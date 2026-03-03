@@ -23,6 +23,7 @@ Hierarchy
     ├── SExpError
     │   ├── SExpParseError   (legacy alias kept for back-compat)
     │   └── SExpWriteError   (legacy alias kept for back-compat)
+    ├── OrchestrationError
     ├── FileFormatError
     └── ConfigurationError
 """
@@ -137,6 +138,15 @@ class SExpParseError(SExpError):
 
 class SExpWriteError(SExpError):
     """Raised when an S-expression node cannot be serialised."""
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+
+class OrchestrationError(KiCadPipelineError):
+    """Raised when orchestration operations fail (manifest, workflow, variants)."""
 
 
 # ---------------------------------------------------------------------------

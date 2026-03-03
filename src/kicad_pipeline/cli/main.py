@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     pipe_p.add_argument("--output", "-o", required=True, help="Output directory")
     pipe_p.add_argument("--name", "-n", default="project", help="Project name")
 
+    # project subcommand (orchestrated workflow)
+    from kicad_pipeline.cli.project_cmd import add_project_subparser
+
+    add_project_subparser(subparsers)
+
     return parser
 
 
@@ -84,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_produce(args)
     if args.command == "pipeline":
         return _cmd_pipeline(args)
+    if args.command == "project":
+        from kicad_pipeline.cli.project_cmd import dispatch_project
+
+        return dispatch_project(args)
 
     parser.print_help()
     return 0
