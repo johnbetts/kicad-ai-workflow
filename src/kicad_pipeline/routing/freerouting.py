@@ -1,0 +1,258 @@
+"""FreeRouting integration: headless launcher and SES result parser.
+
+FreeRouting is a Java-based autorouter.  This module attempts to invoke it
+when available and falls back gracefully when Java or the FreeRouting JAR
+cannot be found.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_pipeline.models.pcb import PCBDesign, Track
+
+# ---------------------------------------------------------------------------
+# Common search locations for the FreeRouting JAR
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SEARCH_DIRS: tuple[str, ...] = (
+    ".",
+    os.path.expanduser("~/.local/share/freerouting/"),
+    "/usr/local/share/freerouting/",
+    "/opt/freerouting/",
+)
+
+_JAR_NAME: str = "freerouting.jar"
+
+
+# ---------------------------------------------------------------------------
+# Public data classes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FreeRoutingResult:
+    """Result of a FreeRouting autorouting run."""
+
+    success: bool
+    ses_file: str | None  # path to output .ses file if successful
+    stdout: str
+    stderr: str
+    error: str = ""
+
+
+# ---------------------------------------------------------------------------
+# JAR discovery
+# ---------------------------------------------------------------------------
+
+
+def find_freerouting_jar(search_dirs: list[str] | None = None) -> str | None:
+    """Search for freerouting.jar in common locations.
+
+    Args:
+        search_dirs: Additional directories to search before the defaults.
+
+    Returns:
+        Absolute path to the JAR file if found, else ``None``.
+    """
+    dirs_to_check: list[str] = list(search_dirs) if search_dirs else []
+    dirs_to_check.extend(_DEFAULT_SEARCH_DIRS)
+
+    for directory in dirs_to_check:
+        candidate = os.path.join(directory, _JAR_NAME)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
+# FreeRouting launcher
+# ---------------------------------------------------------------------------
+
+
+def route_with_freerouting(
+    dsn_path: str,
+    jar_path: str | None = None,
+    timeout_seconds: int = 300,
+) -> FreeRoutingResult:
+    """Run FreeRouting headlessly to route the given DSN file.
+
+    Executes::
+
+        java -jar freerouting.jar -de input.dsn -do output.ses -mp 20
+
+    Args:
+        dsn_path: Path to the input ``.dsn`` file.
+        jar_path: Path to the FreeRouting JAR.  If ``None``, the common
+            locations are searched automatically.
+        timeout_seconds: Maximum run time in seconds before the process is
+            killed.
+
+    Returns:
+        A :class:`FreeRoutingResult` describing the outcome.
+    """
+    resolved_jar = jar_path if jar_path is not None else find_freerouting_jar()
+
+    if resolved_jar is None:
+        return FreeRoutingResult(
+            success=False,
+            ses_file=None,
+            stdout="",
+            stderr="",
+            error="FreeRouting jar not found",
+        )
+
+    # Derive output .ses path by replacing the extension
+    ses_path = dsn_path[:-4] + ".ses" if dsn_path.endswith(".dsn") else dsn_path + ".ses"
+
+    cmd: list[str] = [
+        "java",
+        "-jar",
+        resolved_jar,
+        "-de",
+        dsn_path,
+        "-do",
+        ses_path,
+        "-mp",
+        "20",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return FreeRoutingResult(
+            success=False,
+            ses_file=None,
+            stdout=stdout,
+            stderr=stderr,
+            error=f"FreeRouting timed out after {timeout_seconds}s",
+        )
+    except FileNotFoundError:
+        return FreeRoutingResult(
+            success=False,
+            ses_file=None,
+            stdout="",
+            stderr="",
+            error="java executable not found; please install a JRE",
+        )
+
+    success = proc.returncode == 0 and os.path.isfile(ses_path)
+    return FreeRoutingResult(
+        success=success,
+        ses_file=ses_path if success else None,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        error="" if success else f"FreeRouting exited with code {proc.returncode}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# SES parser
+# ---------------------------------------------------------------------------
+
+# Regex to match a wire path statement:
+#   (path "LAYER" WIDTH x1 y1 x2 y2 ...)
+_PATH_RE = re.compile(
+    r'\(path\s+"([^"]+)"\s+([\d.]+)((?:\s+[-\d.]+){4,})\s*\)',
+    re.DOTALL,
+)
+
+# Regex to extract the net name containing wire paths
+_NET_OUT_RE = re.compile(r'\(net\s+"([^"]+)"(.*?)\)', re.DOTALL)
+
+
+def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
+    """Parse a Specctra SES session file into :class:`Track` objects.
+
+    Handles wire paths of the form::
+
+        (path "F.Cu" 0.25 x1 y1 x2 y2 ...)
+
+    Each consecutive (x, y) pair in the path becomes one :class:`Track`
+    segment.  The net name is looked up in *pcb.nets* to obtain the net
+    number; unknown net names receive net number 0.
+
+    Args:
+        ses_content: Raw text content of the ``.ses`` file.
+        pcb: PCB design used for net-name to net-number resolution.
+
+    Returns:
+        Tuple of :class:`Track` objects parsed from the session file.
+    """
+    from kicad_pipeline.models.pcb import Point, Track
+
+    net_name_to_num: dict[str, int] = {n.name: n.number for n in pcb.nets}
+
+    tracks: list[Track] = []
+
+    # We need to find which net each path belongs to.
+    # Walk through the network_out section block by block.
+    # Strategy: find all (net "NAME" ...) blocks, then find (path ...) within each.
+
+    # Extract the routes / network_out section
+    network_out_match = re.search(r"\(network_out(.*)", ses_content, re.DOTALL)
+    search_text = network_out_match.group(1) if network_out_match else ses_content
+
+    # Find net blocks: we use a simple bracket-counting approach for each
+    # occurrence of (net "...") to capture its full content.
+    net_block_re = re.compile(r'\(net\s+"([^"]+)"')
+    pos = 0
+    while True:
+        m = net_block_re.search(search_text, pos)
+        if m is None:
+            break
+        net_name = m.group(1)
+        net_number = net_name_to_num.get(net_name, 0)
+
+        # Find the matching closing parenthesis for this (net ... block
+        block_start = m.start()
+        depth = 0
+        block_end = block_start
+        for i in range(block_start, len(search_text)):
+            if search_text[i] == "(":
+                depth += 1
+            elif search_text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    block_end = i + 1
+                    break
+
+        net_block = search_text[block_start:block_end]
+
+        # Find all (path ...) within this net block
+        for path_m in _PATH_RE.finditer(net_block):
+            layer = path_m.group(1)
+            width = float(path_m.group(2))
+            coords_str = path_m.group(3).strip()
+            coord_vals = [float(v) for v in coords_str.split()]
+
+            # Each consecutive pair of (x, y) values forms a track segment
+            if len(coord_vals) >= 4 and len(coord_vals) % 2 == 0:
+                for j in range(0, len(coord_vals) - 2, 2):
+                    x0, y0 = coord_vals[j], coord_vals[j + 1]
+                    x1, y1 = coord_vals[j + 2], coord_vals[j + 3]
+                    tracks.append(
+                        Track(
+                            start=Point(x=x0, y=y0),
+                            end=Point(x=x1, y=y1),
+                            width=width,
+                            layer=layer,
+                            net_number=net_number,
+                        )
+                    )
+
+        pos = m.end()
+
+    return tuple(tracks)
