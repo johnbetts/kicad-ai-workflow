@@ -555,8 +555,10 @@ def build_pcb(
     corner_radius_mm: float = 0.0
     template_mounting_positions: tuple[tuple[float, float], ...] | None = None
     template_mounting_diameter: float | None = None
+    tmpl_obj: object | None = None
     if board_template is not None:
         tmpl = get_template(board_template)
+        tmpl_obj = tmpl
         log.info("build_pcb: using board template '%s'", tmpl.name)
         if board_width_mm is None:
             board_width_mm = tmpl.board_width_mm
@@ -671,6 +673,7 @@ def build_pcb(
     positions = layout_pcb(
         requirements, outline, footprint_sizes=fp_sizes,
         fixed_positions=fixed_positions,
+        board_template=tmpl_obj,
     )
 
     # Apply positions to footprints
@@ -728,9 +731,12 @@ def build_pcb(
     # Resolve mounting positions: template → mechanical → 4-corner fallback
     mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
     mount_radius = _KEEPOUT_MARGIN_MM
-    if mount_positions is None and requirements.mechanical is not None:
-        if requirements.mechanical.mounting_hole_positions:
-            mount_positions = requirements.mechanical.mounting_hole_positions
+    if (
+        mount_positions is None
+        and requirements.mechanical is not None
+        and requirements.mechanical.mounting_hole_positions
+    ):
+        mount_positions = requirements.mechanical.mounting_hole_positions
     if template_mounting_diameter is not None:
         mount_radius = template_mounting_diameter / 2.0 + 1.0
     elif requirements.mechanical is not None:

@@ -21,12 +21,77 @@ class ZoneFill(Enum):
     HATCHED = "hatched"
 
 
+class PlacementConstraintType(Enum):
+    """Type of placement constraint for PCB component layout."""
+
+    FIXED = "fixed"
+    EDGE = "edge"
+    NEAR = "near"
+    GROUP = "group"
+    AWAY_FROM = "away_from"
+
+
+class BoardEdge(Enum):
+    """Edge of the PCB board for edge-based placement."""
+
+    TOP = "top"
+    BOTTOM = "bottom"
+    LEFT = "left"
+    RIGHT = "right"
+
+
 @dataclass(frozen=True)
 class Point:
     """2D coordinate in mm."""
 
     x: float
     y: float
+
+
+@dataclass(frozen=True)
+class PlacementConstraint:
+    """A placement constraint for a PCB component.
+
+    Attributes:
+        ref: Component reference designator.
+        constraint_type: Type of placement constraint.
+        target_ref: Reference of the target component (for NEAR/AWAY_FROM).
+        edge: Board edge (for EDGE constraints).
+        x: Fixed X position (for FIXED constraints).
+        y: Fixed Y position (for FIXED constraints).
+        rotation: Fixed rotation (for FIXED/EDGE constraints).
+        max_distance_mm: Maximum distance from target (for NEAR).
+        min_distance_mm: Minimum distance from target (for AWAY_FROM).
+        group_name: Group identifier (for GROUP constraints).
+        priority: Higher priority constraints are resolved first.
+    """
+
+    ref: str
+    constraint_type: PlacementConstraintType
+    target_ref: str | None = None
+    edge: BoardEdge | None = None
+    x: float | None = None
+    y: float | None = None
+    rotation: float | None = None
+    max_distance_mm: float | None = None
+    min_distance_mm: float | None = None
+    group_name: str | None = None
+    priority: int = 0
+
+
+@dataclass(frozen=True)
+class PlacementResult:
+    """Result of constraint-based placement solving.
+
+    Attributes:
+        positions: Mapping from ref to placed position.
+        rotations: Mapping from ref to placement rotation.
+        violations: Descriptions of constraints that could not be satisfied.
+    """
+
+    positions: dict[str, Point]
+    rotations: dict[str, float]
+    violations: tuple[str, ...]
 
 
 @dataclass(frozen=True)

@@ -425,16 +425,14 @@ def layout_pcb(
     board: BoardOutline,
     footprint_sizes: dict[str, tuple[float, float]] | None = None,
     fixed_positions: dict[str, tuple[float, float, float]] | None = None,
+    board_template: object | None = None,
+    keepouts: tuple[object, ...] = (),
 ) -> dict[str, Point]:
     """Compute a full PCB placement for all components in *requirements*.
 
-    Steps:
-
-    1. Pre-populate positions from *fixed_positions* (template-defined).
-    2. Build a ``(ref, feature_name)`` list from :attr:`~ProjectRequirements.features`.
-    3. Call :func:`assign_pcb_zones` to map each ref to a :class:`PCBZone`.
-    4. Create dynamic non-overlapping zones sized for actual component groups.
-    5. Group refs by zone and call :func:`place_pcb_components` for each group.
+    When *board_template* is provided, uses the constraint-based solver
+    for intelligent placement. Otherwise falls back to the zone-based
+    grid-fill approach for backward compatibility.
 
     Args:
         requirements: Fully-populated project requirements document.
@@ -444,17 +442,67 @@ def layout_pcb(
         fixed_positions: Optional mapping from ref to ``(x, y, rotation)``
             for components with fixed board positions (e.g. from a board
             template).  These refs are excluded from dynamic placement.
+        board_template: Optional :class:`BoardTemplate` for constraint-based
+            placement. When provided, the constraint solver is used.
+        keepouts: Optional keepout zones to avoid during placement.
 
     Returns:
         Mapping from component ref to :class:`Point` for every component in
         *requirements*.
     """
+    # Constraint-based path when template is available
+    if board_template is not None and footprint_sizes is not None:
+        from kicad_pipeline.models.pcb import Keepout as KeepoutModel
+        from kicad_pipeline.pcb.board_templates import BoardTemplate as BTClass
+        from kicad_pipeline.pcb.constraints import (
+            constraints_from_requirements,
+            solve_placement,
+        )
+
+        if isinstance(board_template, BTClass):
+            log.info(
+                "layout_pcb: using constraint-based solver (template=%s)",
+                board_template.name,
+            )
+            constraint_list = constraints_from_requirements(
+                requirements, board_template, footprint_sizes,
+            )
+            typed_keepouts = tuple(
+                k for k in keepouts if isinstance(k, KeepoutModel)
+            )
+            result = solve_placement(
+                constraint_list, board, footprint_sizes,
+                keepouts=typed_keepouts, grid_mm=0.5,
+            )
+            positions = dict(result.positions)
+
+            # Ensure all component refs are placed
+            all_refs = {c.ref for c in requirements.components}
+            unplaced = all_refs - set(positions.keys())
+            if unplaced:
+                log.warning(
+                    "layout_pcb: constraint solver missed %d refs, adding: %s",
+                    len(unplaced), list(unplaced),
+                )
+                xs = [p.x for p in board.polygon]
+                ys = [p.y for p in board.polygon]
+                board_w = max(xs) - min(xs)
+                board_h = max(ys) - min(ys)
+                fallback = PCBZone("FALLBACK", 5.0, board_h * 0.6, board_w - 10.0, board_h * 0.35)
+                extra = place_pcb_components(
+                    list(unplaced), fallback, footprint_sizes=footprint_sizes,
+                )
+                positions.update(extra)
+
+            log.info("layout_pcb: placed %d components (constraint solver)", len(positions))
+            return positions
+    # --- Zone-based fallback path (no template) ---
     # Pre-populate positions from fixed_positions (board template)
-    positions: dict[str, Point] = {}
+    zone_positions: dict[str, Point] = {}
     fixed_refs: set[str] = set()
     if fixed_positions:
         for ref, (fx, fy, _rot) in fixed_positions.items():
-            positions[ref] = Point(x=fx, y=fy)
+            zone_positions[ref] = Point(x=fx, y=fy)
             fixed_refs.add(ref)
             log.info("layout_pcb: fixed position for %s at (%.2f, %.2f)", ref, fx, fy)
 
@@ -464,8 +512,8 @@ def layout_pcb(
         for ref in fb.components:
             feature_map[ref] = fb.name
 
-    all_refs = [c.ref for c in requirements.components if c.ref not in fixed_refs]
-    tagged = [(ref, feature_map.get(ref, "Peripherals")) for ref in all_refs]
+    zone_refs_list = [c.ref for c in requirements.components if c.ref not in fixed_refs]
+    tagged = [(ref, feature_map.get(ref, "Peripherals")) for ref in zone_refs_list]
 
     zone_map = assign_pcb_zones(tagged)
 
@@ -485,26 +533,26 @@ def layout_pcb(
 
     for zone_name, zone_refs in groups.items():
         zone = dynamic_zones[zone_name]
-        zone_positions = place_pcb_components(
+        zone_pos = place_pcb_components(
             zone_refs, zone, footprint_sizes=footprint_sizes,
         )
-        positions.update(zone_positions)
+        zone_positions.update(zone_pos)
 
     # Safety net: any refs not yet placed (check all components, not just dynamic)
     all_component_refs = [c.ref for c in requirements.components]
-    unplaced = [ref for ref in all_component_refs if ref not in positions]
-    if unplaced:
+    unplaced_refs = [ref for ref in all_component_refs if ref not in zone_positions]
+    if unplaced_refs:
         log.warning(
             "layout_pcb: %d refs not placed; adding fallback placement: %s",
-            len(unplaced),
-            unplaced,
+            len(unplaced_refs),
+            unplaced_refs,
         )
         # Create a fallback zone from remaining board space
         fallback = PCBZone("FALLBACK", 5.0, board_h * 0.6, board_w - 10.0, board_h * 0.35)
         extra = place_pcb_components(
-            unplaced, fallback, footprint_sizes=footprint_sizes,
+            unplaced_refs, fallback, footprint_sizes=footprint_sizes,
         )
-        positions.update(extra)
+        zone_positions.update(extra)
 
-    log.info("layout_pcb: placed %d components", len(positions))
-    return positions
+    log.info("layout_pcb: placed %d components", len(zone_positions))
+    return zone_positions
