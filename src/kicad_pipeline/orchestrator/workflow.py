@@ -269,14 +269,26 @@ class WorkflowEngine:
 
     def _generate_pcb(self, variant_name: str, vdir: Path) -> None:
         """Build and write a PCB from requirements."""
+        from kicad_pipeline.pcb.board_templates import detect_template
         from kicad_pipeline.pcb.builder import build_pcb, write_pcb
+        from kicad_pipeline.project_file import write_project_file
         from kicad_pipeline.requirements.decomposer import load_requirements
 
         req = load_requirements(vdir / "requirements.json")
-        pcb = build_pcb(req)
+        # Auto-detect board template from mechanical constraints
+        tmpl = detect_template(req.mechanical)
+        board_template = tmpl.name if tmpl is not None else None
+        pcb = build_pcb(req, board_template=board_template)
         pcb_path = vdir / f"{variant_name}.kicad_pcb"
         write_pcb(pcb, pcb_path)
         log.info("PCB written: %s", pcb_path)
+
+        # Regenerate project file with netclass definitions so KiCad
+        # applies correct clearances and track widths when routing.
+        write_project_file(
+            variant_name, vdir, netclasses=pcb.netclasses,
+        )
+        log.info("Project file updated with netclasses: %s", vdir)
 
     def _generate_production(self, variant_name: str, vdir: Path) -> None:
         """Build and write production artifacts."""

@@ -395,13 +395,14 @@ def test_pcb_to_sexp_zone_clearance_not_min_thickness() -> None:
     ]
     assert len(zone_nodes) >= 1
     for zone_node in zone_nodes:
-        # Find connect_pads node
+        # Find connect_pads node: ["connect_pads", "yes", ["clearance", N]]
         for sub in zone_node:
             if isinstance(sub, list) and sub and sub[0] == "connect_pads":
-                clearance_node = sub[1]
-                assert isinstance(clearance_node, list)
-                assert clearance_node[0] == "clearance"
-                assert clearance_node[1] >= 0.2
+                clearance_node = [
+                    s for s in sub if isinstance(s, list) and s and s[0] == "clearance"
+                ]
+                assert len(clearance_node) == 1
+                assert clearance_node[0][1] >= 0.2
 
 
 def test_write_pcb_accepts_string_path(tmp_path: Path) -> None:
@@ -411,3 +412,119 @@ def test_write_pcb_accepts_string_path(tmp_path: Path) -> None:
     dest = str(tmp_path / "string_path.kicad_pcb")
     write_pcb(design, dest)
     assert Path(dest).exists()
+
+
+# ---------------------------------------------------------------------------
+# BUG-7: Track/via serialization
+# ---------------------------------------------------------------------------
+
+
+def test_pcb_to_sexp_serializes_tracks_and_vias() -> None:
+    """pcb_to_sexp correctly serializes tracks and vias in the S-expression."""
+    from dataclasses import replace
+
+    from kicad_pipeline.models.pcb import Track, Via
+
+    req = _make_requirements()
+    design = build_pcb(req)
+    # Add a track and a via manually
+    track = Track(
+        start=design.footprints[0].position,
+        end=design.footprints[1].position,
+        width=0.25,
+        layer="F.Cu",
+        net_number=1,
+        uuid="track-uuid-test",
+    )
+    via = Via(
+        position=design.footprints[0].position,
+        drill=0.508,
+        size=0.8,
+        layers=("F.Cu", "B.Cu"),
+        net_number=1,
+        uuid="via-uuid-test",
+    )
+    design_with_routing = replace(
+        design, tracks=(track,), vias=(via,),
+    )
+    sexp = pcb_to_sexp(design_with_routing)
+    assert isinstance(sexp, list)
+
+    # Check segment node
+    seg_nodes = [
+        n for n in sexp
+        if isinstance(n, list) and n and n[0] == "segment"
+    ]
+    assert len(seg_nodes) == 1
+    seg = seg_nodes[0]
+    # Should have start, end, width, layer, net, uuid sub-nodes
+    seg_keys = {s[0] for s in seg if isinstance(s, list) and s}
+    assert {"start", "end", "width", "layer", "net", "uuid"} <= seg_keys
+
+    # Check via node
+    via_nodes = [
+        n for n in sexp
+        if isinstance(n, list) and n and n[0] == "via"
+    ]
+    assert len(via_nodes) == 1
+    vn = via_nodes[0]
+    via_keys = {s[0] for s in vn if isinstance(s, list) and s}
+    assert {"at", "size", "drill", "layers", "net", "uuid"} <= via_keys
+
+
+# ---------------------------------------------------------------------------
+# BUG-9: Board outline corner radius
+# ---------------------------------------------------------------------------
+
+
+def test_board_outline_with_corner_radius() -> None:
+    """Board outline with corner_radius_mm > 0 produces a rounded polygon."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    pts = design.outline.polygon
+    # Rounded rectangle has many more points than 5 (4 corners + closure)
+    # 4 corners x (8 segments + 1) + 1 closure = 37
+    assert len(pts) > 10, f"Expected rounded polygon, got {len(pts)} points"
+    # Should still be closed
+    assert abs(pts[0].x - pts[-1].x) < 1e-4
+    assert abs(pts[0].y - pts[-1].y) < 1e-4
+
+
+def test_board_outline_sharp_corners_default() -> None:
+    """Board outline without corner radius has exactly 5 points (closed rect)."""
+    req = _make_requirements()
+    design = build_pcb(req)
+    pts = design.outline.polygon
+    assert len(pts) == 5
+
+
+def test_build_pcb_with_template_uses_template_dimensions() -> None:
+    """build_pcb with board_template uses the template dimensions."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    xs = [p.x for p in design.outline.polygon]
+    ys = [p.y for p in design.outline.polygon]
+    assert max(xs) == pytest.approx(65.0, abs=0.5)
+    assert max(ys) == pytest.approx(56.5, abs=0.5)
+
+
+def test_mounting_hole_keepouts_use_actual_positions() -> None:
+    """When template provides mounting positions, keepouts use them."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    # RPi HAT has 4 mounting holes + 1 antenna keepout (ESP32)
+    mounting_keepouts = [
+        k for k in design.keepouts
+        if k.no_copper and k.no_vias and k.no_tracks
+    ]
+    assert len(mounting_keepouts) >= 4
+    # Check that keepout centres are near the RPi HAT mounting positions
+    expected_centres = [(3.5, 3.5), (3.5, 52.5), (61.5, 3.5), (61.5, 52.5)]
+    for ko in mounting_keepouts[:4]:
+        cx = sum(p.x for p in ko.polygon) / len(ko.polygon)
+        cy = sum(p.y for p in ko.polygon) / len(ko.polygon)
+        matched = any(
+            abs(cx - ex) < 1.0 and abs(cy - ey) < 1.0
+            for ex, ey in expected_centres
+        )
+        assert matched, f"Keepout centre ({cx:.1f}, {cy:.1f}) not near any expected position"

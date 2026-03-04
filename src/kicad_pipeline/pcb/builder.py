@@ -109,6 +109,7 @@ def _make_board_outline(
     height: float,
     origin_x: float = 0.0,
     origin_y: float = 0.0,
+    corner_radius_mm: float = 0.0,
 ) -> BoardOutline:
     """Create a rectangular :class:`BoardOutline` for the given dimensions.
 
@@ -117,19 +118,50 @@ def _make_board_outline(
         height: Board height in mm.
         origin_x: X coordinate of the board origin in mm.
         origin_y: Y coordinate of the board origin in mm.
+        corner_radius_mm: Corner rounding radius in mm (0 for sharp corners).
 
     Returns:
-        :class:`BoardOutline` with a closed rectangular polygon.
+        :class:`BoardOutline` with a closed polygon (rounded if radius > 0).
     """
-    # Explicitly close polygon (KiCad 9 zone polygons require closure)
-    polygon = (
-        Point(x=origin_x, y=origin_y),
-        Point(x=origin_x + width, y=origin_y),
-        Point(x=origin_x + width, y=origin_y + height),
-        Point(x=origin_x, y=origin_y + height),
-        Point(x=origin_x, y=origin_y),
-    )
-    return BoardOutline(polygon=polygon, width=PCB_EDGE_CUTS_WIDTH_MM)
+    import math as _m
+
+    r = corner_radius_mm
+    if r <= 0.0:
+        # Sharp-cornered rectangle
+        polygon = (
+            Point(x=origin_x, y=origin_y),
+            Point(x=origin_x + width, y=origin_y),
+            Point(x=origin_x + width, y=origin_y + height),
+            Point(x=origin_x, y=origin_y + height),
+            Point(x=origin_x, y=origin_y),
+        )
+        return BoardOutline(polygon=polygon, width=PCB_EDGE_CUTS_WIDTH_MM)
+
+    # Clamp radius to half the smaller dimension
+    r = min(r, width / 2.0, height / 2.0)
+    n_seg = 8  # arc segments per corner
+
+    points: list[Point] = []
+    # Corner centres and start angles (CW traversal)
+    corners = [
+        (origin_x + r, origin_y + r, _m.pi, _m.pi * 1.5),           # top-left
+        (origin_x + width - r, origin_y + r, _m.pi * 1.5, 2 * _m.pi),  # top-right
+        (origin_x + width - r, origin_y + height - r, 0.0, _m.pi * 0.5),  # bottom-right
+        (origin_x + r, origin_y + height - r, _m.pi * 0.5, _m.pi),   # bottom-left
+    ]
+    for cx, cy, a_start, a_end in corners:
+        for i in range(n_seg + 1):
+            angle = a_start + (a_end - a_start) * i / n_seg
+            points.append(Point(
+                x=round(cx + r * _m.cos(angle), 6),
+                y=round(cy + r * _m.sin(angle), 6),
+            ))
+
+    # Explicitly close polygon (last point == first point)
+    if points:
+        points.append(points[0])
+
+    return BoardOutline(polygon=tuple(points), width=PCB_EDGE_CUTS_WIDTH_MM)
 
 
 def _build_nets(requirements: ProjectRequirements) -> tuple[NetEntry, ...]:
@@ -345,28 +377,39 @@ def _make_mounting_hole_keepouts(
     board_height: float,
     inset: float,
     radius: float,
+    mounting_positions: tuple[tuple[float, float], ...] | None = None,
 ) -> tuple[Keepout, ...]:
-    """Create circular keepout zones at the four board corners.
+    """Create circular keepout zones around mounting holes.
+
+    When *mounting_positions* is provided, keepouts are placed at those exact
+    positions. Otherwise, keepouts are placed at 4-corner fallback positions
+    using the *inset* parameter.
 
     Each keepout is represented as a 12-point polygon approximating a circle.
 
     Args:
         board_width: Board width in mm.
         board_height: Board height in mm.
-        inset: Distance from board corner to mounting hole centre in mm.
+        inset: Distance from board corner to mounting hole centre in mm
+            (used only for 4-corner fallback).
         radius: Radius of the keepout zone in mm.
+        mounting_positions: Explicit mounting hole centres ``(x, y)`` in mm.
+            When provided, overrides the 4-corner fallback.
 
     Returns:
-        Tuple of four :class:`Keepout` objects, one per corner.
+        Tuple of :class:`Keepout` objects, one per mounting hole.
     """
     import math
 
-    corners = [
-        (inset, inset),
-        (board_width - inset, inset),
-        (board_width - inset, board_height - inset),
-        (inset, board_height - inset),
-    ]
+    if mounting_positions is not None:
+        corners = list(mounting_positions)
+    else:
+        corners = [
+            (inset, inset),
+            (board_width - inset, inset),
+            (board_width - inset, board_height - inset),
+            (inset, board_height - inset),
+        ]
     keepouts: list[Keepout] = []
     n_pts = 12
     for cx, cy in corners:
@@ -509,6 +552,9 @@ def build_pcb(
     # Step 0: Board template (if specified)
     # ------------------------------------------------------------------
     fixed_positions: dict[str, tuple[float, float, float]] | None = None
+    corner_radius_mm: float = 0.0
+    template_mounting_positions: tuple[tuple[float, float], ...] | None = None
+    template_mounting_diameter: float | None = None
     if board_template is not None:
         tmpl = get_template(board_template)
         log.info("build_pcb: using board template '%s'", tmpl.name)
@@ -516,6 +562,13 @@ def build_pcb(
             board_width_mm = tmpl.board_width_mm
         if board_height_mm is None:
             board_height_mm = tmpl.board_height_mm
+        corner_radius_mm = tmpl.corner_radius_mm
+        # Extract mounting hole positions from template
+        if tmpl.mounting_holes:
+            template_mounting_positions = tuple(
+                (h.x_mm, h.y_mm) for h in tmpl.mounting_holes
+            )
+            template_mounting_diameter = tmpl.mounting_holes[0].diameter_mm
         # Extract fixed component positions from template
         if tmpl.fixed_components:
             fixed_positions = {}
@@ -546,7 +599,10 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 2: Board outline
     # ------------------------------------------------------------------
-    outline = _make_board_outline(board_width_mm, board_height_mm, origin_x, origin_y)
+    outline = _make_board_outline(
+        board_width_mm, board_height_mm, origin_x, origin_y,
+        corner_radius_mm=corner_radius_mm,
+    )
 
     # ------------------------------------------------------------------
     # Step 3: Nets
@@ -599,7 +655,10 @@ def build_pcb(
     if new_width > board_width_mm or new_height > board_height_mm:
         board_width_mm = new_width
         board_height_mm = new_height
-        outline = _make_board_outline(board_width_mm, board_height_mm, origin_x, origin_y)
+        outline = _make_board_outline(
+            board_width_mm, board_height_mm, origin_x, origin_y,
+            corner_radius_mm=corner_radius_mm,
+        )
         log.info(
             "build_pcb: auto-sized board to %.1f x %.1f mm",
             board_width_mm,
@@ -666,11 +725,23 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 8: Mounting-hole keepouts
     # ------------------------------------------------------------------
+    # Resolve mounting positions: template → mechanical → 4-corner fallback
+    mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
+    mount_radius = _KEEPOUT_MARGIN_MM
+    if mount_positions is None and requirements.mechanical is not None:
+        if requirements.mechanical.mounting_hole_positions:
+            mount_positions = requirements.mechanical.mounting_hole_positions
+    if template_mounting_diameter is not None:
+        mount_radius = template_mounting_diameter / 2.0 + 1.0
+    elif requirements.mechanical is not None:
+        mount_radius = requirements.mechanical.mounting_hole_diameter_mm / 2.0 + 1.0
+
     corner_keepouts = _make_mounting_hole_keepouts(
         board_width_mm,
         board_height_mm,
         _MOUNTING_HOLE_INSET_MM,
-        _KEEPOUT_MARGIN_MM,
+        mount_radius,
+        mounting_positions=mount_positions,
     )
     keepouts.extend(corner_keepouts)
 
@@ -944,7 +1015,7 @@ def _zone_sexp(zone: ZonePolygon) -> SExpNode:
         node.append(["uuid", zone.uuid])
     node.extend([
         ["hatch", "edge", 0.508],
-        ["connect_pads", ["clearance", zone.clearance_mm]],
+        ["connect_pads", "yes", ["clearance", zone.clearance_mm]],
         ["min_thickness", zone.min_thickness],
         ["filled_areas_thickness", False],
         [
@@ -1089,6 +1160,34 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     # Keepout zones
     for keepout in design.keepouts:
         root.append(_keepout_sexp(keepout))
+
+    # Tracks (segments)
+    for track in design.tracks:
+        seg: list[SExpNode] = [
+            "segment",
+            ["start", track.start.x, track.start.y],
+            ["end", track.end.x, track.end.y],
+            ["width", track.width],
+            ["layer", track.layer],
+            ["net", track.net_number],
+        ]
+        if track.uuid:
+            seg.append(["uuid", track.uuid])
+        root.append(seg)
+
+    # Vias
+    for via in design.vias:
+        via_node: list[SExpNode] = [
+            "via",
+            ["at", via.position.x, via.position.y],
+            ["size", via.size],
+            ["drill", via.drill],
+            ["layers", *via.layers],
+            ["net", via.net_number],
+        ]
+        if via.uuid:
+            via_node.append(["uuid", via.uuid])
+        root.append(via_node)
 
     return root
 

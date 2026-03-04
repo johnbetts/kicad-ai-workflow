@@ -485,8 +485,8 @@ def _parse_pin_count(footprint_id: str) -> int:
         n = int(m.group(1))
         if 2 <= n <= 100:
             return n * 2
-    # Match -N_ or _N_ where N looks like a pin count (2-200)
-    m = re.search(r"[-_](\d{1,3})[-_]", footprint_id)
+    # Match -N or _N where N looks like a pin count (2-200), allowing end-of-string
+    m = re.search(r"[-_](\d{1,3})(?:[-_]|$)", footprint_id)
     if m:
         n = int(m.group(1))
         if 2 <= n <= 200:

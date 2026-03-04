@@ -82,8 +82,8 @@ _TEMPLATES: dict[str, BoardTemplate] = {
         mounting_holes=(
             MountingHoleDef(x_mm=3.5, y_mm=3.5),
             MountingHoleDef(x_mm=3.5, y_mm=52.5),
-            MountingHoleDef(x_mm=58.0, y_mm=3.5),
-            MountingHoleDef(x_mm=58.0, y_mm=52.5),
+            MountingHoleDef(x_mm=61.5, y_mm=3.5),
+            MountingHoleDef(x_mm=61.5, y_mm=52.5),
         ),
         fixed_components=(
             FixedComponentDef(
@@ -156,6 +156,53 @@ def list_templates() -> list[str]:
         Sorted list of template name strings.
     """
     return sorted(_TEMPLATES.keys())
+
+
+def detect_template(mechanical: MechanicalConstraints | None) -> BoardTemplate | None:
+    """Auto-detect a board template from mechanical constraints.
+
+    Detection priority:
+
+    1. Explicit ``board_template`` field on *mechanical*.
+    2. Keywords in ``mechanical.notes`` (e.g. "raspberry pi hat").
+    3. Dimensions matching a known template within 0.5mm tolerance.
+
+    Args:
+        mechanical: Mechanical constraints from the project requirements.
+
+    Returns:
+        The matching :class:`BoardTemplate`, or ``None`` if no match is found.
+    """
+    if mechanical is None:
+        return None
+
+    # 1. Explicit board_template field
+    if mechanical.board_template is not None:
+        key = mechanical.board_template.upper().replace(" ", "_").replace("-", "_")
+        if key in _TEMPLATES:
+            return _TEMPLATES[key]
+
+    # 2. Keyword matching on notes
+    if mechanical.notes:
+        notes_lower = mechanical.notes.lower()
+        _keyword_map: list[tuple[tuple[str, ...], str]] = [
+            (("raspberry pi hat", "rpi hat", "rpi_hat"), "RPI_HAT"),
+            (("arduino uno", "arduino_uno"), "ARDUINO_UNO"),
+        ]
+        for keywords, tmpl_name in _keyword_map:
+            if any(kw in notes_lower for kw in keywords):
+                return _TEMPLATES[tmpl_name]
+
+    # 3. Dimension matching (within 0.5mm tolerance)
+    tol = 0.5
+    for tmpl in _TEMPLATES.values():
+        if (
+            abs(mechanical.board_width_mm - tmpl.board_width_mm) < tol
+            and abs(mechanical.board_height_mm - tmpl.board_height_mm) < tol
+        ):
+            return tmpl
+
+    return None
 
 
 def template_to_mechanical_constraints(tmpl: BoardTemplate) -> MechanicalConstraints:

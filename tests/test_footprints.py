@@ -381,3 +381,28 @@ def test_load_rotation_offsets_invalid_json_raises(tmp_path: Path) -> None:
     bad_file.write_text("NOT JSON {{{", encoding="utf-8")
     with pytest.raises(ConfigurationError):
         load_rotation_offsets(bad_file)
+
+
+# ---------------------------------------------------------------------------
+# BUG-8: _parse_pin_count for MSOP-10
+# ---------------------------------------------------------------------------
+
+
+def test_parse_pin_count_msop_10() -> None:
+    """_parse_pin_count extracts 10 from 'MSOP-10' (end-of-string)."""
+    from kicad_pipeline.pcb.footprints import _parse_pin_count
+
+    assert _parse_pin_count("MSOP-10") == 10
+
+
+def test_parse_pin_count_msop_10_with_suffix() -> None:
+    """_parse_pin_count extracts 10 from 'MSOP-10_P0.5mm'."""
+    from kicad_pipeline.pcb.footprints import _parse_pin_count
+
+    assert _parse_pin_count("MSOP-10_P0.5mm") == 10
+
+
+def test_msop10_footprint_has_10_pads() -> None:
+    """MSOP-10 footprint should have exactly 10 pads."""
+    fp = footprint_for_component("U1", "ADS1115", "MSOP-10")
+    assert len(fp.pads) == 10

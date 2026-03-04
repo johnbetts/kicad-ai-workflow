@@ -144,6 +144,7 @@ class MechanicalConstraints:
     mounting_hole_diameter_mm: float = 3.2
     mounting_hole_positions: tuple[tuple[float, float], ...] = ()  # (x,y) pairs
     notes: str | None = None
+    board_template: str | None = None
 
 
 @dataclass(frozen=True)
