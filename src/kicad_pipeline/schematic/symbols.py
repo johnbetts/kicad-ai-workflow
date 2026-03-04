@@ -41,16 +41,29 @@ log = logging.getLogger(__name__)
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-_BODY_HALF_WIDTH_MM: float = 5.08
-"""Half-width of the rectangular IC symbol body (mm)."""
+_MIN_BODY_HALF_WIDTH_MM: float = 5.08
+"""Minimum half-width of the rectangular IC symbol body (mm)."""
 
-_PIN_X_LEFT_MM: float = -(
-    _BODY_HALF_WIDTH_MM + SCHEMATIC_PIN_LENGTH_MM
-)
-"""X coordinate of left-side pin *at* points (outside the body edge)."""
 
-_PIN_X_RIGHT_MM: float = _BODY_HALF_WIDTH_MM + SCHEMATIC_PIN_LENGTH_MM
-"""X coordinate of right-side pin *at* points (outside the body edge)."""
+def _body_half_width(
+    left_pins: list[Pin],
+    right_pins: list[Pin],
+) -> float:
+    """Compute body half-width to fit the longest pin name on each side.
+
+    Each character is approximately 1.0mm at the default font size.  The body
+    must be wide enough that left-side pin names (rendered inside the body to
+    the right of the pin) and right-side pin names (rendered inside the body to
+    the left of the pin) do not overlap.
+    """
+    left_max = max((len(p.name) for p in left_pins), default=0)
+    right_max = max((len(p.name) for p in right_pins), default=0)
+    # Each side needs ~1.0mm per character plus a small margin
+    needed = max(left_max, right_max) * 1.0 + 2.0
+    # If both sides have names, total width must fit both
+    if left_pins and right_pins:
+        needed = max(needed, (left_max + right_max) * 1.0 / 2.0 + 3.0)
+    return max(_MIN_BODY_HALF_WIDTH_MM, round(needed / 1.27) * 1.27)
 
 _DEFAULT_FONT: FontEffect = FontEffect(
     size_x=SCHEMATIC_TEXT_SIZE_MM,
@@ -82,6 +95,9 @@ def _classify_pins(
     * everything else (input, passive, bidirectional, open_collector) → left
     * no_connect pins are skipped entirely
 
+    When the left side would have more than 12 pins (e.g. large connectors),
+    the overflow is moved to the right side to keep the symbol compact.
+
     Args:
         pins: All component pins.
 
@@ -92,6 +108,16 @@ def _classify_pins(
     right: list[Pin] = []
     top: list[Pin] = []
     bottom: list[Pin] = []
+
+    # For small components (≤3 pins), use simple horizontal layout
+    active_pins = [p for p in pins if p.pin_type is not PinType.NO_CONNECT]
+    if len(active_pins) <= 3:
+        for i, pin in enumerate(active_pins):
+            if i % 2 == 0:
+                left.append(pin)
+            else:
+                right.append(pin)
+        return left, right, top, bottom
 
     for pin in pins:
         if pin.pin_type is PinType.NO_CONNECT:
@@ -105,10 +131,61 @@ def _classify_pins(
                 top.append(pin)
         elif pin.pin_type is PinType.OUTPUT:
             right.append(pin)
+        elif pin.pin_type is PinType.BIDIRECTIONAL:
+            # Communication pins (I2C, SPI, UART) go on the right
+            right.append(pin)
         else:
             left.append(pin)
 
+    # Balance left/right: split evenly when all pins end up on one side
+    # (common for DIP switches, multi-pin passives, etc.)
+    if len(left) > 4 and not right and not top and not bottom:
+        half = (len(left) + 1) // 2
+        right = left[half:]
+        left = left[:half]
+    elif len(left) > 12 and len(right) < 12:
+        target_per_side = (len(left) + len(right) + 1) // 2
+        overflow = len(left) - target_per_side
+        if overflow > 0:
+            right = left[-overflow:] + right
+            left = left[:-overflow]
+
     return left, right, top, bottom
+
+
+def _classify_connector_pins(
+    pins: tuple[Pin, ...],
+) -> tuple[list[Pin], list[Pin], list[Pin], list[Pin]]:
+    """Split connector pins into left (odd) and right (even) groups.
+
+    Multi-row connectors (Conn_02xNN) are best shown with odd pins on the
+    left and even pins on the right, matching their physical layout.  Single-
+    row connectors (Conn_01xNN) just put all pins on the left.
+
+    Args:
+        pins: All connector pins.
+
+    Returns:
+        Four lists: left_pins, right_pins, top_pins, bottom_pins.
+    """
+    left: list[Pin] = []
+    right: list[Pin] = []
+    for pin in pins:
+        if pin.pin_type is PinType.NO_CONNECT:
+            continue
+        try:
+            num = int(pin.number)
+        except ValueError:
+            left.append(pin)
+            continue
+        if num % 2 == 1:
+            left.append(pin)
+        else:
+            right.append(pin)
+    # Sort by pin number within each side
+    left.sort(key=lambda p: int(p.number) if p.number.isdigit() else 0)
+    right.sort(key=lambda p: int(p.number) if p.number.isdigit() else 0)
+    return left, right, [], []
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +204,9 @@ def make_lib_symbol(component: Component) -> LibSymbol:
     * power_in that contains GND or VSS: bottom
     * no_connect: omitted from the symbol body
 
+    For multi-row connectors (``Conn_02x``), pins are split odd (left) /
+    even (right) to match physical layout.
+
     The symbol body is a filled rectangle.  The ``lib_id`` is formatted as
     ``"kicad-ai:{ref_prefix}_{value}"`` where *ref_prefix* is the leading
     alpha characters of :attr:`Component.ref`.
@@ -141,57 +221,77 @@ def make_lib_symbol(component: Component) -> LibSymbol:
     ref_prefix = "".join(ch for ch in component.ref if ch.isalpha()) or "U"
     lib_id = f"kicad-ai:{ref_prefix}_{component.value}"
 
-    left_pins, right_pins, top_pins, bottom_pins = _classify_pins(component.pins)
+    # Use connector-specific pin classification for multi-row connectors
+    is_multirow_conn = (
+        ref_prefix == "J"
+        and "Conn_02x" in component.value
+        and len(component.pins) > 4
+    )
+    if is_multirow_conn:
+        left_pins, right_pins, top_pins, bottom_pins = _classify_connector_pins(
+            component.pins,
+        )
+    else:
+        left_pins, right_pins, top_pins, bottom_pins = _classify_pins(component.pins)
 
     # Determine body height from the tallest left/right side
     side_max = max(len(left_pins), len(right_pins), 1)
     body_height = side_max * SCHEMATIC_SYMBOL_PIN_SPACING_MM + SCHEMATIC_SYMBOL_PIN_SPACING_MM
 
-    # Body rectangle: y=0 at top, increasing downward
-    body_top = -body_height / 2.0
-    body_bottom = body_height / 2.0
+    # Adaptive body width based on pin name lengths
+    half_w = _body_half_width(left_pins, right_pins)
+    pin_x_left = -(half_w + SCHEMATIC_PIN_LENGTH_MM)
+    pin_x_right = half_w + SCHEMATIC_PIN_LENGTH_MM
+
+    # KiCad lib_symbol Y-axis: positive = up (mathematical convention)
+    # body_top is the visual top (positive Y), body_bottom is visual bottom (negative Y)
+    body_top = body_height / 2.0
+    body_bottom = -body_height / 2.0
     rect = LibRectangle(
-        start=Point(-_BODY_HALF_WIDTH_MM, body_top),
-        end=Point(_BODY_HALF_WIDTH_MM, body_bottom),
+        start=Point(-half_w, body_top),
+        end=Point(half_w, body_bottom),
         stroke=Stroke(),
         fill="background",
     )
 
     placed_pins: list[LibPin] = []
 
-    # Left-side pins (inputs etc.)
+    # Left-side pins (inputs etc.) — top to bottom (positive to negative Y)
+    # KiCad convention: left pins at negative X, rotation=0° (extends RIGHT toward body)
     for idx, pin in enumerate(left_pins):
-        y = body_top + SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
+        y = body_top - SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
         placed_pins.append(
             LibPin(
                 number=pin.number,
                 name=pin.name,
                 pin_type=pin.pin_type.value,
-                at=Point(_PIN_X_LEFT_MM, y),
-                rotation=180.0,
-                length=SCHEMATIC_PIN_LENGTH_MM,
-                name_effects=_make_font(),
-                number_effects=_make_font(),
-            )
-        )
-
-    # Right-side pins (outputs)
-    for idx, pin in enumerate(right_pins):
-        y = body_top + SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
-        placed_pins.append(
-            LibPin(
-                number=pin.number,
-                name=pin.name,
-                pin_type=pin.pin_type.value,
-                at=Point(_PIN_X_RIGHT_MM, y),
+                at=Point(pin_x_left, y),
                 rotation=0.0,
                 length=SCHEMATIC_PIN_LENGTH_MM,
                 name_effects=_make_font(),
-                number_effects=_make_font(),
+                number_effects=_make_font(hidden=True),
             )
         )
 
-    # Top pins (power supply)
+    # Right-side pins (outputs) — top to bottom (positive to negative Y)
+    # KiCad convention: right pins at positive X, rotation=180° (extends LEFT toward body)
+    for idx, pin in enumerate(right_pins):
+        y = body_top - SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
+        placed_pins.append(
+            LibPin(
+                number=pin.number,
+                name=pin.name,
+                pin_type=pin.pin_type.value,
+                at=Point(pin_x_right, y),
+                rotation=180.0,
+                length=SCHEMATIC_PIN_LENGTH_MM,
+                name_effects=_make_font(),
+                number_effects=_make_font(hidden=True),
+            )
+        )
+
+    # Top pins (power supply) — above body (positive Y direction)
+    # KiCad convention: rotation=270° (extends DOWN toward body)
     for idx, pin in enumerate(top_pins):
         x = (idx - (len(top_pins) - 1) / 2.0) * SCHEMATIC_SYMBOL_PIN_SPACING_MM
         placed_pins.append(
@@ -199,15 +299,16 @@ def make_lib_symbol(component: Component) -> LibSymbol:
                 number=pin.number,
                 name=pin.name,
                 pin_type=pin.pin_type.value,
-                at=Point(x, body_top - SCHEMATIC_PIN_LENGTH_MM),
+                at=Point(x, body_top + SCHEMATIC_PIN_LENGTH_MM),
                 rotation=270.0,
                 length=SCHEMATIC_PIN_LENGTH_MM,
                 name_effects=_make_font(),
-                number_effects=_make_font(),
+                number_effects=_make_font(hidden=True),
             )
         )
 
-    # Bottom pins (GND / VSS)
+    # Bottom pins (GND / VSS) — below body (negative Y direction)
+    # KiCad convention: rotation=90° (extends UP toward body)
     for idx, pin in enumerate(bottom_pins):
         x = (idx - (len(bottom_pins) - 1) / 2.0) * SCHEMATIC_SYMBOL_PIN_SPACING_MM
         placed_pins.append(
@@ -215,11 +316,11 @@ def make_lib_symbol(component: Component) -> LibSymbol:
                 number=pin.number,
                 name=pin.name,
                 pin_type=pin.pin_type.value,
-                at=Point(x, body_bottom + SCHEMATIC_PIN_LENGTH_MM),
+                at=Point(x, body_bottom - SCHEMATIC_PIN_LENGTH_MM),
                 rotation=90.0,
                 length=SCHEMATIC_PIN_LENGTH_MM,
                 name_effects=_make_font(),
-                number_effects=_make_font(),
+                number_effects=_make_font(hidden=True),
             )
         )
 
@@ -255,8 +356,8 @@ def make_passive_symbol(
     Returns:
         A :class:`LibSymbol` with two passive pins and a polyline body.
     """
-    # Body: horizontal line from -1.016 to +1.016 with short end marks
-    _half: float = 1.016
+    # Body: horizontal line from -1.27 to +1.27 with short end marks
+    _half: float = 1.27
     body_line = LibPolyline(
         points=(Point(-_half, 0.0), Point(_half, 0.0)),
         stroke=Stroke(),
@@ -278,20 +379,20 @@ def make_passive_symbol(
         name=pin1_name,
         pin_type=PinType.PASSIVE.value,
         at=Point(-(SCHEMATIC_PIN_LENGTH_MM + _half), 0.0),
-        rotation=180.0,
+        rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(hidden=True),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     pin2 = LibPin(
         number="2",
         name=pin2_name,
         pin_type=PinType.PASSIVE.value,
         at=Point(SCHEMATIC_PIN_LENGTH_MM + _half, 0.0),
-        rotation=0.0,
+        rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(hidden=True),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
 
     return LibSymbol(
@@ -317,17 +418,17 @@ def make_led_symbol(lib_id: str = "Device:LED") -> LibSymbol:
     # Diode triangle body: tip pointing right
     triangle = LibPolyline(
         points=(
-            Point(-1.016, -1.016),
-            Point(-1.016, 1.016),
-            Point(1.016, 0.0),
-            Point(-1.016, -1.016),
+            Point(-1.27, -1.27),
+            Point(-1.27, 1.27),
+            Point(1.27, 0.0),
+            Point(-1.27, -1.27),
         ),
         stroke=Stroke(),
         fill="background",
     )
     # Cathode bar
     bar = LibPolyline(
-        points=(Point(1.016, -1.016), Point(1.016, 1.016)),
+        points=(Point(1.27, -1.27), Point(1.27, 1.27)),
         stroke=Stroke(),
         fill="none",
     )
@@ -336,21 +437,21 @@ def make_led_symbol(lib_id: str = "Device:LED") -> LibSymbol:
         number="1",
         name="A",
         pin_type=PinType.PASSIVE.value,
-        at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 1.016), 0.0),
-        rotation=180.0,
+        at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 1.27), 0.0),
+        rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     cathode = LibPin(
         number="2",
         name="K",
         pin_type=PinType.PASSIVE.value,
-        at=Point(SCHEMATIC_PIN_LENGTH_MM + 1.016, 0.0),
-        rotation=0.0,
+        at=Point(SCHEMATIC_PIN_LENGTH_MM + 1.27, 0.0),
+        rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
 
     return LibSymbol(
@@ -445,16 +546,16 @@ def _make_diode_symbol(lib_id: str = "Device:D") -> LibSymbol:
     """
     triangle = LibPolyline(
         points=(
-            Point(-1.016, -1.016),
-            Point(-1.016, 1.016),
-            Point(1.016, 0.0),
-            Point(-1.016, -1.016),
+            Point(-1.27, -1.27),
+            Point(-1.27, 1.27),
+            Point(1.27, 0.0),
+            Point(-1.27, -1.27),
         ),
         stroke=Stroke(),
         fill="background",
     )
     bar = LibPolyline(
-        points=(Point(1.016, -1.016), Point(1.016, 1.016)),
+        points=(Point(1.27, -1.27), Point(1.27, 1.27)),
         stroke=Stroke(),
         fill="none",
     )
@@ -462,21 +563,21 @@ def _make_diode_symbol(lib_id: str = "Device:D") -> LibSymbol:
         number="1",
         name="A",
         pin_type=PinType.PASSIVE.value,
-        at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 1.016), 0.0),
-        rotation=180.0,
+        at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 1.27), 0.0),
+        rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     cathode = LibPin(
         number="2",
         name="K",
         pin_type=PinType.PASSIVE.value,
-        at=Point(SCHEMATIC_PIN_LENGTH_MM + 1.016, 0.0),
-        rotation=0.0,
+        at=Point(SCHEMATIC_PIN_LENGTH_MM + 1.27, 0.0),
+        rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     return LibSymbol(lib_id=lib_id, pins=(anode, cathode), shapes=(triangle, bar))
 
@@ -498,31 +599,31 @@ def _make_npn_symbol() -> LibSymbol:
         number="1",
         name="B",
         pin_type=PinType.INPUT.value,
-        at=Point(-(SCHEMATIC_PIN_LENGTH_MM + _BODY_HALF_WIDTH_MM), 0.0),
-        rotation=180.0,
+        at=Point(-(SCHEMATIC_PIN_LENGTH_MM + _MIN_BODY_HALF_WIDTH_MM), 0.0),
+        rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     collector = LibPin(
         number="2",
         name="C",
         pin_type=PinType.PASSIVE.value,
-        at=Point(SCHEMATIC_PIN_LENGTH_MM + _BODY_HALF_WIDTH_MM, -2.54),
-        rotation=0.0,
+        at=Point(SCHEMATIC_PIN_LENGTH_MM + _MIN_BODY_HALF_WIDTH_MM, -2.54),
+        rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     emitter = LibPin(
         number="3",
         name="E",
         pin_type=PinType.PASSIVE.value,
-        at=Point(SCHEMATIC_PIN_LENGTH_MM + _BODY_HALF_WIDTH_MM, 2.54),
-        rotation=0.0,
+        at=Point(SCHEMATIC_PIN_LENGTH_MM + _MIN_BODY_HALF_WIDTH_MM, 2.54),
+        rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
         name_effects=_make_font(),
-        number_effects=_make_font(),
+        number_effects=_make_font(hidden=True),
     )
     return LibSymbol(lib_id=lib_id, pins=(base, collector, emitter), shapes=(body,))
 

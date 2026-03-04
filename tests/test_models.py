@@ -317,7 +317,7 @@ class TestSchematic:
             labels=(),
             global_labels=(),
         )
-        assert sch.version == 20231120
+        assert sch.version == 20250114
         assert sch.generator == "kicad-ai-pipeline"
         assert sch.paper == "A4"
         assert len(sch.symbols) == 0

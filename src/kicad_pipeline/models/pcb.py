@@ -211,8 +211,9 @@ class PCBDesign:
     vias: tuple[Via, ...]
     zones: tuple[ZonePolygon, ...]
     keepouts: tuple[Keepout, ...]
-    version: int = 20231120
+    version: int = 20241229
     generator: str = "kicad-ai-pipeline"
+    generator_version: str = "9.0"
 
     def get_footprint(self, ref: str) -> Footprint | None:
         """Return footprint by ref, or None."""

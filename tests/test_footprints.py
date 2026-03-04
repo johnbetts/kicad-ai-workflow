@@ -92,11 +92,11 @@ def test_smd_rc_unknown_package() -> None:
 
 
 def test_smd_rc_has_courtyard() -> None:
-    """Graphics include lines on F.Courtyard."""
+    """Graphics include lines on F.CrtYd."""
     fp = make_smd_resistor_capacitor("R1", "10k", "0805")
     courtyard_lines = [
         g for g in fp.graphics
-        if isinstance(g, FootprintLine) and g.layer == "F.Courtyard"
+        if isinstance(g, FootprintLine) and g.layer == "F.CrtYd"
     ]
     assert len(courtyard_lines) >= 4
 
@@ -106,7 +106,7 @@ def test_smd_rc_has_silkscreen() -> None:
     fp = make_smd_resistor_capacitor("R1", "10k", "0805")
     silk_lines = [
         g for g in fp.graphics
-        if isinstance(g, FootprintLine) and g.layer == "F.Silkscreen"
+        if isinstance(g, FootprintLine) and g.layer == "F.SilkS"
     ]
     assert len(silk_lines) >= 2
 
@@ -143,11 +143,11 @@ def test_smd_led_0805() -> None:
     led = make_smd_led("D1", "RED", "0805")
     rc_silk = [
         g for g in rc.graphics
-        if isinstance(g, FootprintLine) and g.layer == "F.Silkscreen"
+        if isinstance(g, FootprintLine) and g.layer == "F.SilkS"
     ]
     led_silk = [
         g for g in led.graphics
-        if isinstance(g, FootprintLine) and g.layer == "F.Silkscreen"
+        if isinstance(g, FootprintLine) and g.layer == "F.SilkS"
     ]
     assert len(led_silk) > len(rc_silk)
 

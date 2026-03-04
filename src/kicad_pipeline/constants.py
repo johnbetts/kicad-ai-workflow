@@ -13,14 +13,17 @@ corner, X increases to the right, Y increases downward.
 # KiCad format identifiers
 # ---------------------------------------------------------------------------
 
-KICAD_SCH_VERSION: int = 20231120
-"""KiCad schematic file format version integer."""
+KICAD_SCH_VERSION: int = 20250114
+"""KiCad schematic file format version integer (KiCad 9)."""
 
-KICAD_PCB_VERSION: int = 20231120
-"""KiCad PCB file format version integer."""
+KICAD_PCB_VERSION: int = 20241229
+"""KiCad PCB file format version integer (KiCad 9)."""
 
 KICAD_GENERATOR: str = "kicad-ai-pipeline"
 """String written into the ``generator`` field of generated KiCad files."""
+
+KICAD_GENERATOR_VERSION: str = "9.0"
+"""Generator version string written into generated KiCad files."""
 
 # ---------------------------------------------------------------------------
 # Unit conversion
@@ -193,11 +196,11 @@ LAYER_F_CU: str = "F.Cu"
 LAYER_B_CU: str = "B.Cu"
 """Back copper layer."""
 
-LAYER_F_SILKSCREEN: str = "F.Silkscreen"
-"""Front silkscreen layer."""
+LAYER_F_SILKSCREEN: str = "F.SilkS"
+"""Front silkscreen layer (canonical KiCad file-format name)."""
 
-LAYER_B_SILKSCREEN: str = "B.Silkscreen"
-"""Back silkscreen layer."""
+LAYER_B_SILKSCREEN: str = "B.SilkS"
+"""Back silkscreen layer (canonical KiCad file-format name)."""
 
 LAYER_F_PASTE: str = "F.Paste"
 """Front solder-paste layer."""
@@ -211,11 +214,11 @@ LAYER_F_MASK: str = "F.Mask"
 LAYER_B_MASK: str = "B.Mask"
 """Back solder-mask layer."""
 
-LAYER_F_COURTYARD: str = "F.Courtyard"
-"""Front courtyard layer."""
+LAYER_F_COURTYARD: str = "F.CrtYd"
+"""Front courtyard layer (canonical KiCad file-format name)."""
 
-LAYER_B_COURTYARD: str = "B.Courtyard"
-"""Back courtyard layer."""
+LAYER_B_COURTYARD: str = "B.CrtYd"
+"""Back courtyard layer (canonical KiCad file-format name)."""
 
 LAYER_F_FAB: str = "F.Fab"
 """Front fabrication-aid layer."""

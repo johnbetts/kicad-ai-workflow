@@ -3,18 +3,15 @@
 Assigns 2-D positions to schematic symbols by first grouping them into named
 functional zones and then distributing them on a regular grid within each zone.
 
-Zone layout (millimetres, origin at top-left):
+Zone layout (millimetres, A4 landscape 297x210, margins 30mm):
 
-+-----------+-----------+
-|  POWER    |   MCU     |
-| (0,0)     | (130,0)   |
-+-----------+-----------+
-| ETHERNET  |  ANALOG   |
-| (0,90)    | (280,90)  |
-+-----------+-----------+
-|       PERIPHERALS     |
-|       (0,200)         |
-+-----------------------+
++-------------+-------------+
+|  POWER      |   MCU       |
+| (30,30)     | (155,30)    |
++-------------+-------------+
+| ANALOG      | PERIPHERALS |
+| (30,110)    | (155,110)   |
++-------------+-------------+
 """
 
 from __future__ import annotations
@@ -56,103 +53,360 @@ class PlacementZone:
 # ---------------------------------------------------------------------------
 
 SCHEMATIC_ZONES: dict[str, PlacementZone] = {
-    "POWER": PlacementZone("POWER", 0.0, 0.0, 120.0, 80.0),
-    "MCU": PlacementZone("MCU", 130.0, 0.0, 140.0, 120.0),
-    "ETHERNET": PlacementZone("ETHERNET", 0.0, 90.0, 120.0, 100.0),
-    "ANALOG": PlacementZone("ANALOG", 280.0, 90.0, 140.0, 100.0),
-    "PERIPHERALS": PlacementZone("PERIPHERALS", 0.0, 200.0, 420.0, 80.0),
+    "ANALOG": PlacementZone("ANALOG", 25.40, 27.94, 116.84, 139.70),
+    "POWER": PlacementZone("POWER", 149.86, 27.94, 120.65, 20.32),
+    "MCU": PlacementZone("MCU", 149.86, 50.80, 120.65, 50.80),
+    "PERIPHERALS": PlacementZone("PERIPHERALS", 149.86, 119.38, 120.65, 50.80),
 }
-"""Standard schematic zones keyed by name.
+"""Standard schematic zones keyed by name (A4 layout).
 
-Matches the zone plan defined in the project architecture document section 2.4.
+A4 landscape (297x210mm) with asymmetric zones:
+- ANALOG: full left column (for voltage divider channels etc.)
+- POWER: tiny strip at top-right (bypass caps)
+- MCU: mid-right (ICs, DIP switches, pull-ups)
+- PERIPHERALS: bottom-right (large connectors)
+~18mm gap between MCU and PERIPHERALS to prevent label overlap.
 """
 
-# Feature-name to zone-name mapping (case-insensitive prefix matching)
-_FEATURE_ZONE_MAP: list[tuple[tuple[str, ...], str]] = [
-    (("power", "usb"), "POWER"),
-    (("mcu", "core"), "MCU"),
-    (("ethernet",), "ETHERNET"),
-    (("analog",), "ANALOG"),
+_A3_ZONES: dict[str, PlacementZone] = {
+    "POWER": PlacementZone("POWER", 20.32, 20.32, 180.34, 119.38),
+    "MCU": PlacementZone("MCU", 209.55, 20.32, 180.34, 119.38),
+    "ANALOG": PlacementZone("ANALOG", 20.32, 149.86, 180.34, 119.38),
+    "PERIPHERALS": PlacementZone("PERIPHERALS", 209.55, 149.86, 180.34, 119.38),
+}
+"""Schematic zones for A3 landscape page (420x297mm) with 20mm margins.
+
+Four non-overlapping quadrants.  ETHERNET is removed (it shared
+coordinates with PERIPHERALS).
+"""
+
+
+def zones_for_page(paper: str = "A4") -> dict[str, PlacementZone]:
+    """Return the schematic zone layout for the given paper size.
+
+    Args:
+        paper: Paper size identifier (``"A4"`` or ``"A3"``).
+
+    Returns:
+        Zone dictionary for the given paper size.
+    """
+    if paper == "A3":
+        return _A3_ZONES
+    return SCHEMATIC_ZONES
+
+# Feature-name keyword hints for preferred zone placement.
+# Each keyword maps to a preferred zone slot index (0-3 in the 2x2 grid:
+# 0=top-left, 1=top-right, 2=bottom-left, 3=bottom-right).
+_ZONE_HINT_KEYWORDS: list[tuple[tuple[str, ...], int]] = [
+    (("power", "supply", "regulator", "usb", "battery"), 0),  # top-left
+    (("mcu", "core", "processor", "cpu", "adc", "dac", "ic"), 1),  # top-right
+    (("analog", "sensor", "divider", "amplifier", "filter", "opamp"), 2),  # bottom-left
+    (("connect", "terminal", "header", "interface", "periph", "io"), 3),  # bottom-right
+    (("ethernet", "wifi", "radio", "rf", "bluetooth"), 3),  # bottom-right
 ]
-"""Ordered list of (feature_prefix_tuple, zone_name) pairs.
 
-The first match wins.  Any unmatched feature falls back to ``'PERIPHERALS'``.
-"""
+# The 4 zone slot names in order (matches _ZONE_HINT_KEYWORDS indices)
+_ZONE_SLOT_NAMES = ("POWER", "MCU", "ANALOG", "PERIPHERALS")
 
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
 
 
+def _feature_to_slot(feature: str) -> int | None:
+    """Return the preferred zone slot for a feature name, or None."""
+    fl = feature.lower()
+    for keywords, slot in _ZONE_HINT_KEYWORDS:
+        if any(fl.startswith(kw) or kw in fl for kw in keywords):
+            return slot
+    return None
+
+
 def assign_zones(
     components: list[tuple[str, str]],
+    paper: str = "A4",
+    adjacency: dict[str, set[str]] | None = None,
 ) -> dict[str, PlacementZone]:
     """Assign each component reference to a :class:`PlacementZone`.
 
-    The zone is selected by matching *feature_name* (case-insensitively) against
-    the keywords in :data:`_FEATURE_ZONE_MAP`.  Components that do not match any
-    keyword are placed in the ``'PERIPHERALS'`` zone.
+    Groups components by feature name, then distributes feature groups
+    across 4 non-overlapping zone slots.  Keyword hints guide placement
+    (e.g. "Power" features go to the POWER zone), but unmatched features
+    are distributed to remaining unused slots instead of all being
+    crammed into PERIPHERALS.
+
+    When a zone is overloaded (>8 refs) and another zone is empty,
+    the overloaded zone is split using connectivity-aware ordering so
+    tightly-connected subcircuits stay together.
 
     Args:
-        components: List of ``(ref, feature_name)`` tuples, e.g.
-            ``[('U1', 'MCU'), ('C1', 'Power'), ('J1', 'USB')]``.
+        components: List of ``(ref, feature_name)`` tuples.
+        paper: Page size (``"A4"`` or ``"A3"``).
+        adjacency: Optional connectivity map for smart splitting.
 
     Returns:
         Mapping from component ref to the assigned :class:`PlacementZone`.
     """
-    result: dict[str, PlacementZone] = {}
+    active_zones = zones_for_page(paper)
+
+    # Group refs by feature name (preserving order)
+    feature_groups: dict[str, list[str]] = {}
     for ref, feature in components:
-        feature_lower = feature.lower()
-        zone_name = "PERIPHERALS"
-        for keywords, candidate_zone in _FEATURE_ZONE_MAP:
-            if any(feature_lower.startswith(kw) for kw in keywords):
-                zone_name = candidate_zone
-                break
-        result[ref] = SCHEMATIC_ZONES[zone_name]
-        log.debug("assign_zones: %s (feature=%s) → %s", ref, feature, zone_name)
+        feature_groups.setdefault(feature, []).append(ref)
+
+    # Assign each feature group to a zone slot
+    feature_to_zone: dict[str, str] = {}
+    used_slots: set[int] = set()
+
+    # First pass: features with keyword hints get their preferred slot
+    for feature in feature_groups:
+        slot = _feature_to_slot(feature)
+        if slot is not None and slot not in used_slots:
+            feature_to_zone[feature] = _ZONE_SLOT_NAMES[slot]
+            used_slots.add(slot)
+
+    # Second pass: distribute remaining features to unused slots
+    # Prefer PERIPHERALS (3) first, then ANALOG (2), MCU (1), POWER (0)
+    available_slots = [i for i in (3, 2, 1, 0) if i not in used_slots]
+    for feature in feature_groups:
+        if feature not in feature_to_zone:
+            if available_slots:
+                slot = available_slots.pop(0)
+                feature_to_zone[feature] = _ZONE_SLOT_NAMES[slot]
+                used_slots.add(slot)
+            else:
+                # More features than zones: pick the zone with fewest refs
+                zone_counts = {z: 0 for z in _ZONE_SLOT_NAMES}
+                for z in feature_to_zone.values():
+                    zone_counts[z] = zone_counts.get(z, 0) + 1
+                least_used = min(zone_counts, key=lambda z: zone_counts[z])
+                feature_to_zone[feature] = least_used
+
+    # Rebalance: if any zone is empty and another is overloaded, redistribute.
+    zone_ref_counts: dict[str, int] = {z: 0 for z in _ZONE_SLOT_NAMES}
+    for feature, refs in feature_groups.items():
+        zone_ref_counts[feature_to_zone[feature]] += len(refs)
+
+    empty_zones = [z for z in _ZONE_SLOT_NAMES if zone_ref_counts[z] == 0]
+    ref_overrides: dict[str, str] = {}
+
+    if empty_zones:
+        overloaded = max(_ZONE_SLOT_NAMES, key=lambda z: zone_ref_counts[z])
+        if zone_ref_counts[overloaded] > 16:
+            # Collect all refs in the overloaded zone
+            overloaded_refs: list[str] = []
+            for feature, refs in feature_groups.items():
+                if feature_to_zone[feature] == overloaded:
+                    overloaded_refs.extend(refs)
+
+            # Sort by connectivity so connected components are adjacent
+            if adjacency is not None:
+                overloaded_refs = _sort_by_connectivity(overloaded_refs, adjacency)
+
+            # Split in half — second half goes to the empty zone.
+            # Choose target zone that's adjacent (same column = above/below).
+            # ANALOG(2) ↔ POWER(0) share left column
+            # PERIPHERALS(3) ↔ MCU(1) share right column
+            adjacent_map = {"ANALOG": "POWER", "POWER": "ANALOG",
+                            "PERIPHERALS": "MCU", "MCU": "PERIPHERALS"}
+            preferred_target = adjacent_map.get(overloaded, "")
+            target_zone = preferred_target if preferred_target in empty_zones else empty_zones[0]
+
+            split_point = len(overloaded_refs) // 2
+            for ref in overloaded_refs[split_point:]:
+                ref_overrides[ref] = target_zone
+            log.debug(
+                "assign_zones: split %d refs from %s to %s (connectivity-aware)",
+                len(overloaded_refs) - split_point, overloaded, target_zone,
+            )
+
+    # Build result: ref -> PlacementZone
+    result: dict[str, PlacementZone] = {}
+    for feature, refs in feature_groups.items():
+        zone_name = feature_to_zone[feature]
+        for ref in refs:
+            actual_zone = ref_overrides.get(ref, zone_name)
+            result[ref] = active_zones[actual_zone]
+            log.debug("assign_zones: %s (feature=%s) -> %s", ref, feature, actual_zone)
+
     return result
+
+
+def _h_spacing_for_pins(pin_count: int, grid: float) -> float:
+    """Compute horizontal spacing for a component based on pin count."""
+    if pin_count > 10:
+        raw = pin_count * 1.5 + 15.0
+    elif pin_count > 4:
+        raw = pin_count * 2.5 + 10.0
+    else:
+        # 2-pin passives: body ~9mm + labels ~10mm
+        raw = 20.0
+    return round(raw / grid) * grid
 
 
 def place_in_zone(
     refs: list[str],
     zone: PlacementZone,
     grid: float = SCHEMATIC_WIRE_GRID_MM,
-    symbols_per_row: int = 3,
+    symbols_per_row: int | None = None,
+    pin_counts: list[int] | None = None,
 ) -> dict[str, Point]:
     """Place a list of component refs in a grid within *zone*.
 
-    Symbols are arranged left-to-right, top-to-bottom with a spacing of
-    25.4 mm horizontally and 30 mm vertically between symbol origins.
-    All positions are snapped to the schematic grid.
+    Large components (>10 pins) are placed first, each in their own row.
+    Remaining small components are packed in a compact grid below.
 
     Args:
         refs: Ordered list of component reference designators to place.
         zone: The :class:`PlacementZone` that bounds the placement.
         grid: Grid size for snapping (default: ``SCHEMATIC_WIRE_GRID_MM``).
-        symbols_per_row: Number of symbols per row (default ``3``).
+        symbols_per_row: Number of symbols per row.  If ``None``, derived
+            from zone width / horizontal spacing (at least 1).
+        pin_counts: Optional list of pin counts parallel to *refs*.
+            When provided, vertical spacing adapts to symbol height.
 
     Returns:
         Mapping from component ref to grid-snapped :class:`Point`.
     """
-    h_spacing = 25.4  # mm between symbol origins horizontally
-    v_spacing = 30.0  # mm between symbol origins vertically
-
     result: dict[str, Point] = {}
-    for idx, ref in enumerate(refs):
-        col = idx % symbols_per_row
-        row = idx // symbols_per_row
-        raw_x = zone.origin_x + col * h_spacing
-        raw_y = zone.origin_y + row * v_spacing
-        x = snap_to_grid(raw_x, grid)
-        y = snap_to_grid(raw_y, grid)
-        result[ref] = Point(x=x, y=y)
-        log.debug("place_in_zone: %s → (%.3f, %.3f) in zone %s", ref, x, y, zone.name)
+    default_v_spacing = 20.32  # 16 * 1.27mm grid — compact for passives
+
+    if pin_counts is None or len(pin_counts) != len(refs):
+        # No pin info: simple grid with compact spacing
+        h_spacing = 25.4  # 20 * 1.27mm
+        if symbols_per_row is None:
+            symbols_per_row = max(1, int(zone.width / h_spacing))
+        for idx, ref in enumerate(refs):
+            col = idx % symbols_per_row
+            row = idx // symbols_per_row
+            raw_x = zone.origin_x + col * h_spacing
+            raw_y = zone.origin_y + row * default_v_spacing
+            x = snap_to_grid(raw_x, grid)
+            y = snap_to_grid(raw_y, grid)
+            result[ref] = Point(x=x, y=y)
+            log.debug("place_in_zone: %s → (%.3f, %.3f) in zone %s", ref, x, y, zone.name)
+        return result
+
+    # Separate large components (>=8 pins) from small ones
+    large_threshold = 8
+    large_indices = [i for i, pc in enumerate(pin_counts) if pc >= large_threshold]
+    small_indices = [i for i, pc in enumerate(pin_counts) if pc < large_threshold]
+
+    cumulative_y = 0.0
+
+    # Place large components side by side (up to 2 per row)
+    # Use ~40mm spacing between large components (enough for IC body + labels)
+    large_spacing = snap_to_grid(45.0, grid)
+    for row_start in range(0, len(large_indices), 2):
+        row_items = large_indices[row_start:row_start + 2]
+        max_row_h = 0.0
+        for col_idx, i in enumerate(row_items):
+            ref = refs[i]
+            pc = pin_counts[i]
+            x = snap_to_grid(zone.origin_x + col_idx * large_spacing, grid)
+            y = snap_to_grid(zone.origin_y + cumulative_y, grid)
+            result[ref] = Point(x=x, y=y)
+            log.debug("place_in_zone: %s → (%.3f, %.3f) in zone %s [large]", ref, x, y, zone.name)
+            effective_pins = pc // 2 if pc > 10 else pc
+            body_h = max(effective_pins * 2.54, 5.08)
+            body_h = min(body_h, zone.height * 0.5)
+            max_row_h = max(max_row_h, body_h)
+        cumulative_y += max_row_h + 10.0
+
+    # Place small components: uniform grid
+    if small_indices:
+        n_small = len(small_indices)
+
+        # Compute columns: use fixed spacing, don't spread across full zone
+        max_h_spacing = 27.94  # 22 * 1.27mm — fits 4 per row in ANALOG zone
+        cols = max(1, min(n_small, int(zone.width / max_h_spacing)))
+        h_spacing = snap_to_grid(max_h_spacing, grid)
+
+        for local_idx, global_idx in enumerate(small_indices):
+            ref = refs[global_idx]
+            pc = pin_counts[global_idx]
+            col = local_idx % cols
+            row = local_idx // cols
+
+            # Compute row height from pin counts in this row
+            row_start = row * cols
+            row_end = min(row_start + cols, n_small)
+            row_pcs = [pin_counts[small_indices[j]] for j in range(row_start, row_end)]
+            max_pc = max(row_pcs) if row_pcs else 2
+            body_h = max(max_pc * 2.54, 5.08)
+            clearance = 15.0 if body_h <= 10.0 else 17.0
+            row_height = body_h + clearance
+
+            raw_x = zone.origin_x + col * h_spacing
+            if col == 0 and local_idx > 0:
+                cumulative_y += row_height
+            raw_y = zone.origin_y + cumulative_y
+
+            x = snap_to_grid(raw_x, grid)
+            y = snap_to_grid(raw_y, grid)
+            result[ref] = Point(x=x, y=y)
+            log.debug("place_in_zone: %s → (%.3f, %.3f) in zone %s", ref, x, y, zone.name)
+
+    return result
+
+
+def _sort_by_connectivity(
+    refs: list[str],
+    adjacency: dict[str, set[str]],
+) -> list[str]:
+    """Sort refs so connected components are adjacent (greedy nearest-neighbor).
+
+    Starts with the ref that has the most connections to other zone members,
+    then greedily picks the most-connected remaining neighbor.
+    """
+    if len(refs) <= 2:
+        return refs
+    ref_set = set(refs)
+
+    # Seed with an input connector (J ref) if available — they represent
+    # signal entry points and give natural left-to-right signal flow.
+    # Use (count, ref_name) tuples as sort keys for deterministic tie-breaking.
+    j_refs = sorted(r for r in refs if r.startswith("J"))
+    if j_refs:
+        seed = min(j_refs, key=lambda r: (len(adjacency.get(r, set()) & ref_set), r))
+    else:
+        seed = max(refs, key=lambda r: (len(adjacency.get(r, set()) & ref_set), r))
+
+    result: list[str] = [seed]
+    remaining = set(refs) - {seed}
+    while remaining:
+        current = result[-1]
+        # Find the remaining ref most connected to current
+        nbrs = adjacency.get(current, set()) & remaining
+        if nbrs:
+            nxt = max(nbrs, key=lambda r: (len(adjacency.get(r, set()) & ref_set), r))
+        else:
+            # Chain break — start a new chain from a remaining connector
+            # if available, to preserve signal-flow ordering (alphabetical)
+            remaining_j = sorted(r for r in remaining if r.startswith("J"))
+            if remaining_j:
+                nxt = min(
+                    remaining_j,
+                    key=lambda r: (len(adjacency.get(r, set()) & ref_set), r),
+                )
+            else:
+                # No connectors left — pick ref with fewest connections
+                # (leaf node) to start a clean chain
+                nxt = min(
+                    sorted(remaining),
+                    key=lambda r: (len(adjacency.get(r, set()) & ref_set), r),
+                )
+        result.append(nxt)
+        remaining.remove(nxt)
     return result
 
 
 def layout_schematic(
     symbol_refs: list[str],
     feature_map: dict[str, str],
+    pin_count_map: dict[str, int] | None = None,
+    paper: str = "A4",
+    adjacency: dict[str, set[str]] | None = None,
 ) -> dict[str, Point]:
     """Compute the full schematic layout for all symbol references.
 
@@ -164,14 +418,18 @@ def layout_schematic(
         feature_map: Mapping from ref to feature name, e.g.
             ``{'U1': 'MCU', 'C1': 'Power'}``.  Refs missing from the map
             are assigned to the ``'PERIPHERALS'`` zone.
+        pin_count_map: Optional mapping from ref to number of pins.
+            When provided, vertical spacing adapts to symbol height.
 
     Returns:
         Mapping from component ref to :class:`Point` for every ref in
         *symbol_refs*.
     """
+    active_zones = zones_for_page(paper)
+
     # Build (ref, feature) list — fall back to 'Peripherals' for unknowns
     tagged = [(ref, feature_map.get(ref, "Peripherals")) for ref in symbol_refs]
-    zone_map = assign_zones(tagged)
+    zone_map = assign_zones(tagged, paper=paper, adjacency=adjacency)
 
     # Group refs by zone
     groups: dict[str, list[str]] = {}
@@ -180,20 +438,23 @@ def layout_schematic(
 
     positions: dict[str, Point] = {}
     for zone_name, zone_refs in groups.items():
-        zone = SCHEMATIC_ZONES[zone_name]
-        zone_positions = place_in_zone(zone_refs, zone)
+        zone = active_zones[zone_name]
+        # Sort refs by connectivity so connected components are adjacent
+        if adjacency is not None:
+            zone_refs = _sort_by_connectivity(zone_refs, adjacency)
+        zone_pin_counts: list[int] | None = None
+        if pin_count_map is not None:
+            zone_pin_counts = [pin_count_map.get(ref, 2) for ref in zone_refs]
+        zone_positions = place_in_zone(zone_refs, zone, pin_counts=zone_pin_counts)
         positions.update(zone_positions)
 
     # Any refs not covered (shouldn't happen, but be safe)
-    for ref in symbol_refs:
-        if ref not in positions:
-            log.warning("layout_schematic: %s not placed; adding to PERIPHERALS", ref)
-            fallback_zone = SCHEMATIC_ZONES["PERIPHERALS"]
-            offset = len(positions) * 25.4
-            positions[ref] = Point(
-                x=snap_to_grid(fallback_zone.origin_x + offset, SCHEMATIC_WIRE_GRID_MM),
-                y=snap_to_grid(fallback_zone.origin_y, SCHEMATIC_WIRE_GRID_MM),
-            )
+    unplaced = [ref for ref in symbol_refs if ref not in positions]
+    if unplaced:
+        log.warning("layout_schematic: %d refs not placed; adding to PERIPHERALS", len(unplaced))
+        fallback_zone = active_zones["PERIPHERALS"]
+        fallback_positions = place_in_zone(unplaced, fallback_zone)
+        positions.update(fallback_positions)
 
     return positions
 

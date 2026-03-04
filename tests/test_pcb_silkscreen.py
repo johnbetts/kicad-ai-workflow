@@ -36,13 +36,13 @@ def _footprint_with_texts(ref: str = "R1", value: str = "10k") -> Footprint:
         text_type="reference",
         text=ref,
         position=Point(0.0, -1.5),
-        layer="F.Silkscreen",
+        layer="F.SilkS",
     )
     val_text = FootprintText(
         text_type="value",
         text=value,
         position=Point(0.0, 1.5),
-        layer="F.Silkscreen",
+        layer="F.SilkS",
     )
     return Footprint(
         lib_id="R_SMD:R_0805_2012Metric",
@@ -69,7 +69,7 @@ def test_make_ref_label() -> None:
 def test_make_ref_label_layer() -> None:
     """make_ref_label defaults to F.Silkscreen layer."""
     label = make_ref_label("U1", Point(x=0.0, y=0.0))
-    assert label.layer == "F.Silkscreen"
+    assert label.layer == "F.SilkS"
 
 
 def test_make_ref_label_not_hidden() -> None:
@@ -131,7 +131,7 @@ def test_make_zone_label_size() -> None:
 def test_make_zone_label_default_layer() -> None:
     """make_zone_label defaults to F.Silkscreen layer."""
     label = make_zone_label("ANALOG", x=0.0, y=0.0)
-    assert label.layer == "F.Silkscreen"
+    assert label.layer == "F.SilkS"
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ def test_make_pin1_indicator() -> None:
     """make_pin1_indicator returns FootprintLine on F.Silkscreen."""
     line = make_pin1_indicator(x=0.0, y=0.0)
     assert isinstance(line, FootprintLine)
-    assert line.layer == "F.Silkscreen"
+    assert line.layer == "F.SilkS"
 
 
 def test_make_pin1_indicator_extends_right() -> None:

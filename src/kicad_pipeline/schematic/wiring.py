@@ -32,7 +32,7 @@ from kicad_pipeline.models.schematic import (
 log = logging.getLogger(__name__)
 
 # Distance (mm) to extend the wire stub away from a pin before placing a label.
-_LABEL_STUB_MM: float = SCHEMATIC_PIN_LENGTH_MM  # 2.54 mm
+_LABEL_STUB_MM: float = SCHEMATIC_PIN_LENGTH_MM * 2.0  # 5.08 mm — short stub to label
 
 
 # ---------------------------------------------------------------------------
@@ -170,30 +170,50 @@ def connect_pin_to_label(
     pin_position: Point,
     label_text: str,
     is_global: bool = False,
+    pin_side: str = "left",
 ) -> tuple[list[Wire], list[GlobalLabel], list[Label]]:
     """Generate a short wire stub and a net label for a pin.
 
-    The wire extends ``SCHEMATIC_PIN_LENGTH_MM`` (2.54 mm) to the right of the
-    pin position.  The label is placed at the far end of the stub.
+    The wire extends away from the symbol body in the direction indicated by
+    *pin_side*.  The label is placed at the far end of the stub.
 
     Args:
         pin_position: The position of the symbol pin endpoint.
         label_text: Net name to show on the label.
         is_global: If ``True``, generates a :class:`GlobalLabel`; otherwise a
             local :class:`Label`.
+        pin_side: Which side of the symbol the pin is on.
+            ``"left"`` → stub extends left, ``"right"`` → right,
+            ``"top"`` → up, ``"bottom"`` → down.
 
     Returns:
         A three-element tuple ``(wires, global_labels, local_labels)`` where
         *wires* contains one :class:`Wire` and exactly one of the label lists
         is non-empty depending on *is_global*.
     """
-    lx = pin_position.x + _LABEL_STUB_MM
-    ly = pin_position.y
-    wire = make_wire(pin_position.x, pin_position.y, lx, ly)
+    px, py = pin_position.x, pin_position.y
+    # KiCad global label rotation: the direction the label text extends FROM
+    # its connection point.  0° = text extends RIGHT, 180° = text extends LEFT,
+    # 90° = text extends DOWN, 270° = text extends UP.
+    # Labels should extend AWAY from the component body.
+    if pin_side == "right":
+        lx, ly = px + _LABEL_STUB_MM, py
+        rotation = 0.0  # text extends RIGHT (away from component body)
+    elif pin_side == "top":
+        lx, ly = px, py - _LABEL_STUB_MM
+        rotation = 270.0  # text extends UP (away from component body)
+    elif pin_side == "bottom":
+        lx, ly = px, py + _LABEL_STUB_MM
+        rotation = 90.0  # text extends DOWN (away from component body)
+    else:  # "left" (default)
+        lx, ly = px - _LABEL_STUB_MM, py
+        rotation = 180.0  # text extends LEFT (away from component body)
+
+    wire = make_wire(px, py, lx, ly)
 
     if is_global:
-        return [wire], [make_global_label(label_text, lx, ly)], []
-    return [wire], [], [make_label(label_text, lx, ly)]
+        return [wire], [make_global_label(label_text, lx, ly, rotation=rotation)], []
+    return [wire], [], [make_label(label_text, lx, ly, rotation=rotation)]
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +229,7 @@ class _ZoneKey:
     row: int
 
 
-def _zone_key(pt: Point, zone_w: float = 130.0, zone_h: float = 90.0) -> _ZoneKey:
+def _zone_key(pt: Point, zone_w: float = 125.0, zone_h: float = 80.0) -> _ZoneKey:
     """Map a point to a grid-sector key for zone-proximity testing.
 
     Args:
@@ -227,6 +247,7 @@ def route_net(
     net: Net,
     pin_positions: dict[tuple[str, str], Point],
     use_global_labels: bool = True,
+    pin_sides: dict[tuple[str, str], str] | None = None,
 ) -> tuple[list[Wire], list[Junction], list[GlobalLabel], list[Label]]:
     """Route wires for a single net.
 
@@ -270,33 +291,19 @@ def route_net(
     if not known_pins:
         return wires, junctions, global_labels, local_labels
 
-    # Attempt direct connection only for exactly 2 pins in the same zone
-    if len(known_pins) == 2:
-        _, _, pt_a = known_pins[0]
-        _, _, pt_b = known_pins[1]
-        if _zone_key(pt_a) == _zone_key(pt_b):
-            log.debug(
-                "route_net(%s): direct wire (same zone)", net.name
-            )
-            # Horizontal + vertical L-route
-            w1 = make_wire(pt_a.x, pt_a.y, pt_b.x, pt_a.y)
-            w2 = make_wire(pt_b.x, pt_a.y, pt_b.x, pt_b.y)
-            wires.append(w1)
-            if abs(pt_a.y - pt_b.y) > 1e-6:
-                # Only add the second segment and a junction when they differ in y
-                wires.append(w2)
-                junctions.append(make_junction(pt_b.x, pt_a.y))
-            return wires, junctions, global_labels, local_labels
-
-    # Label-per-pin strategy
+    # Label-per-pin: each pin gets its own wire stub and net label so KiCad
+    # ERC sees every pin as connected.
     log.debug(
         "route_net(%s): label-per-pin for %d pins",
         net.name,
         len(known_pins),
     )
     for _ref, _pin, pt in known_pins:
+        side = "left"
+        if pin_sides is not None:
+            side = pin_sides.get((_ref, _pin), "left")
         stub_wires, gls, lls = connect_pin_to_label(
-            pt, net.name, is_global=use_global_labels
+            pt, net.name, is_global=use_global_labels, pin_side=side,
         )
         wires.extend(stub_wires)
         global_labels.extend(gls)

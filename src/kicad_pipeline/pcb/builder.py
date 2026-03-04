@@ -30,6 +30,9 @@ from kicad_pipeline.models.pcb import (
     BoardOutline,
     DesignRules,
     Footprint,
+    FootprintArc,
+    FootprintCircle,
+    FootprintLine,
     FootprintText,
     Keepout,
     NetEntry,
@@ -39,6 +42,7 @@ from kicad_pipeline.models.pcb import (
     ZoneFill,
     ZonePolygon,
 )
+from kicad_pipeline.pcb.footprints import estimate_footprint_size, footprint_for_component
 from kicad_pipeline.pcb.placement import layout_pcb
 from kicad_pipeline.pcb.silkscreen import add_silkscreen_to_footprint
 from kicad_pipeline.sexp.writer import SExpNode, write_file
@@ -64,8 +68,12 @@ _MOUNTING_HOLE_INSET_MM: float = 3.5
 _MOUNTING_HOLE_DIAMETER_MM: float = 3.2
 """Mounting hole drill diameter in mm (M3 screw)."""
 
-_KEEPOUT_MARGIN_MM: float = 4.0
-"""Radius of the keepout zone around each mounting hole in mm."""
+_KEEPOUT_MARGIN_MM: float = 3.0
+"""Radius of the keepout zone around each mounting hole in mm.
+
+Must be <= ``_MOUNTING_HOLE_INSET_MM`` (3.5 mm) to prevent keepout
+circles from extending past the board edge.
+"""
 
 _ANTENNA_KEEPOUT_WIDTH_MM: float = 15.0
 """Width of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
@@ -101,11 +109,13 @@ def _make_board_outline(width: float, height: float) -> BoardOutline:
     Returns:
         :class:`BoardOutline` with a closed rectangular polygon.
     """
+    # Explicitly close polygon (KiCad 9 zone polygons require closure)
     polygon = (
         Point(x=0.0, y=0.0),
         Point(x=width, y=0.0),
         Point(x=width, y=height),
         Point(x=0.0, y=height),
+        Point(x=0.0, y=0.0),
     )
     return BoardOutline(polygon=polygon, width=PCB_EDGE_CUTS_WIDTH_MM)
 
@@ -217,6 +227,67 @@ def _make_footprint(
     return fp
 
 
+def _apply_nets_to_footprint(
+    fp: Footprint,
+    component: Component,
+    net_lookup: dict[str, int],
+) -> Footprint:
+    """Copy net assignments onto matching pads of a footprint.
+
+    ``footprint_for_component`` generates pads without net assignments.
+    This helper copies the net number/name from the component's pin
+    definitions onto matching pad numbers.
+
+    Args:
+        fp: Footprint from ``footprint_for_component`` (no nets on pads).
+        component: Source component with pin-level net info.
+        net_lookup: Mapping from net name to net number.
+
+    Returns:
+        A new :class:`Footprint` with nets assigned to pads.
+    """
+    pin_net_map: dict[str, tuple[int | None, str | None]] = {}
+    for pin in component.pins:
+        if pin.net is not None:
+            net_num = net_lookup.get(pin.net)
+            pin_net_map[pin.number] = (net_num, pin.net)
+
+    new_pads: list[Pad] = []
+    for pad in fp.pads:
+        if pad.number in pin_net_map:
+            net_num, net_name = pin_net_map[pad.number]
+            pad = Pad(
+                number=pad.number,
+                pad_type=pad.pad_type,
+                shape=pad.shape,
+                position=pad.position,
+                size_x=pad.size_x,
+                size_y=pad.size_y,
+                layers=pad.layers,
+                net_number=net_num,
+                net_name=net_name,
+                drill_diameter=pad.drill_diameter,
+                roundrect_ratio=pad.roundrect_ratio,
+                uuid=pad.uuid or _new_uuid(),
+            )
+        new_pads.append(pad)
+
+    return Footprint(
+        lib_id=fp.lib_id,
+        ref=fp.ref,
+        value=fp.value,
+        position=fp.position,
+        rotation=fp.rotation,
+        layer=fp.layer,
+        pads=tuple(new_pads),
+        graphics=fp.graphics,
+        texts=fp.texts,
+        lcsc=fp.lcsc or component.lcsc,
+        uuid=fp.uuid or _new_uuid(),
+        attr=fp.attr,
+    )
+
+
 def _make_gnd_zones(
     board: BoardOutline,
     gnd_net_number: int,
@@ -281,13 +352,16 @@ def _make_mounting_hole_keepouts(
     keepouts: list[Keepout] = []
     n_pts = 12
     for cx, cy in corners:
-        pts = tuple(
+        points: list[Point] = [
             Point(
                 x=cx + radius * math.cos(2.0 * math.pi * i / n_pts),
                 y=cy + radius * math.sin(2.0 * math.pi * i / n_pts),
             )
             for i in range(n_pts)
-        )
+        ]
+        # Do NOT explicitly close — KiCad auto-closes polygons.
+        # Explicit closure creates a zero-length edge → "malformed" warning.
+        pts = tuple(points)
         keepouts.append(
             Keepout(
                 polygon=pts,
@@ -318,6 +392,7 @@ def _make_antenna_keepout(
     """
     x0 = board_width - width
     y0 = 0.0
+    # Do NOT explicitly close — KiCad auto-closes polygons for keepouts.
     polygon = (
         Point(x=x0, y=y0),
         Point(x=board_width, y=y0),
@@ -434,16 +509,60 @@ def build_pcb(
 
     # ------------------------------------------------------------------
     # Step 4: Footprints (without position — placement assigns positions)
+    # Uses footprint_for_component from footprints.py for proper geometry,
+    # then applies net assignments from component pins.
     # ------------------------------------------------------------------
     pre_footprints: list[Footprint] = []
     for comp in requirements.components:
-        fp = _make_footprint(comp, Point(x=0.0, y=0.0), net_lookup)
+        fp = footprint_for_component(comp.ref, comp.value, comp.footprint, comp.lcsc)
+        fp = _apply_nets_to_footprint(fp, comp, net_lookup)
         pre_footprints.append(fp)
+
+    # ------------------------------------------------------------------
+    # Step 4b: Compute footprint sizes and auto-size board if needed
+    # ------------------------------------------------------------------
+    fp_sizes: dict[str, tuple[float, float]] = {}
+    total_area = 0.0
+    for comp in requirements.components:
+        sz = estimate_footprint_size(comp.footprint)
+        fp_sizes[comp.ref] = sz
+        total_area += sz[0] * sz[1]
+
+    # Auto-size board: ensure board is large enough for all footprints
+    import math as _math
+
+    # Estimate minimum board area as 3x total footprint area
+    min_board_area = total_area * 3.0
+    # Maintain ~2:1 aspect ratio: w * h = area, h = w/2 → w = sqrt(2*area)
+    min_width = _math.sqrt(min_board_area * 2.0)
+    min_height = min_width / 2.0
+    new_width = max(board_width_mm, min_width)
+    new_height = max(board_height_mm, min_height)
+    # Ensure largest footprint fits with at least 10mm margin on each side
+    max_fp_w = max((s[0] for s in fp_sizes.values()), default=0.0)
+    max_fp_h = max((s[1] for s in fp_sizes.values()), default=0.0)
+    new_width = max(new_width, max_fp_w + 20.0)
+    new_height = max(new_height, max_fp_h + 20.0)
+    # Cap aspect ratio to 2.5:1 max
+    if new_width > 2.5 * new_height:
+        new_height = new_width / 2.0
+    elif new_height > 2.5 * new_width:
+        new_width = new_height / 2.0
+
+    if new_width > board_width_mm or new_height > board_height_mm:
+        board_width_mm = new_width
+        board_height_mm = new_height
+        outline = _make_board_outline(board_width_mm, board_height_mm)
+        log.info(
+            "build_pcb: auto-sized board to %.1f x %.1f mm",
+            board_width_mm,
+            board_height_mm,
+        )
 
     # ------------------------------------------------------------------
     # Step 5: Layout placement
     # ------------------------------------------------------------------
-    positions = layout_pcb(requirements, outline)
+    positions = layout_pcb(requirements, outline, footprint_sizes=fp_sizes)
 
     # Apply positions to footprints
     footprints_with_pos: list[Footprint] = []
@@ -527,26 +646,27 @@ def build_pcb(
 # S-expression serialiser
 # ---------------------------------------------------------------------------
 
-# Standard KiCad layer table for a 2-layer board
-_LAYER_TABLE: list[tuple[int, str, str]] = [
+# Standard KiCad 9 layer table for a 2-layer board.
+# KiCad 9 renumbered all layers; some have canonical aliases.
+_LAYER_TABLE: list[tuple[int, str, str] | tuple[int, str, str, str]] = [
     (0, "F.Cu", "signal"),
-    (31, "B.Cu", "signal"),
-    (32, "B.Adhes", "user"),
-    (33, "F.Adhes", "user"),
-    (34, "B.Paste", "user"),
-    (35, "F.Paste", "user"),
-    (36, "B.SilkS", "user"),
-    (37, "F.SilkS", "user"),
-    (38, "B.Mask", "user"),
-    (39, "F.Mask", "user"),
-    (40, "Dwgs.User", "user"),
-    (41, "Cmts.User", "user"),
-    (44, "Edge.Cuts", "user"),
-    (45, "Margin", "user"),
-    (46, "B.CrtYd", "user"),
-    (47, "F.CrtYd", "user"),
-    (48, "B.Fab", "user"),
-    (49, "F.Fab", "user"),
+    (2, "B.Cu", "signal"),
+    (9, "F.Adhes", "user", "F.Adhesive"),
+    (11, "B.Adhes", "user", "B.Adhesive"),
+    (13, "F.Paste", "user"),
+    (15, "B.Paste", "user"),
+    (5, "F.SilkS", "user", "F.Silkscreen"),
+    (7, "B.SilkS", "user", "B.Silkscreen"),
+    (1, "F.Mask", "user"),
+    (3, "B.Mask", "user"),
+    (17, "Dwgs.User", "user", "User.Drawings"),
+    (19, "Cmts.User", "user", "User.Comments"),
+    (25, "Edge.Cuts", "user"),
+    (27, "Margin", "user"),
+    (31, "F.CrtYd", "user", "F.Courtyard"),
+    (29, "B.CrtYd", "user", "B.Courtyard"),
+    (33, "F.Fab", "user", "F.Fabrication"),
+    (35, "B.Fab", "user", "B.Fabrication"),
 ]
 
 
@@ -624,13 +744,13 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
     if fp.uuid:
         node.append(["uuid", fp.uuid])
 
-    # Properties for ref and value
+    # Properties for ref and value — relative to footprint origin
     node.append(
         [
             "property",
             "Reference",
             fp.ref,
-            ["at", fp.position.x, fp.position.y - 1.5, 0],
+            ["at", 0, -2.5, 0],
             ["layer", "F.SilkS"],
             ["effects", ["font", ["size", 1.0, 1.0]]],
         ]
@@ -640,14 +760,54 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
             "property",
             "Value",
             fp.value,
-            ["at", fp.position.x, fp.position.y + 1.5, 0],
+            ["at", 0, 2.5, 0],
             ["layer", "F.Fab"],
             ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
         ]
     )
 
+    # KiCad 9: fp_text replaced by property entries (already emitted above).
+    # Only emit fp_text for custom user text, not reference/value.
     for text in fp.texts:
-        node.append(_footprint_text_sexp(text))
+        if text.text_type not in ("reference", "value"):
+            node.append(_footprint_text_sexp(text))
+
+    # Footprint graphics (courtyard, silkscreen, fab outlines)
+    for graphic in fp.graphics:
+        if isinstance(graphic, FootprintLine):
+            g_line: list[SExpNode] = [
+                "fp_line",
+                ["start", graphic.start.x, graphic.start.y],
+                ["end", graphic.end.x, graphic.end.y],
+                ["layer", graphic.layer],
+                ["width", graphic.width],
+            ]
+            if graphic.uuid:
+                g_line.append(["uuid", graphic.uuid])
+            node.append(g_line)
+        elif isinstance(graphic, FootprintArc):
+            g_arc: list[SExpNode] = [
+                "fp_arc",
+                ["start", graphic.start.x, graphic.start.y],
+                ["mid", graphic.mid.x, graphic.mid.y],
+                ["end", graphic.end.x, graphic.end.y],
+                ["layer", graphic.layer],
+                ["width", graphic.width],
+            ]
+            if graphic.uuid:
+                g_arc.append(["uuid", graphic.uuid])
+            node.append(g_arc)
+        elif isinstance(graphic, FootprintCircle):
+            g_circ: list[SExpNode] = [
+                "fp_circle",
+                ["center", graphic.center.x, graphic.center.y],
+                ["end", graphic.end.x, graphic.end.y],
+                ["layer", graphic.layer],
+                ["width", graphic.width],
+            ]
+            if graphic.uuid:
+                g_circ.append(["uuid", graphic.uuid])
+            node.append(g_circ)
 
     for pad in fp.pads:
         node.append(_pad_sexp(pad))
@@ -671,7 +831,14 @@ def _outline_sexp(outline: BoardOutline) -> list[SExpNode]:
     nodes: list[SExpNode] = []
     pts = outline.polygon
     n = len(pts)
-    for i in range(n):
+    # If polygon is explicitly closed (last == first), don't wrap around
+    is_closed = (
+        n > 2
+        and abs(pts[0].x - pts[-1].x) < 1e-6
+        and abs(pts[0].y - pts[-1].y) < 1e-6
+    )
+    edge_count = n - 1 if is_closed else n
+    for i in range(edge_count):
         p0 = pts[i]
         p1 = pts[(i + 1) % n]
         nodes.append(
@@ -704,21 +871,21 @@ def _zone_sexp(zone: ZonePolygon) -> SExpNode:
         ["net", zone.net_number],
         ["net_name", zone.net_name],
         ["layer", zone.layer],
-        ["name", zone.name],
+    ]
+    if zone.uuid:
+        node.append(["uuid", zone.uuid])
+    node.extend([
         ["hatch", "edge", 0.508],
         ["connect_pads", ["clearance", zone.min_thickness]],
         ["min_thickness", zone.min_thickness],
+        ["filled_areas_thickness", False],
         [
             "fill",
-            "yes",
-            ["mode", zone.fill.value],
             ["thermal_gap", zone.thermal_relief_gap],
             ["thermal_bridge_width", zone.thermal_relief_bridge],
         ],
         ["polygon", pts_node],
-    ]
-    if zone.uuid:
-        node.append(["uuid", zone.uuid])
+    ])
     return node
 
 
@@ -735,25 +902,29 @@ def _keepout_sexp(keepout: Keepout) -> SExpNode:
     for pt in keepout.polygon:
         pts_node.append(["xy", pt.x, pt.y])
 
-    rules: list[SExpNode] = ["keepout"]
-    if keepout.no_copper:
-        rules.append(["copper", "not_allowed"])
-    if keepout.no_vias:
-        rules.append(["vias", "not_allowed"])
-    if keepout.no_tracks:
-        rules.append(["tracks", "not_allowed"])
+    # KiCad 9 keepout format requires all five rule entries.
+    rules: list[SExpNode] = [
+        "keepout",
+        ["copperpour", "not_allowed" if keepout.no_copper else "allowed"],
+        ["footprints", "allowed"],
+        ["pads", "allowed"],
+        ["tracks", "not_allowed" if keepout.no_tracks else "allowed"],
+        ["vias", "not_allowed" if keepout.no_vias else "allowed"],
+    ]
 
     node: list[SExpNode] = [
         "zone",
         ["net", 0],
         ["net_name", ""],
         ["layers", *keepout.layers],
-        ["hatch", "edge", 0.508],
-        rules,
-        ["polygon", pts_node],
     ]
     if keepout.uuid:
         node.append(["uuid", keepout.uuid])
+    node.extend([
+        ["hatch", "edge", 0.508],
+        rules,
+        ["polygon", pts_node],
+    ])
     return node
 
 
@@ -790,21 +961,26 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
         "kicad_pcb",
         ["version", design.version],
         ["generator", design.generator],
-        ["general", ["thickness", 1.6]],
+        ["generator_version", design.generator_version],
+        ["general", ["thickness", 1.6], ["legacy_teardrops", False]],
         ["paper", "A4"],
     ]
 
     # Layers
     layers_node: list[SExpNode] = ["layers"]
-    for layer_num, layer_name, layer_type in _LAYER_TABLE:
-        layers_node.append([layer_num, layer_name, layer_type])
+    for layer_entry in _LAYER_TABLE:
+        layer_node: list[SExpNode] = [layer_entry[0], layer_entry[1], layer_entry[2]]
+        if len(layer_entry) > 3:
+            layer_node.append(layer_entry[3])
+        layers_node.append(layer_node)
     root.append(layers_node)
 
     # Setup
     root.append(
         [
             "setup",
-            ["pad_drill_adjust_back_out", "no"],
+            ["pad_to_mask_clearance", 0],
+            ["allow_soldermask_bridges_in_footprints", False],
             [
                 "pcbplotparams",
                 ["layerselection", "0x00010fc_ffffffff"],

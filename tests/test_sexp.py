@@ -22,16 +22,31 @@ from kicad_pipeline.sexp.writer import SExpNode, atom, needs_quotes, write, writ
 # ===========================================================================
 
 
-def test_atom_bare_string() -> None:
-    """A string without spaces or special chars is written bare (no quotes)."""
-    assert atom("wire") == "wire"
+def test_atom_quotes_user_strings() -> None:
+    """User-defined strings are quoted in KiCad 9 format."""
+    assert atom("kicad-ai-pipeline") == '"kicad-ai-pipeline"'
+    assert atom("A4 landscape") == '"A4 landscape"'
+    assert atom("R1") == '"R1"'
+    assert atom("10k") == '"10k"'
+    assert atom("GND") == '"GND"'
 
 
-def test_atom_quoted_string() -> None:
-    """A string containing a space is wrapped in double-quotes."""
-    assert atom("kicad-ai-pipeline") == "kicad-ai-pipeline"
-    result = atom("A4 landscape")
-    assert result == '"A4 landscape"'
+def test_atom_bare_keywords() -> None:
+    """Known KiCad enum values are written bare."""
+    assert atom("passive") == "passive"
+    assert atom("line") == "line"
+    assert atom("default") == "default"
+    assert atom("background") == "background"
+    assert atom("signal") == "signal"
+    assert atom("smd") == "smd"
+
+
+def test_keyword_atom_bare_string() -> None:
+    """keyword_atom writes strings bare (used for list keywords)."""
+    from kicad_pipeline.sexp.writer import keyword_atom
+
+    assert keyword_atom("wire") == "wire"
+    assert keyword_atom("kicad_sch") == "kicad_sch"
 
 
 def test_atom_number_int() -> None:
@@ -128,10 +143,10 @@ def test_write_bool_in_list() -> None:
 
 
 def test_write_quoted_string_in_list() -> None:
-    """Strings with spaces inside a list are rendered with double-quotes."""
+    """String values in lists are quoted; keywords are bare."""
     node: SExpNode = ["generator", "kicad-ai-pipeline"]
     result = write(node)
-    assert result.strip() == "(generator kicad-ai-pipeline)"
+    assert result.strip() == '(generator "kicad-ai-pipeline")'
 
     node2: SExpNode = ["paper", "A4 landscape"]
     result2 = write(node2)

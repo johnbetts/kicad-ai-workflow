@@ -202,6 +202,11 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         pcb_path = out / f"{args.name}.kicad_pcb"
         write_pcb(design, str(pcb_path))
 
+        print("[3.5/4] Generating project file...")
+        from kicad_pipeline.project_file import write_project_file
+
+        write_project_file(args.name, out)
+
         print("[4/4] Generating production artifacts...")
         pkg = build_production_package(design, args.name, req)
         write_production_package(pkg, str(out / "production"))

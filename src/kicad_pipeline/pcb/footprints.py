@@ -303,7 +303,7 @@ def make_smd_led(
     if package not in _SMD_RC_DIMS:  # already raised above, guard for type checker
         raise PCBError(f"Unknown SMD LED package '{package}'")
 
-    _, pad_h, pitch, body_w, body_h = _SMD_RC_DIMS[package]
+    _, pad_h, pitch, _body_w, _body_h = _SMD_RC_DIMS[package]
     _log.debug("make_smd_led ref=%s pkg=%s", ref, package)
 
     # Polarity triangle near cathode (pin 1, negative x)
@@ -457,6 +457,298 @@ def make_through_hole_2pin(
     )
 
 
+def _parse_pin_count(footprint_id: str) -> int:
+    """Extract pin count from a footprint ID string.
+
+    Searches for patterns like ``_1x04_``, ``_2x20_``, ``x04``, ``-10_``,
+    or bare trailing digits after a size separator.
+
+    The NxM pattern must be preceded by ``_`` or start of string to avoid
+    matching decimal dimensions like ``9.78x12.34mm``.
+
+    Args:
+        footprint_id: Footprint identifier string.
+
+    Returns:
+        Extracted pin count, or 2 as fallback.
+    """
+    import re
+
+    # Match NxM pattern preceded by _ or start (e.g. _1x04_, _2x20_)
+    # Avoids matching decimal dimensions like 9.78x12.34mm
+    m = re.search(r"(?:^|[_])(\d+)x(\d+)", footprint_id)
+    if m:
+        return int(m.group(1)) * int(m.group(2))
+    # Match xNN pattern (e.g. SPSTx04 in DIP switches) → 2*N (switches have 2 pins each)
+    m = re.search(r"x(\d{2,3})(?:[_]|$)", footprint_id)
+    if m:
+        n = int(m.group(1))
+        if 2 <= n <= 100:
+            return n * 2
+    # Match -N_ or _N_ where N looks like a pin count (2-200)
+    m = re.search(r"[-_](\d{1,3})[-_]", footprint_id)
+    if m:
+        n = int(m.group(1))
+        if 2 <= n <= 200:
+            return n
+    return 2
+
+
+def _parse_pitch(footprint_id: str) -> float:
+    """Extract pitch from a footprint ID string (e.g. ``P2.54mm``).
+
+    Args:
+        footprint_id: Footprint identifier string.
+
+    Returns:
+        Pitch in mm, or 2.54 as fallback.
+    """
+    import re
+
+    m = re.search(r"P(\d+\.?\d*)mm", footprint_id)
+    if m:
+        return float(m.group(1))
+    return 2.54
+
+
+def make_generic_smd_ic(
+    ref: str,
+    value: str,
+    pin_count: int,
+    pitch_mm: float = 0.5,
+    lib_id: str = "",
+) -> Footprint:
+    """Generate a generic SMD IC footprint (MSOP, TSSOP, SOIC, QFP, QFN, etc.).
+
+    Pins are arranged in two rows: odd pins on the left, even on the right.
+
+    Args:
+        ref: Reference designator.
+        value: Component value string.
+        pin_count: Total number of pins.
+        pitch_mm: Pin pitch in mm.
+        lib_id: KiCad library ID string (auto-generated if empty).
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    _log.debug("make_generic_smd_ic ref=%s pins=%d pitch=%.2f", ref, pin_count, pitch_mm)
+    half = pin_count // 2
+    pad_w = min(pitch_mm * 0.6, 0.5)
+    pad_h = min(pitch_mm * 0.8, 1.5)
+    row_span = (half - 1) * pitch_mm
+    col_pitch = row_span / 2.0 + 1.5  # distance from center to pad column
+
+    pads: list[Pad] = []
+    for i in range(half):
+        # Left column: pins 1..half going downward
+        y = -row_span / 2.0 + i * pitch_mm
+        pads.append(_smd_pad(str(i + 1), -col_pitch, y, pad_h, pad_w, LAYER_F_CU))
+    for i in range(half):
+        # Right column: pins half+1..pin_count going upward
+        y = row_span / 2.0 - i * pitch_mm
+        pads.append(_smd_pad(str(half + i + 1), col_pitch, y, pad_h, pad_w, LAYER_F_CU))
+
+    body_w = col_pitch * 2.0 + pad_h
+    body_h = row_span + pad_w + 0.5
+    graphics: tuple[FootprintLine, ...] = (
+        *_courtyard_rect(body_w, body_h),
+        *_silk_side_marks(col_pitch * 1.6, body_h),
+    )
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+    )
+    if not lib_id:
+        lib_id = f"Package_SO:SOIC-{pin_count}"
+
+    return Footprint(
+        lib_id=lib_id,
+        ref=ref,
+        value=value,
+        position=Point(0.0, 0.0),
+        layer=LAYER_F_CU,
+        pads=tuple(pads),
+        graphics=graphics,
+        texts=texts,
+        attr="smd",
+    )
+
+
+def make_pin_header_socket(
+    ref: str,
+    value: str,
+    pin_count: int,
+    pitch_mm: float = 2.54,
+    rows: int = 1,
+    lib_id: str = "",
+) -> Footprint:
+    """Generate a through-hole pin header or socket footprint.
+
+    Args:
+        ref: Reference designator.
+        value: Component value string.
+        pin_count: Total number of pins.
+        pitch_mm: Pin pitch in mm.
+        rows: Number of rows (1 or 2).
+        lib_id: KiCad library ID string (auto-generated if empty).
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    _log.debug("make_pin_header_socket ref=%s pins=%d rows=%d", ref, pin_count, rows)
+    drill_mm = 1.0
+    pad_diam = 1.7
+    cols = pin_count // max(rows, 1)
+    row_pitch = pitch_mm if rows > 1 else 0.0
+
+    pads: list[Pad] = []
+    pin_num = 1
+    for col in range(cols):
+        for row in range(rows):
+            x = col * pitch_mm - (cols - 1) * pitch_mm / 2.0
+            y = row * row_pitch - (rows - 1) * row_pitch / 2.0
+            pads.append(_thru_pad(str(pin_num), x, y, pad_diam, drill_mm))
+            pin_num += 1
+
+    body_w = (cols - 1) * pitch_mm + pad_diam + 0.5
+    body_h = (rows - 1) * row_pitch + pad_diam + 0.5
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+    )
+    if not lib_id:
+        lib_prefix = f"Connector_PinHeader_{pitch_mm:.2f}mm"
+        pitch_str = f"P{pitch_mm:.2f}mm_Vertical"
+        if rows > 1:
+            lib_id = f"{lib_prefix}:PinHeader_{rows}x{cols:02d}_{pitch_str}"
+        else:
+            lib_id = f"{lib_prefix}:PinHeader_1x{cols:02d}_{pitch_str}"
+
+    return Footprint(
+        lib_id=lib_id,
+        ref=ref,
+        value=value,
+        position=Point(0.0, 0.0),
+        layer=LAYER_F_CU,
+        pads=tuple(pads),
+        graphics=graphics,
+        texts=texts,
+        attr="through_hole",
+    )
+
+
+def make_terminal_block(
+    ref: str,
+    value: str,
+    pin_count: int = 2,
+    pitch_mm: float = 5.08,
+) -> Footprint:
+    """Generate a through-hole terminal block footprint.
+
+    Args:
+        ref: Reference designator.
+        value: Component value string.
+        pin_count: Number of terminals.
+        pitch_mm: Terminal pitch in mm.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    _log.debug("make_terminal_block ref=%s pins=%d pitch=%.2f", ref, pin_count, pitch_mm)
+    drill_mm = 1.3
+    pad_diam = 2.5
+
+    pads = tuple(
+        _thru_pad(
+            str(i + 1),
+            i * pitch_mm - (pin_count - 1) * pitch_mm / 2.0,
+            0.0,
+            pad_diam,
+            drill_mm,
+        )
+        for i in range(pin_count)
+    )
+    body_w = (pin_count - 1) * pitch_mm + pad_diam + 2.0
+    body_h = pad_diam + 4.0
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+    )
+    lib_id = f"Connector_TerminalBlock:TerminalBlock_{pin_count}P_P{pitch_mm:.2f}mm"
+
+    return Footprint(
+        lib_id=lib_id,
+        ref=ref,
+        value=value,
+        position=Point(0.0, 0.0),
+        layer=LAYER_F_CU,
+        pads=tuple(pads),
+        graphics=graphics,
+        texts=texts,
+        attr="through_hole",
+    )
+
+
+def make_dip_switch(
+    ref: str,
+    value: str,
+    pin_count: int = 8,
+    pitch_mm: float = 2.54,
+) -> Footprint:
+    """Generate a through-hole DIP switch footprint.
+
+    Pins are arranged in two rows like a standard DIP package.
+
+    Args:
+        ref: Reference designator.
+        value: Component value string.
+        pin_count: Total number of pins (must be even).
+        pitch_mm: Pin pitch in mm.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    _log.debug("make_dip_switch ref=%s pins=%d", ref, pin_count)
+    drill_mm = 1.0
+    pad_diam = 1.7
+    half = pin_count // 2
+    row_pitch = 7.62  # standard DIP row spacing
+
+    pads: list[Pad] = []
+    # Left column pins 1..half top-to-bottom
+    for i in range(half):
+        y = i * pitch_mm - (half - 1) * pitch_mm / 2.0
+        pads.append(_thru_pad(str(i + 1), -row_pitch / 2.0, y, pad_diam, drill_mm))
+    # Right column pins half+1..pin_count bottom-to-top
+    for i in range(half):
+        y = (half - 1 - i) * pitch_mm - (half - 1) * pitch_mm / 2.0
+        pads.append(_thru_pad(str(half + i + 1), row_pitch / 2.0, y, pad_diam, drill_mm))
+
+    body_w = row_pitch + pad_diam + 0.5
+    body_h = (half - 1) * pitch_mm + pad_diam + 0.5
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+    )
+    lib_id = f"Button_Switch_DIP:SW_DIP_x{half:02d}"
+
+    return Footprint(
+        lib_id=lib_id,
+        ref=ref,
+        value=value,
+        position=Point(0.0, 0.0),
+        layer=LAYER_F_CU,
+        pads=tuple(pads),
+        graphics=graphics,
+        texts=texts,
+        attr="through_hole",
+    )
+
+
 def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
     """USB-C SMD connector footprint (generic, suitable for basic ordering).
 
@@ -582,6 +874,11 @@ def footprint_for_component(
     - ``"SOT-223"``                    → :func:`make_sot23` (SOT-23 variant)
     - ``"USB-C*"`` / ``"USB_C*"``      → :func:`make_usbc_connector`
     - ``"RJ45*"``                      → :func:`make_rj45`
+    - ``"PinHeader*"`` / ``"PinSocket*"`` → :func:`make_pin_header_socket`
+    - ``"TerminalBlock*"``             → :func:`make_terminal_block`
+    - ``"SW_DIP*"``                    → :func:`make_dip_switch`
+    - ``"MSOP*"`` / ``"TSSOP*"`` / ``"SOIC*"`` / ``"QFP*"`` / ``"QFN*"`` / ``"DIP*"`` / ``"SOP*"``
+      → :func:`make_generic_smd_ic`
     - Otherwise → :func:`make_smd_resistor_capacitor` with package ``"0805"`` (fallback)
 
     Args:
@@ -629,6 +926,40 @@ def footprint_for_component(
     # RJ45
     elif upper.startswith("RJ45"):
         fp = make_rj45(ref, value)
+
+    # Pin headers and sockets
+    elif upper.startswith(("PINHEADER", "PINSOCKET")):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        # Detect dual-row from "2x" in the footprint ID
+        rows = 2 if "2X" in upper or "2x" in fid else 1
+        fp = make_pin_header_socket(ref, value, pin_count, pitch, rows, lib_id=fid)
+
+    # Terminal blocks
+    elif upper.startswith("TERMINALBLOCK") or upper.startswith("TB_"):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        fp = make_terminal_block(ref, value, pin_count, pitch)
+
+    # DIP switches
+    elif upper.startswith("SW_DIP"):
+        pin_count = _parse_pin_count(fid)
+        if pin_count < 4:
+            pin_count = 8  # sensible default
+        fp = make_dip_switch(ref, value, pin_count)
+
+    # Generic SMD IC packages (MSOP, TSSOP, SOIC, QFP, QFN, SOP, DFN, etc.)
+    elif any(
+        upper.startswith(prefix)
+        for prefix in ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
+    ):
+        pin_count = _parse_pin_count(fid)
+        if pin_count < 2:
+            pin_count = 8
+        pitch = _parse_pitch(fid)
+        if pitch > 2.0:
+            pitch = 0.5  # IC packages have fine pitch
+        fp = make_generic_smd_ic(ref, value, pin_count, pitch, lib_id=fid)
 
     # Fallback
     else:
@@ -758,6 +1089,97 @@ def apply_rotation_offset(
         result,
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Footprint size estimation
+# ---------------------------------------------------------------------------
+
+
+def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
+    """Estimate the physical dimensions (width, height) of a footprint in mm.
+
+    Uses known package dimensions and heuristics to estimate footprint size
+    without generating the full footprint geometry.
+
+    Args:
+        footprint_id: Footprint identifier string.
+
+    Returns:
+        ``(width_mm, height_mm)`` estimated bounding box.
+    """
+    fid = footprint_id.strip()
+    upper = fid.upper()
+
+    # SMD R/C packages
+    for prefix in ("R_", "C_", "LED_"):
+        if upper.startswith(prefix):
+            pkg = fid[len(prefix):].upper()
+            if pkg in _SMD_RC_DIMS:
+                _, _, pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
+                return (body_w + 0.5, body_h + 0.5)
+            return (2.5, 1.75)  # 0805 fallback
+
+    # SOT-23 family
+    if upper.startswith("SOT-23"):
+        variant = fid.upper()
+        if variant in _SOT23_VARIANTS:
+            _, _, coords = _SOT23_VARIANTS[variant]
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+            return (max(xs) - min(xs) + 1.5, max(ys) - min(ys) + 1.5)
+        return (3.0, 3.0)
+
+    if upper == "SOT-223":
+        return (7.0, 4.0)
+
+    # USB-C
+    if upper.startswith(("USB-C", "USB_C")):
+        return (9.5, 8.0)
+
+    # RJ45
+    if upper.startswith("RJ45"):
+        return (16.5, 14.0)
+
+    # Pin headers/sockets
+    if upper.startswith(("PINHEADER", "PINSOCKET")):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        rows = 2 if "2X" in upper or "2x" in fid else 1
+        cols = pin_count // max(rows, 1)
+        w = (cols - 1) * pitch + 2.5
+        h = (rows - 1) * pitch + 2.5 if rows > 1 else 2.5
+        return (w, h)
+
+    # Terminal blocks
+    if upper.startswith(("TERMINALBLOCK", "TB_")):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        return ((pin_count - 1) * pitch + 5.0, 7.0)
+
+    # DIP switches — try to parse explicit dimensions from name first
+    if upper.startswith("SW_DIP"):
+        import re as _re
+        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)mm", fid)
+        if dim_m:
+            return (float(dim_m.group(1)) + 1.0, float(dim_m.group(2)) + 1.0)
+        pin_count = _parse_pin_count(fid)
+        half = max(pin_count // 2, 2)
+        return (8.5, (half - 1) * 2.54 + 3.0)
+
+    # Generic SMD ICs
+    ic_prefixes = ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
+    if any(upper.startswith(p) for p in ic_prefixes):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        if pitch > 2.0:
+            pitch = 0.5
+        half = pin_count // 2
+        row_span = (half - 1) * pitch
+        return (row_span / 2.0 + 3.0, row_span + 1.5)
+
+    # Generic fallback
+    return (3.0, 3.0)
 
 
 # Keep math in module namespace so tests / type checker see no unused import

@@ -251,6 +251,7 @@ class WorkflowEngine:
 
     def _generate_schematic(self, variant_name: str, vdir: Path) -> None:
         """Build and write a schematic from requirements."""
+        from kicad_pipeline.project_file import write_project_file
         from kicad_pipeline.requirements.decomposer import load_requirements
         from kicad_pipeline.schematic.builder import build_schematic, write_schematic
 
@@ -259,6 +260,12 @@ class WorkflowEngine:
         sch_path = vdir / f"{variant_name}.kicad_sch"
         write_schematic(sch, sch_path)
         log.info("Schematic written: %s", sch_path)
+
+        # Generate .kicad_pro so KiCad can open the project
+        pro_path = vdir / f"{variant_name}.kicad_pro"
+        if not pro_path.exists():
+            write_project_file(variant_name, vdir)
+            log.info("Project file written: %s", pro_path)
 
     def _generate_pcb(self, variant_name: str, vdir: Path) -> None:
         """Build and write a PCB from requirements."""

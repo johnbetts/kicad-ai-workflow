@@ -366,8 +366,8 @@ def test_placement_zones_defined() -> None:
 
 
 def test_placement_zones_all_defined() -> None:
-    """All five standard zones are present."""
-    for zone_name in ("POWER", "MCU", "ETHERNET", "ANALOG", "PERIPHERALS"):
+    """All four standard zones are present."""
+    for zone_name in ("POWER", "MCU", "ANALOG", "PERIPHERALS"):
         assert zone_name in SCHEMATIC_ZONES
 
 
@@ -397,9 +397,9 @@ def test_assign_zones_usb() -> None:
 
 
 def test_assign_zones_ethernet() -> None:
-    """Ethernet components are assigned to the ETHERNET zone."""
+    """Ethernet components are assigned to the PERIPHERALS zone (slot 3)."""
     result = assign_zones([("U3", "Ethernet")])
-    assert result["U3"].name == "ETHERNET"
+    assert result["U3"].name == "PERIPHERALS"
 
 
 def test_assign_zones_unknown() -> None:
@@ -478,8 +478,8 @@ def test_route_net_single_pin_produces_label() -> None:
     assert gls[0].text == "SIG"
 
 
-def test_route_net_two_same_zone_pins_direct_wire() -> None:
-    """Two pins in the same zone get a direct wire connection."""
+def test_route_net_two_same_zone_pins_uses_labels() -> None:
+    """Two pins always get label-per-pin routing (no direct wires to avoid crossings)."""
     from kicad_pipeline.models.schematic import Point
 
     net = Net(
@@ -489,12 +489,11 @@ def test_route_net_two_same_zone_pins_direct_wire() -> None:
             NetConnection(ref="R2", pin="2"),
         ),
     )
-    # Both pins in zone 0,0 (x < 130, y < 90)
     positions = {
         ("R1", "1"): Point(x=10.0, y=10.0),
         ("R2", "2"): Point(x=20.0, y=20.0),
     }
     wires, _, gls, _ = route_net(net, positions, use_global_labels=True)
-    # Direct route uses wires, not labels
-    assert len(wires) >= 1
-    assert len(gls) == 0
+    # Label-per-pin: one stub wire + label per pin
+    assert len(wires) == 2
+    assert len(gls) == 2

@@ -203,6 +203,7 @@ class Schematic:
     no_connects: tuple[NoConnect, ...]
     labels: tuple[Label, ...]
     global_labels: tuple[GlobalLabel, ...]
-    version: int = 20231120
+    version: int = 20250114
     generator: str = "kicad-ai-pipeline"
+    generator_version: str = "9.0"
     paper: str = "A4"
