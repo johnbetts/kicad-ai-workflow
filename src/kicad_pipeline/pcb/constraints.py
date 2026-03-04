@@ -173,6 +173,44 @@ def _is_connector(ref: str, footprint_id: str) -> bool:
     )
 
 
+def _is_screw_terminal(footprint_id: str) -> bool:
+    """Return True if footprint looks like a screw terminal or terminal block."""
+    fp_upper = footprint_id.upper()
+    return any(
+        kw in fp_upper
+        for kw in ("TERMINAL", "SCREW", "TERMINALBLOCK", "PHOENIX")
+    )
+
+
+def _connector_edge(
+    ref: str,
+    footprint_id: str,
+    board_template_name: str | None = None,
+) -> BoardEdge:
+    """Choose the best board edge for a connector based on its type.
+
+    Screw terminals and terminal blocks go on LEFT or BOTTOM edges.
+    Pin headers default to TOP.  GPIO headers on RPi HATs stay FIXED
+    (handled separately).
+
+    Args:
+        ref: Component reference designator.
+        footprint_id: Footprint identifier string.
+        board_template_name: Name of the active board template, if any.
+
+    Returns:
+        The recommended :class:`BoardEdge` for the connector.
+    """
+    if _is_screw_terminal(footprint_id):
+        # Alternate screw terminals between LEFT and BOTTOM
+        num = int("".join(ch for ch in ref if ch.isdigit()) or "0")
+        return BoardEdge.LEFT if num % 2 == 1 else BoardEdge.BOTTOM
+    fp_upper = footprint_id.upper()
+    if "PINSOCKET" in fp_upper or "PINHEADER" in fp_upper:
+        return BoardEdge.TOP
+    return BoardEdge.LEFT
+
+
 def _is_decoupling_cap(ref: str, value: str) -> bool:
     """Return True if component looks like a decoupling capacitor."""
     if not ref.startswith("C"):
@@ -182,6 +220,116 @@ def _is_decoupling_cap(ref: str, value: str) -> bool:
         kw in val_lower
         for kw in ("nf", "pf", "100n", "10n", "1u", "10u", "0.1u", "4.7u")
     )
+
+
+def _is_power_net(net_name: str) -> bool:
+    """Return True if *net_name* is a power or ground net."""
+    name = net_name.upper().strip()
+    if name in ("GND", "AGND", "DGND", "PGND", "VGND", "VSS", "VEE"):
+        return True
+    return name.startswith("+") or name.startswith("V") or name.startswith("-")
+
+
+def build_signal_adjacency(
+    requirements: ProjectRequirements,
+) -> dict[str, set[str]]:
+    """Build an adjacency graph of components connected by signal nets.
+
+    Power/ground nets (GND, +3V3, VCC, etc.) are excluded since they
+    connect most components and would defeat the purpose of grouping.
+
+    Args:
+        requirements: Project requirements with components and nets.
+
+    Returns:
+        Adjacency dict mapping each ref to the set of refs it is
+        connected to via signal nets.
+    """
+    adj: dict[str, set[str]] = {}
+    for comp in requirements.components:
+        adj[comp.ref] = set()
+
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue
+        refs_in_net = [c.ref for c in net.connections]
+        for i, r1 in enumerate(refs_in_net):
+            for r2 in refs_in_net[i + 1:]:
+                adj.setdefault(r1, set()).add(r2)
+                adj.setdefault(r2, set()).add(r1)
+
+    return adj
+
+
+def trace_linear_chains(
+    adj: dict[str, set[str]],
+) -> list[tuple[str, ...]]:
+    """Trace linear chains in the signal adjacency graph.
+
+    A linear chain is a sequence of components where interior nodes have
+    exactly degree 2 in the adjacency graph (i.e. they connect to exactly
+    two signal neighbours). Chains start and end at components with
+    degree != 2 (endpoints, tees, or isolated).
+
+    Args:
+        adj: Adjacency dict from :func:`build_signal_adjacency`.
+
+    Returns:
+        List of chains, each a tuple of ref strings in order.
+    """
+    visited: set[tuple[str, str]] = set()
+    chains: list[tuple[str, ...]] = []
+
+    # Find chain start points: nodes with degree != 2
+    # These are endpoints (degree 1) or branch points (degree 3+)
+    start_nodes = [ref for ref, neighbours in adj.items() if len(neighbours) != 2]
+    # Also consider isolated nodes (degree 0), but they aren't chains
+    start_nodes = [ref for ref in start_nodes if len(adj.get(ref, set())) > 0]
+
+    for start in start_nodes:
+        for neighbour in adj.get(start, set()):
+            if (start, neighbour) in visited or (neighbour, start) in visited:
+                continue
+            # Walk the chain from start through neighbour
+            chain = [start]
+            prev = start
+            current = neighbour
+            while True:
+                chain.append(current)
+                visited.add((prev, current))
+                visited.add((current, prev))
+                neighbours = adj.get(current, set()) - {prev}
+                if len(adj.get(current, set())) != 2:
+                    break  # End of chain (branch point or endpoint)
+                if not neighbours:
+                    break
+                nxt = next(iter(neighbours))
+                prev = current
+                current = nxt
+            if len(chain) >= 2:
+                chains.append(tuple(chain))
+
+    # Handle pure cycles (all nodes have degree 2) — pick any unvisited
+    for ref, neighbours in adj.items():
+        if len(neighbours) == 2 and not any(
+            (ref, n) in visited for n in neighbours
+        ):
+            chain = [ref]
+            prev = ref
+            current = next(iter(neighbours))
+            while current != ref:
+                chain.append(current)
+                visited.add((prev, current))
+                visited.add((current, prev))
+                neighbours_set = adj.get(current, set()) - {prev}
+                if not neighbours_set:
+                    break
+                prev = current
+                current = next(iter(neighbours_set))
+            if len(chain) >= 2:
+                chains.append(tuple(chain))
+
+    return chains
 
 
 def constraints_from_requirements(
@@ -238,7 +386,8 @@ def constraints_from_requirements(
         if comp.ref.startswith("U"):
             ic_refs.add(comp.ref)
 
-    # 3. Connectors -> EDGE
+    # 3. Connectors -> EDGE (with type-aware edge selection)
+    tmpl_name = board_template.name if board_template is not None else None
     for comp in requirements.components:
         if _is_connector(comp.ref, comp.footprint):
             # Skip if already fixed by template
@@ -247,10 +396,11 @@ def constraints_from_requirements(
                 for c in constraints
             ):
                 continue
+            edge = _connector_edge(comp.ref, comp.footprint, tmpl_name)
             constraints.append(PlacementConstraint(
                 ref=comp.ref,
                 constraint_type=PlacementConstraintType.EDGE,
-                edge=BoardEdge.LEFT,
+                edge=edge,
                 priority=50,
             ))
 
@@ -289,6 +439,30 @@ def constraints_from_requirements(
                     group_name=fb.name,
                     priority=10,
                 ))
+
+    # 6. Signal-path chains -> GROUP (higher priority than FeatureBlock)
+    adj = build_signal_adjacency(requirements)
+    chains = trace_linear_chains(adj)
+    for chain_idx, chain in enumerate(chains):
+        if len(chain) < 2:
+            continue
+        chain_group = f"_signal_chain_{chain_idx}"
+        for ref in chain:
+            # Only upgrade if current constraint is lower priority
+            if any(c.ref == ref and c.priority >= 15 for c in constraints):
+                continue
+            # Remove any existing GROUP at priority 10
+            constraints = [
+                c for c in constraints
+                if not (c.ref == ref and c.constraint_type == PlacementConstraintType.GROUP
+                        and c.priority < 15)
+            ]
+            constraints.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name=chain_group,
+                priority=15,
+            ))
 
     return tuple(constraints)
 
@@ -533,22 +707,67 @@ def rpi_hat_constraints(
     base = constraints_from_requirements(requirements, board_template, footprint_sizes)
     extra: list[PlacementConstraint] = []
 
-    # Find DIP switches and place near ADC IC
+    # Find the primary IC (first U* ref)
+    ic_ref: str | None = None
     for comp in requirements.components:
-        if comp.ref.startswith("SW"):
-            ic_ref = None
-            for other in requirements.components:
-                if other.ref.startswith("U"):
-                    ic_ref = other.ref
-                    break
-            if ic_ref is not None:
-                extra.append(PlacementConstraint(
-                    ref=comp.ref,
-                    constraint_type=PlacementConstraintType.NEAR,
-                    target_ref=ic_ref,
-                    max_distance_mm=10.0,
-                    priority=25,
-                ))
+        if comp.ref.startswith("U"):
+            ic_ref = comp.ref
+            break
+
+    # DIP switches -> NEAR(IC)
+    for comp in requirements.components:
+        if comp.ref.startswith("SW") and ic_ref is not None:
+            extra.append(PlacementConstraint(
+                ref=comp.ref,
+                constraint_type=PlacementConstraintType.NEAR,
+                target_ref=ic_ref,
+                max_distance_mm=10.0,
+                priority=25,
+            ))
+
+    # Screw terminals -> EDGE(LEFT or BOTTOM), alternating
+    screw_idx = 0
+    for comp in requirements.components:
+        if not _is_connector(comp.ref, comp.footprint):
+            continue
+        if _is_screw_terminal(comp.footprint):
+            # Skip if already FIXED by template
+            if any(
+                c.ref == comp.ref and c.constraint_type == PlacementConstraintType.FIXED
+                for c in base
+            ):
+                continue
+            edge = BoardEdge.LEFT if screw_idx % 2 == 0 else BoardEdge.BOTTOM
+            extra.append(PlacementConstraint(
+                ref=comp.ref,
+                constraint_type=PlacementConstraintType.EDGE,
+                edge=edge,
+                priority=55,
+            ))
+            screw_idx += 1
+
+    # Voltage divider chains: pairs of R* sharing a signal net -> GROUP
+    adj = build_signal_adjacency(requirements)
+    divider_idx = 0
+    visited_divider: set[str] = set()
+    for ref, neighbours in adj.items():
+        if not ref.startswith("R") or ref in visited_divider:
+            continue
+        # Check for R-R pairs on same signal net
+        r_neighbours = [n for n in neighbours if n.startswith("R")]
+        if r_neighbours:
+            chain = [ref, *r_neighbours]
+            group_name = f"_divider_{divider_idx}"
+            for r in chain:
+                if r not in visited_divider:
+                    extra.append(PlacementConstraint(
+                        ref=r,
+                        constraint_type=PlacementConstraintType.GROUP,
+                        group_name=group_name,
+                        priority=20,
+                    ))
+                    visited_divider.add(r)
+            divider_idx += 1
 
     # Merge: higher-priority extras override base
     merged: dict[str, PlacementConstraint] = {}
