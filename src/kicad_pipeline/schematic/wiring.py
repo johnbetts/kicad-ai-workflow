@@ -114,6 +114,7 @@ def make_global_label(
     y: float,
     shape: str = "bidirectional",
     rotation: float = 0.0,
+    justify: str = "",
 ) -> GlobalLabel:
     """Create a :class:`GlobalLabel` at a grid-snapped position.
 
@@ -124,6 +125,7 @@ def make_global_label(
         shape: Label shape identifier (``'input'``, ``'output'``,
                ``'bidirectional'``, ``'tri_state'``, ``'passive'``).
         rotation: Label rotation in degrees (default ``0.0``).
+        justify: Text justification (``''``, ``'left'``, ``'right'``).
 
     Returns:
         A new :class:`GlobalLabel` with a fresh UUID.
@@ -134,7 +136,7 @@ def make_global_label(
         shape=shape,
         position=Point(x=snap_to_grid(x, grid), y=snap_to_grid(y, grid)),
         rotation=rotation,
-        effects=FontEffect(),
+        effects=FontEffect(justify=justify),
         uuid=_new_uuid(),
     )
 
@@ -192,30 +194,36 @@ def connect_pin_to_label(
         is non-empty depending on *is_global*.
     """
     px, py = pin_position.x, pin_position.y
-    # GlobalLabel rotation = direction the arrow POINTS (connection at arrow tip).
-    # Label rotation = text reading direction (connection at start of text).
-    # For "top" and "bottom" the local label rotation is opposite to global.
+    # KiCad global_label rotation: direction the label arrow points.
+    #   0° = right, 90° = down, 180° = left, 270° = up
+    # Convention: label arrow points AWAY from the symbol body (toward the net).
+    # (justify right) is needed when rotation=180 to keep text readable.
+    global_justify = ""
     if pin_side == "right":
         lx, ly = px + _LABEL_STUB_MM, py
-        global_rotation = 180.0  # arrow points left toward wire/pin
-        local_rotation = 0.0  # text reads left-to-right, connection at left end
+        global_rotation = 0.0  # arrow points right (away from symbol)
+        local_rotation = 0.0
     elif pin_side == "top":
         lx, ly = px, py - _LABEL_STUB_MM
-        global_rotation = 90.0  # arrow points down toward wire/pin
-        local_rotation = 90.0  # text reads bottom-to-top, connection at bottom
+        global_rotation = 270.0  # arrow points up (away from symbol)
+        local_rotation = 90.0
     elif pin_side == "bottom":
         lx, ly = px, py + _LABEL_STUB_MM
-        global_rotation = 270.0  # arrow points up toward wire/pin
-        local_rotation = 270.0  # text reads top-to-bottom, connection at top
+        global_rotation = 90.0  # arrow points down (away from symbol)
+        local_rotation = 270.0
     else:  # "left" (default)
         lx, ly = px - _LABEL_STUB_MM, py
-        global_rotation = 0.0  # arrow points right toward wire/pin
-        local_rotation = 180.0  # text reads right-to-left, connection at right end
+        global_rotation = 180.0  # arrow points left (away from symbol)
+        global_justify = "right"
+        local_rotation = 180.0
 
     wire = make_wire(px, py, lx, ly)
 
     if is_global:
-        return [wire], [make_global_label(label_text, lx, ly, rotation=global_rotation)], []
+        gl = make_global_label(
+            label_text, lx, ly, rotation=global_rotation, justify=global_justify,
+        )
+        return [wire], [gl], []
     return [wire], [], [make_label(label_text, lx, ly, rotation=local_rotation)]
 
 

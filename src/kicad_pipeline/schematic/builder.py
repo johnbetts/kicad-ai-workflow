@@ -976,6 +976,8 @@ def _effects_sexp(effects: FontEffect) -> SExpNode:
     """
     font: SExpNode = ["font", ["size", effects.size_x, effects.size_y]]
     node: list[SExpNode] = ["effects", font]
+    if effects.justify:
+        node.append(["justify", effects.justify])
     if effects.hidden:
         node.append(["hide", "yes"])
     return node
@@ -1096,12 +1098,14 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
 def _symbol_instance_sexp(
     inst: SymbolInstance,
     project_name: str = "kicad-ai",
+    root_uuid: str = "",
 ) -> SExpNode:
     """Serialise a :class:`SymbolInstance` to a KiCad ``(symbol ...)`` node.
 
     Args:
         inst: Placed symbol instance.
         project_name: Project name for the ``(instances ...)`` annotation block.
+        root_uuid: Root schematic sheet UUID for the instances path.
 
     Returns:
         ``SExpNode`` list.
@@ -1153,7 +1157,8 @@ def _symbol_instance_sexp(
             ]
         )
     # KiCad 9 requires (instances ...) inside each placed symbol for annotation.
-    # Path "/" = root sheet (no hierarchy).
+    # Path must be "/{root_sheet_uuid}" for KiCad to resolve references.
+    sheet_path = f"/{root_uuid}" if root_uuid else "/"
     node.append(
         [
             "instances",
@@ -1162,7 +1167,7 @@ def _symbol_instance_sexp(
                 project_name,
                 [
                     "path",
-                    "/",
+                    sheet_path,
                     ["reference", inst.ref],
                     ["unit", inst.unit],
                 ],
@@ -1246,16 +1251,19 @@ def _global_label_sexp(gl: GlobalLabel) -> SExpNode:
 def _power_symbol_sexp(
     ps: PowerSymbol,
     project_name: str = "kicad-ai",
+    root_uuid: str = "",
 ) -> SExpNode:
     """Serialise a :class:`PowerSymbol` to a KiCad ``(symbol ...)`` node.
 
     Args:
         ps: Power symbol instance.
         project_name: Project name for the ``(instances ...)`` annotation block.
+        root_uuid: Root schematic sheet UUID for the instances path.
 
     Returns:
         ``SExpNode`` list.
     """
+    sheet_path = f"/{root_uuid}" if root_uuid else "/"
     return [
         "symbol",
         ["lib_id", ps.lib_id],
@@ -1286,7 +1294,7 @@ def _power_symbol_sexp(
                 project_name,
                 [
                     "path",
-                    "/",
+                    sheet_path,
                     ["reference", ps.ref],
                     ["unit", 1],
                 ],
@@ -1320,12 +1328,13 @@ def schematic_to_sexp(
         A nested :data:`~kicad_pipeline.sexp.writer.SExpNode` list representing
         the root ``(kicad_sch ...)`` expression.
     """
+    root_uuid = str(uuid.uuid4())
     root: list[SExpNode] = [
         "kicad_sch",
         ["version", schematic.version],
         ["generator", schematic.generator],
         ["generator_version", schematic.generator_version],
-        ["uuid", str(uuid.uuid4())],
+        ["uuid", root_uuid],
         ["paper", schematic.paper],
     ]
 
@@ -1356,9 +1365,9 @@ def schematic_to_sexp(
 
     # Symbol instances (regular + power)
     for inst in schematic.symbols:
-        root.append(_symbol_instance_sexp(inst, project_name=project_name))
+        root.append(_symbol_instance_sexp(inst, project_name=project_name, root_uuid=root_uuid))
     for ps in schematic.power_symbols:
-        root.append(_power_symbol_sexp(ps, project_name=project_name))
+        root.append(_power_symbol_sexp(ps, project_name=project_name, root_uuid=root_uuid))
 
     # Wires
     for wire in schematic.wires:
@@ -1384,17 +1393,17 @@ def schematic_to_sexp(
     root.append(["sheet_instances", ["path", "/", ["page", "1"]]])
 
     # KiCad 9 symbol_instances — maps each symbol UUID to its reference designator.
-    # Without this section, KiCad GUI shows '?' instead of R1, U1, etc.
+    # Path format: "/{root_sheet_uuid}/{symbol_uuid}" for KiCad 9.
     sym_instances: list[SExpNode] = ["symbol_instances"]
     for inst in schematic.symbols:
         sym_instances.append([
-            "path", f"/{inst.uuid}",
+            "path", f"/{root_uuid}/{inst.uuid}",
             ["reference", inst.ref],
             ["unit", inst.unit],
         ])
     for ps in schematic.power_symbols:
         sym_instances.append([
-            "path", f"/{ps.uuid}",
+            "path", f"/{root_uuid}/{ps.uuid}",
             ["reference", ps.ref],
             ["unit", 1],
         ])

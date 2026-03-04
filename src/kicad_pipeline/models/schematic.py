@@ -42,6 +42,7 @@ class FontEffect:
     bold: bool = False
     italic: bool = False
     hidden: bool = False
+    justify: str = ""  # "", "left", "right"
 
 
 @dataclass(frozen=True)

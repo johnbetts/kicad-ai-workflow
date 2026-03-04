@@ -408,8 +408,10 @@ class TestSymbolInstances:
         result: dict[str, str] = {}
         for path_node in _find_nodes(si, "path"):
             if len(path_node) >= 2 and isinstance(path_node[1], str):
-                # path is "/{uuid}"
-                uid = path_node[1].lstrip("/")
+                # path is "/{root_uuid}/{symbol_uuid}" (KiCad 9) or "/{symbol_uuid}"
+                path_str = path_node[1].strip("/")
+                # Last segment is the symbol UUID
+                uid = path_str.rsplit("/", 1)[-1]
                 ref_node = _find_node(path_node, "reference")
                 if ref_node and len(ref_node) >= 2:
                     result[uid] = str(ref_node[1])
