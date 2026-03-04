@@ -25,6 +25,8 @@ from kicad_pipeline.constants import (
     LAYER_EDGE_CUTS,
     LAYER_F_CU,
     PCB_EDGE_CUTS_WIDTH_MM,
+    ZONE_CLEARANCE_DEFAULT_MM,
+    ZONE_MIN_THICKNESS_MM,
 )
 from kicad_pipeline.exceptions import PCBError
 from kicad_pipeline.models.pcb import (
@@ -43,7 +45,9 @@ from kicad_pipeline.models.pcb import (
     ZoneFill,
     ZonePolygon,
 )
+from kicad_pipeline.pcb.board_templates import get_template
 from kicad_pipeline.pcb.footprints import estimate_footprint_size, footprint_for_component
+from kicad_pipeline.pcb.netclasses import classify_nets
 from kicad_pipeline.pcb.placement import layout_pcb
 from kicad_pipeline.pcb.silkscreen import add_silkscreen_to_footprint
 from kicad_pipeline.sexp.writer import SExpNode, write_file
@@ -81,12 +85,6 @@ _ANTENNA_KEEPOUT_WIDTH_MM: float = 15.0
 
 _ANTENNA_KEEPOUT_HEIGHT_MM: float = 10.0
 """Height of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
-
-_DEFAULT_BOARD_ORIGIN_X: float = 20.0
-"""Default X origin offset for the board outline in mm."""
-
-_DEFAULT_BOARD_ORIGIN_Y: float = 20.0
-"""Default Y origin offset for the board outline in mm."""
 
 # Keywords that indicate the design contains an RF module requiring a keepout
 _RF_KEYWORDS: frozenset[str] = frozenset({"esp32", "esp8266", "nrf", "cc3200", "rf"})
@@ -305,12 +303,14 @@ def _apply_nets_to_footprint(
 def _make_gnd_zones(
     board: BoardOutline,
     gnd_net_number: int,
+    clearance_mm: float = ZONE_CLEARANCE_DEFAULT_MM,
 ) -> tuple[ZonePolygon, ZonePolygon]:
     """Create GND copper pours on both ``F.Cu`` and ``B.Cu``.
 
     Args:
         board: The board outline; its polygon is used as the zone boundary.
         gnd_net_number: Net number of the GND net.
+        clearance_mm: Zone-to-pad/track clearance in mm.
 
     Returns:
         A pair ``(front_zone, back_zone)`` of :class:`ZonePolygon` objects.
@@ -321,7 +321,9 @@ def _make_gnd_zones(
         layer=LAYER_F_CU,
         name="GND_F",
         polygon=board.polygon,
+        min_thickness=ZONE_MIN_THICKNESS_MM,
         fill=ZoneFill.SOLID,
+        clearance_mm=clearance_mm,
         uuid=_new_uuid(),
     )
     back = ZonePolygon(
@@ -330,7 +332,9 @@ def _make_gnd_zones(
         layer=LAYER_B_CU,
         name="GND_B",
         polygon=board.polygon,
+        min_thickness=ZONE_MIN_THICKNESS_MM,
         fill=ZoneFill.SOLID,
+        clearance_mm=clearance_mm,
         uuid=_new_uuid(),
     )
     return front, back
@@ -450,13 +454,14 @@ def build_pcb(
     board_height_mm: float | None = None,
     origin_x: float = 0.0,
     origin_y: float = 0.0,
+    board_template: str | None = None,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
     Steps:
 
-    1. Determine board dimensions from :attr:`~ProjectRequirements.mechanical`
-       constraints or the supplied overrides (default 80 x 40 mm).
+    1. Determine board dimensions from *board_template*, mechanical
+       constraints, or the supplied overrides (default 80 x 40 mm).
     2. Create the rectangular :class:`BoardOutline`.
     3. Build the :class:`NetEntry` list from requirements (GND always = net 1).
     4. Generate :class:`Footprint` objects for all components with net
@@ -478,8 +483,11 @@ def build_pcb(
         board_height_mm: Override board height in mm.  If ``None``, the value
             from :attr:`~ProjectRequirements.mechanical` is used, or
             40 mm as the default.
-        origin_x: X coordinate of the board origin in mm (default 20.0).
-        origin_y: Y coordinate of the board origin in mm (default 20.0).
+        origin_x: X coordinate of the board origin in mm (default 0.0).
+        origin_y: Y coordinate of the board origin in mm (default 0.0).
+        board_template: Optional board template name (e.g. ``"RPI_HAT"``).
+            When provided, uses template dimensions and fixed component
+            positions.
 
     Returns:
         A complete :class:`PCBDesign` ready for serialisation.
@@ -496,6 +504,27 @@ def build_pcb(
         len(requirements.components),
         len(requirements.nets),
     )
+
+    # ------------------------------------------------------------------
+    # Step 0: Board template (if specified)
+    # ------------------------------------------------------------------
+    fixed_positions: dict[str, tuple[float, float, float]] | None = None
+    if board_template is not None:
+        tmpl = get_template(board_template)
+        log.info("build_pcb: using board template '%s'", tmpl.name)
+        if board_width_mm is None:
+            board_width_mm = tmpl.board_width_mm
+        if board_height_mm is None:
+            board_height_mm = tmpl.board_height_mm
+        # Extract fixed component positions from template
+        if tmpl.fixed_components:
+            fixed_positions = {}
+            for fc in tmpl.fixed_components:
+                # Match template ref_pattern against actual component refs
+                for comp in requirements.components:
+                    if comp.ref == fc.ref_pattern:
+                        fixed_positions[comp.ref] = (fc.x_mm, fc.y_mm, fc.rotation)
+                        break
 
     # ------------------------------------------------------------------
     # Step 1: Board dimensions
@@ -580,7 +609,10 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 5: Layout placement
     # ------------------------------------------------------------------
-    positions = layout_pcb(requirements, outline, footprint_sizes=fp_sizes)
+    positions = layout_pcb(
+        requirements, outline, footprint_sizes=fp_sizes,
+        fixed_positions=fixed_positions,
+    )
 
     # Apply positions to footprints
     footprints_with_pos: list[Footprint] = []
@@ -603,10 +635,21 @@ def build_pcb(
         footprints_with_pos.append(fp_placed)
 
     # ------------------------------------------------------------------
+    # Step 5b: Net classification
+    # ------------------------------------------------------------------
+    netclasses = classify_nets(nets)
+
+    # Derive zone clearance from max netclass clearance
+    zone_clearance = max(
+        (nc.clearance_mm for nc in netclasses),
+        default=ZONE_CLEARANCE_DEFAULT_MM,
+    )
+
+    # ------------------------------------------------------------------
     # Step 6: GND pours
     # ------------------------------------------------------------------
     gnd_net_num = net_lookup.get("GND", 1)
-    gnd_front, gnd_back = _make_gnd_zones(outline, gnd_net_num)
+    gnd_front, gnd_back = _make_gnd_zones(outline, gnd_net_num, zone_clearance)
     zones: list[ZonePolygon] = [gnd_front, gnd_back]
 
     # ------------------------------------------------------------------
@@ -655,6 +698,7 @@ def build_pcb(
         vias=(),
         zones=tuple(zones),
         keepouts=tuple(keepouts),
+        netclasses=netclasses,
         version=KICAD_PCB_VERSION,
         generator=KICAD_GENERATOR,
         title=requirements.project.name,
@@ -902,7 +946,7 @@ def _zone_sexp(zone: ZonePolygon) -> SExpNode:
         node.append(["uuid", zone.uuid])
     node.extend([
         ["hatch", "edge", 0.508],
-        ["connect_pads", ["clearance", zone.min_thickness]],
+        ["connect_pads", ["clearance", zone.clearance_mm]],
         ["min_thickness", zone.min_thickness],
         ["filled_areas_thickness", False],
         [

@@ -378,11 +378,13 @@ def route_all_nets(
     board_width_mm: float,
     board_height_mm: float,
     grid_step_mm: float = 0.5,
+    net_widths: dict[str, float] | None = None,
 ) -> tuple[RouteResult, ...]:
     """Route all nets in the netlist.
 
-    Nets with fewer than two pads are skipped.  Power/GND nets receive a
-    wider trace (0.5 mm); all other nets use the default width (0.25 mm).
+    Nets with fewer than two pads are skipped.  Trace widths are looked up
+    from *net_widths* when provided; otherwise Power/GND nets receive a
+    wider trace (0.5 mm) and all other nets use 0.25 mm.
 
     Args:
         netlist: The board netlist.
@@ -390,6 +392,8 @@ def route_all_nets(
         board_width_mm: Board width in mm.
         board_height_mm: Board height in mm.
         grid_step_mm: Grid resolution in mm.
+        net_widths: Optional mapping from net name to trace width in mm,
+            typically from :func:`~kicad_pipeline.pcb.netclasses.net_width_map`.
 
     Returns:
         Tuple of RouteResult, one per routed net entry.
@@ -401,7 +405,10 @@ def route_all_nets(
             continue
 
         net_name = entry.net.name
-        width = 0.5 if "GND" in net_name or "PWR" in net_name else 0.25
+        if net_widths is not None:
+            width = net_widths.get(net_name, 0.25)
+        else:
+            width = 0.5 if "GND" in net_name or "PWR" in net_name else 0.25
 
         request = RouteRequest(
             net_number=entry.net.number,

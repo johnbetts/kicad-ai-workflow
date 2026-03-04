@@ -11,18 +11,27 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path  # noqa: TC003 — used at runtime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kicad_pipeline.models.pcb import NetClass
 
 log = logging.getLogger(__name__)
 
 
-def build_project_file(project_name: str, root_uuid: str = "") -> dict[str, Any]:
+def build_project_file(
+    project_name: str,
+    root_uuid: str = "",
+    netclasses: tuple[NetClass, ...] | None = None,
+) -> dict[str, Any]:
     """Build a minimal KiCad 9 project file structure.
 
     Args:
         project_name: Project name (used for filename field).
         root_uuid: UUID of the root schematic sheet. If empty,
             KiCad will assign one on first open.
+        netclasses: Optional netclass definitions to include in
+            the project file's net_settings section.
 
     Returns:
         A dictionary suitable for JSON serialisation as a .kicad_pro file.
@@ -31,7 +40,7 @@ def build_project_file(project_name: str, root_uuid: str = "") -> dict[str, Any]
     if root_uuid:
         sheets.append([root_uuid, "Root"])
 
-    return {
+    data: dict[str, Any] = {
         "board": {
             "3dviewports": [],
             "design_settings": {
@@ -128,8 +137,7 @@ def build_project_file(project_name: str, root_uuid: str = "") -> dict[str, Any]
                 "track_widths": [0.0, 0.2, 0.25, 0.4, 0.5],
                 "via_dimensions": [
                     {"diameter": 0.0, "drill": 0.0},
-                    {"diameter": 0.6, "drill": 0.3},
-                    {"diameter": 0.8, "drill": 0.4},
+                    {"diameter": 0.8, "drill": 0.508},
                 ],
                 "zones_allow_external_fillets": False,
                 "zones_use_no_outline": True,
@@ -165,7 +173,7 @@ def build_project_file(project_name: str, root_uuid: str = "") -> dict[str, Any]
                     "schematic_color": "rgba(0, 0, 0, 0.000)",
                     "track_width": 0.25,
                     "via_diameter": 0.8,
-                    "via_drill": 0.4,
+                    "via_drill": 0.508,
                     "wire_width": 6,
                 }
             ],
@@ -283,21 +291,65 @@ def build_project_file(project_name: str, root_uuid: str = "") -> dict[str, Any]
         "text_variables": {},
     }
 
+    # Inject additional netclass definitions and assignments
+    if netclasses:
+        classes = data["net_settings"]["classes"]
+        assignments: dict[str, str] = {}
+        for nc in netclasses:
+            if nc.name == "Default":
+                # Update the existing Default class values
+                classes[0]["track_width"] = nc.trace_width_mm
+                classes[0]["clearance"] = nc.clearance_mm
+                classes[0]["via_diameter"] = nc.via_diameter_mm
+                classes[0]["via_drill"] = nc.via_drill_mm
+                continue
+            classes.append({
+                "bus_width": 12,
+                "clearance": nc.clearance_mm,
+                "diff_pair_gap": nc.diff_pair_gap_mm,
+                "diff_pair_via_gap": 0.25,
+                "diff_pair_width": nc.diff_pair_width_mm,
+                "line_style": 0,
+                "microvia_diameter": 0.508,
+                "microvia_drill": 0.127,
+                "name": nc.name,
+                "pcb_color": "rgba(0, 0, 0, 0.000)",
+                "priority": 2147483647,
+                "schematic_color": "rgba(0, 0, 0, 0.000)",
+                "track_width": nc.trace_width_mm,
+                "via_diameter": nc.via_diameter_mm,
+                "via_drill": nc.via_drill_mm,
+                "wire_width": 6,
+            })
+            for net_name in nc.nets:
+                assignments[net_name] = nc.name
 
-def write_project_file(project_name: str, directory: Path, root_uuid: str = "") -> Path:
+        if assignments:
+            data["net_settings"]["netclass_assignments"] = assignments
+
+    return data
+
+
+def write_project_file(
+    project_name: str,
+    directory: Path,
+    root_uuid: str = "",
+    netclasses: tuple[NetClass, ...] | None = None,
+) -> Path:
     """Write a .kicad_pro file to the given directory.
 
     Args:
         project_name: Base name for the project file.
         directory: Directory to write the file into.
         root_uuid: UUID of the root schematic sheet.
+        netclasses: Optional netclass definitions to include.
 
     Returns:
         Path to the written .kicad_pro file.
     """
     directory.mkdir(parents=True, exist_ok=True)
     pro_path = directory / f"{project_name}.kicad_pro"
-    data = build_project_file(project_name, root_uuid)
+    data = build_project_file(project_name, root_uuid, netclasses=netclasses)
     pro_path.write_text(json.dumps(data, indent=2) + "\n")
     log.info("Project file written: %s", pro_path)
     return pro_path

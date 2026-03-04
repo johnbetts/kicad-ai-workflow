@@ -237,3 +237,13 @@ LAYER_IN2_CU: str = "In2.Cu"
 
 LAYER_DWGS_USER: str = "Dwgs.User"
 """User drawings layer for non-manufacturing annotations."""
+
+# ---------------------------------------------------------------------------
+# Zone defaults
+# ---------------------------------------------------------------------------
+
+ZONE_CLEARANCE_DEFAULT_MM: float = 0.3
+"""Default copper zone clearance to pads/tracks (mm)."""
+
+ZONE_MIN_THICKNESS_MM: float = 0.25
+"""Default minimum zone fill thickness (mm)."""

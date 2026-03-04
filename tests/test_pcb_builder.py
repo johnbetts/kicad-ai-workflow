@@ -175,6 +175,28 @@ def test_build_pcb_has_zones() -> None:
     assert "B.Cu" in layers
 
 
+def test_build_pcb_zone_clearance_adequate() -> None:
+    """GND zones should have clearance >= 0.2mm (not min_thickness)."""
+    req = _make_requirements()
+    design = build_pcb(req)
+    for zone in design.zones:
+        assert zone.clearance_mm >= 0.2, (
+            f"Zone {zone.name} clearance {zone.clearance_mm} < 0.2mm"
+        )
+        assert zone.min_thickness >= 0.25, (
+            f"Zone {zone.name} min_thickness {zone.min_thickness} < 0.25mm"
+        )
+
+
+def test_build_pcb_has_netclasses() -> None:
+    """PCBDesign should have netclasses after build."""
+    req = _make_requirements()
+    design = build_pcb(req)
+    assert len(design.netclasses) >= 1
+    names = {nc.name for nc in design.netclasses}
+    assert "Default" in names
+
+
 def test_build_pcb_no_tracks_yet() -> None:
     """Fresh PCBDesign has no tracks (autorouter adds them)."""
     req = _make_requirements()
@@ -359,6 +381,27 @@ def test_write_pcb_parseable(tmp_path: Path) -> None:
     parsed = parse(text)
     assert isinstance(parsed, list)
     assert parsed[0] == "kicad_pcb"
+
+
+def test_pcb_to_sexp_zone_clearance_not_min_thickness() -> None:
+    """Zone connect_pads clearance should use clearance_mm, not min_thickness."""
+    req = _make_requirements()
+    design = build_pcb(req)
+    sexp = pcb_to_sexp(design)
+    zone_nodes = [
+        n for n in sexp
+        if isinstance(n, list) and n and n[0] == "zone"
+        and any(isinstance(s, list) and s and s[0] == "net_name" and s[1] == "GND" for s in n)
+    ]
+    assert len(zone_nodes) >= 1
+    for zone_node in zone_nodes:
+        # Find connect_pads node
+        for sub in zone_node:
+            if isinstance(sub, list) and sub and sub[0] == "connect_pads":
+                clearance_node = sub[1]
+                assert isinstance(clearance_node, list)
+                assert clearance_node[0] == "clearance"
+                assert clearance_node[1] >= 0.2
 
 
 def test_write_pcb_accepts_string_path(tmp_path: Path) -> None:

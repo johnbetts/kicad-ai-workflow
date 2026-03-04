@@ -157,10 +157,11 @@ class ZonePolygon:
     layer: str
     name: str
     polygon: tuple[Point, ...]  # outline points
-    min_thickness: float = 0.127
+    min_thickness: float = 0.25
     fill: ZoneFill = ZoneFill.SOLID
     thermal_relief_gap: float = 0.3
     thermal_relief_bridge: float = 0.5
+    clearance_mm: float = 0.3
     uuid: str = ""
 
 
@@ -182,6 +183,24 @@ class BoardOutline:
 
     polygon: tuple[Point, ...]  # ordered points forming closed polygon
     width: float = 0.05  # Edge.Cuts line width
+
+
+@dataclass(frozen=True)
+class NetClass:
+    """A net classification with electrical rules.
+
+    Groups nets by function (power, analog, digital) and assigns
+    appropriate trace widths, clearances, and via sizes.
+    """
+
+    name: str
+    clearance_mm: float = 0.2
+    trace_width_mm: float = 0.25
+    via_diameter_mm: float = 0.8
+    via_drill_mm: float = 0.508
+    diff_pair_width_mm: float = 0.2
+    diff_pair_gap_mm: float = 0.25
+    nets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -214,6 +233,7 @@ class PCBDesign:
     version: int = 20241229
     generator: str = "kicad-ai-pipeline"
     generator_version: str = "9.0"
+    netclasses: tuple[NetClass, ...] = ()
     title: str = ""
     date: str = ""
     revision: str = ""

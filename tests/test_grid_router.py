@@ -227,7 +227,7 @@ def test_route_all_nets_returns_tuple() -> None:
 
 
 def test_route_gnd_uses_wider_trace() -> None:
-    """Nets with 'GND' in the name should use 0.5 mm width."""
+    """Nets with 'GND' in the name should use 0.5 mm width (fallback)."""
     fp1, fp2 = _make_simple_footprints()
     entry = _make_netlist_entry(1, "GND", (("R1", "1"), ("R2", "1")))
     netlist = _make_netlist([entry])
@@ -239,11 +239,45 @@ def test_route_gnd_uses_wider_trace() -> None:
 
 
 def test_route_signal_uses_default_trace() -> None:
-    """Regular signal nets should use 0.25 mm width."""
+    """Regular signal nets should use 0.25 mm width (fallback)."""
     fp1, fp2 = _make_simple_footprints()
     entry = _make_netlist_entry(2, "SDA", (("R1", "1"), ("R2", "1")))
     netlist = _make_netlist([entry])
     results = route_all_nets(netlist, (fp1, fp2), board_width_mm=30.0, board_height_mm=40.0)
+    assert len(results) == 1
+    result = results[0]
+    if result.routed and result.tracks:
+        assert all(abs(t.width - 0.25) < 1e-9 for t in result.tracks)
+
+
+def test_route_all_nets_with_net_widths() -> None:
+    """net_widths parameter should override default trace width logic."""
+    fp1, fp2 = _make_simple_footprints()
+    entry = _make_netlist_entry(1, "SENS_IN", (("R1", "1"), ("R2", "1")))
+    netlist = _make_netlist([entry])
+    widths = {"SENS_IN": 0.4}
+    results = route_all_nets(
+        netlist, (fp1, fp2),
+        board_width_mm=30.0, board_height_mm=40.0,
+        net_widths=widths,
+    )
+    assert len(results) == 1
+    result = results[0]
+    if result.routed and result.tracks:
+        assert all(abs(t.width - 0.4) < 1e-9 for t in result.tracks)
+
+
+def test_route_all_nets_net_widths_fallback() -> None:
+    """Nets not in net_widths should fall back to 0.25mm."""
+    fp1, fp2 = _make_simple_footprints()
+    entry = _make_netlist_entry(2, "UNKNOWN", (("R1", "1"), ("R2", "1")))
+    netlist = _make_netlist([entry])
+    widths = {"GND": 0.5}  # UNKNOWN not in widths
+    results = route_all_nets(
+        netlist, (fp1, fp2),
+        board_width_mm=30.0, board_height_mm=40.0,
+        net_widths=widths,
+    )
     assert len(results) == 1
     result = results[0]
     if result.routed and result.tracks:

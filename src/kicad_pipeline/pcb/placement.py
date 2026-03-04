@@ -190,8 +190,8 @@ def place_pcb_components(
             max_w = max(s[0] for s in zone_sizes)
             max_h = max(s[1] for s in zone_sizes)
             max_dim = max(max_w, max_h)
-            if max_dim + 2.0 > component_spacing_mm:
-                component_spacing_mm = max_dim + 2.0
+            if max_dim + 4.0 > component_spacing_mm:
+                component_spacing_mm = max_dim + 4.0
                 log.info(
                     "place_pcb_components: increased spacing to %.1f mm "
                     "for zone '%s' (largest footprint %.1f mm)",
@@ -424,33 +424,47 @@ def layout_pcb(
     requirements: ProjectRequirements,
     board: BoardOutline,
     footprint_sizes: dict[str, tuple[float, float]] | None = None,
+    fixed_positions: dict[str, tuple[float, float, float]] | None = None,
 ) -> dict[str, Point]:
     """Compute a full PCB placement for all components in *requirements*.
 
     Steps:
 
-    1. Build a ``(ref, feature_name)`` list from :attr:`~ProjectRequirements.features`.
-    2. Call :func:`assign_pcb_zones` to map each ref to a :class:`PCBZone`.
-    3. Create dynamic non-overlapping zones sized for actual component groups.
-    4. Group refs by zone and call :func:`place_pcb_components` for each group.
+    1. Pre-populate positions from *fixed_positions* (template-defined).
+    2. Build a ``(ref, feature_name)`` list from :attr:`~ProjectRequirements.features`.
+    3. Call :func:`assign_pcb_zones` to map each ref to a :class:`PCBZone`.
+    4. Create dynamic non-overlapping zones sized for actual component groups.
+    5. Group refs by zone and call :func:`place_pcb_components` for each group.
 
     Args:
         requirements: Fully-populated project requirements document.
         board: The board outline used to validate that components fit.
         footprint_sizes: Optional mapping from ref to ``(width, height)``
             in mm.  Passed through to :func:`place_pcb_components`.
+        fixed_positions: Optional mapping from ref to ``(x, y, rotation)``
+            for components with fixed board positions (e.g. from a board
+            template).  These refs are excluded from dynamic placement.
 
     Returns:
         Mapping from component ref to :class:`Point` for every component in
         *requirements*.
     """
+    # Pre-populate positions from fixed_positions (board template)
+    positions: dict[str, Point] = {}
+    fixed_refs: set[str] = set()
+    if fixed_positions:
+        for ref, (fx, fy, _rot) in fixed_positions.items():
+            positions[ref] = Point(x=fx, y=fy)
+            fixed_refs.add(ref)
+            log.info("layout_pcb: fixed position for %s at (%.2f, %.2f)", ref, fx, fy)
+
     # Build feature map from FeatureBlocks
     feature_map: dict[str, str] = {}
     for fb in requirements.features:
         for ref in fb.components:
             feature_map[ref] = fb.name
 
-    all_refs = [c.ref for c in requirements.components]
+    all_refs = [c.ref for c in requirements.components if c.ref not in fixed_refs]
     tagged = [(ref, feature_map.get(ref, "Peripherals")) for ref in all_refs]
 
     zone_map = assign_pcb_zones(tagged)
@@ -469,7 +483,6 @@ def layout_pcb(
     # Create dynamic non-overlapping zones based on actual groups
     dynamic_zones = _dynamic_zones(groups, board_w, board_h, footprint_sizes)
 
-    positions: dict[str, Point] = {}
     for zone_name, zone_refs in groups.items():
         zone = dynamic_zones[zone_name]
         zone_positions = place_pcb_components(
@@ -477,8 +490,9 @@ def layout_pcb(
         )
         positions.update(zone_positions)
 
-    # Safety net: any refs not yet placed
-    unplaced = [ref for ref in all_refs if ref not in positions]
+    # Safety net: any refs not yet placed (check all components, not just dynamic)
+    all_component_refs = [c.ref for c in requirements.components]
+    unplaced = [ref for ref in all_component_refs if ref not in positions]
     if unplaced:
         log.warning(
             "layout_pcb: %d refs not placed; adding fallback placement: %s",
