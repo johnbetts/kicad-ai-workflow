@@ -23,6 +23,7 @@ def build_project_file(
     project_name: str,
     root_uuid: str = "",
     netclasses: tuple[NetClass, ...] | None = None,
+    drc_exclusions: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Build a minimal KiCad 9 project file structure.
 
@@ -32,6 +33,8 @@ def build_project_file(
             KiCad will assign one on first open.
         netclasses: Optional netclass definitions to include in
             the project file's net_settings section.
+        drc_exclusions: Optional list of DRC exclusion strings
+            (e.g. intra-footprint clearance exclusions).
 
     Returns:
         A dictionary suitable for JSON serialisation as a .kicad_pro file.
@@ -291,6 +294,10 @@ def build_project_file(
         "text_variables": {},
     }
 
+    # Inject DRC exclusions
+    if drc_exclusions:
+        data["board"]["design_settings"]["drc_exclusions"] = list(drc_exclusions)
+
     # Inject additional netclass definitions and assignments
     if netclasses:
         classes = data["net_settings"]["classes"]
@@ -335,6 +342,7 @@ def write_project_file(
     directory: Path,
     root_uuid: str = "",
     netclasses: tuple[NetClass, ...] | None = None,
+    drc_exclusions: tuple[str, ...] | None = None,
 ) -> Path:
     """Write a .kicad_pro file to the given directory.
 
@@ -343,13 +351,16 @@ def write_project_file(
         directory: Directory to write the file into.
         root_uuid: UUID of the root schematic sheet.
         netclasses: Optional netclass definitions to include.
+        drc_exclusions: Optional DRC exclusion strings.
 
     Returns:
         Path to the written .kicad_pro file.
     """
     directory.mkdir(parents=True, exist_ok=True)
     pro_path = directory / f"{project_name}.kicad_pro"
-    data = build_project_file(project_name, root_uuid, netclasses=netclasses)
+    data = build_project_file(
+        project_name, root_uuid, netclasses=netclasses, drc_exclusions=drc_exclusions,
+    )
     pro_path.write_text(json.dumps(data, indent=2) + "\n")
     log.info("Project file written: %s", pro_path)
     return pro_path

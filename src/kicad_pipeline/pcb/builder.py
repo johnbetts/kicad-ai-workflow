@@ -336,28 +336,22 @@ def _make_gnd_zones(
     board: BoardOutline,
     gnd_net_number: int,
     clearance_mm: float = ZONE_CLEARANCE_DEFAULT_MM,
-) -> tuple[ZonePolygon, ZonePolygon]:
-    """Create GND copper pours on both ``F.Cu`` and ``B.Cu``.
+    strategy: str = "both",
+) -> tuple[ZonePolygon, ...]:
+    """Create GND copper pours on ``F.Cu`` and/or ``B.Cu``.
 
     Args:
         board: The board outline; its polygon is used as the zone boundary.
         gnd_net_number: Net number of the GND net.
         clearance_mm: Zone-to-pad/track clearance in mm.
+        strategy: Ground plane strategy.  ``"both"`` (default) places GND
+            pours on both layers.  ``"back_only"`` places GND only on B.Cu,
+            leaving F.Cu free for routing (recommended for designs with
+            >20 nets or analog signals).
 
     Returns:
-        A pair ``(front_zone, back_zone)`` of :class:`ZonePolygon` objects.
+        Tuple of :class:`ZonePolygon` objects (1 or 2 zones).
     """
-    front = ZonePolygon(
-        net_number=gnd_net_number,
-        net_name="GND",
-        layer=LAYER_F_CU,
-        name="GND_F",
-        polygon=board.polygon,
-        min_thickness=ZONE_MIN_THICKNESS_MM,
-        fill=ZoneFill.SOLID,
-        clearance_mm=clearance_mm,
-        uuid=_new_uuid(),
-    )
     back = ZonePolygon(
         net_number=gnd_net_number,
         net_name="GND",
@@ -369,7 +363,21 @@ def _make_gnd_zones(
         clearance_mm=clearance_mm,
         uuid=_new_uuid(),
     )
-    return front, back
+    if strategy == "back_only":
+        log.info("build_pcb: GND plane on B.Cu only (back_only strategy)")
+        return (back,)
+    front = ZonePolygon(
+        net_number=gnd_net_number,
+        net_name="GND",
+        layer=LAYER_F_CU,
+        name="GND_F",
+        polygon=board.polygon,
+        min_thickness=ZONE_MIN_THICKNESS_MM,
+        fill=ZoneFill.SOLID,
+        clearance_mm=clearance_mm,
+        uuid=_new_uuid(),
+    )
+    return (front, back)
 
 
 def _make_mounting_hole_keepouts(
@@ -709,8 +717,11 @@ def build_pcb(
     # Step 6: GND pours
     # ------------------------------------------------------------------
     gnd_net_num = net_lookup.get("GND", 1)
-    gnd_front, gnd_back = _make_gnd_zones(outline, gnd_net_num, zone_clearance)
-    zones: list[ZonePolygon] = [gnd_front, gnd_back]
+    # Auto-select strategy: use "back_only" when >20 nets or analog netclass
+    has_analog = any(nc.name.lower() == "analog" for nc in netclasses)
+    gnd_strategy = "back_only" if len(nets) > 20 or has_analog else "both"
+    gnd_zones = _make_gnd_zones(outline, gnd_net_num, zone_clearance, strategy=gnd_strategy)
+    zones: list[ZonePolygon] = list(gnd_zones)
 
     # ------------------------------------------------------------------
     # Step 7: Antenna keepout (ESP32 / RF modules)

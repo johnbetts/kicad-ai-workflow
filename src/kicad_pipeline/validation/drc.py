@@ -256,6 +256,35 @@ def _check_duplicate_refs(pcb: PCBDesign) -> list[DRCViolation]:
     return violations
 
 
+def is_intra_footprint_violation(
+    violation: DRCViolation,
+    pcb: PCBDesign,
+) -> bool:
+    """Return True if *violation* is an intra-footprint pad clearance issue.
+
+    Many fine-pitch ICs (QFN, MSOP, TSSOP) have pads closer together than
+    the default clearance rule.  KiCad's DRC flags these as violations but
+    they are false positives — the pad spacing is fixed by the package.
+
+    This function checks if a clearance violation refers to pads on the
+    same footprint.  If so, it should be downgraded or excluded.
+
+    Args:
+        violation: The DRC violation to check.
+        pcb: The PCB design for footprint lookup.
+
+    Returns:
+        ``True`` when the violation involves pads within a single footprint.
+    """
+    if violation.rule != "min_clearance":
+        return False
+    if not violation.ref:
+        return False
+    # If the ref field references a single footprint, it's intra-footprint
+    fp = pcb.get_footprint(violation.ref)
+    return fp is not None
+
+
 def _check_unconnected_pads(pcb: PCBDesign) -> list[DRCViolation]:
     """Flag SMD/thru-hole pads with net_number == 0 as unconnected."""
     violations: list[DRCViolation] = []

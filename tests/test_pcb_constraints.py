@@ -29,7 +29,9 @@ from kicad_pipeline.pcb.constraints import (
     _is_screw_terminal,
     _OccupancyGrid,
     build_signal_adjacency,
+    check_courtyard_collisions,
     constraints_from_requirements,
+    optimize_rotations,
     rpi_hat_constraints,
     solve_placement,
     trace_linear_chains,
@@ -766,3 +768,247 @@ class TestRPiHATPlacement:
         result = solve_placement(constraints, board, sizes)
         assert len(result.positions) == len(req.components)
         assert len(result.violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase E: Ground plane strategy
+# ---------------------------------------------------------------------------
+
+
+class TestGroundPlaneStrategy:
+    """Tests for FEAT-6: B.Cu ground plane strategy."""
+
+    def test_gnd_zones_both_layers(self) -> None:
+        """Default strategy creates zones on both F.Cu and B.Cu."""
+        from kicad_pipeline.pcb.builder import _make_gnd_zones
+
+        board = _board()
+        zones = _make_gnd_zones(board, gnd_net_number=1, strategy="both")
+        assert len(zones) == 2
+        layers = {z.layer for z in zones}
+        assert "F.Cu" in layers
+        assert "B.Cu" in layers
+
+    def test_gnd_zones_back_only(self) -> None:
+        """back_only strategy creates zone only on B.Cu."""
+        from kicad_pipeline.pcb.builder import _make_gnd_zones
+
+        board = _board()
+        zones = _make_gnd_zones(board, gnd_net_number=1, strategy="back_only")
+        assert len(zones) == 1
+        assert zones[0].layer == "B.Cu"
+
+
+# ---------------------------------------------------------------------------
+# Phase E: Rotation optimization
+# ---------------------------------------------------------------------------
+
+
+class TestRotationOptimization:
+    """Tests for FEAT-7: component rotation optimization."""
+
+    def test_passive_aligns_toward_neighbour(self) -> None:
+        """2-pin passive rotates to face its connected neighbour."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="RotTest"),
+            features=(
+                FeatureBlock(
+                    name="Test", description="", components=("R1", "U1"),
+                    nets=("SIG",), subcircuits=(),
+                ),
+            ),
+            components=(
+                Component(ref="R1", value="10k", footprint="R_0805", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+                )),
+                Component(ref="U1", value="IC", footprint="TSSOP-8", pins=(
+                    Pin(number="1", name="IN", pin_type=PinType.INPUT, net="SIG"),
+                )),
+            ),
+            nets=(
+                Net(name="SIG", connections=(
+                    NetConnection(ref="R1", pin="1"),
+                    NetConnection(ref="U1", pin="1"),
+                )),
+            ),
+        )
+        positions = {
+            "R1": Point(x=10.0, y=20.0),
+            "U1": Point(x=30.0, y=20.0),
+        }
+        rotations = {"R1": 0.0, "U1": 0.0}
+        result = optimize_rotations(positions, rotations, req)
+        # R1 should be aligned toward U1 (to the right) = 0 degrees
+        assert result["R1"] == pytest.approx(0.0)
+
+    def test_passive_aligns_vertical(self) -> None:
+        """Passive above its neighbour rotates to 90 degrees."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="RotTest"),
+            features=(
+                FeatureBlock(
+                    name="Test", description="", components=("C1", "U1"),
+                    nets=("PWR",), subcircuits=(),
+                ),
+            ),
+            components=(
+                Component(ref="C1", value="100nF", footprint="C_0402", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="PWR"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+                )),
+                Component(ref="U1", value="IC", footprint="TSSOP-8", pins=(
+                    Pin(number="1", name="VDD", pin_type=PinType.POWER_IN, net="PWR"),
+                )),
+            ),
+            nets=(
+                Net(name="PWR", connections=(
+                    NetConnection(ref="C1", pin="1"),
+                    NetConnection(ref="U1", pin="1"),
+                )),
+            ),
+        )
+        positions = {
+            "C1": Point(x=20.0, y=10.0),
+            "U1": Point(x=20.0, y=30.0),
+        }
+        rotations = {"C1": 0.0, "U1": 0.0}
+        result = optimize_rotations(positions, rotations, req)
+        assert result["C1"] == pytest.approx(90.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase E: Courtyard collision checking
+# ---------------------------------------------------------------------------
+
+
+class TestCourtyardCollisions:
+    """Tests for FEAT-9: courtyard collision checking."""
+
+    def test_no_collision_when_separated(self) -> None:
+        positions = {"R1": Point(10.0, 10.0), "R2": Point(30.0, 30.0)}
+        sizes = {"R1": (3.0, 3.0), "R2": (3.0, 3.0)}
+        violations = check_courtyard_collisions(positions, sizes)
+        assert len(violations) == 0
+
+    def test_detects_overlapping_components(self) -> None:
+        positions = {"R1": Point(10.0, 10.0), "R2": Point(11.0, 11.0)}
+        sizes = {"R1": (5.0, 5.0), "R2": (5.0, 5.0)}
+        violations = check_courtyard_collisions(positions, sizes)
+        assert len(violations) == 1
+        assert "R1" in violations[0]
+        assert "R2" in violations[0]
+
+    def test_detects_keepout_collision(self) -> None:
+        positions = {"R1": Point(10.0, 10.0)}
+        sizes = {"R1": (5.0, 5.0)}
+        keepout = Keepout(
+            polygon=(Point(8, 8), Point(12, 8), Point(12, 12), Point(8, 12)),
+            layers=("F.Cu",), no_copper=True,
+        )
+        violations = check_courtyard_collisions(positions, sizes, keepouts=(keepout,))
+        assert len(violations) == 1
+        assert "keepout" in violations[0].lower()
+
+    def test_no_keepout_collision_when_clear(self) -> None:
+        positions = {"R1": Point(10.0, 10.0)}
+        sizes = {"R1": (3.0, 3.0)}
+        keepout = Keepout(
+            polygon=(Point(30, 30), Point(35, 30), Point(35, 35), Point(30, 35)),
+            layers=("F.Cu",), no_copper=True,
+        )
+        violations = check_courtyard_collisions(positions, sizes, keepouts=(keepout,))
+        assert len(violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase E: DRC intra-footprint filter
+# ---------------------------------------------------------------------------
+
+
+class TestDRCIntraFootprint:
+    """Tests for FEAT-10: intra-footprint violation filter."""
+
+    def test_is_intra_footprint_for_clearance(self) -> None:
+        """Clearance violation on a known footprint ref is intra-footprint."""
+        from kicad_pipeline.models.pcb import (
+            DesignRules,
+            Footprint,
+            NetEntry,
+            PCBDesign,
+        )
+        from kicad_pipeline.validation.drc import (
+            DRCViolation,
+            Severity,
+            is_intra_footprint_violation,
+        )
+
+        pcb = PCBDesign(
+            outline=BoardOutline(
+                polygon=(Point(0, 0), Point(50, 0), Point(50, 50), Point(0, 50)),
+            ),
+            design_rules=DesignRules(),
+            nets=(NetEntry(number=0, name=""),),
+            footprints=(
+                Footprint(
+                    lib_id="R:R_0805", ref="R1", value="10k",
+                    position=Point(10, 10),
+                ),
+            ),
+            tracks=(),
+            vias=(),
+            zones=(),
+            keepouts=(),
+        )
+        v = DRCViolation(
+            rule="min_clearance", message="Pad too close",
+            severity=Severity.WARNING, ref="R1",
+        )
+        assert is_intra_footprint_violation(v, pcb) is True
+
+    def test_not_intra_footprint_for_other_rules(self) -> None:
+        """Non-clearance violations are not intra-footprint."""
+        from kicad_pipeline.models.pcb import (
+            DesignRules,
+            Footprint,
+            NetEntry,
+            PCBDesign,
+        )
+        from kicad_pipeline.validation.drc import (
+            DRCViolation,
+            Severity,
+            is_intra_footprint_violation,
+        )
+
+        pcb = PCBDesign(
+            outline=BoardOutline(
+                polygon=(Point(0, 0), Point(50, 0), Point(50, 50), Point(0, 50)),
+            ),
+            design_rules=DesignRules(),
+            nets=(NetEntry(number=0, name=""),),
+            footprints=(
+                Footprint(
+                    lib_id="R:R_0805", ref="R1", value="10k",
+                    position=Point(10, 10),
+                ),
+            ),
+            tracks=(),
+            vias=(),
+            zones=(),
+            keepouts=(),
+        )
+        v = DRCViolation(
+            rule="min_trace_width", message="Too thin",
+            severity=Severity.ERROR, ref="R1",
+        )
+        assert is_intra_footprint_violation(v, pcb) is False
+
+    def test_drc_exclusions_in_project_file(self) -> None:
+        """DRC exclusions are written to the project file."""
+        from kicad_pipeline.project_file import build_project_file
+
+        data = build_project_file(
+            "test", drc_exclusions=("clearance|R1|pad1|R1|pad2",),
+        )
+        exclusions = data["board"]["design_settings"]["drc_exclusions"]
+        assert "clearance|R1|pad1|R1|pad2" in exclusions

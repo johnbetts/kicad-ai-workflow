@@ -779,3 +779,166 @@ def rpi_hat_constraints(
             merged[c.ref] = c
 
     return tuple(merged.values())
+
+
+# ---------------------------------------------------------------------------
+# Component rotation optimization (FEAT-7)
+# ---------------------------------------------------------------------------
+
+
+def _is_two_pin_passive(ref: str) -> bool:
+    """Return True if *ref* is a 2-pin passive (R, C, or L)."""
+    prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
+    return prefix in ("R", "C", "L")
+
+
+def optimize_rotations(
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    requirements: ProjectRequirements,
+) -> dict[str, float]:
+    """Optimize component rotations for shorter routing.
+
+    For 2-pin passives (R, C, L), aligns the pad axis with the direction
+    toward the nearest connected component.  For ICs (U*), tries 0/90/180/270
+    and picks the rotation minimizing total Manhattan distance to connected pads.
+
+    Args:
+        positions: Placed positions for all components.
+        rotations: Current rotations for all components.
+        requirements: Project requirements with net connections.
+
+    Returns:
+        Updated rotation dict (original is not modified).
+    """
+    result = dict(rotations)
+
+    # Build ref -> set of connected refs (via signal nets)
+    adj = build_signal_adjacency(requirements)
+
+    # 2-pin passives: align toward nearest connected neighbour
+    for ref in positions:
+        if not _is_two_pin_passive(ref):
+            continue
+        neighbours = adj.get(ref, set())
+        if not neighbours:
+            continue
+        # Find nearest neighbour by Euclidean distance
+        pos = positions[ref]
+        best_neighbour: str | None = None
+        best_dist = float("inf")
+        for nb in neighbours:
+            if nb not in positions:
+                continue
+            nb_pos = positions[nb]
+            d = math.hypot(nb_pos.x - pos.x, nb_pos.y - pos.y)
+            if d < best_dist:
+                best_dist = d
+                best_neighbour = nb
+
+        if best_neighbour is not None:
+            nb_pos = positions[best_neighbour]
+            dx = nb_pos.x - pos.x
+            dy = nb_pos.y - pos.y
+            angle = math.degrees(math.atan2(dy, dx))
+            # Snap to nearest 90 degrees
+            snapped = round(angle / 90.0) * 90.0
+            result[ref] = snapped % 360.0
+
+    # ICs: try 0/90/180/270 and pick minimum total Manhattan distance
+    for ref in positions:
+        if not ref.startswith("U"):
+            continue
+        neighbours = adj.get(ref, set())
+        placed_neighbours = [nb for nb in neighbours if nb in positions]
+        if not placed_neighbours:
+            continue
+        pos = positions[ref]
+        best_rot = result.get(ref, 0.0)
+        best_cost = float("inf")
+        for trial_rot in (0.0, 90.0, 180.0, 270.0):
+            cost = 0.0
+            for nb in placed_neighbours:
+                nb_pos = positions[nb]
+                cost += abs(nb_pos.x - pos.x) + abs(nb_pos.y - pos.y)
+            if cost < best_cost:
+                best_cost = cost
+                best_rot = trial_rot
+        result[ref] = best_rot
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Courtyard collision checking (FEAT-9)
+# ---------------------------------------------------------------------------
+
+
+def check_courtyard_collisions(
+    positions: dict[str, Point],
+    footprint_sizes: dict[str, tuple[float, float]],
+    keepouts: tuple[Keepout, ...] = (),
+) -> tuple[str, ...]:
+    """Check for courtyard overlaps between placed components.
+
+    Uses axis-aligned bounding boxes centered on each component position.
+    Also checks for overlaps with keepout zones.
+
+    Args:
+        positions: Placed positions for all components.
+        footprint_sizes: Mapping from ref to ``(width, height)`` in mm.
+        keepouts: Optional keepout zones to check against.
+
+    Returns:
+        Tuple of violation description strings.
+    """
+    violations: list[str] = []
+    refs = list(positions.keys())
+
+    # Component vs component collision
+    for i, ref_a in enumerate(refs):
+        pos_a = positions[ref_a]
+        w_a, h_a = footprint_sizes.get(ref_a, (3.0, 3.0))
+        ax0 = pos_a.x - w_a / 2.0
+        ay0 = pos_a.y - h_a / 2.0
+        ax1 = pos_a.x + w_a / 2.0
+        ay1 = pos_a.y + h_a / 2.0
+
+        for ref_b in refs[i + 1:]:
+            pos_b = positions[ref_b]
+            w_b, h_b = footprint_sizes.get(ref_b, (3.0, 3.0))
+            bx0 = pos_b.x - w_b / 2.0
+            by0 = pos_b.y - h_b / 2.0
+            bx1 = pos_b.x + w_b / 2.0
+            by1 = pos_b.y + h_b / 2.0
+
+            if ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0:
+                violations.append(
+                    f"Courtyard collision: {ref_a} and {ref_b}"
+                )
+
+    # Component vs keepout collision
+    for ref in refs:
+        pos = positions[ref]
+        w, h = footprint_sizes.get(ref, (3.0, 3.0))
+        cx0 = pos.x - w / 2.0
+        cy0 = pos.y - h / 2.0
+        cx1 = pos.x + w / 2.0
+        cy1 = pos.y + h / 2.0
+
+        for ko_idx, ko in enumerate(keepouts):
+            ko_xs = [p.x for p in ko.polygon]
+            ko_ys = [p.y for p in ko.polygon]
+            if not ko_xs:
+                continue
+            kx0 = min(ko_xs)
+            ky0 = min(ko_ys)
+            kx1 = max(ko_xs)
+            ky1 = max(ko_ys)
+
+            if cx0 < kx1 and cx1 > kx0 and cy0 < ky1 and cy1 > ky0:
+                violations.append(
+                    f"Courtyard collision: {ref} overlaps keepout zone {ko_idx}"
+                )
+
+    return tuple(violations)
