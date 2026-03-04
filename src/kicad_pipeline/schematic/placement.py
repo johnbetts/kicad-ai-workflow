@@ -53,19 +53,19 @@ class PlacementZone:
 # ---------------------------------------------------------------------------
 
 SCHEMATIC_ZONES: dict[str, PlacementZone] = {
-    "ANALOG": PlacementZone("ANALOG", 25.40, 27.94, 116.84, 139.70),
-    "POWER": PlacementZone("POWER", 149.86, 27.94, 120.65, 20.32),
-    "MCU": PlacementZone("MCU", 149.86, 50.80, 120.65, 50.80),
-    "PERIPHERALS": PlacementZone("PERIPHERALS", 149.86, 119.38, 120.65, 50.80),
+    "POWER": PlacementZone("POWER", 25.40, 27.94, 116.84, 69.85),
+    "MCU": PlacementZone("MCU", 149.86, 27.94, 120.65, 69.85),
+    "ANALOG": PlacementZone("ANALOG", 25.40, 106.68, 116.84, 69.85),
+    "PERIPHERALS": PlacementZone("PERIPHERALS", 149.86, 106.68, 120.65, 69.85),
 }
 """Standard schematic zones keyed by name (A4 layout).
 
-A4 landscape (297x210mm) with asymmetric zones:
-- ANALOG: full left column (for voltage divider channels etc.)
-- POWER: tiny strip at top-right (bypass caps)
-- MCU: mid-right (ICs, DIP switches, pull-ups)
-- PERIPHERALS: bottom-right (large connectors)
-~18mm gap between MCU and PERIPHERALS to prevent label overlap.
+A4 landscape (297x210mm) with 4 roughly equal quadrants:
+- POWER: top-left (supply, regulation, bypass caps)
+- MCU: top-right (ICs, DIP switches, pull-ups)
+- ANALOG: bottom-left (sensors, voltage dividers, ADC channels)
+- PERIPHERALS: bottom-right (large connectors, headers)
+~8mm gap between rows to prevent label overlap.
 """
 
 _A3_ZONES: dict[str, PlacementZone] = {
@@ -192,7 +192,7 @@ def assign_zones(
 
     if empty_zones:
         overloaded = max(_ZONE_SLOT_NAMES, key=lambda z: zone_ref_counts[z])
-        if zone_ref_counts[overloaded] > 16:
+        if zone_ref_counts[overloaded] > 12:
             # Collect all refs in the overloaded zone
             overloaded_refs: list[str] = []
             for feature, refs in feature_groups.items():
@@ -294,11 +294,12 @@ def place_in_zone(
 
     cumulative_y = 0.0
 
-    # Place large components side by side (up to 2 per row)
-    # Use ~40mm spacing between large components (enough for IC body + labels)
+    # Place large components side by side, adapting columns to zone width
+    # Use ~45mm spacing between large components (enough for IC body + labels)
     large_spacing = snap_to_grid(45.0, grid)
-    for row_start in range(0, len(large_indices), 2):
-        row_items = large_indices[row_start:row_start + 2]
+    large_cols = max(2, int(zone.width / large_spacing))
+    for row_start in range(0, len(large_indices), large_cols):
+        row_items = large_indices[row_start:row_start + large_cols]
         max_row_h = 0.0
         for col_idx, i in enumerate(row_items):
             ref = refs[i]

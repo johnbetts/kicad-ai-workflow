@@ -88,9 +88,9 @@ _TEMPLATES: dict[str, BoardTemplate] = {
         fixed_components=(
             FixedComponentDef(
                 ref_pattern="J1",
-                x_mm=29.0,
-                y_mm=50.0,
-                description="40-pin GPIO header",
+                x_mm=29.21,
+                y_mm=3.29,
+                description="40-pin GPIO header (pin 1 per HAT mech spec)",
             ),
         ),
         description="Raspberry Pi HAT (Hardware Attached on Top) form factor",

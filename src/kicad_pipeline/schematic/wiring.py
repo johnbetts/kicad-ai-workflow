@@ -197,19 +197,19 @@ def connect_pin_to_label(
     # For "top" and "bottom" the local label rotation is opposite to global.
     if pin_side == "right":
         lx, ly = px + _LABEL_STUB_MM, py
-        global_rotation = 0.0
+        global_rotation = 180.0  # arrow points left toward wire/pin
         local_rotation = 0.0  # text reads left-to-right, connection at left end
     elif pin_side == "top":
         lx, ly = px, py - _LABEL_STUB_MM
-        global_rotation = 270.0
+        global_rotation = 90.0  # arrow points down toward wire/pin
         local_rotation = 90.0  # text reads bottom-to-top, connection at bottom
     elif pin_side == "bottom":
         lx, ly = px, py + _LABEL_STUB_MM
-        global_rotation = 90.0
+        global_rotation = 270.0  # arrow points up toward wire/pin
         local_rotation = 270.0  # text reads top-to-bottom, connection at top
     else:  # "left" (default)
         lx, ly = px - _LABEL_STUB_MM, py
-        global_rotation = 180.0
+        global_rotation = 0.0  # arrow points right toward wire/pin
         local_rotation = 180.0  # text reads right-to-left, connection at right end
 
     wire = make_wire(px, py, lx, ly)

@@ -639,11 +639,9 @@ def build_pcb(
     # ------------------------------------------------------------------
     netclasses = classify_nets(nets)
 
-    # Derive zone clearance from max netclass clearance
-    zone_clearance = max(
-        (nc.clearance_mm for nc in netclasses),
-        default=ZONE_CLEARANCE_DEFAULT_MM,
-    )
+    # Zone clearance uses the safe default — KiCad enforces per-netclass
+    # clearance on tracks separately, so zones should not inherit the max.
+    zone_clearance = ZONE_CLEARANCE_DEFAULT_MM
 
     # ------------------------------------------------------------------
     # Step 6: GND pours

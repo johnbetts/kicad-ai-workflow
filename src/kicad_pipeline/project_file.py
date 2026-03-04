@@ -78,7 +78,7 @@ def build_project_file(
                     "silk_text_upright": False,
                     "zones": {
                         "45_degree_only": False,
-                        "min_clearance": 0.5,
+                        "min_clearance": 0.2,
                     },
                 },
                 "diff_pair_dimensions": [],
