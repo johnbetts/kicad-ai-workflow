@@ -582,6 +582,7 @@ def make_pin_header_socket(
     pitch_mm: float = 2.54,
     rows: int = 1,
     lib_id: str = "",
+    row_swap: bool = False,
 ) -> Footprint:
     """Generate a through-hole pin header or socket footprint.
 
@@ -592,6 +593,9 @@ def make_pin_header_socket(
         pitch_mm: Pin pitch in mm.
         rows: Number of rows (1 or 2).
         lib_id: KiCad library ID string (auto-generated if empty).
+        row_swap: If True, swap row direction (negate Y). Useful for
+            RPi-style headers where pin numbering follows the opposite
+            row convention.
 
     Returns:
         Fully constructed :class:`Footprint`.
@@ -608,11 +612,13 @@ def make_pin_header_socket(
         for row in range(rows):
             x = col * pitch_mm - (cols - 1) * pitch_mm / 2.0
             y = row * row_pitch - (rows - 1) * row_pitch / 2.0
+            if row_swap:
+                y = -y  # swap row direction
             pads.append(_thru_pad(str(pin_num), x, y, pad_diam, drill_mm))
             pin_num += 1
 
-    body_w = (cols - 1) * pitch_mm + pad_diam + 0.5
-    body_h = (rows - 1) * row_pitch + pad_diam + 0.5
+    body_w = (cols - 1) * pitch_mm + pad_diam + 1.5
+    body_h = (rows - 1) * row_pitch + pad_diam + 1.5
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
@@ -670,8 +676,8 @@ def make_terminal_block(
         )
         for i in range(pin_count)
     )
-    body_w = (pin_count - 1) * pitch_mm + pad_diam + 2.0
-    body_h = pad_diam + 4.0
+    body_w = (pin_count - 1) * pitch_mm + pad_diam + 4.0
+    body_h = pad_diam + 6.0
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
@@ -933,7 +939,11 @@ def footprint_for_component(
         pitch = _parse_pitch(fid)
         # Detect dual-row from "2x" in the footprint ID
         rows = 2 if "2X" in upper or "2x" in fid else 1
-        fp = make_pin_header_socket(ref, value, pin_count, pitch, rows, lib_id=fid)
+        # Detect RPi-related footprint IDs and pass row_swap=True
+        rpi_swap = "2X20" in upper or "RPI" in upper or "RASPBERRY" in upper
+        fp = make_pin_header_socket(
+            ref, value, pin_count, pitch, rows, lib_id=fid, row_swap=rpi_swap,
+        )
 
     # Terminal blocks
     elif upper.startswith("TERMINALBLOCK") or upper.startswith("TB_"):

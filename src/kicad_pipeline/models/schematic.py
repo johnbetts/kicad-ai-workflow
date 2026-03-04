@@ -207,3 +207,7 @@ class Schematic:
     generator: str = "kicad-ai-pipeline"
     generator_version: str = "9.0"
     paper: str = "A4"
+    title: str = ""
+    date: str = ""
+    revision: str = ""
+    company: str = ""

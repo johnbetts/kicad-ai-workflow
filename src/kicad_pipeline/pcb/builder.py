@@ -12,6 +12,7 @@ pipeline entry point.  The primary public surface is:
 
 from __future__ import annotations
 
+import datetime
 import logging
 import uuid
 from pathlib import Path
@@ -81,6 +82,12 @@ _ANTENNA_KEEPOUT_WIDTH_MM: float = 15.0
 _ANTENNA_KEEPOUT_HEIGHT_MM: float = 10.0
 """Height of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
 
+_DEFAULT_BOARD_ORIGIN_X: float = 20.0
+"""Default X origin offset for the board outline in mm."""
+
+_DEFAULT_BOARD_ORIGIN_Y: float = 20.0
+"""Default Y origin offset for the board outline in mm."""
+
 # Keywords that indicate the design contains an RF module requiring a keepout
 _RF_KEYWORDS: frozenset[str] = frozenset({"esp32", "esp8266", "nrf", "cc3200", "rf"})
 
@@ -99,23 +106,30 @@ def _new_uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _make_board_outline(width: float, height: float) -> BoardOutline:
+def _make_board_outline(
+    width: float,
+    height: float,
+    origin_x: float = 0.0,
+    origin_y: float = 0.0,
+) -> BoardOutline:
     """Create a rectangular :class:`BoardOutline` for the given dimensions.
 
     Args:
         width: Board width in mm.
         height: Board height in mm.
+        origin_x: X coordinate of the board origin in mm.
+        origin_y: Y coordinate of the board origin in mm.
 
     Returns:
         :class:`BoardOutline` with a closed rectangular polygon.
     """
     # Explicitly close polygon (KiCad 9 zone polygons require closure)
     polygon = (
-        Point(x=0.0, y=0.0),
-        Point(x=width, y=0.0),
-        Point(x=width, y=height),
-        Point(x=0.0, y=height),
-        Point(x=0.0, y=0.0),
+        Point(x=origin_x, y=origin_y),
+        Point(x=origin_x + width, y=origin_y),
+        Point(x=origin_x + width, y=origin_y + height),
+        Point(x=origin_x, y=origin_y + height),
+        Point(x=origin_x, y=origin_y),
     )
     return BoardOutline(polygon=polygon, width=PCB_EDGE_CUTS_WIDTH_MM)
 
@@ -434,6 +448,8 @@ def build_pcb(
     requirements: ProjectRequirements,
     board_width_mm: float | None = None,
     board_height_mm: float | None = None,
+    origin_x: float = 0.0,
+    origin_y: float = 0.0,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -462,6 +478,8 @@ def build_pcb(
         board_height_mm: Override board height in mm.  If ``None``, the value
             from :attr:`~ProjectRequirements.mechanical` is used, or
             40 mm as the default.
+        origin_x: X coordinate of the board origin in mm (default 20.0).
+        origin_y: Y coordinate of the board origin in mm (default 20.0).
 
     Returns:
         A complete :class:`PCBDesign` ready for serialisation.
@@ -499,7 +517,7 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 2: Board outline
     # ------------------------------------------------------------------
-    outline = _make_board_outline(board_width_mm, board_height_mm)
+    outline = _make_board_outline(board_width_mm, board_height_mm, origin_x, origin_y)
 
     # ------------------------------------------------------------------
     # Step 3: Nets
@@ -552,7 +570,7 @@ def build_pcb(
     if new_width > board_width_mm or new_height > board_height_mm:
         board_width_mm = new_width
         board_height_mm = new_height
-        outline = _make_board_outline(board_width_mm, board_height_mm)
+        outline = _make_board_outline(board_width_mm, board_height_mm, origin_x, origin_y)
         log.info(
             "build_pcb: auto-sized board to %.1f x %.1f mm",
             board_width_mm,
@@ -639,6 +657,10 @@ def build_pcb(
         keepouts=tuple(keepouts),
         version=KICAD_PCB_VERSION,
         generator=KICAD_GENERATOR,
+        title=requirements.project.name,
+        date=datetime.date.today().isoformat(),
+        revision=requirements.project.revision,
+        company=requirements.project.author or "",
     )
 
 
@@ -688,6 +710,10 @@ def _pad_sexp(pad: Pad) -> SExpNode:
         ["size", pad.size_x, pad.size_y],
         ["layers", *pad.layers],
     ]
+    if pad.drill_diameter is not None and pad.drill_diameter > 0:
+        node.append(["drill", pad.drill_diameter])
+    if pad.roundrect_ratio is not None:
+        node.append(["roundrect_rratio", pad.roundrect_ratio])
     if pad.net_number is not None and pad.net_name is not None:
         node.append(["net", pad.net_number, pad.net_name])
     if pad.uuid:
@@ -965,6 +991,19 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
         ["general", ["thickness", 1.6], ["legacy_teardrops", False]],
         ["paper", "A4"],
     ]
+
+    # Title block
+    if design.title or design.date or design.revision or design.company:
+        title_block: list[SExpNode] = ["title_block"]
+        if design.title:
+            title_block.append(["title", design.title])
+        if design.date:
+            title_block.append(["date", design.date])
+        if design.revision:
+            title_block.append(["rev", design.revision])
+        if design.company:
+            title_block.append(["company", design.company])
+        root.append(title_block)
 
     # Layers
     layers_node: list[SExpNode] = ["layers"]

@@ -589,6 +589,128 @@ def ldo_regulator(
     )
 
 
+def dip_switch_address(
+    switch_ref: str,
+    bit_count: int = 4,
+    addr_net: str = "ADDR",
+    target_nets: tuple[str, ...] = (),
+    series_resistance: float = 10_000.0,
+    package: str = "0805",
+    db: ComponentDB | None = None,
+) -> SubcircuitResult:
+    """Generate a DIP switch address selector with series resistor protection.
+
+    Each switch output goes through a series resistor before connecting to
+    the target net, preventing short circuits when multiple switches are
+    activated simultaneously.
+
+    Topology (per bit)::
+
+        ADDR_n --- SW_n --- R_n --- TARGET_n
+
+    Args:
+        switch_ref: Reference designator for the DIP switch (e.g. "SW1").
+        bit_count: Number of switch positions (default 4).
+        addr_net: Base name for address nets (default "ADDR").
+        target_nets: Net names each switch bridges to. If empty,
+            auto-generated as "ADDR_0", "ADDR_1", etc.
+        series_resistance: Series resistor value in ohms (default 10k).
+        package: Resistor footprint package (default "0805").
+        db: Optional component database for LCSC lookup.
+
+    Returns:
+        :class:`SubcircuitResult` with DIP switch + series resistors.
+    """
+    if not target_nets:
+        target_nets = tuple(f"{addr_net}_{i}" for i in range(bit_count))
+
+    if len(target_nets) < bit_count:
+        target_nets = target_nets + tuple(
+            f"{addr_net}_{i}" for i in range(len(target_nets), bit_count)
+        )
+
+    components: list[Component] = []
+    nets: list[Net] = []
+
+    # DIP switch component: 2 * bit_count pins
+    # Left column: pins 1..bit_count (inputs)
+    # Right column: pins bit_count+1..2*bit_count (outputs, reversed order)
+    sw_pins: list[Pin] = []
+    for i in range(bit_count):
+        input_net = f"{addr_net}_SW{i}_IN"
+        sw_pins.append(
+            Pin(
+                number=str(i + 1),
+                name=f"IN{i + 1}",
+                pin_type=PinType.PASSIVE,
+                net=input_net,
+            )
+        )
+    for i in range(bit_count):
+        output_net = f"{addr_net}_SW{bit_count - 1 - i}_OUT"
+        sw_pins.append(
+            Pin(
+                number=str(bit_count + i + 1),
+                name=f"OUT{bit_count - i}",
+                pin_type=PinType.PASSIVE,
+                net=output_net,
+            )
+        )
+
+    sw_comp = Component(
+        ref=switch_ref,
+        value=f"DIPx{bit_count:02d}",
+        footprint=f"SW_DIP_SPSTx{bit_count:02d}",
+        description=f"DIP switch {bit_count}-position address selector",
+        pins=tuple(sw_pins),
+    )
+    components.append(sw_comp)
+
+    # Series resistors: one per bit
+    for i in range(bit_count):
+        r_ref = f"R_{switch_ref}_{i + 1}"
+        input_net = f"{addr_net}_SW{i}_IN"
+        output_net = f"{addr_net}_SW{i}_OUT"
+
+        r_comp = _resistor_component(
+            r_ref, series_resistance, package,
+            output_net, target_nets[i], db,
+        )
+        components.append(r_comp)
+
+        # Net: switch input to source
+        nets.append(Net(
+            name=input_net,
+            connections=(NetConnection(ref=switch_ref, pin=str(i + 1)),),
+        ))
+
+        # Net: switch output through resistor
+        nets.append(Net(
+            name=output_net,
+            connections=(
+                NetConnection(ref=switch_ref, pin=str(bit_count + (bit_count - 1 - i) + 1)),
+                NetConnection(ref=r_ref, pin="1"),
+            ),
+        ))
+
+        # Net: resistor output to target
+        nets.append(Net(
+            name=target_nets[i],
+            connections=(NetConnection(ref=r_ref, pin="2"),),
+        ))
+
+    desc = (
+        f"DIP switch {switch_ref}: {bit_count}-bit address selector "
+        f"with {_format_resistance(series_resistance)} series protection. "
+        f"WARNING: activate only ONE switch at a time to avoid contention."
+    )
+    return SubcircuitResult(
+        components=tuple(components),
+        nets=tuple(nets),
+        description=desc,
+    )
+
+
 def usb_c_input(
     ref_conn: str,
     ref_cc1: str,

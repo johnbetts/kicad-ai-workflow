@@ -110,10 +110,10 @@ CLEARANCE_ANALOG_MM: float = 0.25
 # Via defaults
 # ---------------------------------------------------------------------------
 
-VIA_DRILL_DEFAULT_MM: float = 0.4
+VIA_DRILL_DEFAULT_MM: float = 0.508
 """Default via drill diameter (mm)."""
 
-VIA_DIAMETER_DEFAULT_MM: float = 0.8
+VIA_DIAMETER_DEFAULT_MM: float = 0.9
 """Default via pad diameter (mm)."""
 
 THERMAL_RELIEF_GAP_MM: float = 0.3

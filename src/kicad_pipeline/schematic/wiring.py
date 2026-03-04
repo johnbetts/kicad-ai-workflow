@@ -32,7 +32,7 @@ from kicad_pipeline.models.schematic import (
 log = logging.getLogger(__name__)
 
 # Distance (mm) to extend the wire stub away from a pin before placing a label.
-_LABEL_STUB_MM: float = SCHEMATIC_PIN_LENGTH_MM * 2.0  # 5.08 mm — short stub to label
+_LABEL_STUB_MM: float = SCHEMATIC_PIN_LENGTH_MM * 3.0  # 7.62 mm — clears label overlap
 
 
 # ---------------------------------------------------------------------------
@@ -192,28 +192,31 @@ def connect_pin_to_label(
         is non-empty depending on *is_global*.
     """
     px, py = pin_position.x, pin_position.y
-    # KiCad global label rotation: the direction the label text extends FROM
-    # its connection point.  0° = text extends RIGHT, 180° = text extends LEFT,
-    # 90° = text extends DOWN, 270° = text extends UP.
-    # Labels should extend AWAY from the component body.
+    # GlobalLabel rotation = direction the arrow POINTS (connection at arrow tip).
+    # Label rotation = text reading direction (connection at start of text).
+    # For "top" and "bottom" the local label rotation is opposite to global.
     if pin_side == "right":
         lx, ly = px + _LABEL_STUB_MM, py
-        rotation = 0.0  # text extends RIGHT (away from component body)
+        global_rotation = 0.0
+        local_rotation = 0.0  # text reads left-to-right, connection at left end
     elif pin_side == "top":
         lx, ly = px, py - _LABEL_STUB_MM
-        rotation = 270.0  # text extends UP (away from component body)
+        global_rotation = 270.0
+        local_rotation = 90.0  # text reads bottom-to-top, connection at bottom
     elif pin_side == "bottom":
         lx, ly = px, py + _LABEL_STUB_MM
-        rotation = 90.0  # text extends DOWN (away from component body)
+        global_rotation = 90.0
+        local_rotation = 270.0  # text reads top-to-bottom, connection at top
     else:  # "left" (default)
         lx, ly = px - _LABEL_STUB_MM, py
-        rotation = 180.0  # text extends LEFT (away from component body)
+        global_rotation = 180.0
+        local_rotation = 180.0  # text reads right-to-left, connection at right end
 
     wire = make_wire(px, py, lx, ly)
 
     if is_global:
-        return [wire], [make_global_label(label_text, lx, ly, rotation=rotation)], []
-    return [wire], [], [make_label(label_text, lx, ly, rotation=rotation)]
+        return [wire], [make_global_label(label_text, lx, ly, rotation=global_rotation)], []
+    return [wire], [], [make_label(label_text, lx, ly, rotation=local_rotation)]
 
 
 # ---------------------------------------------------------------------------

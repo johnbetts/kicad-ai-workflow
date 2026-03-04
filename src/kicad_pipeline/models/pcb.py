@@ -193,8 +193,8 @@ class DesignRules:
     usb_trace_width_mm: float = 0.3
     analog_trace_width_mm: float = 0.2
     default_clearance_mm: float = 0.2
-    min_via_drill_mm: float = 0.3
-    min_via_diameter_mm: float = 0.6
+    min_via_drill_mm: float = 0.508
+    min_via_diameter_mm: float = 0.9
     copper_pour_clearance_mm: float = 0.2
     layer_count: int = 2
 
@@ -214,6 +214,10 @@ class PCBDesign:
     version: int = 20241229
     generator: str = "kicad-ai-pipeline"
     generator_version: str = "9.0"
+    title: str = ""
+    date: str = ""
+    revision: str = ""
+    company: str = ""
 
     def get_footprint(self, ref: str) -> Footprint | None:
         """Return footprint by ref, or None."""

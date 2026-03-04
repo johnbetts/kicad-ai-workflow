@@ -318,7 +318,7 @@ def place_in_zone(
         n_small = len(small_indices)
 
         # Compute columns: use fixed spacing, don't spread across full zone
-        max_h_spacing = 27.94  # 22 * 1.27mm — fits 4 per row in ANALOG zone
+        max_h_spacing = 35.56  # 28 * 1.27mm — clears label+pin+body+pin+label
         cols = max(1, min(n_small, int(zone.width / max_h_spacing)))
         h_spacing = snap_to_grid(max_h_spacing, grid)
 
@@ -334,7 +334,7 @@ def place_in_zone(
             row_pcs = [pin_counts[small_indices[j]] for j in range(row_start, row_end)]
             max_pc = max(row_pcs) if row_pcs else 2
             body_h = max(max_pc * 2.54, 5.08)
-            clearance = 15.0 if body_h <= 10.0 else 17.0
+            clearance = 20.0 if body_h <= 10.0 else 22.0
             row_height = body_h + clearance
 
             raw_x = zone.origin_x + col * h_spacing

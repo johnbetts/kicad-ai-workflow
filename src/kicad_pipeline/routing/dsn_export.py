@@ -19,8 +19,8 @@ if TYPE_CHECKING:
 DSN_VERSION: str = "ELECTRA"
 
 # Default via template dimensions (drill x annular diameter in mm)
-_VIA_DRILL_MM: float = 0.3
-_VIA_DIAMETER_MM: float = 0.6
+_VIA_DRILL_MM: float = 0.508
+_VIA_DIAMETER_MM: float = 0.9
 
 # Default design-rule values used in the DSN structure section
 _DEFAULT_TRACE_WIDTH_MM: float = 0.25

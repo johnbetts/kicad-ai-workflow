@@ -497,3 +497,105 @@ def test_route_net_two_same_zone_pins_uses_labels() -> None:
     # Label-per-pin: one stub wire + label per pin
     assert len(wires) == 2
     assert len(gls) == 2
+
+
+# ---------------------------------------------------------------------------
+# Page threshold tests
+# ---------------------------------------------------------------------------
+
+
+def test_auto_a3_for_many_components() -> None:
+    """Designs with >15 components auto-select A3 page."""
+    components = []
+    for i in range(16):
+        ref = f"R{i + 1}"
+        components.append(Component(
+            ref=ref, value="10k", footprint="0805",
+            pins=(Pin(number="1", name="1", pin_type=PinType.PASSIVE),
+                  Pin(number="2", name="2", pin_type=PinType.PASSIVE)),
+        ))
+    reqs = ProjectRequirements(
+        project=ProjectInfo(name="Big"),
+        features=(FeatureBlock(
+            name="Analog", description="", nets=(), subcircuits=(),
+            components=tuple(c.ref for c in components),
+        ),),
+        components=tuple(components),
+        nets=(),
+    )
+    sch = build_schematic(reqs)
+    assert sch.paper == "A3"
+
+
+def test_auto_a3_for_large_pin_component() -> None:
+    """A component with >=20 pins triggers A3 even with few components."""
+    pins = tuple(
+        Pin(number=str(i + 1), name=f"P{i + 1}", pin_type=PinType.PASSIVE, net="SIG")
+        for i in range(20)
+    )
+    reqs = ProjectRequirements(
+        project=ProjectInfo(name="BigChip"),
+        features=(FeatureBlock(
+            name="MCU", description="", components=("U1",),
+            nets=("SIG",), subcircuits=(),
+        ),),
+        components=(Component(ref="U1", value="IC", footprint="QFP", pins=pins),),
+        nets=(Net(name="SIG", connections=(NetConnection(ref="U1", pin="1"),)),),
+    )
+    sch = build_schematic(reqs)
+    assert sch.paper == "A3"
+
+
+def test_a4_for_small_design() -> None:
+    """Designs with <=15 components and <60 active pins stay on A4."""
+    reqs = _minimal_requirements()
+    sch = build_schematic(reqs)
+    assert sch.paper == "A4"
+
+
+# ---------------------------------------------------------------------------
+# Power symbol consolidation tests
+# ---------------------------------------------------------------------------
+
+
+def test_power_consolidation_single_pin_no_bus() -> None:
+    """A single GND pin produces one power symbol and one stub wire."""
+    reqs = _minimal_requirements()
+    sch = build_schematic(reqs)
+    gnd_syms = [ps for ps in sch.power_symbols if ps.value == "GND"]
+    # At least one GND symbol (from the minimal requirements)
+    assert len(gnd_syms) >= 1
+
+
+def test_power_consolidation_multi_pin_same_side() -> None:
+    """Multiple GND pins on the same side of one component produce one symbol."""
+    # Build a component with 4 right-side GND pins
+    gnd_pins = tuple(
+        Pin(number=str(i + 1), name=f"GND{i + 1}", pin_type=PinType.POWER_IN, net="GND")
+        for i in range(4)
+    )
+    sig_pin = Pin(number="5", name="SIG", pin_type=PinType.INPUT, net="SIG1")
+    comp = Component(
+        ref="J1", value="CONN", footprint="PinHeader_1x05",
+        pins=(*gnd_pins, sig_pin),
+    )
+    reqs = ProjectRequirements(
+        project=ProjectInfo(name="MultiGND"),
+        features=(FeatureBlock(
+            name="Connectors", description="", components=("J1",),
+            nets=("GND", "SIG1"), subcircuits=(),
+        ),),
+        components=(comp,),
+        nets=(
+            Net(name="GND", connections=tuple(
+                NetConnection(ref="J1", pin=str(i + 1)) for i in range(4)
+            )),
+            Net(name="SIG1", connections=(NetConnection(ref="J1", pin="5"),)),
+        ),
+    )
+    sch = build_schematic(reqs)
+    gnd_syms = [ps for ps in sch.power_symbols if ps.value == "GND"]
+    # Should be consolidated to exactly 1 GND symbol (all 4 pins same ref+side)
+    assert len(gnd_syms) == 1
+    # Should have junctions for interior T-connections (4 pins, 2 interior)
+    assert len(sch.junctions) >= 2

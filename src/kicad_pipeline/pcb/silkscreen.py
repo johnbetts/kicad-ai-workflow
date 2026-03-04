@@ -195,6 +195,34 @@ def make_board_title(
     return items
 
 
+def make_dip_warning_label(
+    x: float,
+    y: float,
+    layer: str = LAYER_F_SILKSCREEN,
+) -> FootprintText:
+    """Generate a silkscreen warning label for a DIP switch.
+
+    Warns the user that only one switch should be active at a time to
+    prevent short circuits.
+
+    Args:
+        x: X coordinate in board space (mm).
+        y: Y coordinate in board space (mm).
+        layer: Target silkscreen layer (default F.SilkS).
+
+    Returns:
+        A :class:`FootprintText` with the warning message.
+    """
+    return FootprintText(
+        text_type="user",
+        text="ONE SWITCH AT A TIME",
+        position=Point(x=x, y=y),
+        layer=layer,
+        effects_size=0.8,
+        hidden=False,
+    )
+
+
 def make_pin1_indicator(
     x: float,
     y: float,

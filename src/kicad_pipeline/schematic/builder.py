@@ -12,6 +12,7 @@ into a single pipeline entry point.  The primary public surface is:
 
 from __future__ import annotations
 
+import datetime
 import logging
 import uuid
 from dataclasses import replace
@@ -521,17 +522,43 @@ def _collect_power_nets(requirements: ProjectRequirements) -> list[str]:
     return result
 
 
+def _power_symbol_offset(
+    side: str, stub: float, is_gnd: bool,
+) -> tuple[float, float, float]:
+    """Compute (dx, dy, rotation) for a power symbol relative to its pin.
+
+    Args:
+        side: Pin side on the component body.
+        stub: Distance in mm from pin to power symbol.
+        is_gnd: Whether this is a ground net.
+
+    Returns:
+        Tuple of (dx, dy, rotation_degrees).
+    """
+    if side == "top":
+        return 0.0, -stub, (0.0 if not is_gnd else 180.0)
+    if side == "bottom":
+        return 0.0, stub, (180.0 if not is_gnd else 0.0)
+    if side == "right":
+        return stub, 0.0, (270.0 if not is_gnd else 90.0)
+    # left (default)
+    return -stub, 0.0, (90.0 if not is_gnd else 270.0)
+
+
 def _make_power_symbols_at_pins(
     power_net_names: list[str],
     pin_positions: dict[tuple[str, str], Point],
     pin_sides: dict[tuple[str, str], str],
     requirements: ProjectRequirements,
-) -> tuple[list[PowerSymbol], list[Wire], list[GlobalLabel]]:
-    """Create :class:`PowerSymbol` instances at every power pin location.
+) -> tuple[list[PowerSymbol], list[Wire], list[GlobalLabel], list[Junction]]:
+    """Create :class:`PowerSymbol` instances at power pin locations.
 
-    Every pin on a recognised power net gets its own power symbol — this
-    matches standard KiCad schematic practice where each GND/VCC pin has a
-    dedicated symbol rather than a net label.
+    When multiple pins on the same component, same side, and same power net
+    exist, they are consolidated into a single power symbol at their vertical
+    (or horizontal) midpoint.  A bus wire connects all pins to the shared
+    symbol, with junctions at each T-connection (except bus endpoints).
+
+    Single-pin groups keep the original one-symbol-per-pin behaviour.
 
     Args:
         power_net_names: Recognised power net names.
@@ -540,63 +567,121 @@ def _make_power_symbols_at_pins(
         requirements: Project requirements (for net connection lists).
 
     Returns:
-        Tuple of (power_symbols, wires, extra_global_labels).
+        Tuple of ``(power_symbols, wires, extra_global_labels, junctions)``.
     """
     symbols: list[PowerSymbol] = []
     wires: list[Wire] = []
+    junctions: list[Junction] = []
     pwr_idx = 0
     power_set = set(power_net_names)
+    stub = 7.62  # mm distance from pin to power symbol
+
+    # Group pins by (ref, net_name, side) so duplicates can be consolidated
+    _group_key = tuple[str, str, str]  # (ref, net_name, side)
+    groups: dict[_group_key, list[tuple[str, Point]]] = {}
 
     for net in requirements.nets:
         if net.name not in power_set:
             continue
-        lib_id = _POWER_LIB_IDS.get(net.name, f"power:{net.name}")
-        is_gnd = net.name in _GND_NETS
-
         for conn in net.connections:
             pin_key = (conn.ref, conn.pin)
             pin_pos = pin_positions.get(pin_key)
             if pin_pos is None:
                 continue
-
             side = pin_sides.get(pin_key, "left")
-            stub = 5.08  # mm distance from pin to power symbol
+            gk: _group_key = (conn.ref, net.name, side)
+            groups.setdefault(gk, []).append((conn.pin, pin_pos))
 
-            # Inline routing: single straight wire in the pin's outward direction.
-            # Rotation values verified against KiCad power.kicad_sym pin positions:
-            #   +5V pin at (0,0) pointing down → arrow up at rot 0
-            #   GND pin at (0,0) pointing up → triangle down at rot 0
-            if side == "top":
-                sx, sy = pin_pos.x, pin_pos.y - stub
-                rotation = 0.0 if not is_gnd else 180.0
-            elif side == "bottom":
-                sx, sy = pin_pos.x, pin_pos.y + stub
-                rotation = 180.0 if not is_gnd else 0.0
-            elif side == "right":
-                sx, sy = pin_pos.x + stub, pin_pos.y
-                rotation = 270.0 if not is_gnd else 90.0
-            else:  # left
-                sx, sy = pin_pos.x - stub, pin_pos.y
-                rotation = 90.0 if not is_gnd else 270.0
+    for (_ref, net_name, side), pin_list in groups.items():
+        lib_id = _POWER_LIB_IDS.get(net_name, f"power:{net_name}")
+        is_gnd = net_name in _GND_NETS
+        dx, dy, rotation = _power_symbol_offset(side, stub, is_gnd)
 
-            # Single straight wire from pin to power symbol
-            pwr_wires = [Wire(
+        if len(pin_list) == 1:
+            # Single pin — original behaviour: one stub wire + one symbol
+            _pin_num, pin_pos = pin_list[0]
+            sx, sy = pin_pos.x + dx, pin_pos.y + dy
+            wires.append(Wire(
                 start=pin_pos, end=Point(x=sx, y=sy),
                 stroke=Stroke(), uuid=_new_uuid(),
-            )]
-
+            ))
             pwr_idx += 1
             symbols.append(PowerSymbol(
                 lib_id=lib_id,
                 position=Point(x=sx, y=sy),
                 ref=f"#PWR0{pwr_idx:02d}",
-                value=net.name,
+                value=net_name,
                 rotation=rotation,
                 uuid=_new_uuid(),
             ))
-            wires.extend(pwr_wires)
+            continue
 
-    return symbols, wires, []
+        # Multiple pins — consolidate: one symbol at midpoint, bus wire
+        # Sort pins by the axis perpendicular to the stub direction.
+        is_vertical_stub = side in ("top", "bottom")
+        if is_vertical_stub:
+            # Pins arranged horizontally; bus is horizontal
+            pin_list.sort(key=lambda p: p[1].x)
+        else:
+            # Pins arranged vertically; bus is vertical
+            pin_list.sort(key=lambda p: p[1].y)
+
+        # Compute bus line coordinate (offset from pins by stub distance)
+        first_pos = pin_list[0][1]
+        bus_fixed = (first_pos.y + dy) if is_vertical_stub else (first_pos.x + dx)
+
+        # Compute midpoint along the bus for the power symbol
+        if is_vertical_stub:
+            coords = [p.x for _, p in pin_list]
+            mid = (min(coords) + max(coords)) / 2.0
+            sym_x, sym_y = mid, bus_fixed
+        else:
+            coords = [p.y for _, p in pin_list]
+            mid = (min(coords) + max(coords)) / 2.0
+            sym_x, sym_y = bus_fixed, mid
+
+        pwr_idx += 1
+        symbols.append(PowerSymbol(
+            lib_id=lib_id,
+            position=Point(x=sym_x, y=sym_y),
+            ref=f"#PWR0{pwr_idx:02d}",
+            value=net_name,
+            rotation=rotation,
+            uuid=_new_uuid(),
+        ))
+
+        # Draw bus wire spanning all pin stub endpoints
+        if is_vertical_stub:
+            bus_start = Point(x=pin_list[0][1].x, y=bus_fixed)
+            bus_end = Point(x=pin_list[-1][1].x, y=bus_fixed)
+        else:
+            bus_start = Point(x=bus_fixed, y=pin_list[0][1].y)
+            bus_end = Point(x=bus_fixed, y=pin_list[-1][1].y)
+
+        wires.append(Wire(
+            start=bus_start, end=bus_end,
+            stroke=Stroke(), uuid=_new_uuid(),
+        ))
+
+        # Draw horizontal/vertical stub wires from each pin to the bus,
+        # and add junctions at T-connections (all except first and last)
+        for idx, (_pin_num, pin_pos) in enumerate(pin_list):
+            if is_vertical_stub:
+                stub_end = Point(x=pin_pos.x, y=bus_fixed)
+            else:
+                stub_end = Point(x=bus_fixed, y=pin_pos.y)
+            wires.append(Wire(
+                start=pin_pos, end=stub_end,
+                stroke=Stroke(), uuid=_new_uuid(),
+            ))
+            # Add junction at T-connections (interior points on bus)
+            if 0 < idx < len(pin_list) - 1:
+                junctions.append(Junction(
+                    position=stub_end,
+                    uuid=_new_uuid(),
+                ))
+
+    return symbols, wires, [], junctions
 
 
 def _refine_feature_map_by_connectivity(
@@ -711,8 +796,9 @@ def build_schematic(
         1 for c in requirements.components for p in c.pins
         if p.net is not None
     )
+    max_pins = max((len(c.pins) for c in requirements.components), default=0)
     paper = "A4"
-    if len(requirements.components) > 30 or active_pins > 120:
+    if len(requirements.components) > 15 or active_pins > 60 or max_pins >= 20:
         paper = "A3"
         log.info(
             "build_schematic: auto-selected A3 page (%d components, %d pins)",
@@ -822,11 +908,12 @@ def build_schematic(
     # Step 6: Power symbols at pin locations
     # ------------------------------------------------------------------
     power_net_names = _collect_power_nets(requirements)
-    power_syms, power_wires, power_labels = _make_power_symbols_at_pins(
+    power_syms, power_wires, power_labels, power_junctions = _make_power_symbols_at_pins(
         power_net_names, pin_positions, pin_sides, requirements,
     )
     all_wires.extend(power_wires)
     all_global_labels.extend(power_labels)
+    all_junctions.extend(power_junctions)
 
     # ------------------------------------------------------------------
     # Step 7: No-connect markers for pins with no net assignment
@@ -866,6 +953,10 @@ def build_schematic(
         version=KICAD_SCH_VERSION,
         generator=KICAD_GENERATOR,
         paper=paper,
+        title=requirements.project.name,
+        date=datetime.date.today().isoformat(),
+        revision=requirements.project.revision,
+        company=requirements.project.author or "",
     )
 
 
@@ -1237,6 +1328,19 @@ def schematic_to_sexp(
         ["uuid", str(uuid.uuid4())],
         ["paper", schematic.paper],
     ]
+
+    # Title block
+    if schematic.title or schematic.date or schematic.revision or schematic.company:
+        title_block: list[SExpNode] = ["title_block"]
+        if schematic.title:
+            title_block.append(["title", schematic.title])
+        if schematic.date:
+            title_block.append(["date", schematic.date])
+        if schematic.revision:
+            title_block.append(["rev", schematic.revision])
+        if schematic.company:
+            title_block.append(["company", schematic.company])
+        root.append(title_block)
 
     # lib_symbols section
     lib_syms_node: list[SExpNode] = ["lib_symbols"]

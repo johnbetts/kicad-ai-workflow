@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import ProjectRequirements
 
 _GND_NET_NAMES: frozenset[str] = frozenset({"GND", "AGND", "DGND"})
+_POWER_NET_NAMES: frozenset[str] = frozenset({"VCC", "+5V", "+3V3", "+3.3V", "+1V8", "VBUS"})
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def run_electrical_checks(
     violations.extend(_check_decoupling_caps(pcb, requirements))
     violations.extend(_check_power_rail_voltage(requirements))
     violations.extend(_check_short_circuit(pcb))
+    violations.extend(_check_dip_switch_protection(requirements))
 
     return ElectricalReport(violations=tuple(violations))
 
@@ -153,6 +155,48 @@ def _check_power_rail_voltage(
                     severity=Severity.ERROR,
                 )
             )
+    return violations
+
+
+def _check_dip_switch_protection(
+    requirements: ProjectRequirements | None,
+) -> list[DRCViolation]:
+    """Warn if a DIP switch has outputs connecting to power nets without series resistors."""
+    if requirements is None:
+        return []
+
+    violations: list[DRCViolation] = []
+
+    # Find DIP switch components
+    dip_switches = [
+        c for c in requirements.components
+        if c.footprint.upper().startswith("SW_DIP")
+    ]
+
+    all_power = _GND_NET_NAMES | _POWER_NET_NAMES
+
+    for sw in dip_switches:
+        # Check if any switch pin connects directly to a power net
+        power_pins: list[str] = []
+        for pin in sw.pins:
+            if pin.net is not None and pin.net in all_power:
+                power_pins.append(pin.number)
+
+        if len(power_pins) >= 2:
+            # Multiple pins on power nets without series protection
+            violations.append(
+                DRCViolation(
+                    rule="dip_switch_protection",
+                    message=(
+                        f"DIP switch {sw.ref} has {len(power_pins)} pins "
+                        f"connected directly to power nets ({', '.join(power_pins)}). "
+                        f"Add series resistors to prevent short circuits."
+                    ),
+                    severity=Severity.WARNING,
+                    ref=sw.ref,
+                )
+            )
+
     return violations
 
 
