@@ -212,12 +212,13 @@ def _restore_pad_marks(
     zone for routing, nearby pad B's zone might also get cleared.  After
     routing, this function restores ALL pad marks with correct clearances.
     """
+    _half_track_width = 0.125
     for fp in footprints:
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
-            cl = _PAD_CLEARANCE_MM
+            cl = _PAD_CLEARANCE_MM + _half_track_width
             if net_clearances is not None and pad.net_name:
-                cl = max(cl, net_clearances.get(pad.net_name, cl))
+                cl = max(cl, net_clearances.get(pad.net_name, cl) + _half_track_width)
             _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
 
 
@@ -238,13 +239,17 @@ def _prepare_grid(
         keepouts: Keepout zones whose areas are marked occupied.
         net_clearances: Optional per-net clearance overrides for pad marking.
     """
-    # Mark all pad areas with their actual size + clearance margin
+    # Mark all pad areas with their actual size + clearance margin.
+    # Clearance includes half the default track width (0.125mm) because
+    # KiCad measures clearance from copper edge to copper edge, not from
+    # track center to pad edge.
+    _half_track_width = 0.125  # half of default 0.25mm track
     for fp in footprints:
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
-            cl = _PAD_CLEARANCE_MM
+            cl = _PAD_CLEARANCE_MM + _half_track_width
             if net_clearances is not None and pad.net_name:
-                cl = max(cl, net_clearances.get(pad.net_name, cl))
+                cl = max(cl, net_clearances.get(pad.net_name, cl) + _half_track_width)
             _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
 
     # Mark board-edge margins as occupied
@@ -473,7 +478,8 @@ def route_net(
     # Temporarily unmark same-net pad areas (including clearance) so the
     # router can reach and exit them.  After routing, ALL pad areas are
     # restored to prevent cross-net contamination.
-    pad_cl = max(_PAD_CLEARANCE_MM, request.clearance_mm)
+    _htw = 0.125  # half default track width, must match _prepare_grid
+    pad_cl = max(_PAD_CLEARANCE_MM + _htw, request.clearance_mm + _htw)
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 

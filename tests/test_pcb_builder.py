@@ -196,17 +196,17 @@ def test_build_pcb_has_netclasses() -> None:
     assert "Default" in names
 
 
-def test_build_pcb_no_tracks_yet() -> None:
-    """Fresh PCBDesign has no tracks (autorouter adds them)."""
+def test_build_pcb_no_tracks_when_routing_disabled() -> None:
+    """PCBDesign has no tracks when auto_route is disabled."""
     req = _make_requirements()
-    design = build_pcb(req)
+    design = build_pcb(req, auto_route=False)
     assert len(design.tracks) == 0
 
 
-def test_build_pcb_no_vias_yet() -> None:
-    """Fresh PCBDesign has no vias (autorouter adds them)."""
+def test_build_pcb_no_vias_when_routing_disabled() -> None:
+    """PCBDesign has no vias when auto_route is disabled."""
     req = _make_requirements()
-    design = build_pcb(req)
+    design = build_pcb(req, auto_route=False)
     assert len(design.vias) == 0
 
 
