@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-import shutil
-import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1776,25 +1774,15 @@ def write_pcb(
 
 
 def _fill_zones(pcb_path: Path) -> None:
-    """Run ``kicad-cli pcb fill-zones`` on *pcb_path* if available."""
-    cli = shutil.which("kicad-cli")
-    if cli is None:
-        log.warning(
-            "kicad-cli not found on PATH; zones not filled. "
-            "GND stitching vias may appear unconnected in DRC."
-        )
-        return
-    log.info("Filling zones via kicad-cli: %s", pcb_path)
-    try:
-        subprocess.run(
-            [cli, "pcb", "fill-zones", str(pcb_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        log.info("Zone fill complete: %s", pcb_path)
-    except subprocess.CalledProcessError as exc:
-        log.warning("kicad-cli fill-zones failed: %s", exc.stderr or exc)
-    except subprocess.TimeoutExpired:
-        log.warning("kicad-cli fill-zones timed out after 30s")
+    """Log that zone fill requires KiCad GUI.
+
+    KiCad 9's ``kicad-cli`` does not expose a ``fill-zones`` subcommand.
+    Zone fill only happens when the PCB is opened in the KiCad GUI.
+    GND stitching vias will show as "dangling" and GND pads as
+    "unconnected" in CLI DRC until zones are filled interactively.
+    """
+    log.info(
+        "Zone fill requires KiCad GUI; CLI DRC will report GND "
+        "stitching vias as dangling until the board is opened in KiCad. "
+        "(%s)", pcb_path,
+    )

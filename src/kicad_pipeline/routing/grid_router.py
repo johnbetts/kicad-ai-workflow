@@ -270,6 +270,44 @@ def _global_pad_clearance(
     return max_cl + htw
 
 
+def _track_crosses_other_pads(
+    tracks: list[Track] | tuple[Track, ...],
+    net_number: int,
+    footprints: list[Footprint],
+    clearance_mm: float = 0.05,
+) -> bool:
+    """Return True if any F.Cu track crosses a pad on a different net.
+
+    Used to validate IC final-leg stubs: if a B.Cu fallback creates an
+    F.Cu stub that crosses another IC pad, the connection should be
+    discarded rather than creating a DRC short.
+    """
+    for fp in footprints:
+        for pad in fp.pads:
+            px, py = _pad_abs_pos(fp, pad)
+            phw, phh = _pad_rotated_half_size(fp, pad)
+            # Skip pads on the same net or unconnected pads
+            if pad.net_number is not None and pad.net_number == net_number:
+                continue
+            for t in tracks:
+                if t.layer != "F.Cu":
+                    continue
+                hw = t.width / 2.0
+                # Quick AABB check: does the track segment bounding box
+                # overlap the pad rectangle (with clearance)?
+                tx0 = min(t.start.x, t.end.x) - hw
+                tx1 = max(t.start.x, t.end.x) + hw
+                ty0 = min(t.start.y, t.end.y) - hw
+                ty1 = max(t.start.y, t.end.y) + hw
+                pad_x0 = px - phw - clearance_mm
+                pad_x1 = px + phw + clearance_mm
+                pad_y0 = py - phh - clearance_mm
+                pad_y1 = py + phh + clearance_mm
+                if tx1 > pad_x0 and tx0 < pad_x1 and ty1 > pad_y0 and ty0 < pad_y1:
+                    return True
+    return False
+
+
 def _restore_pad_marks(
     grid: _Grid,
     footprints: list[Footprint],
@@ -1287,11 +1325,15 @@ def route_net(
             )
             if bcu_result is not None:
                 bcu_tracks, (via_s, via_g) = bcu_result
-                all_tracks.extend(bcu_tracks)
-                all_vias.extend([via_s, via_g])
-                routed_set.add(best_to)
-                unrouted.discard(best_to)
-                continue
+                # Validate F.Cu stubs don't cross other-net pads
+                if not _track_crosses_other_pads(
+                    bcu_tracks, request.net_number, footprints,
+                ):
+                    all_tracks.extend(bcu_tracks)
+                    all_vias.extend([via_s, via_g])
+                    routed_set.add(best_to)
+                    unrouted.discard(best_to)
+                    continue
 
         if path is None:
             # Restore all pad markings that may have been cleared
@@ -1393,11 +1435,13 @@ def route_net(
             goal_col, goal_row = grid.to_cell(ic_pi.x, ic_pi.y)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
+            ic_routed = False
             if path is not None:
+                fcu_segs: list[Track] = []
                 for j in range(len(path) - 1):
                     x1, y1 = grid.to_mm(path[j][0], path[j][1])
                     x2, y2 = grid.to_mm(path[j + 1][0], path[j + 1][1])
-                    all_tracks.append(
+                    fcu_segs.append(
                         Track(
                             start=Point(x1, y1),
                             end=Point(x2, y2),
@@ -1407,34 +1451,41 @@ def route_net(
                             uuid="",
                         )
                     )
-                # Mark path with exclusion
-                for cell_col, cell_row in path:
-                    for dc in range(-excl_cells, excl_cells + 1):
-                        for dr in range(-excl_cells, excl_cells + 1):
-                            grid.mark(cell_col + dc, cell_row + dr)
-            else:
-                # F.Cu failed — try B.Cu fallback for IC pad
-                if bcu_grid is not None:
-                    bcu_result = _route_on_bcu(
-                        best_pi.x, best_pi.y, ic_pi.x, ic_pi.y,
-                        bcu_grid, request.net_number, request.net_name,
-                        ic_stub_width, request.clearance_mm,
-                        fcu_grid=grid,
-                    )
-                    if bcu_result is not None:
-                        bcu_tracks, (via_s, via_g) = bcu_result
+                # Validate: discard if path crosses other-net pads
+                if not _track_crosses_other_pads(
+                    fcu_segs, request.net_number, footprints,
+                ):
+                    all_tracks.extend(fcu_segs)
+                    # Mark path with exclusion
+                    for cell_col, cell_row in path:
+                        for dc in range(-excl_cells, excl_cells + 1):
+                            for dr in range(-excl_cells, excl_cells + 1):
+                                grid.mark(cell_col + dc, cell_row + dr)
+                    ic_routed = True
+
+            if not ic_routed and bcu_grid is not None:
+                # F.Cu failed or crossed other pads — try B.Cu fallback
+                bcu_result = _route_on_bcu(
+                    best_pi.x, best_pi.y, ic_pi.x, ic_pi.y,
+                    bcu_grid, request.net_number, request.net_name,
+                    ic_stub_width, request.clearance_mm,
+                    fcu_grid=grid,
+                )
+                if bcu_result is not None:
+                    bcu_tracks, (via_s, via_g) = bcu_result
+                    # Validate F.Cu stubs don't cross other-net pads
+                    if not _track_crosses_other_pads(
+                        bcu_tracks, request.net_number, footprints,
+                    ):
                         all_tracks.extend(bcu_tracks)
                         all_vias.extend([via_s, via_g])
-                    else:
-                        # Re-mark the IC pad we tried
-                        _mark_pad_area(
-                            grid, px, py, ic_hw, ic_hh, pad_cl,
-                        )
-                else:
-                    # Re-mark the IC pad we tried
-                    _mark_pad_area(
-                        grid, px, py, ic_hw, ic_hh, pad_cl,
-                    )
+                        ic_routed = True
+
+            if not ic_routed:
+                # Re-mark the IC pad — couldn't route without crossing
+                _mark_pad_area(
+                    grid, px, py, ic_hw, ic_hh, pad_cl,
+                )
 
     # Restore all pad markings that may have been cleared during unmark
     _restore_pad_marks(grid, footprints, net_clearances, net_widths)

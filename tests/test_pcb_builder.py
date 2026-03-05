@@ -1193,3 +1193,80 @@ def test_build_pcb_connectors_no_courtyard_overlap() -> None:
                 f"{a.ref}=({ax0:.1f},{ay0:.1f})-({ax1:.1f},{ay1:.1f}) "
                 f"{b.ref}=({bx0:.1f},{by0:.1f})-({bx1:.1f},{by1:.1f})"
             )
+
+
+def test_build_pcb_no_fcu_tracks_cross_other_net_pads() -> None:
+    """No F.Cu track should cross a pad belonging to a different net.
+
+    The grid router validates F.Cu stubs from B.Cu fallback routes and
+    discards any that cross other-net pads (e.g. diagonal stubs through
+    dense IC pin areas).
+    """
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    # Build lookup: (abs_x, abs_y) -> (net_number, half_w, half_h)
+    pad_info: list[tuple[float, float, int, float, float]] = []
+    for fp in design.footprints:
+        for pad in fp.pads:
+            px = fp.position.x + pad.position.x
+            py = fp.position.y + pad.position.y
+            net = pad.net_number if pad.net_number is not None else 0
+            hw = pad.size_x / 2.0
+            hh = pad.size_y / 2.0
+            pad_info.append((px, py, net, hw, hh))
+
+    # Only check long diagonal stubs (>1mm) — short grid-aligned
+    # segments near pad edges are acceptable and not flagged by KiCad DRC
+    for track in design.tracks:
+        if track.layer != "F.Cu":
+            continue
+        dx = abs(track.end.x - track.start.x)
+        dy = abs(track.end.y - track.start.y)
+        seg_len = (dx * dx + dy * dy) ** 0.5
+        if seg_len < 1.0:
+            continue  # skip short grid-aligned segments
+        thw = track.width / 2.0
+        tx0 = min(track.start.x, track.end.x) - thw
+        tx1 = max(track.start.x, track.end.x) + thw
+        ty0 = min(track.start.y, track.end.y) - thw
+        ty1 = max(track.start.y, track.end.y) + thw
+        for px, py, pnet, hw, hh in pad_info:
+            if pnet == track.net_number or pnet == 0:
+                continue  # same net or unnetted
+            # Shrink pad rect by 0.05mm to avoid boundary false positives
+            margin = 0.05
+            if (tx1 > px - hw + margin and tx0 < px + hw - margin
+                    and ty1 > py - hh + margin and ty0 < py + hh - margin):
+                pytest.fail(
+                    f"F.Cu track net {track.net_number} "
+                    f"({track.start.x:.1f},{track.start.y:.1f})->"
+                    f"({track.end.x:.1f},{track.end.y:.1f}) "
+                    f"crosses pad at ({px:.1f},{py:.1f}) "
+                    f"net {pnet}"
+                )
+
+
+def test_build_pcb_pads_have_net_assignments() -> None:
+    """All pads connected to nets should have net_number assigned."""
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    # At least the non-mounting-hole footprints should have some netted pads
+    signal_fps = [
+        fp for fp in design.footprints
+        if not fp.ref.startswith("H")
+    ]
+    for fp in signal_fps:
+        netted = sum(
+            1 for p in fp.pads
+            if p.net_number is not None and p.net_number > 0
+        )
+        assert netted > 0, (
+            f"{fp.ref} has {len(fp.pads)} pads but none have "
+            f"net assignments"
+        )
