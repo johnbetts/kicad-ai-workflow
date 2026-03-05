@@ -24,7 +24,7 @@ _NETCLASS_PATTERNS: tuple[tuple[re.Pattern[str], str, float, float, float, float
     (
         re.compile(r"^(GND|\+\d*V\d*|VCC|VDD|VBUS|PWR|V_\w+|VBAT)$", re.IGNORECASE),
         "Power",
-        0.5,
+        0.3,
         0.3,
         0.8,
         0.508,

@@ -520,14 +520,13 @@ def route_net(
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
-    # Track which components have THT pads that might need sibling
-    # unmark if routing fails (deferred to retry within the routing loop).
+    # Track THT components for deferred sibling unmark (retry on A* failure).
     _tht_refs_in_net: set[str] = set()
     for ref, _ in request.pad_refs:
         fp = fp_by_ref.get(ref)
-        if fp is None or len(fp.pads) > 12:
+        if fp is None:
             continue
-        if any(p.size_x > 1.0 or p.size_y > 1.0 for p in fp.pads):
+        if any(p.size_x > 1.5 or p.size_y > 1.5 for p in fp.pads):
             _tht_refs_in_net.add(ref)
 
     # Dense IC handling: fine-pitch ICs have pad clearance zones that
@@ -629,9 +628,13 @@ def route_net(
             # create routing channels BETWEEN pads (not through them).
             # We unmark the full pad+clearance area then re-mark just
             # the pad copper, leaving only the clearance ring free.
+            # Include THT sibling pads in net_pad_set so _remark_other_pads
+            # won't re-mark them with full clearance.
+            extended_pads: set[tuple[str, str]] = set(net_pad_set)
             for ref in _tht_refs_in_net:
                 fp = fp_by_ref[ref]
                 for pad in fp.pads:
+                    extended_pads.add((ref, pad.number))
                     px, py = _pad_abs_pos(fp, pad)
                     # Unmark pad + clearance
                     _unmark_pad_area(
@@ -641,6 +644,7 @@ def route_net(
                     # Re-mark just the pad copper (no clearance)
                     _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, 0.0)
             _tht_refs_in_net.clear()  # only retry once
+            net_pad_set = frozenset(extended_pads)
             _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
@@ -767,7 +771,9 @@ def route_all_nets(
     def _sort_key(entry: NetlistEntry) -> tuple[int, float]:
         name = entry.net.name.upper()
         is_power = name.startswith("+") or "VDD" in name or "VCC" in name or "VBUS" in name
-        tier = 2 if is_power else 0
+        # Power nets route at tier 1 (after short signal nets but before long
+        # signal nets) — gives them enough space while prioritising local nets.
+        tier = 1 if is_power else 0
         return (tier, _estimated_length(entry))
 
     routable.sort(key=_sort_key)
