@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import datetime
 import logging
+import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -503,10 +505,10 @@ def _has_rf_module(requirements: ProjectRequirements) -> bool:
 _GND_VIA_SPACING_MM: float = 8.0
 """Grid spacing for GND stitching vias in mm."""
 
-_GND_VIA_SIZE_MM: float = 0.8
+_GND_VIA_SIZE_MM: float = 1.0
 """Pad diameter for GND stitching vias in mm."""
 
-_GND_VIA_DRILL_MM: float = 0.4
+_GND_VIA_DRILL_MM: float = 0.6
 """Drill diameter for GND stitching vias in mm."""
 
 _GND_VIA_EDGE_MARGIN_MM: float = 1.5
@@ -1086,7 +1088,7 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
         fp.lib_id,
         ["layer", fp.layer],
         ["at", fp.position.x, fp.position.y, fp.rotation],
-        ["attr", fp.attr],
+        ["attr", *fp.attr.split()],
     ]
 
     if fp.uuid:
@@ -1406,12 +1408,20 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
 # ---------------------------------------------------------------------------
 
 
-def write_pcb(design: PCBDesign, path: str | Path) -> None:
+def write_pcb(
+    design: PCBDesign,
+    path: str | Path,
+    *,
+    fill_zones: bool = True,
+) -> None:
     """Serialise *design* and write it to a ``.kicad_pcb`` file.
 
     Args:
         design: The PCB design to write.
         path: Destination file path.  The parent directory must exist.
+        fill_zones: If True, attempt to fill zones via ``kicad-cli`` after
+            writing.  Requires ``kicad-cli`` on PATH; logs a warning if
+            unavailable.
 
     Raises:
         PCBError: If serialisation fails for any reason.
@@ -1427,3 +1437,31 @@ def write_pcb(design: PCBDesign, path: str | Path) -> None:
     except Exception as exc:
         raise PCBError(f"Failed to write PCB to {dest}: {exc}") from exc
     log.info("write_pcb: wrote %s", dest)
+
+    if fill_zones:
+        _fill_zones(dest)
+
+
+def _fill_zones(pcb_path: Path) -> None:
+    """Run ``kicad-cli pcb fill-zones`` on *pcb_path* if available."""
+    cli = shutil.which("kicad-cli")
+    if cli is None:
+        log.warning(
+            "kicad-cli not found on PATH; zones not filled. "
+            "GND stitching vias may appear unconnected in DRC."
+        )
+        return
+    log.info("Filling zones via kicad-cli: %s", pcb_path)
+    try:
+        subprocess.run(
+            [cli, "pcb", "fill-zones", str(pcb_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        log.info("Zone fill complete: %s", pcb_path)
+    except subprocess.CalledProcessError as exc:
+        log.warning("kicad-cli fill-zones failed: %s", exc.stderr or exc)
+    except subprocess.TimeoutExpired:
+        log.warning("kicad-cli fill-zones timed out after 30s")

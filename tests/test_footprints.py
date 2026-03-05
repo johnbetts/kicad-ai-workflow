@@ -466,6 +466,7 @@ def test_make_mounting_hole_default() -> None:
     assert fp.pads[0].pad_type == "np_thru_hole"
     assert fp.pads[0].drill_diameter == pytest.approx(2.75)
     assert fp.pads[0].number == ""
+    assert fp.pads[0].layers == ("*.Cu", "*.Mask")
     assert "exclude_from_bom" in fp.attr
 
 

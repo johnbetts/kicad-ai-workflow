@@ -936,7 +936,7 @@ def make_mounting_hole(
         position=Point(0.0, 0.0),
         size_x=drill_diameter,
         size_y=drill_diameter,
-        layers=(LAYER_F_CU, LAYER_B_CU),
+        layers=("*.Cu", "*.Mask"),
         drill_diameter=drill_diameter,
     )
     # Courtyard circle approximated as a rectangle
