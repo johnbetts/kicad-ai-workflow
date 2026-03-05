@@ -191,6 +191,27 @@ def _unmark_pad_area(
             grid.unmark(cc, rr)
 
 
+def _restore_pad_marks(
+    grid: _Grid,
+    footprints: list[Footprint],
+    net_clearances: dict[str, float] | None = None,
+) -> None:
+    """Re-mark all pad areas after temporarily clearing same-net pads.
+
+    This prevents cross-net contamination: when clearing pad A's clearance
+    zone for routing, nearby pad B's zone might also get cleared.  After
+    routing, this function restores ALL pad marks with correct clearances.
+    """
+    for fp in footprints:
+        for pad in fp.pads:
+            px = fp.position.x + pad.position.x
+            py = fp.position.y + pad.position.y
+            cl = _PAD_CLEARANCE_MM
+            if net_clearances is not None and pad.net_name:
+                cl = max(cl, net_clearances.get(pad.net_name, cl))
+            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
+
+
 def _prepare_grid(
     grid: _Grid,
     footprints: list[Footprint],
@@ -389,6 +410,7 @@ def route_net(
     grid_step_mm: float = 0.5,
     grid: _Grid | None = None,
     keepouts: tuple[Keepout, ...] = (),
+    net_clearances: dict[str, float] | None = None,
 ) -> RouteResult:
     """Route a single net using A* on a 2-D occupancy grid.
 
@@ -440,7 +462,9 @@ def route_net(
             reason="insufficient pad positions",
         )
 
-    # Temporarily unmark this net's own pads so the router can reach them
+    # Temporarily unmark same-net pad areas (including clearance) so the
+    # router can reach and exit them.  After routing, ALL pad areas are
+    # restored to prevent cross-net contamination.
     pad_cl = max(_PAD_CLEARANCE_MM, request.clearance_mm)
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
@@ -479,9 +503,8 @@ def route_net(
         path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None:
-            # Re-mark pads before returning failure
-            for pi in pad_infos:
-                _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
+            # Restore all pad markings that may have been cleared
+            _restore_pad_marks(grid, footprints, net_clearances)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -515,9 +538,8 @@ def route_net(
         routed_set.add(best_to)
         unrouted.discard(best_to)
 
-    # Re-mark pad cells for subsequent nets
-    for pi in pad_infos:
-        _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
+    # Restore all pad markings that may have been cleared during unmark
+    _restore_pad_marks(grid, footprints, net_clearances)
 
     return RouteResult(
         net_number=request.net_number,
@@ -607,7 +629,7 @@ def route_all_nets(
         )
         result = route_net(
             request, footprints, board_width_mm, board_height_mm,
-            grid_step_mm, grid=grid,
+            grid_step_mm, grid=grid, net_clearances=net_clearances,
         )
         results.append(result)
 
