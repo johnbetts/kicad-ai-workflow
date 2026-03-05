@@ -469,6 +469,20 @@ def route_net(
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
+    # Also unmark sibling pads on the same component to create routing
+    # channels through dense pad fields (e.g. DIP switches, connectors).
+    # Without this, through-hole pads at 2.54mm pitch block access to
+    # their neighbours because clearance zones overlap.
+    target_refs = {ref for ref, _ in request.pad_refs}
+    for ref in target_refs:
+        fp = fp_by_ref.get(ref)
+        if fp is None:
+            continue
+        for pad in fp.pads:
+            px = fp.position.x + pad.position.x
+            py = fp.position.y + pad.position.y
+            _unmark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, pad_cl)
+
     # Dense IC handling: fine-pitch ICs have pad clearance zones that
     # leave no routing space between pins.  We exclude these pads from
     # routing and only route the passive-to-passive connections.
@@ -511,9 +525,20 @@ def route_net(
                         grid, px, py,
                         pad.size_x / 2, pad.size_y / 2, pad_cl,
                     )
-        elif len(non_ic_infos) <= 1:
-            # Only 0-1 non-IC pad: skip routing this net entirely
-            # (all pads are on dense ICs that need via/manual routing)
+        elif len(non_ic_infos) == 1:
+            # One non-IC pad + IC pads: keep IC pads in routing targets
+            # but unmark their clearance zones so A* can reach them.
+            for ic_ref in ic_refs_in_net:
+                fp = fp_by_ref[ic_ref]
+                for pad in fp.pads:
+                    px = fp.position.x + pad.position.x
+                    py = fp.position.y + pad.position.y
+                    _unmark_pad_area(
+                        grid, px, py,
+                        pad.size_x / 2, pad.size_y / 2, pad_cl,
+                    )
+        elif len(non_ic_infos) == 0:
+            # All pads on dense ICs: skip routing entirely
             _restore_pad_marks(grid, footprints, net_clearances)
             return RouteResult(
                 net_number=request.net_number,
@@ -521,7 +546,7 @@ def route_net(
                 tracks=(),
                 vias=(),
                 routed=False,
-                reason="all pads on dense ICs — needs via routing",
+                reason="all pads on dense ICs - needs via routing",
             )
 
     all_tracks: list[Track] = []
