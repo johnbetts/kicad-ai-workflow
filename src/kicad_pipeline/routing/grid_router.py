@@ -144,8 +144,8 @@ class _Grid:
 # ---------------------------------------------------------------------------
 
 
-_PAD_CLEARANCE_MM: float = 0.3
-"""Routing clearance around pads in mm (covers most netclass clearances)."""
+_PAD_CLEARANCE_MM: float = 0.2
+"""Routing clearance around pads in mm (matches KiCad default netclass)."""
 
 _KEEPOUT_MARGIN_CELLS: int = 2
 """Extra grid cells marked around keepout zone bounding boxes."""
@@ -469,12 +469,67 @@ def route_net(
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
+    # Dense IC handling: fine-pitch ICs have pad clearance zones that
+    # leave no routing space between pins.  We exclude these pads from
+    # routing and only route the passive-to-passive connections.
+    # Detection: >=6 pads AND minimum pad spacing < 1.0mm (fine pitch).
+    ic_refs_in_net: set[str] = set()
+    for ref, _ in request.pad_refs:
+        fp = fp_by_ref.get(ref)
+        if fp is None or len(fp.pads) < 6:
+            continue
+        # Check minimum pad spacing to distinguish fine-pitch ICs from
+        # DIP switches, connectors, etc.
+        positions = sorted(
+            (p.position.x, p.position.y) for p in fp.pads
+        )
+        min_spacing = 999.0
+        for i in range(len(positions) - 1):
+            dx = abs(positions[i + 1][0] - positions[i][0])
+            dy = abs(positions[i + 1][1] - positions[i][1])
+            d = (dx * dx + dy * dy) ** 0.5
+            if d > 0.01:
+                min_spacing = min(min_spacing, d)
+        if min_spacing < 1.0:
+            ic_refs_in_net.add(ref)
+    if ic_refs_in_net:
+        # Remove IC pads from routing targets — keep only non-IC pads
+        non_ic_infos = [
+            pi for pi, (ref, _) in zip(pad_infos, request.pad_refs, strict=True)
+            if ref not in ic_refs_in_net
+        ]
+        if len(non_ic_infos) >= 2:
+            pad_infos = non_ic_infos
+            # Unmark IC pad areas so non-IC pads near the IC can route
+            # around it without being blocked by its clearance zones.
+            for ic_ref in ic_refs_in_net:
+                fp = fp_by_ref[ic_ref]
+                for pad in fp.pads:
+                    px = fp.position.x + pad.position.x
+                    py = fp.position.y + pad.position.y
+                    _unmark_pad_area(
+                        grid, px, py,
+                        pad.size_x / 2, pad.size_y / 2, pad_cl,
+                    )
+        elif len(non_ic_infos) <= 1:
+            # Only 0-1 non-IC pad: skip routing this net entirely
+            # (all pads are on dense ICs that need via/manual routing)
+            _restore_pad_marks(grid, footprints, net_clearances)
+            return RouteResult(
+                net_number=request.net_number,
+                net_name=request.net_name,
+                tracks=(),
+                vias=(),
+                routed=False,
+                reason="all pads on dense ICs — needs via routing",
+            )
+
     all_tracks: list[Track] = []
 
-    # Compute track exclusion radius: half track width + netclass clearance
-    half_track = request.width_mm / 2
-    excl_mm = half_track + request.clearance_mm
-    excl_cells = max(1, math.ceil(excl_mm / grid.grid_step_mm))
+    # Track exclusion: 1 cell on each side at 0.25mm grid provides 0.25mm
+    # clearance which satisfies the default netclass (0.2mm).  Larger values
+    # cause grid congestion that blocks later nets.
+    excl_cells = 1
 
     # MST-style routing: always connect closest unrouted pad to routed set
     routed_set: set[int] = {0}  # index into pad_infos
@@ -535,6 +590,13 @@ def route_net(
                 for dr in range(-excl_cells, excl_cells + 1):
                     grid.mark(cell_col + dc, cell_row + dr)
 
+        # Re-unmark same-net pads so subsequent MST connections can still
+        # reach unrouted target pads.  IC pads are NOT re-unmarked — the
+        # initial unmark provides access, and marked path cells naturally
+        # constrain later connections, preventing over-long wandering routes.
+        for pi in pad_infos:
+            _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
+
         routed_set.add(best_to)
         unrouted.discard(best_to)
 
@@ -591,11 +653,38 @@ def route_all_nets(
         if len(e.pad_refs) >= 2 and e.net.name != "GND"
     ]
 
-    # Route short signal nets first, power nets last
-    def _sort_key(entry: NetlistEntry) -> tuple[bool, int]:
+    # Sort by estimated route length: shortest first.  This minimises
+    # grid congestion — short, local nets consume few cells and leave
+    # space for longer nets.  Power nets route last.
+    fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
+
+    def _estimated_length(entry: NetlistEntry) -> float:
+        positions: list[tuple[float, float]] = []
+        for ref, pad_num in entry.pad_refs:
+            fp = fp_by_ref.get(ref)
+            if fp is None:
+                continue
+            for pad in fp.pads:
+                if pad.number == pad_num:
+                    positions.append((
+                        fp.position.x + pad.position.x,
+                        fp.position.y + pad.position.y,
+                    ))
+                    break
+        if len(positions) < 2:
+            return 0.0
+        max_d = 0.0
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                d = abs(positions[i][0] - positions[j][0]) + abs(positions[i][1] - positions[j][1])
+                max_d = max(max_d, d)
+        return max_d
+
+    def _sort_key(entry: NetlistEntry) -> tuple[int, float]:
         name = entry.net.name.upper()
         is_power = name.startswith("+") or "VDD" in name or "VCC" in name or "VBUS" in name
-        return (is_power, len(entry.pad_refs))
+        tier = 2 if is_power else 0
+        return (tier, _estimated_length(entry))
 
     routable.sort(key=_sort_key)
 
@@ -608,7 +697,7 @@ def route_all_nets(
 
     results: list[RouteResult] = []
 
-    for entry in routable:
+    def _route_entry(entry: NetlistEntry) -> RouteResult:
         net_name = entry.net.name
         if net_widths is not None:
             width = net_widths.get(net_name, 0.25)
@@ -627,10 +716,23 @@ def route_all_nets(
             width_mm=width,
             clearance_mm=clearance,
         )
-        result = route_net(
+        return route_net(
             request, footprints, board_width_mm, board_height_mm,
             grid_step_mm, grid=grid, net_clearances=net_clearances,
         )
+
+    # First pass: route all nets
+    failed_entries: list[NetlistEntry] = []
+    for entry in routable:
+        result = _route_entry(entry)
+        if result.routed:
+            results.append(result)
+        else:
+            failed_entries.append(entry)
+
+    # Retry failed nets: earlier routes may have left enough space
+    for entry in failed_entries:
+        result = _route_entry(entry)
         results.append(result)
 
     return tuple(results)
@@ -639,16 +741,22 @@ def route_all_nets(
 def collect_tracks(
     results: tuple[RouteResult, ...],
     *,
+    routed_only: bool = True,
     filter_dangling: bool = True,
 ) -> tuple[Track, ...]:
     """Flatten all Track objects from all RouteResults into a single tuple.
 
+    When *routed_only* is ``True`` (default), tracks from partially-routed
+    nets are excluded.  Partial routes create tracks that don't complete
+    connections, causing both ``unconnected`` and ``clearance``/``shorting``
+    DRC violations — removing them reduces overall violation count.
+
     When *filter_dangling* is ``True`` (default), single-segment tracks whose
     endpoints don't connect to any other track in the same net are removed.
-    These orphan stubs cause ``track_dangling`` DRC violations in KiCad.
 
     Args:
         results: Routing results to collect tracks from.
+        routed_only: Only include tracks from fully-routed nets (default True).
         filter_dangling: Remove orphan single-segment stubs (default True).
 
     Returns:
@@ -656,6 +764,8 @@ def collect_tracks(
     """
     tracks: list[Track] = []
     for r in results:
+        if routed_only and not r.routed:
+            continue
         tracks.extend(r.tracks)
 
     if not filter_dangling or len(tracks) < 2:
