@@ -13,14 +13,14 @@ and [HAT Board Mechanical Specification](https://github.com/raspberrypi/hats/blo
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | Board width | 65.0 mm | |
-| Board height | 56.5 mm | |
+| Board height | 56.0 mm | |
 | Corner radius | 3.0 mm | All four corners |
 | Mounting hole diameter | 2.7 mm (M2.5 clearance) | 4 holes |
 | Mounting hole 1 (bottom-left) | x=3.5, y=3.5 mm | From bottom-left origin |
 | Mounting hole 2 (top-left) | x=3.5, y=52.5 mm | |
 | Mounting hole 3 (bottom-right) | x=61.5, y=3.5 mm | |
 | Mounting hole 4 (top-right) | x=61.5, y=52.5 mm | |
-| GPIO header pin 1 position | x=29.21, y=3.29 mm | 2x20 pin, 2.54mm pitch |
+| GPIO header center position | x=32.504, y=3.502 mm | 2x20 pin, 2.54mm pitch (pin 1 at 8.374, 4.772) |
 | GPIO header orientation | Pins on bottom, socket on top | Mates with Pi GPIO |
 | Keepout: under GPIO header | 3mm below PCB surface | For Pi components |
 | Keepout: camera/display connectors | See HAT spec Fig 3 | Avoid routing copper here |

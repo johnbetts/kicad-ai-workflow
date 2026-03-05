@@ -48,7 +48,11 @@ from kicad_pipeline.models.pcb import (
     ZonePolygon,
 )
 from kicad_pipeline.pcb.board_templates import get_template
-from kicad_pipeline.pcb.footprints import estimate_footprint_size, footprint_for_component
+from kicad_pipeline.pcb.footprints import (
+    estimate_footprint_size,
+    footprint_for_component,
+    make_mounting_hole,
+)
 from kicad_pipeline.pcb.netclasses import classify_nets
 from kicad_pipeline.pcb.placement import LayoutResult, layout_pcb
 from kicad_pipeline.pcb.silkscreen import add_silkscreen_to_footprint
@@ -496,6 +500,109 @@ def _has_rf_module(requirements: ProjectRequirements) -> bool:
     return False
 
 
+_GND_VIA_SPACING_MM: float = 8.0
+"""Grid spacing for GND stitching vias in mm."""
+
+_GND_VIA_SIZE_MM: float = 0.8
+"""Pad diameter for GND stitching vias in mm."""
+
+_GND_VIA_DRILL_MM: float = 0.4
+"""Drill diameter for GND stitching vias in mm."""
+
+_GND_VIA_EDGE_MARGIN_MM: float = 1.5
+"""Minimum distance from board edge for stitching vias in mm."""
+
+_GND_VIA_FP_CLEARANCE_MM: float = 0.5
+"""Clearance from footprint bounding boxes for stitching vias in mm."""
+
+
+def _make_gnd_stitching_vias(
+    board_width_mm: float,
+    board_height_mm: float,
+    gnd_net_num: int,
+    footprints: tuple[Footprint, ...],
+    keepouts: tuple[Keepout, ...],
+) -> tuple[Via, ...]:
+    """Generate a grid of GND stitching vias across the board.
+
+    Stitching vias connect F.Cu and B.Cu GND pours, preventing the back
+    copper plane from floating.  Vias are placed on a regular grid and
+    skipped where they would overlap footprint bounding boxes or keepout
+    zones.
+
+    Args:
+        board_width_mm: Board width in mm.
+        board_height_mm: Board height in mm.
+        gnd_net_num: Net number assigned to GND.
+        footprints: All placed footprints (used for bounding-box exclusion).
+        keepouts: Keepout zones to avoid.
+
+    Returns:
+        Tuple of :class:`Via` instances.
+    """
+    import math as _m
+
+    margin = _GND_VIA_EDGE_MARGIN_MM
+    spacing = _GND_VIA_SPACING_MM
+    clr = _GND_VIA_FP_CLEARANCE_MM
+
+    # Pre-compute footprint bounding boxes (centre +/- half-size + clearance)
+    fp_boxes: list[tuple[float, float, float, float]] = []
+    for fp in footprints:
+        # Estimate size from pads + graphics extent
+        pad_xs = [fp.position.x + p.position.x for p in fp.pads] if fp.pads else [fp.position.x]
+        pad_ys = [fp.position.y + p.position.y for p in fp.pads] if fp.pads else [fp.position.y]
+        half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
+        half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
+        min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=True)) - clr
+        max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=True)) + clr
+        min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=True)) - clr
+        max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=True)) + clr
+        fp_boxes.append((min_x, min_y, max_x, max_y))
+
+    # Pre-compute keepout bounding boxes
+    ko_boxes: list[tuple[float, float, float, float]] = []
+    for ko in keepouts:
+        if ko.no_vias or ko.no_copper:
+            xs = [p.x for p in ko.polygon]
+            ys = [p.y for p in ko.polygon]
+            ko_boxes.append((min(xs), min(ys), max(xs), max(ys)))
+
+    def _blocked(x: float, y: float) -> bool:
+        """Return True if (x, y) is inside a footprint or keepout."""
+        for bx0, by0, bx1, by1 in fp_boxes:
+            if bx0 <= x <= bx1 and by0 <= y <= by1:
+                return True
+        return any(
+            bx0 <= x <= bx1 and by0 <= y <= by1
+            for bx0, by0, bx1, by1 in ko_boxes
+        )
+
+    # Generate grid
+    cols = _m.floor((board_width_mm - 2 * margin) / spacing) + 1
+    rows = _m.floor((board_height_mm - 2 * margin) / spacing) + 1
+    x_start = margin + (board_width_mm - 2 * margin - (cols - 1) * spacing) / 2.0
+    y_start = margin + (board_height_mm - 2 * margin - (rows - 1) * spacing) / 2.0
+
+    vias: list[Via] = []
+    for r in range(rows):
+        for c in range(cols):
+            vx = round(x_start + c * spacing, 3)
+            vy = round(y_start + r * spacing, 3)
+            if not _blocked(vx, vy):
+                vias.append(Via(
+                    position=Point(vx, vy),
+                    drill=_GND_VIA_DRILL_MM,
+                    size=_GND_VIA_SIZE_MM,
+                    layers=(LAYER_F_CU, LAYER_B_CU),
+                    net_number=gnd_net_num,
+                    uuid=_new_uuid(),
+                ))
+
+    log.info("build_pcb: generated %d GND stitching vias", len(vias))
+    return tuple(vias)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -775,6 +882,33 @@ def build_pcb(
     final_footprints = [add_silkscreen_to_footprint(fp) for fp in footprints_with_pos]
 
     # ------------------------------------------------------------------
+    # Step 9b: Mounting hole footprints (NPTH, no net)
+    # ------------------------------------------------------------------
+    if template_mounting_positions and template_mounting_diameter is not None:
+        for idx, (mx, my) in enumerate(template_mounting_positions, start=1):
+            mh_ref = f"H{idx}"
+            mh_fp = make_mounting_hole(mh_ref, drill_diameter=template_mounting_diameter)
+            # Place at the template-defined position
+            mh_fp = Footprint(
+                lib_id=mh_fp.lib_id,
+                ref=mh_fp.ref,
+                value=mh_fp.value,
+                position=Point(mx, my),
+                rotation=0.0,
+                layer=mh_fp.layer,
+                pads=mh_fp.pads,
+                graphics=mh_fp.graphics,
+                texts=mh_fp.texts,
+                uuid=mh_fp.uuid,
+                attr=mh_fp.attr,
+            )
+            final_footprints.append(mh_fp)
+        log.info(
+            "build_pcb: added %d mounting hole footprints",
+            len(template_mounting_positions),
+        )
+
+    # ------------------------------------------------------------------
     # Step 10: Autoroute (when enabled)
     # ------------------------------------------------------------------
     all_tracks: tuple[Track, ...] = ()
@@ -813,13 +947,24 @@ def build_pcb(
         # have plated holes.  SMD GND pads may show as "unconnected" in
         # DRC until zones are filled.
 
+    # ------------------------------------------------------------------
+    # Step 10b: GND stitching vias (connect F.Cu ↔ B.Cu ground planes)
+    # ------------------------------------------------------------------
+    gnd_vias = _make_gnd_stitching_vias(
+        board_width_mm, board_height_mm, gnd_net_num,
+        tuple(final_footprints), tuple(keepouts),
+    )
+    all_vias = all_vias + gnd_vias
+
     log.info(
-        "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, %d tracks",
+        "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "
+        "%d tracks, %d vias",
         len(final_footprints),
         len(nets),
         len(zones),
         len(keepouts),
         len(all_tracks),
+        len(all_vias),
     )
 
     return PCBDesign(

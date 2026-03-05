@@ -78,7 +78,7 @@ _TEMPLATES: dict[str, BoardTemplate] = {
     "RPI_HAT": BoardTemplate(
         name="RPI_HAT",
         board_width_mm=65.0,
-        board_height_mm=56.5,
+        board_height_mm=56.0,
         mounting_holes=(
             MountingHoleDef(x_mm=3.5, y_mm=3.5),
             MountingHoleDef(x_mm=3.5, y_mm=52.5),
@@ -88,9 +88,9 @@ _TEMPLATES: dict[str, BoardTemplate] = {
         fixed_components=(
             FixedComponentDef(
                 ref_pattern="J1",
-                x_mm=29.21,
-                y_mm=3.29,
-                description="40-pin GPIO header (pin 1 per HAT mech spec)",
+                x_mm=32.504,
+                y_mm=3.502,
+                description="40-pin GPIO header center (pin 1 at 8.374, 4.772)",
             ),
         ),
         description="Raspberry Pi HAT (Hardware Attached on Top) form factor",

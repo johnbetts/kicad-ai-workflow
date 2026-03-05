@@ -26,7 +26,7 @@ def test_get_template_rpi_hat() -> None:
     """get_template returns the RPi HAT template with correct dimensions."""
     tmpl = get_template("RPI_HAT")
     assert tmpl.board_width_mm == 65.0
-    assert tmpl.board_height_mm == 56.5
+    assert tmpl.board_height_mm == 56.0
     assert len(tmpl.mounting_holes) == 4
 
 
@@ -62,7 +62,7 @@ def test_template_to_mechanical_constraints() -> None:
     tmpl = get_template("RPI_HAT")
     mc = template_to_mechanical_constraints(tmpl)
     assert mc.board_width_mm == 65.0
-    assert mc.board_height_mm == 56.5
+    assert mc.board_height_mm == 56.0
     assert len(mc.mounting_hole_positions) == 4
     assert mc.mounting_hole_diameter_mm == pytest.approx(2.7)
 

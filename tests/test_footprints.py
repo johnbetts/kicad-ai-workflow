@@ -455,6 +455,29 @@ def test_footprint_lib_ids_all_packages() -> None:
         assert "LED_SMD:LED_" in led.lib_id, f"Bad lib_id for LED {pkg}: {led.lib_id}"
 
 
+def test_make_mounting_hole_default() -> None:
+    """make_mounting_hole generates an NPTH footprint with correct drill."""
+    from kicad_pipeline.pcb.footprints import make_mounting_hole
+
+    fp = make_mounting_hole("H1")
+    assert fp.ref == "H1"
+    assert fp.value == "MountingHole"
+    assert len(fp.pads) == 1
+    assert fp.pads[0].pad_type == "np_thru_hole"
+    assert fp.pads[0].drill_diameter == pytest.approx(2.75)
+    assert fp.pads[0].number == ""
+    assert "exclude_from_bom" in fp.attr
+
+
+def test_make_mounting_hole_custom_drill() -> None:
+    """make_mounting_hole accepts a custom drill diameter."""
+    from kicad_pipeline.pcb.footprints import make_mounting_hole
+
+    fp = make_mounting_hole("H2", drill_diameter=3.2)
+    assert fp.pads[0].drill_diameter == pytest.approx(3.2)
+    assert fp.pads[0].size_x == pytest.approx(3.2)
+
+
 def test_footprint_for_component_uses_standard_lib_id() -> None:
     """footprint_for_component routes should produce standard lib_ids."""
     r = footprint_for_component("R1", "10k", "R_0805")

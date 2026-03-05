@@ -203,11 +203,15 @@ def test_build_pcb_no_tracks_when_routing_disabled() -> None:
     assert len(design.tracks) == 0
 
 
-def test_build_pcb_no_vias_when_routing_disabled() -> None:
-    """PCBDesign has no vias when auto_route is disabled."""
+def test_build_pcb_has_gnd_stitching_vias_when_routing_disabled() -> None:
+    """PCBDesign has GND stitching vias even when auto_route is disabled."""
     req = _make_requirements()
     design = build_pcb(req, auto_route=False)
-    assert len(design.vias) == 0
+    assert len(design.vias) > 0
+    # All stitching vias should be on GND net
+    gnd_net_num = next(n.number for n in design.nets if n.name == "GND")
+    for v in design.vias:
+        assert v.net_number == gnd_net_num
 
 
 def test_build_pcb_has_keepouts() -> None:
@@ -504,7 +508,7 @@ def test_build_pcb_with_template_uses_template_dimensions() -> None:
     xs = [p.x for p in design.outline.polygon]
     ys = [p.y for p in design.outline.polygon]
     assert max(xs) == pytest.approx(65.0, abs=0.5)
-    assert max(ys) == pytest.approx(56.5, abs=0.5)
+    assert max(ys) == pytest.approx(56.0, abs=0.5)
 
 
 def test_mounting_hole_keepouts_use_actual_positions() -> None:
@@ -572,3 +576,64 @@ def test_build_pcb_with_template_applies_rotations() -> None:
     # The design should build without error; rotations should be numeric
     for fp in design.footprints:
         assert isinstance(fp.rotation, float)
+
+
+# ---------------------------------------------------------------------------
+# BUG-11: Mounting hole footprints
+# ---------------------------------------------------------------------------
+
+
+def test_build_pcb_rpi_hat_has_mounting_holes() -> None:
+    """RPi HAT template generates NPTH mounting hole footprints H1-H4."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    mh_fps = [fp for fp in design.footprints if fp.ref.startswith("H")]
+    assert len(mh_fps) == 4
+    refs = sorted(fp.ref for fp in mh_fps)
+    assert refs == ["H1", "H2", "H3", "H4"]
+    # All should be NPTH (exclude_from_bom)
+    for fp in mh_fps:
+        assert "exclude_from_bom" in fp.attr
+        assert fp.pads[0].pad_type == "np_thru_hole"
+
+
+def test_build_pcb_rpi_hat_mounting_hole_positions() -> None:
+    """Mounting holes are at the correct RPi HAT spec positions."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    mh_fps = {fp.ref: fp for fp in design.footprints if fp.ref.startswith("H")}
+    expected = {"H1": (3.5, 3.5), "H2": (3.5, 52.5), "H3": (61.5, 3.5), "H4": (61.5, 52.5)}
+    for ref, (ex, ey) in expected.items():
+        assert ref in mh_fps, f"Missing mounting hole {ref}"
+        assert mh_fps[ref].position.x == pytest.approx(ex, abs=0.01)
+        assert mh_fps[ref].position.y == pytest.approx(ey, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# BUG-12: GND stitching vias
+# ---------------------------------------------------------------------------
+
+
+def test_build_pcb_rpi_hat_has_stitching_vias() -> None:
+    """RPi HAT board generates GND stitching vias."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT", auto_route=False)
+    assert len(design.vias) > 0
+    gnd_net_num = next(n.number for n in design.nets if n.name == "GND")
+    for v in design.vias:
+        assert v.net_number == gnd_net_num
+        assert v.layers == ("F.Cu", "B.Cu")
+
+
+# ---------------------------------------------------------------------------
+# BUG-10 + BUG-13: Board template values
+# ---------------------------------------------------------------------------
+
+
+def test_rpi_hat_board_height_56mm() -> None:
+    """RPi HAT board height must be 56.0mm per official spec."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    ys = [p.y for p in design.outline.polygon]
+    board_h = max(ys) - min(ys)
+    assert board_h == pytest.approx(56.0, abs=0.5)

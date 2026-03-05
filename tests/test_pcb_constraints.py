@@ -547,7 +547,7 @@ class TestBackwardCompatibility:
 
         req = _make_requirements_for_constraints()
         tmpl = get_template("RPI_HAT")
-        board = _board(65.0, 56.5)
+        board = _board(65.0, 56.0)
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
         result = layout_pcb(req, board, footprint_sizes=sizes, board_template=tmpl)
         assert len(result.positions) == len(req.components)
@@ -559,7 +559,7 @@ class TestBackwardCompatibility:
 
         req = _make_requirements_for_constraints()
         tmpl = get_template("RPI_HAT")
-        board = _board(65.0, 56.5)
+        board = _board(65.0, 56.0)
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
         result = layout_pcb(req, board, footprint_sizes=sizes, board_template=tmpl)
         assert isinstance(result, LayoutResult)
@@ -913,7 +913,7 @@ class TestRPiHATPlacement:
 
         req = self._make_hat_requirements()
         tmpl = get_template("RPI_HAT")
-        board = _board(65.0, 56.5)
+        board = _board(65.0, 56.0)
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
         constraints = rpi_hat_constraints(req, tmpl, sizes)
         result = solve_placement(constraints, board, sizes)
@@ -1537,15 +1537,15 @@ class TestLayoutPcbRpiHatDispatch:
             ),
         )
         tmpl = get_template("RPI_HAT")
-        board = _board(65.0, 56.5)
+        board = _board(65.0, 56.0)
         sizes = {"J1": (51.0, 5.08), "U1": (3.0, 5.0)}
         result = layout_pcb(
             req, board, footprint_sizes=sizes,
-            fixed_positions={"J1": (29.21, 3.29, 0.0)},
+            fixed_positions={"J1": (32.504, 3.502, 0.0)},
             board_template=tmpl,
         )
         # J1 should be at the template fixed position
-        assert abs(result.positions["J1"].x - 29.21) < 0.01
-        assert abs(result.positions["J1"].y - 3.29) < 0.01
+        assert abs(result.positions["J1"].x - 32.504) < 0.01
+        assert abs(result.positions["J1"].y - 3.502) < 0.01
         # U1 should also be placed
         assert "U1" in result.positions

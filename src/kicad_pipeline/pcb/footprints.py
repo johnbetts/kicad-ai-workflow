@@ -909,6 +909,56 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     )
 
 
+def make_mounting_hole(
+    ref: str,
+    drill_diameter: float = 2.75,
+) -> Footprint:
+    """Generate an NPTH mounting hole footprint.
+
+    Creates a non-plated through-hole with no copper annular ring,
+    suitable for M2.5 screws (2.75mm drill) or similar mechanical
+    mounting hardware.
+
+    Args:
+        ref: Reference designator (e.g. "H1").
+        drill_diameter: Drill hole diameter in mm. Default 2.75mm
+            (M2.5 clearance hole).
+
+    Returns:
+        Fully constructed :class:`Footprint` with ``exclude_from_pos_files``
+        and ``exclude_from_bom`` attributes set.
+    """
+    _log.debug("make_mounting_hole ref=%s drill=%.2f", ref, drill_diameter)
+    pad = Pad(
+        number="",
+        pad_type="np_thru_hole",
+        shape="circle",
+        position=Point(0.0, 0.0),
+        size_x=drill_diameter,
+        size_y=drill_diameter,
+        layers=(LAYER_F_CU, LAYER_B_CU),
+        drill_diameter=drill_diameter,
+    )
+    # Courtyard circle approximated as a rectangle
+    crtyd_size = drill_diameter + 2 * PCB_COURTYARD_CLEARANCE_MM
+    graphics = _courtyard_rect(crtyd_size, crtyd_size)
+    texts = (
+        _ref_text(ref, -(crtyd_size / 2.0 + 0.5), LAYER_F_SILKSCREEN),
+        _val_text("MountingHole", crtyd_size / 2.0 + 0.5, LAYER_F_FAB),
+    )
+    return Footprint(
+        lib_id="MountingHole:MountingHole_2.7mm_M2.5",
+        ref=ref,
+        value="MountingHole",
+        position=Point(0.0, 0.0),
+        layer=LAYER_F_CU,
+        pads=(pad,),
+        graphics=graphics,
+        texts=texts,
+        attr="exclude_from_pos_files exclude_from_bom",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routing helper
 # ---------------------------------------------------------------------------
