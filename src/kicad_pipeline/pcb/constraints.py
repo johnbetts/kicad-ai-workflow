@@ -67,11 +67,18 @@ class _OccupancyGrid:
                 self._cells[r][c] = True
 
     def is_rect_free(self, x: float, y: float, w: float, h: float) -> bool:
-        """Check whether a rectangular area is entirely unoccupied."""
-        c0 = max(0, self._to_grid(x))
-        r0 = max(0, self._to_grid(y))
-        c1 = min(self._cols, self._to_grid(x + w))
-        r1 = min(self._rows, self._to_grid(y + h))
+        """Check whether a rectangular area is entirely unoccupied.
+
+        Returns ``False`` if the rectangle extends beyond the grid boundary
+        (i.e. off the board), ensuring no component is placed out of bounds.
+        """
+        c0 = self._to_grid(x)
+        r0 = self._to_grid(y)
+        c1 = self._to_grid(x + w)
+        r1 = self._to_grid(y + h)
+        # Reject rectangles that extend beyond the board
+        if c0 < 0 or r0 < 0 or c1 > self._cols or r1 > self._rows:
+            return False
         for r in range(r0, r1):
             for c in range(c0, c1):
                 if self._cells[r][c]:
@@ -640,32 +647,44 @@ def solve_placement(
             group_members.setdefault(gname, []).append(ref)
 
     for gname, refs in group_members.items():
-        # Find a free area large enough for the group
-        total_w = sum(footprint_sizes.get(r, (3.0, 3.0))[0] + 2.0 for r in refs)
+        # Compute uniform cell size for the group
+        item_w = max(footprint_sizes.get(r, (3.0, 3.0))[0] + 2.0 for r in refs)
         max_h = max(footprint_sizes.get(r, (3.0, 3.0))[1] for r in refs) + 2.0
+
+        # Wrap to multiple rows if group exceeds board width
+        max_row_w = board_w - 10.0  # 5mm margin each side
+        cols_per_row = max(1, int(max_row_w / item_w))
+        num_rows = math.ceil(len(refs) / cols_per_row)
+
+        block_w = min(len(refs), cols_per_row) * item_w
+        block_h = num_rows * max_h
 
         # Start from board centre
         centre_x = board_w / 2.0
         centre_y = board_h / 2.0
-        start = grid.find_nearest_free(centre_x, centre_y, total_w, max_h)
+        start = grid.find_nearest_free(centre_x, centre_y, block_w, block_h)
         if start is None:
             start = (5.0, 5.0)
 
-        x_cursor = start[0] + origin_x
-        y_cursor = start[1] + origin_y
-        for ref in refs:
+        base_x = start[0] + origin_x
+        base_y = start[1] + origin_y
+        for idx, ref in enumerate(refs):
+            col = idx % cols_per_row
+            row = idx // cols_per_row
             w, h = footprint_sizes.get(ref, (3.0, 3.0))
-            positions[ref] = Point(x=x_cursor + w / 2, y=y_cursor + max_h / 2)
+            x_pos = base_x + col * item_w + w / 2
+            y_pos = base_y + row * max_h + max_h / 2
+            positions[ref] = Point(x=x_pos, y=y_pos)
             rotations[ref] = 0.0
             gap = PLACEMENT_GAP_MM
             grid.mark_rect(
-                x_cursor - origin_x - gap, y_cursor - origin_y - gap,
+                x_pos - origin_x - w / 2 - gap,
+                y_pos - origin_y - max_h / 2 - gap,
                 w + 2.0 + 2 * gap, max_h + 2 * gap,
             )
-            x_cursor += w + 2.0
             log.debug(
-                "GROUP(%s): %s at (%.1f, %.1f)",
-                gname, ref, positions[ref].x, positions[ref].y,
+                "GROUP(%s): %s at (%.1f, %.1f) [row=%d col=%d]",
+                gname, ref, positions[ref].x, positions[ref].y, row, col,
             )
 
     # 5. Place any remaining unplaced refs

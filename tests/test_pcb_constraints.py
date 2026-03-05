@@ -102,6 +102,38 @@ class TestOccupancyGrid:
         assert not grid.is_rect_free(2.0, 2.0, 0.5, 0.5)
         assert grid.is_rect_free(4.0, 4.0, 0.5, 0.5)
 
+    def test_is_rect_free_rejects_right_overflow(self) -> None:
+        """Rectangle extending past the right edge of the grid returns False."""
+        grid = _OccupancyGrid(20.0, 20.0, grid_mm=1.0)
+        # 5mm wide rect starting at x=18 overflows a 20mm grid
+        assert not grid.is_rect_free(18.0, 5.0, 5.0, 3.0)
+
+    def test_is_rect_free_rejects_bottom_overflow(self) -> None:
+        """Rectangle extending past the bottom edge of the grid returns False."""
+        grid = _OccupancyGrid(20.0, 20.0, grid_mm=1.0)
+        assert not grid.is_rect_free(5.0, 18.0, 3.0, 5.0)
+
+    def test_is_rect_free_rejects_negative_origin(self) -> None:
+        """Rectangle starting at negative coordinates returns False."""
+        grid = _OccupancyGrid(20.0, 20.0, grid_mm=1.0)
+        assert not grid.is_rect_free(-2.0, 5.0, 3.0, 3.0)
+
+    def test_is_rect_free_allows_rect_at_boundary(self) -> None:
+        """Rectangle that fits exactly at the grid boundary returns True."""
+        grid = _OccupancyGrid(20.0, 20.0, grid_mm=1.0)
+        # 5mm rect ending exactly at x=20
+        assert grid.is_rect_free(15.0, 5.0, 5.0, 3.0)
+
+    def test_find_nearest_free_respects_bounds(self) -> None:
+        """find_nearest_free never returns a position where the rect overflows."""
+        grid = _OccupancyGrid(20.0, 20.0, grid_mm=1.0)
+        # Request near the edge — should stay in bounds
+        pos = grid.find_nearest_free(18.0, 18.0, 5.0, 5.0)
+        assert pos is not None
+        # The rect (pos, 5x5) must fit within the 20x20 grid
+        assert pos[0] + 5.0 <= 20.0 + 0.5  # allow grid rounding
+        assert pos[1] + 5.0 <= 20.0 + 0.5
+
 
 # ---------------------------------------------------------------------------
 # Constraint solver tests
@@ -279,6 +311,72 @@ class TestSolvePlacement:
         result = solve_placement(constraints, _board(), sizes)
         assert len(result.positions) == 4
         assert len(result.violations) == 0
+
+
+class TestGroupWrapping:
+    """Tests for GROUP placement row-wrapping on narrow boards."""
+
+    def test_group_stays_within_board_bounds(self) -> None:
+        """GROUP with many components wraps to rows instead of overflowing."""
+        # Narrow board: 30mm wide x 40mm tall
+        board = _board(w=30.0, h=40.0)
+        refs = [f"R{i}" for i in range(1, 9)]  # 8 resistors
+        sizes = {r: (3.0, 3.0) for r in refs}
+        constraints = tuple(
+            PlacementConstraint(
+                ref=r,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name="resistors",
+                priority=10,
+            )
+            for r in refs
+        )
+        result = solve_placement(constraints, board, sizes)
+        # All components must be within board bounds
+        for ref in refs:
+            pos = result.positions[ref]
+            assert 0 <= pos.x <= 30.0, f"{ref} x={pos.x} is off the board"
+            assert 0 <= pos.y <= 40.0, f"{ref} y={pos.y} is off the board"
+
+    def test_group_wraps_to_multiple_rows(self) -> None:
+        """GROUP with 6 large components on a 30mm board uses multiple rows."""
+        board = _board(w=30.0, h=50.0)
+        refs = [f"R{i}" for i in range(1, 7)]  # 6 components
+        sizes = {r: (8.0, 3.0) for r in refs}  # 8mm wide each, needs ~10mm/slot
+        constraints = tuple(
+            PlacementConstraint(
+                ref=r,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name="wide_parts",
+                priority=10,
+            )
+            for r in refs
+        )
+        result = solve_placement(constraints, board, sizes)
+        # Check that at least 2 distinct y-values are used (multi-row)
+        y_values = {round(result.positions[r].y, 1) for r in refs}
+        assert len(y_values) >= 2, f"Expected multi-row but got y-values: {y_values}"
+
+    def test_group_no_overflow_violations(self) -> None:
+        """GROUP placement must not report overflow violations."""
+        board = _board(w=25.0, h=25.0)
+        refs = [f"C{i}" for i in range(1, 5)]
+        sizes = {r: (2.0, 2.0) for r in refs}
+        constraints = tuple(
+            PlacementConstraint(
+                ref=r,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name="caps",
+                priority=10,
+            )
+            for r in refs
+        )
+        result = solve_placement(constraints, board, sizes)
+        assert len(result.violations) == 0
+        for ref in refs:
+            pos = result.positions[ref]
+            assert 0 <= pos.x <= 25.0, f"{ref} x={pos.x} off board"
+            assert 0 <= pos.y <= 25.0, f"{ref} y={pos.y} off board"
 
 
 # ---------------------------------------------------------------------------
