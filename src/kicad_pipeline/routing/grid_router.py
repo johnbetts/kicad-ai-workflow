@@ -226,6 +226,30 @@ def _restore_pad_marks(
             _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
 
 
+def _remark_other_pads(
+    grid: _Grid,
+    footprints: list[Footprint],
+    net_pad_set: frozenset[tuple[str, str]],
+    net_clearances: dict[str, float] | None = None,
+) -> None:
+    """Re-mark pads NOT in the current net to prevent cross-net contamination.
+
+    When unmarking same-net pads' clearance zones, nearby pads on different
+    nets may have their clearance zones partially cleared (overlap).  This
+    function re-marks all non-current-net pads to restore correct blocking.
+    """
+    _half_track_width = 0.125
+    for fp in footprints:
+        for pad in fp.pads:
+            if (fp.ref, pad.number) in net_pad_set:
+                continue
+            px, py = _pad_abs_pos(fp, pad)
+            cl = _PAD_CLEARANCE_MM + _half_track_width
+            if net_clearances is not None and pad.net_name:
+                cl = max(cl, net_clearances.get(pad.net_name, cl) + _half_track_width)
+            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
+
+
 def _prepare_grid(
     grid: _Grid,
     footprints: list[Footprint],
@@ -484,6 +508,7 @@ def route_net(
     # restored to prevent cross-net contamination.
     _htw = 0.125  # half default track width, must match _prepare_grid
     pad_cl = max(_PAD_CLEARANCE_MM + _htw, request.clearance_mm + _htw)
+    net_pad_set = frozenset(request.pad_refs)
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
@@ -528,22 +553,16 @@ def route_net(
         ]
         if len(non_ic_infos) >= 2:
             pad_infos = non_ic_infos
-            # Unmark IC pad areas so non-IC pads near the IC can route
-            # around it without being blocked by its clearance zones.
-            for ic_ref in ic_refs_in_net:
-                fp = fp_by_ref[ic_ref]
-                for pad in fp.pads:
-                    px, py = _pad_abs_pos(fp, pad)
-                    _unmark_pad_area(
-                        grid, px, py,
-                        pad.size_x / 2, pad.size_y / 2, pad_cl,
-                    )
+            # Don't unmark IC pads — keeps IC area blocked to prevent
+            # cross-net contamination.  IC connections use zone pour or B.Cu.
         elif len(non_ic_infos) == 1:
-            # One non-IC pad + IC pads: keep IC pads in routing targets
-            # but unmark their clearance zones so A* can reach them.
+            # One non-IC pad + IC pads: only unmark the specific IC pad(s)
+            # that belong to this net, not all IC pads.
             for ic_ref in ic_refs_in_net:
                 fp = fp_by_ref[ic_ref]
                 for pad in fp.pads:
+                    if (ic_ref, pad.number) not in net_pad_set:
+                        continue
                     px, py = _pad_abs_pos(fp, pad)
                     _unmark_pad_area(
                         grid, px, py,
@@ -560,6 +579,10 @@ def route_net(
                 routed=False,
                 reason="all pads on dense ICs - needs via routing",
             )
+
+    # After all unmark operations, re-mark other-net pads to prevent
+    # cross-net contamination from overlapping clearance zones.
+    _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
 
     all_tracks: list[Track] = []
 
@@ -610,6 +633,7 @@ def route_net(
                     # Re-mark just the pad copper (no clearance)
                     _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, 0.0)
             _tht_refs_in_net.clear()  # only retry once
+            _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None:
@@ -646,11 +670,11 @@ def route_net(
                     grid.mark(cell_col + dc, cell_row + dr)
 
         # Re-unmark same-net pads so subsequent MST connections can still
-        # reach unrouted target pads.  IC pads are NOT re-unmarked — the
-        # initial unmark provides access, and marked path cells naturally
-        # constrain later connections, preventing over-long wandering routes.
+        # reach unrouted target pads, then re-mark other-net pads to prevent
+        # cross-net contamination from overlapping clearance zones.
         for pi in pad_infos:
             _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
+        _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
 
         routed_set.add(best_to)
         unrouted.discard(best_to)
