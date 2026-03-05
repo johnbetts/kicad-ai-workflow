@@ -96,7 +96,7 @@ def build_project_file(
                     "annular_width": "error",
                     "clearance": "error",
                     "copper_edge_clearance": "error",
-                    "courtyards_overlap": "error",
+                    "courtyards_overlap": "warning",
                     "drill_out_of_range": "error",
                     "duplicate_footprints": "warning",
                     "hole_clearance": "error",

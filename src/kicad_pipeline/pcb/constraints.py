@@ -638,12 +638,24 @@ def solve_placement(
             edge_groups.setdefault(edge, []).append(ref)
 
     for edge, refs in edge_groups.items():
-        edge_len = board_w if edge in (BoardEdge.TOP, BoardEdge.BOTTOM) else board_h
-        spacing = edge_len / (len(refs) + 1)
-        for i, ref in enumerate(refs):
+        is_horizontal = edge in (BoardEdge.TOP, BoardEdge.BOTTOM)
+        edge_len = board_w if is_horizontal else board_h
+        # Sort by footprint size (largest first) for better distribution
+        refs_sorted = sorted(
+            refs,
+            key=lambda r: footprint_sizes.get(r, (3.0, 3.0))[0 if is_horizontal else 1],
+            reverse=True,
+        )
+        spacing = edge_len / (len(refs_sorted) + 1)
+        for i, ref in enumerate(refs_sorted):
             w, h = footprint_sizes.get(ref, (3.0, 3.0))
-            base = origin_x if edge in (BoardEdge.TOP, BoardEdge.BOTTOM) else origin_y
+            base = origin_x if is_horizontal else origin_y
+            # Component half-width along the edge axis
+            half_extent = w / 2.0 if is_horizontal else h / 2.0
             offset = spacing * (i + 1) + base
+            # Clamp offset so entire component body stays within the board
+            offset = max(offset, half_extent + 1.0 + base)
+            offset = min(offset, edge_len + base - half_extent - 1.0)
             x, y, rot = _edge_position(edge, board_w, board_h, w, h, offset)
             x += origin_x
             y += origin_y

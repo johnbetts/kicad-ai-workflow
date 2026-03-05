@@ -511,7 +511,7 @@ _GND_VIA_SIZE_MM: float = 1.0
 _GND_VIA_DRILL_MM: float = 0.6
 """Drill diameter for GND stitching vias in mm."""
 
-_GND_VIA_EDGE_MARGIN_MM: float = 1.5
+_GND_VIA_EDGE_MARGIN_MM: float = 2.0
 """Minimum distance from board edge for stitching vias in mm."""
 
 _GND_VIA_FP_CLEARANCE_MM: float = 0.5
@@ -856,6 +856,14 @@ def build_pcb(
     template_mounting_positions: tuple[tuple[float, float], ...] | None = None
     template_mounting_diameter: float | None = None
     tmpl_obj: object | None = None
+    # Auto-detect board template from mechanical constraints when not
+    # explicitly provided.
+    if board_template is None and requirements.mechanical is not None:
+        from kicad_pipeline.pcb.board_templates import detect_template
+        auto_tmpl = detect_template(requirements.mechanical)
+        if auto_tmpl is not None:
+            board_template = auto_tmpl.name
+            log.info("build_pcb: auto-detected board template '%s'", board_template)
     if board_template is not None:
         tmpl = get_template(board_template)
         tmpl_obj = tmpl
@@ -1166,17 +1174,19 @@ def build_pcb(
     all_vias = all_vias + gnd_vias
 
     # ------------------------------------------------------------------
-    # Step 10c: RF via fence (GND vias around RF keepouts)
+    # Step 10c: RF via fence (GND vias around RF keepouts, only when
+    #           the design actually contains an RF module)
     # ------------------------------------------------------------------
-    from kicad_pipeline.constants import RF_VIA_FENCE_SPACING_MM
+    if _has_rf_module(requirements):
+        from kicad_pipeline.constants import RF_VIA_FENCE_SPACING_MM
 
-    rf_fence_vias = _make_rf_via_fence(
-        tuple(keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
-        footprints=tuple(final_footprints),
-    )
-    if rf_fence_vias:
-        all_vias = all_vias + rf_fence_vias
-        log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
+        rf_fence_vias = _make_rf_via_fence(
+            tuple(keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
+            footprints=tuple(final_footprints),
+        )
+        if rf_fence_vias:
+            all_vias = all_vias + rf_fence_vias
+            log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
 
     log.info(
         "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "

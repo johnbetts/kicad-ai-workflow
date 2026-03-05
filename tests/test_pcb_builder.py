@@ -973,3 +973,223 @@ def test_compute_gnd_via_candidates_returns_positions() -> None:
     )
     assert len(candidates) > 0
     assert all(len(c) == 2 for c in candidates)
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — build_pcb pipeline DRC-like checks
+# ---------------------------------------------------------------------------
+
+
+def _make_rpi_hat_requirements() -> ProjectRequirements:
+    """Build a realistic RPi HAT requirements fixture with ADS1115 + 4 channels.
+
+    This matches the smd-0603 test variant used for manual DRC validation.
+    """
+    from kicad_pipeline.models.requirements import PowerBudget, PowerRail
+
+    def _pin(num: str, name: str, fn: PinFunction = PinFunction.GPIO,
+             pt: PinType = PinType.PASSIVE) -> Pin:
+        return Pin(number=num, name=name, function=fn, pin_type=pt)
+
+    u1_pins = (
+        _pin("1", "ADDR"), _pin("2", "ALRT", PinFunction.INTERRUPT),
+        _pin("3", "SDA", PinFunction.I2C_SDA, PinType.BIDIRECTIONAL),
+        _pin("4", "AIN0", PinFunction.ANALOG_IN, PinType.INPUT),
+        _pin("5", "AIN1", PinFunction.ANALOG_IN, PinType.INPUT),
+        _pin("6", "AIN2", PinFunction.ANALOG_IN, PinType.INPUT),
+        _pin("7", "AIN3", PinFunction.ANALOG_IN, PinType.INPUT),
+        _pin("8", "GND", PinFunction.GND, PinType.POWER_IN),
+        _pin("9", "VDD", PinFunction.VCC, PinType.POWER_IN),
+        _pin("10", "SCL", PinFunction.I2C_SCL, PinType.INPUT),
+    )
+    j1_pins = tuple(
+        _pin(str(i), f"P{i}") for i in range(1, 41)
+    )
+    two_pin = (_pin("1", "1"), _pin("2", "2"))
+
+    components = (
+        Component(
+            ref="U1", value="ADS1115",
+            footprint="MSOP-10_3x3mm_P0.5mm", pins=u1_pins,
+        ),
+        Component(
+            ref="J1", value="Conn_02x20_Stacking",
+            footprint="PinSocket_2x20_P2.54mm_Vertical_Extra_Tall",
+            pins=j1_pins,
+        ),
+        Component(
+            ref="J2", value="Screw_Terminal_01x02",
+            footprint="TerminalBlock_bornier-2_P5.08mm", pins=two_pin,
+        ),
+        Component(
+            ref="R1", value="100k", footprint="R_0603",
+            pins=two_pin,
+        ),
+        Component(
+            ref="C1", value="100nF", footprint="C_0603",
+            pins=two_pin,
+        ),
+    )
+    nets = (
+        Net(name="GND", connections=(
+            NetConnection(ref="U1", pin="8"),
+            NetConnection(ref="J1", pin="6"),
+            NetConnection(ref="J2", pin="2"),
+            NetConnection(ref="C1", pin="2"),
+        )),
+        Net(name="+3V3", connections=(
+            NetConnection(ref="U1", pin="9"),
+            NetConnection(ref="J1", pin="1"),
+            NetConnection(ref="C1", pin="1"),
+        )),
+        Net(name="I2C_SDA", connections=(
+            NetConnection(ref="U1", pin="3"),
+            NetConnection(ref="J1", pin="3"),
+        )),
+        Net(name="I2C_SCL", connections=(
+            NetConnection(ref="U1", pin="10"),
+            NetConnection(ref="J1", pin="5"),
+        )),
+        Net(name="AIN0", connections=(
+            NetConnection(ref="U1", pin="4"),
+            NetConnection(ref="R1", pin="2"),
+        )),
+        Net(name="SENS0", connections=(
+            NetConnection(ref="J2", pin="1"),
+            NetConnection(ref="R1", pin="1"),
+        )),
+    )
+    return ProjectRequirements(
+        project=ProjectInfo(name="test_hat", revision="1.0", author="test"),
+        features=(FeatureBlock(
+            name="ADC", description="4-channel ADC",
+            components=("U1", "R1"), nets=("AIN0",), subcircuits=(),
+        ),),
+        components=components,
+        nets=nets,
+        mechanical=MechanicalConstraints(
+            board_width_mm=65.0,
+            board_height_mm=56.0,
+            mounting_hole_diameter_mm=2.75,
+            mounting_hole_positions=((3.5, 3.5), (61.5, 3.5), (3.5, 52.5), (61.5, 52.5)),
+            notes="Standard Raspberry Pi HAT form factor",
+        ),
+        power_budget=PowerBudget(
+            total_current_ma=100.0,
+            notes=(),
+            rails=(PowerRail(name="+3V3", voltage=3.3, current_ma=50.0, source_ref="J1"),),
+        ),
+    )
+
+
+def test_build_pcb_auto_detects_rpi_hat_template() -> None:
+    """build_pcb should auto-detect RPi HAT template from mechanical constraints."""
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    # J1 should be placed at the template's fixed position (~32.5mm x)
+    j1 = design.get_footprint("J1")
+    assert j1 is not None
+    # All J1 pads must be within the board (0..65mm x, 0..56mm y)
+    for pad in j1.pads:
+        px = j1.position.x + pad.position.x
+        assert 0.0 <= px <= 65.0, (
+            f"J1 pad {pad.number} at x={px:.1f} is outside the board"
+        )
+
+
+def test_build_pcb_no_tracks_through_keepouts() -> None:
+    """No routed track should pass through a keepout zone."""
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    # Build keepout bounding boxes
+    ko_boxes: list[tuple[float, float, float, float]] = []
+    for ko in design.keepouts:
+        if ko.no_tracks or ko.no_copper:
+            xs = [p.x for p in ko.polygon]
+            ys = [p.y for p in ko.polygon]
+            ko_boxes.append((min(xs), min(ys), max(xs), max(ys)))
+
+    # Check that no track endpoint is inside a keepout
+    violations = 0
+    for trk in design.tracks:
+        for pt in (trk.start, trk.end):
+            for bx0, by0, bx1, by1 in ko_boxes:
+                if bx0 <= pt.x <= bx1 and by0 <= pt.y <= by1:
+                    violations += 1
+    assert violations == 0, f"{violations} track endpoints inside keepout zones"
+
+
+def test_build_pcb_no_vias_at_board_edge() -> None:
+    """GND stitching vias must not be placed too close to the board edge."""
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    board_w = 65.0
+    board_h = 56.0
+    min_margin = 1.5  # minimum via center distance from edge
+
+    for via in design.vias:
+        x, y = via.position.x, via.position.y
+        assert x >= min_margin, f"Via at x={x:.2f} too close to left edge"
+        assert y >= min_margin, f"Via at y={y:.2f} too close to top edge"
+        assert x <= board_w - min_margin, f"Via at x={x:.2f} too close to right edge"
+        assert y <= board_h - min_margin, f"Via at y={y:.2f} too close to bottom edge"
+
+
+def test_build_pcb_no_rf_fence_without_rf_module() -> None:
+    """RF via fence should not produce vias when no RF module is present."""
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    # Count GND vias (net_number typically 1 for GND)
+    gnd_net = design.get_net_number("GND")
+    gnd_vias = [v for v in design.vias if v.net_number == gnd_net]
+
+    # Without RF, GND vias should come only from stitching (not fence)
+    # A 65x56mm board with 4mm spacing → max ~14x12 = 168 candidates
+    # After footprint/keepout/track exclusion, expect much fewer
+    assert len(gnd_vias) < 100, (
+        f"Suspiciously many GND vias ({len(gnd_vias)}) — "
+        "RF fence may be running without RF module"
+    )
+
+
+def test_build_pcb_connectors_no_courtyard_overlap() -> None:
+    """Connectors should not overlap each other's courtyards."""
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    req = _make_rpi_hat_requirements()
+    design = build_pcb(req)
+
+    # Build bounding boxes from pad extents (proxy for courtyard)
+    def _fp_bbox(fp: Footprint) -> tuple[float, float, float, float]:
+        if not fp.pads:
+            return (fp.position.x, fp.position.y, fp.position.x, fp.position.y)
+        pad_xs = [fp.position.x + p.position.x - p.size_x / 2 for p in fp.pads]
+        pad_xe = [fp.position.x + p.position.x + p.size_x / 2 for p in fp.pads]
+        pad_ys = [fp.position.y + p.position.y - p.size_y / 2 for p in fp.pads]
+        pad_ye = [fp.position.y + p.position.y + p.size_y / 2 for p in fp.pads]
+        return (min(pad_xs), min(pad_ys), max(pad_xe), max(pad_ye))
+
+    connectors = [fp for fp in design.footprints if fp.ref.startswith("J")]
+    for i, a in enumerate(connectors):
+        for b in connectors[i + 1:]:
+            ax0, ay0, ax1, ay1 = _fp_bbox(a)
+            bx0, by0, bx1, by1 = _fp_bbox(b)
+            overlap_x = ax0 < bx1 and bx0 < ax1
+            overlap_y = ay0 < by1 and by0 < ay1
+            assert not (overlap_x and overlap_y), (
+                f"{a.ref} and {b.ref} pads overlap: "
+                f"{a.ref}=({ax0:.1f},{ay0:.1f})-({ax1:.1f},{ay1:.1f}) "
+                f"{b.ref}=({bx0:.1f},{by0:.1f})-({bx1:.1f},{by1:.1f})"
+            )
