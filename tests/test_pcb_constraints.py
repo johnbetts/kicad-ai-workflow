@@ -890,8 +890,8 @@ class TestRPiHATPlacement:
         assert j2_edge[0].edge == BoardEdge.BOTTOM
         assert j3_edge[0].edge == BoardEdge.BOTTOM
 
-    def test_rpi_hat_voltage_divider_grouped(self) -> None:
-        """Voltage divider resistors get GROUP constraints on RPi HAT."""
+    def test_rpi_hat_voltage_divider_near_target(self) -> None:
+        """Voltage divider resistors get NEAR constraints on RPi HAT."""
         from kicad_pipeline.pcb.board_templates import get_template
 
         req = self._make_hat_requirements()
@@ -900,10 +900,12 @@ class TestRPiHATPlacement:
         constraints = rpi_hat_constraints(req, tmpl, sizes)
         r1 = [c for c in constraints if c.ref == "R1"]
         r2 = [c for c in constraints if c.ref == "R2"]
-        r1_groups = [c for c in r1 if c.constraint_type == PlacementConstraintType.GROUP]
-        r2_groups = [c for c in r2 if c.constraint_type == PlacementConstraintType.GROUP]
-        assert len(r1_groups) >= 1
-        assert len(r2_groups) >= 1
+        r1_near = [c for c in r1 if c.constraint_type == PlacementConstraintType.NEAR]
+        r2_near = [c for c in r2 if c.constraint_type == PlacementConstraintType.NEAR]
+        assert len(r1_near) >= 1
+        assert len(r2_near) >= 1
+        # Resistors should be placed near a relevant target (connector or switch)
+        assert r1_near[0].target_ref is not None
 
     def test_rpi_hat_full_placement_no_violations(self) -> None:
         """Full RPi HAT placement produces no violations."""

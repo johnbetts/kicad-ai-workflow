@@ -808,16 +808,29 @@ def rpi_hat_constraints(
     base = constraints_from_requirements(requirements, board_template, footprint_sizes)
     extra: list[PlacementConstraint] = []
 
-    # Find the primary IC (first U* ref)
+    # Place primary IC at board centre (between J1 at top and J2-J5 at bottom)
     ic_ref: str | None = None
     for comp in requirements.components:
         if comp.ref.startswith("U"):
             ic_ref = comp.ref
             break
+    if ic_ref is not None:
+        cx = board_template.board_width_mm / 2.0
+        cy = board_template.board_height_mm * 0.55  # slightly below centre
+        extra.append(PlacementConstraint(
+            ref=ic_ref,
+            constraint_type=PlacementConstraintType.FIXED,
+            x=cx,
+            y=cy,
+            rotation=0.0,
+            priority=60,
+        ))
 
     # DIP switches -> NEAR(IC)
+    sw_ref: str | None = None
     for comp in requirements.components:
         if comp.ref.startswith("SW") and ic_ref is not None:
+            sw_ref = comp.ref
             extra.append(PlacementConstraint(
                 ref=comp.ref,
                 constraint_type=PlacementConstraintType.NEAR,
@@ -825,6 +838,28 @@ def rpi_hat_constraints(
                 max_distance_mm=10.0,
                 priority=25,
             ))
+
+    # Pull-up/address resistors sharing nets with SW -> NEAR(SW)
+    if sw_ref is not None:
+        sw_nets: set[str] = set()
+        for net in requirements.nets:
+            if any(c.ref == sw_ref for c in net.connections):
+                sw_nets.add(net.name)
+        for comp in requirements.components:
+            if not comp.ref.startswith("R"):
+                continue
+            for net in requirements.nets:
+                if net.name not in sw_nets:
+                    continue
+                if any(c.ref == comp.ref for c in net.connections):
+                    extra.append(PlacementConstraint(
+                        ref=comp.ref,
+                        constraint_type=PlacementConstraintType.NEAR,
+                        target_ref=sw_ref,
+                        max_distance_mm=8.0,
+                        priority=28,
+                    ))
+                    break
 
     # Screw terminals -> EDGE(BOTTOM) for RPi HATs (opposite GPIO header)
     for comp in requirements.components:
@@ -844,28 +879,53 @@ def rpi_hat_constraints(
                 priority=55,
             ))
 
-    # Voltage divider chains: pairs of R* sharing a signal net -> GROUP
-    adj = build_signal_adjacency(requirements)
-    divider_idx = 0
-    visited_divider: set[str] = set()
-    for ref, neighbours in adj.items():
-        if not ref.startswith("R") or ref in visited_divider:
+    # Channel grouping: trace signal nets from screw terminals through
+    # voltage dividers to the ADC, placing each channel's passives near
+    # their input connector.
+    #
+    # Topology per channel:
+    #   Jx --[SENSx]--> Rx_top --[AINx]--> Rx_bot, Cx_filter, U1
+    #
+    # We place Rx_top, Rx_bot, Cx_filter all NEAR their Jx connector.
+    channel_assigned: set[str] = set()
+    for net in requirements.nets:
+        if _is_power_net(net.name):
             continue
-        # Check for R-R pairs on same signal net
-        r_neighbours = [n for n in neighbours if n.startswith("R")]
-        if r_neighbours:
-            chain = [ref, *r_neighbours]
-            group_name = f"_divider_{divider_idx}"
-            for r in chain:
-                if r not in visited_divider:
-                    extra.append(PlacementConstraint(
-                        ref=r,
-                        constraint_type=PlacementConstraintType.GROUP,
-                        group_name=group_name,
-                        priority=20,
-                    ))
-                    visited_divider.add(r)
-            divider_idx += 1
+        # Find SENS-type nets: connect a screw terminal (Jx) to a resistor
+        conn_refs = [c.ref for c in net.connections]
+        j_refs = [r for r in conn_refs if r.startswith("J") and r != "J1"]
+        r_refs = [r for r in conn_refs if r.startswith("R")]
+        if len(j_refs) != 1 or len(r_refs) != 1:
+            continue
+        anchor_j = j_refs[0]
+        top_r = r_refs[0]
+        # Find the ADC-side net that top_r also connects to
+        channel_parts = [top_r]
+        for other_net in requirements.nets:
+            if other_net.name == net.name or _is_power_net(other_net.name):
+                continue
+            other_refs = [c.ref for c in other_net.connections]
+            if top_r not in other_refs:
+                continue
+            # This is the AINx net — collect only passives (R, C, L)
+            for r in other_refs:
+                prefix = "".join(ch for ch in r if ch.isalpha()).upper()
+                if prefix not in ("R", "C", "L"):
+                    continue
+                if r != top_r and r not in channel_parts:
+                    channel_parts.append(r)
+        # Place all channel parts NEAR the screw terminal
+        for ref in channel_parts:
+            if ref in channel_assigned:
+                continue
+            extra.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.NEAR,
+                target_ref=anchor_j,
+                max_distance_mm=12.0,
+                priority=35,
+            ))
+            channel_assigned.add(ref)
 
     # Merge: higher-priority extras override base
     merged: dict[str, PlacementConstraint] = {}
