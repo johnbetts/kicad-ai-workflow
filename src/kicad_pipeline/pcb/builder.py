@@ -759,9 +759,9 @@ def build_pcb(
     # Step 6: GND pours
     # ------------------------------------------------------------------
     gnd_net_num = net_lookup.get("GND", 1)
-    # Always use "back_only" — F.Cu is used for signal routing, so a GND
-    # pour on F.Cu creates clearance violations with every track.
-    gnd_strategy = "back_only"
+    # Use "both" — F.Cu pour connects SMD GND pads, B.Cu pour provides
+    # ground plane.  KiCad automatically keeps clearance from signal tracks.
+    gnd_strategy = "both"
     gnd_zones = _make_gnd_zones(outline, gnd_net_num, zone_clearance, strategy=gnd_strategy)
     zones: list[ZonePolygon] = list(gnd_zones)
 
@@ -807,6 +807,11 @@ def build_pcb(
             "build_pcb: autoroute complete — %d tracks, %d routed, %d unrouted",
             len(all_tracks), routed, unrouted,
         )
+
+        # Note: GND pads on F.Cu connect to the B.Cu GND pour through
+        # the zone fill (applied when opening in KiCad).  THT pads already
+        # have plated holes.  SMD GND pads may show as "unconnected" in
+        # DRC until zones are filled.
 
     log.info(
         "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, %d tracks",
