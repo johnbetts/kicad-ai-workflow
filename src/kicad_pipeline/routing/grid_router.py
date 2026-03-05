@@ -205,6 +205,15 @@ def _unmark_pad_area(
             grid.unmark(cc, rr)
 
 
+def _global_pad_clearance(net_clearances: dict[str, float] | None) -> float:
+    """Compute the global pad clearance (max netclass + half track width)."""
+    _htw = 0.125
+    max_cl = _PAD_CLEARANCE_MM
+    if net_clearances:
+        max_cl = max(max_cl, max(net_clearances.values()))
+    return max_cl + _htw
+
+
 def _restore_pad_marks(
     grid: _Grid,
     footprints: list[Footprint],
@@ -216,13 +225,10 @@ def _restore_pad_marks(
     zone for routing, nearby pad B's zone might also get cleared.  After
     routing, this function restores ALL pad marks with correct clearances.
     """
-    _half_track_width = 0.125
+    cl = _global_pad_clearance(net_clearances)
     for fp in footprints:
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
-            cl = _PAD_CLEARANCE_MM + _half_track_width
-            if net_clearances is not None and pad.net_name:
-                cl = max(cl, net_clearances.get(pad.net_name, cl) + _half_track_width)
             _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
 
 
@@ -238,15 +244,12 @@ def _remark_other_pads(
     nets may have their clearance zones partially cleared (overlap).  This
     function re-marks all non-current-net pads to restore correct blocking.
     """
-    _half_track_width = 0.125
+    cl = _global_pad_clearance(net_clearances)
     for fp in footprints:
         for pad in fp.pads:
             if (fp.ref, pad.number) in net_pad_set:
                 continue
             px, py = _pad_abs_pos(fp, pad)
-            cl = _PAD_CLEARANCE_MM + _half_track_width
-            if net_clearances is not None and pad.net_name:
-                cl = max(cl, net_clearances.get(pad.net_name, cl) + _half_track_width)
             _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
 
 
@@ -271,14 +274,20 @@ def _prepare_grid(
     # Clearance includes half the default track width (0.125mm) because
     # KiCad measures clearance from copper edge to copper edge, not from
     # track center to pad edge.
+    #
+    # Use the MAXIMUM clearance across all netclasses, because KiCad DRC
+    # checks clearance as max(net_A_clearance, net_B_clearance).  A pad on
+    # a 0.2mm-clearance net still needs 0.3mm clearance from a 0.3mm-class
+    # track.  Using the global max is conservative but prevents violations.
     _half_track_width = 0.125  # half of default 0.25mm track
+    _max_cl = _PAD_CLEARANCE_MM
+    if net_clearances:
+        _max_cl = max(_max_cl, max(net_clearances.values()))
+    _pad_mark_cl = _max_cl + _half_track_width
     for fp in footprints:
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
-            cl = _PAD_CLEARANCE_MM + _half_track_width
-            if net_clearances is not None and pad.net_name:
-                cl = max(cl, net_clearances.get(pad.net_name, cl) + _half_track_width)
-            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
+            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, _pad_mark_cl)
 
     # Mark board-edge margins as occupied
     margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
@@ -506,8 +515,7 @@ def route_net(
     # Temporarily unmark same-net pad areas (including clearance) so the
     # router can reach and exit them.  After routing, ALL pad areas are
     # restored to prevent cross-net contamination.
-    _htw = 0.125  # half default track width, must match _prepare_grid
-    pad_cl = max(_PAD_CLEARANCE_MM + _htw, request.clearance_mm + _htw)
+    pad_cl = _global_pad_clearance(net_clearances)
     net_pad_set = frozenset(request.pad_refs)
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
