@@ -223,9 +223,20 @@ def _courtyard_rect(
     )
 
 
-def _silk_side_marks(body_w: float, body_h: float) -> tuple[FootprintLine, ...]:
-    """Short silkscreen lines on left/right edges of component body."""
+def _silk_side_marks(
+    body_w: float,
+    body_h: float,
+    pad_edge_x: float | None = None,
+) -> tuple[FootprintLine, ...]:
+    """Short silkscreen lines on left/right edges of component body.
+
+    When *pad_edge_x* is given, silkscreen lines are pushed outward
+    to avoid overlapping with copper pads (silk_over_copper DRC).
+    """
     hw = body_w / 2.0
+    if pad_edge_x is not None:
+        # Push silk marks 0.25mm outside the pad edge (> half silk line width)
+        hw = max(hw, pad_edge_x + 0.25)
     hh = body_h / 2.0 * 0.6  # 60 % of half-height
     layer = LAYER_F_SILKSCREEN
     w = PCB_SILKSCREEN_LINE_WIDTH_MM
@@ -283,9 +294,11 @@ def make_smd_resistor_capacitor(
         _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
         _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
     )
+    # Pad edge for silkscreen clearance: pitch/2 + pad_w/2
+    pad_edge_x = pitch / 2.0 + pad_w / 2.0
     graphics: tuple[FootprintLine, ...] = (
         *_courtyard_rect(body_w, body_h),
-        *_silk_side_marks(body_w, body_h),
+        *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
     )
     texts = (
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
@@ -587,9 +600,10 @@ def make_generic_smd_ic(
 
     body_w = col_pitch * 2.0 + pad_h
     body_h = row_span + pad_w + 0.5
+    ic_pad_edge_x = col_pitch + pad_h / 2.0
     graphics: tuple[FootprintLine, ...] = (
         *_courtyard_rect(body_w, body_h),
-        *_silk_side_marks(col_pitch * 1.6, body_h),
+        *_silk_side_marks(col_pitch * 1.6, body_h, pad_edge_x=ic_pad_edge_x),
     )
     texts = (
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),

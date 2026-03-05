@@ -38,7 +38,7 @@ def test_classify_nets_gnd_is_power() -> None:
     assert "Power" in names
     power = next(nc for nc in result if nc.name == "Power")
     assert "GND" in power.nets
-    assert power.trace_width_mm == 0.5
+    assert power.trace_width_mm == 0.3
     assert power.clearance_mm == 0.3
 
 

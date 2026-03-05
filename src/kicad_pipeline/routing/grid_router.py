@@ -552,11 +552,24 @@ def route_net(
                 min_spacing = min(min_spacing, d)
         if min_spacing < 1.0:
             ic_refs_in_net.add(ref)
+    # Save IC pad infos for final-leg routing after MST loop
+    _ic_pad_infos: list[_PadInfo] = []
+    _ic_pad_refs: list[tuple[str, str]] = []
     if ic_refs_in_net:
         # Remove IC pads from routing targets — keep only non-IC pads
         non_ic_infos = [
             pi for pi, (ref, _) in zip(pad_infos, request.pad_refs, strict=True)
             if ref not in ic_refs_in_net
+        ]
+        # Collect IC pad infos for final-leg routing
+        _ic_pad_infos = [
+            pi for pi, (ref, _) in zip(pad_infos, request.pad_refs, strict=True)
+            if ref in ic_refs_in_net
+        ]
+        # Also collect IC pad refs for unmark/remark
+        _ic_pad_refs = [
+            (ref, pn) for (ref, pn), pi in zip(request.pad_refs, pad_infos, strict=True)
+            if ref in ic_refs_in_net
         ]
         if len(non_ic_infos) >= 2:
             pad_infos = non_ic_infos
@@ -690,6 +703,66 @@ def route_net(
 
         routed_set.add(best_to)
         unrouted.discard(best_to)
+
+    # Final-leg IC routing: after MST loop routes all non-IC pads,
+    # attempt to connect each IC pad by temporarily unmarking it.
+    if _ic_pad_infos:
+        for ic_pi, (ic_ref, ic_pn) in zip(
+            _ic_pad_infos, _ic_pad_refs, strict=True,
+        ):
+            # Find closest routed non-IC pad
+            best_pi = pad_infos[0]
+            best_dist = float("inf")
+            for pi in pad_infos:
+                d = abs(pi.x - ic_pi.x) + abs(pi.y - ic_pi.y)
+                if d < best_dist:
+                    best_dist = d
+                    best_pi = pi
+
+            # Temporarily unmark just this IC pad's clearance
+            ic_fp = fp_by_ref[ic_ref]
+            ic_pad = next(p for p in ic_fp.pads if p.number == ic_pn)
+            px, py = _pad_abs_pos(ic_fp, ic_pad)
+            _unmark_pad_area(
+                grid, px, py,
+                ic_pad.size_x / 2, ic_pad.size_y / 2, pad_cl,
+            )
+            # Re-unmark source pad too (track exclusion may have blocked it)
+            _unmark_pad_area(
+                grid, best_pi.x, best_pi.y,
+                best_pi.half_w, best_pi.half_h, pad_cl,
+            )
+            _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
+
+            start_col, start_row = grid.to_cell(best_pi.x, best_pi.y)
+            goal_col, goal_row = grid.to_cell(ic_pi.x, ic_pi.y)
+            path = _astar(grid, start_col, start_row, goal_col, goal_row)
+
+            if path is not None:
+                for j in range(len(path) - 1):
+                    x1, y1 = grid.to_mm(path[j][0], path[j][1])
+                    x2, y2 = grid.to_mm(path[j + 1][0], path[j + 1][1])
+                    all_tracks.append(
+                        Track(
+                            start=Point(x1, y1),
+                            end=Point(x2, y2),
+                            width=request.width_mm,
+                            layer=request.layer,
+                            net_number=request.net_number,
+                            uuid="",
+                        )
+                    )
+                # Mark path with exclusion
+                for cell_col, cell_row in path:
+                    for dc in range(-excl_cells, excl_cells + 1):
+                        for dr in range(-excl_cells, excl_cells + 1):
+                            grid.mark(cell_col + dc, cell_row + dr)
+            else:
+                # Re-mark the IC pad we tried
+                _mark_pad_area(
+                    grid, px, py,
+                    ic_pad.size_x / 2, ic_pad.size_y / 2, pad_cl,
+                )
 
     # Restore all pad markings that may have been cleared during unmark
     _restore_pad_marks(grid, footprints, net_clearances)
