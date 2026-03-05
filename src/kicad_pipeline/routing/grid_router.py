@@ -17,8 +17,12 @@ from kicad_pipeline.models.pcb import Footprint, Pad, Point, Track, Via
 
 
 def _pad_abs_pos(fp: Footprint, pad: Pad) -> tuple[float, float]:
-    """Compute absolute pad position accounting for footprint rotation."""
-    rad = math.radians(fp.rotation)
+    """Compute absolute pad position accounting for footprint rotation.
+
+    KiCad uses clockwise rotation (positive angle = CW), which is the
+    negative of standard mathematical CCW convention.
+    """
+    rad = math.radians(-fp.rotation)  # negate for CW convention
     cos_r = math.cos(rad)
     sin_r = math.sin(rad)
     rx = pad.position.x * cos_r - pad.position.y * sin_r
