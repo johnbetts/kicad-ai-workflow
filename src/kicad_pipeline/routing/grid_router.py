@@ -13,7 +13,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import JLCPCB_BOARD_EDGE_CLEARANCE_MM
-from kicad_pipeline.models.pcb import Footprint, Point, Track, Via
+from kicad_pipeline.models.pcb import Footprint, Pad, Point, Track, Via
+
+
+def _pad_abs_pos(fp: Footprint, pad: Pad) -> tuple[float, float]:
+    """Compute absolute pad position accounting for footprint rotation."""
+    rad = math.radians(fp.rotation)
+    cos_r = math.cos(rad)
+    sin_r = math.sin(rad)
+    rx = pad.position.x * cos_r - pad.position.y * sin_r
+    ry = pad.position.x * sin_r + pad.position.y * cos_r
+    return (fp.position.x + rx, fp.position.y + ry)
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import Keepout
@@ -204,8 +214,7 @@ def _restore_pad_marks(
     """
     for fp in footprints:
         for pad in fp.pads:
-            px = fp.position.x + pad.position.x
-            py = fp.position.y + pad.position.y
+            px, py = _pad_abs_pos(fp, pad)
             cl = _PAD_CLEARANCE_MM
             if net_clearances is not None and pad.net_name:
                 cl = max(cl, net_clearances.get(pad.net_name, cl))
@@ -232,8 +241,7 @@ def _prepare_grid(
     # Mark all pad areas with their actual size + clearance margin
     for fp in footprints:
         for pad in fp.pads:
-            px = fp.position.x + pad.position.x
-            py = fp.position.y + pad.position.y
+            px, py = _pad_abs_pos(fp, pad)
             cl = _PAD_CLEARANCE_MM
             if net_clearances is not None and pad.net_name:
                 cl = max(cl, net_clearances.get(pad.net_name, cl))
@@ -389,9 +397,9 @@ def _resolve_pad_positions(
         found_pad: _PadInfo | None = None
         for pad in found_fp.pads:
             if pad.number == pad_num:
+                px, py = _pad_abs_pos(found_fp, pad)
                 found_pad = _PadInfo(
-                    x=found_fp.position.x + pad.position.x,
-                    y=found_fp.position.y + pad.position.y,
+                    x=px, y=py,
                     half_w=pad.size_x / 2,
                     half_h=pad.size_y / 2,
                 )
@@ -515,8 +523,7 @@ def route_net(
             for ic_ref in ic_refs_in_net:
                 fp = fp_by_ref[ic_ref]
                 for pad in fp.pads:
-                    px = fp.position.x + pad.position.x
-                    py = fp.position.y + pad.position.y
+                    px, py = _pad_abs_pos(fp, pad)
                     _unmark_pad_area(
                         grid, px, py,
                         pad.size_x / 2, pad.size_y / 2, pad_cl,
@@ -527,8 +534,7 @@ def route_net(
             for ic_ref in ic_refs_in_net:
                 fp = fp_by_ref[ic_ref]
                 for pad in fp.pads:
-                    px = fp.position.x + pad.position.x
-                    py = fp.position.y + pad.position.y
+                    px, py = _pad_abs_pos(fp, pad)
                     _unmark_pad_area(
                         grid, px, py,
                         pad.size_x / 2, pad.size_y / 2, pad_cl,
@@ -578,17 +584,21 @@ def route_net(
         path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None and _tht_refs_in_net:
-            # Retry: unmark sibling pads on THT components to create
-            # routing channels through dense pad fields.
+            # Retry: shrink clearance zones around sibling THT pads to
+            # create routing channels BETWEEN pads (not through them).
+            # We unmark the full pad+clearance area then re-mark just
+            # the pad copper, leaving only the clearance ring free.
             for ref in _tht_refs_in_net:
                 fp = fp_by_ref[ref]
                 for pad in fp.pads:
-                    px = fp.position.x + pad.position.x
-                    py = fp.position.y + pad.position.y
+                    px, py = _pad_abs_pos(fp, pad)
+                    # Unmark pad + clearance
                     _unmark_pad_area(
                         grid, px, py,
                         pad.size_x / 2, pad.size_y / 2, pad_cl,
                     )
+                    # Re-mark just the pad copper (no clearance)
+                    _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, 0.0)
             _tht_refs_in_net.clear()  # only retry once
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
@@ -701,10 +711,7 @@ def route_all_nets(
                 continue
             for pad in fp.pads:
                 if pad.number == pad_num:
-                    positions.append((
-                        fp.position.x + pad.position.x,
-                        fp.position.y + pad.position.y,
-                    ))
+                    positions.append(_pad_abs_pos(fp, pad))
                     break
         if len(positions) < 2:
             return 0.0
