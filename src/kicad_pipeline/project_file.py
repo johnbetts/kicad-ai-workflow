@@ -24,6 +24,7 @@ def build_project_file(
     root_uuid: str = "",
     netclasses: tuple[NetClass, ...] | None = None,
     drc_exclusions: tuple[str, ...] | None = None,
+    layer_count: int = 2,
 ) -> dict[str, Any]:
     """Build a minimal KiCad 9 project file structure.
 
@@ -35,6 +36,7 @@ def build_project_file(
             the project file's net_settings section.
         drc_exclusions: Optional list of DRC exclusion strings
             (e.g. intra-footprint clearance exclusions).
+        layer_count: Number of copper layers (2 or 4).
 
     Returns:
         A dictionary suitable for JSON serialisation as a .kicad_pro file.
@@ -338,6 +340,15 @@ def build_project_file(
         if assignments:
             data["net_settings"]["netclass_assignments"] = assignments
 
+    # Inject layer definitions for 4-layer stackup
+    if layer_count >= 4:
+        data["board"]["design_settings"]["layers"] = {
+            "F.Cu": {"name": "F.Cu", "type": 0},
+            "In1.Cu": {"name": "In1.Cu", "type": 1},
+            "In2.Cu": {"name": "In2.Cu", "type": 1},
+            "B.Cu": {"name": "B.Cu", "type": 0},
+        }
+
     return data
 
 
@@ -347,6 +358,7 @@ def write_project_file(
     root_uuid: str = "",
     netclasses: tuple[NetClass, ...] | None = None,
     drc_exclusions: tuple[str, ...] | None = None,
+    layer_count: int = 2,
 ) -> Path:
     """Write a .kicad_pro file to the given directory.
 
@@ -356,6 +368,7 @@ def write_project_file(
         root_uuid: UUID of the root schematic sheet.
         netclasses: Optional netclass definitions to include.
         drc_exclusions: Optional DRC exclusion strings.
+        layer_count: Number of copper layers (2 or 4).
 
     Returns:
         Path to the written .kicad_pro file.
@@ -364,6 +377,7 @@ def write_project_file(
     pro_path = directory / f"{project_name}.kicad_pro"
     data = build_project_file(
         project_name, root_uuid, netclasses=netclasses, drc_exclusions=drc_exclusions,
+        layer_count=layer_count,
     )
     pro_path.write_text(json.dumps(data, indent=2) + "\n")
     log.info("Project file written: %s", pro_path)

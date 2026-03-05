@@ -9,6 +9,7 @@ import pytest
 from kicad_pipeline.models.pcb import (
     Footprint,
     FootprintText,
+    Pad,
     PCBDesign,
     Point,
     ZonePolygon,
@@ -26,7 +27,9 @@ from kicad_pipeline.models.requirements import (
     ProjectRequirements,
 )
 from kicad_pipeline.pcb.builder import (
+    _build_layer_table,
     _footprint_sexp,
+    _make_rf_via_fence,
     _zone_sexp,
     build_pcb,
     pcb_to_sexp,
@@ -752,3 +755,221 @@ def test_footprint_sexp_uses_silk_ref_position() -> None:
     assert len(val_props) == 1
     at_node_v = [s for s in val_props[0] if isinstance(s, list) and s and s[0] == "at"]
     assert at_node_v[0][2] == pytest.approx(3.2), "Value Y should use fp.texts position"
+
+
+# ---------------------------------------------------------------------------
+# GND stitching vias avoid signal tracks
+# ---------------------------------------------------------------------------
+
+
+def test_gnd_stitching_vias_avoid_tracks() -> None:
+    """GND stitching vias should not be placed near signal tracks."""
+    import math
+
+    from kicad_pipeline.models.pcb import Track, Via
+    from kicad_pipeline.pcb.builder import (
+        _compute_gnd_via_candidates,
+        _make_gnd_stitching_vias,
+    )
+
+    # Create a diagonal track across the board
+    track = Track(
+        start=Point(5.0, 5.0),
+        end=Point(75.0, 35.0),
+        width=0.25,
+        layer="F.Cu",
+        net_number=2,
+    )
+    # Create a via in the middle
+    sig_via = Via(
+        position=Point(40.0, 20.0),
+        drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"),
+        net_number=2,
+    )
+
+    candidates = _compute_gnd_via_candidates(
+        80.0, 40.0, footprints=(), keepouts=(),
+    )
+    vias_with = _make_gnd_stitching_vias(
+        gnd_net_num=1, candidates=candidates,
+        routed_tracks=(track,), routing_vias=(sig_via,),
+    )
+    vias_without = _make_gnd_stitching_vias(
+        gnd_net_num=1, candidates=candidates,
+    )
+
+    # With track awareness, fewer vias should be placed
+    assert len(vias_with) < len(vias_without)
+
+    # No stitching via should be within clearance of the track
+    via_radius = 0.5  # _GND_VIA_SIZE_MM / 2
+    margin = via_radius + 0.2
+    for v in vias_with:
+        # Point-to-segment distance
+        dx = track.end.x - track.start.x
+        dy = track.end.y - track.start.y
+        len_sq = dx * dx + dy * dy
+        t = max(0.0, min(1.0, (
+            (v.position.x - track.start.x) * dx
+            + (v.position.y - track.start.y) * dy
+        ) / len_sq))
+        proj_x = track.start.x + t * dx
+        proj_y = track.start.y + t * dy
+        dist = math.hypot(v.position.x - proj_x, v.position.y - proj_y)
+        assert dist >= margin + track.width / 2.0 - 0.01, (
+            f"Stitching via at ({v.position.x}, {v.position.y}) "
+            f"is {dist:.3f}mm from track (min {margin + track.width / 2.0:.3f}mm)"
+        )
+
+    # No stitching via should be within clearance of the signal via
+    for v in vias_with:
+        dist = math.hypot(
+            v.position.x - sig_via.position.x,
+            v.position.y - sig_via.position.y,
+        )
+        assert dist >= via_radius + sig_via.size / 2.0 + 0.2 - 0.01
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Multi-layer foundation
+# ---------------------------------------------------------------------------
+
+
+def test_build_layer_table_2_layer() -> None:
+    """2-layer table should not contain In1.Cu or In2.Cu."""
+    table = _build_layer_table(2)
+    names = [entry[1] for entry in table]
+    assert "F.Cu" in names
+    assert "B.Cu" in names
+    assert "In1.Cu" not in names
+    assert "In2.Cu" not in names
+
+
+def test_build_layer_table_4_layer() -> None:
+    """4-layer table should contain In1.Cu and In2.Cu."""
+    table = _build_layer_table(4)
+    names = [entry[1] for entry in table]
+    assert "F.Cu" in names
+    assert "In1.Cu" in names
+    assert "In2.Cu" in names
+    assert "B.Cu" in names
+    # In1.Cu should be power type
+    in1 = [e for e in table if e[1] == "In1.Cu"]
+    assert in1[0][2] == "power"
+
+
+def test_build_layer_table_default_is_2_layer() -> None:
+    """Default layer table should be 2-layer."""
+    table = _build_layer_table()
+    names = [entry[1] for entry in table]
+    assert "In1.Cu" not in names
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: RF via fence
+# ---------------------------------------------------------------------------
+
+
+def test_rf_via_fence_around_antenna_keepout() -> None:
+    """RF via fence should place vias around antenna keepout polygons."""
+    from kicad_pipeline.models.pcb import Keepout
+
+    ko = Keepout(
+        polygon=(
+            Point(70.0, 0.0), Point(80.0, 0.0),
+            Point(80.0, 10.0), Point(70.0, 10.0),
+            Point(70.0, 0.0),
+        ),
+        layers=("F.Cu", "B.Cu"),
+        no_copper=True,
+        no_vias=False,
+        no_tracks=False,
+    )
+    vias = _make_rf_via_fence(
+        (ko,), gnd_net_num=1, spacing_mm=2.0,
+    )
+    assert len(vias) > 0
+    # All vias should be GND
+    for v in vias:
+        assert v.net_number == 1
+
+
+def test_rf_via_fence_skips_non_rf_keepout() -> None:
+    """RF via fence should skip keepouts without no_copper or without F.Cu."""
+    from kicad_pipeline.models.pcb import Keepout
+
+    # Keepout without no_copper
+    ko1 = Keepout(
+        polygon=(
+            Point(0.0, 0.0), Point(5.0, 0.0),
+            Point(5.0, 5.0), Point(0.0, 5.0),
+            Point(0.0, 0.0),
+        ),
+        layers=("F.Cu",),
+        no_copper=False,
+        no_vias=True,
+    )
+    # Keepout without F.Cu in layers
+    ko2 = Keepout(
+        polygon=(
+            Point(10.0, 0.0), Point(15.0, 0.0),
+            Point(15.0, 5.0), Point(10.0, 5.0),
+            Point(10.0, 0.0),
+        ),
+        layers=("B.Cu",),
+        no_copper=True,
+    )
+    vias = _make_rf_via_fence(
+        (ko1, ko2), gnd_net_num=1, spacing_mm=2.0,
+    )
+    assert len(vias) == 0
+
+
+def test_netclass_guard_traces_default() -> None:
+    """NetClass.guard_traces should default to False."""
+    from kicad_pipeline.models.pcb import NetClass
+
+    nc = NetClass(name="Default")
+    assert nc.guard_traces is False
+
+
+def test_compute_gnd_via_candidates_avoids_footprints() -> None:
+    """GND via candidates should not overlap footprint bounding boxes."""
+    from kicad_pipeline.pcb.builder import _compute_gnd_via_candidates
+
+    fp = Footprint(
+        lib_id="Test:Test",
+        ref="U1",
+        value="IC",
+        position=Point(10.0, 10.0),
+        rotation=0.0,
+        layer="F.Cu",
+        pads=(
+            Pad(
+                number="1", pad_type="smd", shape="rect",
+                position=Point(0.0, 0.0),
+                size_x=2.0, size_y=2.0,
+                layers=("F.Cu",), net_number=1, net_name="GND",
+            ),
+        ),
+    )
+    candidates = _compute_gnd_via_candidates(
+        20.0, 20.0, footprints=(fp,), keepouts=(),
+    )
+    # No candidate should be within the footprint bounding box + clearance
+    for vx, vy in candidates:
+        # fp at (10,10), pad is 2x2 -> bbox [9,9]-[11,11] + 0.5 clearance
+        in_fp = 8.5 <= vx <= 11.5 and 8.5 <= vy <= 11.5
+        assert not in_fp, f"Candidate ({vx}, {vy}) overlaps footprint"
+
+
+def test_compute_gnd_via_candidates_returns_positions() -> None:
+    """GND via candidates should be a non-empty tuple of (x, y) tuples."""
+    from kicad_pipeline.pcb.builder import _compute_gnd_via_candidates
+
+    candidates = _compute_gnd_via_candidates(
+        80.0, 40.0, footprints=(), keepouts=(),
+    )
+    assert len(candidates) > 0
+    assert all(len(c) == 2 for c in candidates)

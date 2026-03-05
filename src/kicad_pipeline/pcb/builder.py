@@ -518,29 +518,27 @@ _GND_VIA_FP_CLEARANCE_MM: float = 0.5
 """Clearance from footprint bounding boxes for stitching vias in mm."""
 
 
-def _make_gnd_stitching_vias(
+def _compute_gnd_via_candidates(
     board_width_mm: float,
     board_height_mm: float,
-    gnd_net_num: int,
     footprints: tuple[Footprint, ...],
     keepouts: tuple[Keepout, ...],
-) -> tuple[Via, ...]:
-    """Generate a grid of GND stitching vias across the board.
+) -> tuple[tuple[float, float], ...]:
+    """Compute candidate positions for GND stitching vias.
 
-    Stitching vias connect F.Cu and B.Cu GND pours, preventing the back
-    copper plane from floating.  Vias are placed on a regular grid and
-    skipped where they would overlap footprint bounding boxes or keepout
-    zones.
+    Returns grid positions that avoid footprint bounding boxes and keepout
+    zones.  Track/via avoidance is NOT applied here — that is done in a
+    post-routing filter so the router can mark these candidates as occupied
+    on both F.Cu and B.Cu grids before routing begins.
 
     Args:
         board_width_mm: Board width in mm.
         board_height_mm: Board height in mm.
-        gnd_net_num: Net number assigned to GND.
-        footprints: All placed footprints (used for bounding-box exclusion).
+        footprints: All placed footprints (bounding-box exclusion).
         keepouts: Keepout zones to avoid.
 
     Returns:
-        Tuple of :class:`Via` instances.
+        Tuple of ``(x_mm, y_mm)`` candidate positions.
     """
     import math as _m
 
@@ -551,7 +549,6 @@ def _make_gnd_stitching_vias(
     # Pre-compute footprint bounding boxes (centre +/- half-size + clearance)
     fp_boxes: list[tuple[float, float, float, float]] = []
     for fp in footprints:
-        # Estimate size from pads + graphics extent
         pad_xs = [fp.position.x + p.position.x for p in fp.pads] if fp.pads else [fp.position.x]
         pad_ys = [fp.position.y + p.position.y for p in fp.pads] if fp.pads else [fp.position.y]
         half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
@@ -571,7 +568,6 @@ def _make_gnd_stitching_vias(
             ko_boxes.append((min(xs), min(ys), max(xs), max(ys)))
 
     def _blocked(x: float, y: float) -> bool:
-        """Return True if (x, y) is inside a footprint or keepout."""
         for bx0, by0, bx1, by1 in fp_boxes:
             if bx0 <= x <= bx1 and by0 <= y <= by1:
                 return True
@@ -586,12 +582,197 @@ def _make_gnd_stitching_vias(
     x_start = margin + (board_width_mm - 2 * margin - (cols - 1) * spacing) / 2.0
     y_start = margin + (board_height_mm - 2 * margin - (rows - 1) * spacing) / 2.0
 
-    vias: list[Via] = []
+    candidates: list[tuple[float, float]] = []
     for r in range(rows):
         for c in range(cols):
             vx = round(x_start + c * spacing, 3)
             vy = round(y_start + r * spacing, 3)
             if not _blocked(vx, vy):
+                candidates.append((vx, vy))
+
+    log.info("build_pcb: computed %d GND via candidates", len(candidates))
+    return tuple(candidates)
+
+
+def _make_gnd_stitching_vias(
+    gnd_net_num: int,
+    candidates: tuple[tuple[float, float], ...],
+    routed_tracks: tuple[Track, ...] = (),
+    routing_vias: tuple[Via, ...] = (),
+    layer_count: int = 2,
+) -> tuple[Via, ...]:
+    """Filter pre-computed GND via candidates and emit final vias.
+
+    Takes candidate positions from :func:`_compute_gnd_via_candidates` and
+    drops any that overlap routed tracks or existing routing vias.
+
+    For 4-layer boards, vias span all copper layers (F.Cu through B.Cu).
+
+    Args:
+        gnd_net_num: Net number assigned to GND.
+        candidates: Pre-computed ``(x_mm, y_mm)`` candidate positions.
+        routed_tracks: Signal tracks to avoid (prevents shorts/clearance).
+        routing_vias: Signal vias to avoid (prevents shorts/clearance).
+        layer_count: Number of copper layers (2 or 4).
+
+    Returns:
+        Tuple of :class:`Via` instances.
+    """
+    import math as _m
+
+    via_radius = _GND_VIA_SIZE_MM / 2.0
+    track_margin = via_radius + 0.2  # via radius + clearance
+
+    if layer_count >= 4:
+        via_layers: tuple[str, ...] = (LAYER_F_CU, "In1.Cu", "In2.Cu", LAYER_B_CU)
+    else:
+        via_layers = (LAYER_F_CU, LAYER_B_CU)
+
+    def _point_to_segment_dist(
+        px: float, py: float,
+        ax: float, ay: float,
+        bx: float, by: float,
+    ) -> float:
+        dx = bx - ax
+        dy = by - ay
+        len_sq = dx * dx + dy * dy
+        if len_sq < 1e-12:
+            return _m.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / len_sq))
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        return _m.hypot(px - proj_x, py - proj_y)
+
+    def _near_any_track(vx: float, vy: float) -> bool:
+        for trk in routed_tracks:
+            dist = _point_to_segment_dist(
+                vx, vy, trk.start.x, trk.start.y, trk.end.x, trk.end.y,
+            )
+            if dist < track_margin + trk.width / 2.0:
+                return True
+        return False
+
+    def _near_any_via(vx: float, vy: float) -> bool:
+        for rv in routing_vias:
+            dist = _m.hypot(vx - rv.position.x, vy - rv.position.y)
+            if dist < via_radius + rv.size / 2.0 + 0.2:
+                return True
+        return False
+
+    vias: list[Via] = []
+    for vx, vy in candidates:
+        if routed_tracks and _near_any_track(vx, vy):
+            continue
+        if routing_vias and _near_any_via(vx, vy):
+            continue
+        vias.append(Via(
+            position=Point(vx, vy),
+            drill=_GND_VIA_DRILL_MM,
+            size=_GND_VIA_SIZE_MM,
+            layers=via_layers,
+            net_number=gnd_net_num,
+            uuid=_new_uuid(),
+        ))
+
+    log.info("build_pcb: generated %d GND stitching vias", len(vias))
+    return tuple(vias)
+
+
+def _make_rf_via_fence(
+    keepouts: tuple[Keepout, ...],
+    gnd_net_num: int,
+    spacing_mm: float,
+    footprints: tuple[Footprint, ...] = (),
+) -> tuple[Via, ...]:
+    """Place GND stitching vias around RF keepout perimeters.
+
+    Creates a via fence at *spacing_mm* intervals around each keepout
+    that has ``no_copper=True`` and layers containing ``"F.Cu"`` -- typical
+    of RF/antenna keepouts.  Vias are skipped where they overlap
+    footprint bounding boxes.
+
+    Args:
+        keepouts: All board keepouts.
+        gnd_net_num: GND net number.
+        spacing_mm: Target via-to-via spacing along the fence.
+        footprints: Footprints to avoid.
+
+    Returns:
+        Tuple of GND vias forming the fence.
+    """
+    import math as _m
+
+    vias: list[Via] = []
+    fence_margin = 0.5  # mm outside keepout perimeter
+
+    for ko in keepouts:
+        if not ko.no_copper or not ko.polygon:
+            continue
+        # Check if this is an RF-related keepout (on F.Cu)
+        if ko.layers and "F.Cu" not in ko.layers:
+            continue
+
+        # Walk the polygon perimeter and place vias at spacing intervals
+        pts = list(ko.polygon)
+        if len(pts) < 3:
+            continue
+
+        # Pre-compute footprint bounding boxes for avoidance
+        fp_boxes: list[tuple[float, float, float, float]] = []
+        for fp in footprints:
+            pad_xs = (
+                [fp.position.x + p.position.x for p in fp.pads]
+                if fp.pads else [fp.position.x]
+            )
+            pad_ys = (
+                [fp.position.y + p.position.y for p in fp.pads]
+                if fp.pads else [fp.position.y]
+            )
+            half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
+            half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
+            min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=False)) - 0.5
+            max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=False)) + 0.5
+            min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=False)) - 0.5
+            max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=False)) + 0.5
+            fp_boxes.append((min_x, min_y, max_x, max_y))
+
+        # Compute centroid for outward offset direction
+        cx = sum(p.x for p in pts) / len(pts)
+        cy = sum(p.y for p in pts) / len(pts)
+
+        for i in range(len(pts)):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % len(pts)]
+            edge_len = _m.hypot(p2.x - p1.x, p2.y - p1.y)
+            if edge_len < 0.01:
+                continue
+
+            # Normal direction (outward from centroid)
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            nx = -dy / edge_len
+            ny = dx / edge_len
+            # Ensure normal points away from centroid
+            mid_x = (p1.x + p2.x) / 2.0
+            mid_y = (p1.y + p2.y) / 2.0
+            if nx * (mid_x - cx) + ny * (mid_y - cy) < 0:
+                nx, ny = -nx, -ny
+
+            n_vias = max(1, int(edge_len / spacing_mm))
+            for j in range(n_vias):
+                t = (j + 0.5) / n_vias
+                vx = round(p1.x + t * dx + nx * fence_margin, 3)
+                vy = round(p1.y + t * dy + ny * fence_margin, 3)
+
+                # Skip if inside any footprint
+                blocked = False
+                for bx0, by0, bx1, by1 in fp_boxes:
+                    if bx0 <= vx <= bx1 and by0 <= vy <= by1:
+                        blocked = True
+                        break
+                if blocked:
+                    continue
+
                 vias.append(Via(
                     position=Point(vx, vy),
                     drill=_GND_VIA_DRILL_MM,
@@ -601,7 +782,6 @@ def _make_gnd_stitching_vias(
                     uuid=_new_uuid(),
                 ))
 
-    log.info("build_pcb: generated %d GND stitching vias", len(vias))
     return tuple(vias)
 
 
@@ -875,6 +1055,22 @@ def build_pcb(
     zones: list[ZonePolygon] = list(gnd_zones)
 
     # ------------------------------------------------------------------
+    # Step 6b: Inner-layer zones (4-layer stackup)
+    # ------------------------------------------------------------------
+    design_rules = DesignRules()
+    layer_count = design_rules.layer_count
+
+    if layer_count >= 4:
+        from kicad_pipeline.pcb.zones import make_gnd_pour
+
+        in1_gnd = make_gnd_pour(
+            outline, net_number=gnd_net_num, net_name="GND",
+            layer="In1.Cu",
+        )
+        zones.append(in1_gnd)
+        log.info("build_pcb: added In1.Cu GND plane zone")
+
+    # ------------------------------------------------------------------
     # Step 7-8: Keepouts already created in step 4c (before placement)
     # ------------------------------------------------------------------
 
@@ -911,6 +1107,14 @@ def build_pcb(
         )
 
     # ------------------------------------------------------------------
+    # Step 9c: Pre-compute GND stitching via candidates (before routing)
+    # ------------------------------------------------------------------
+    gnd_via_candidates = _compute_gnd_via_candidates(
+        board_width_mm, board_height_mm,
+        tuple(final_footprints), tuple(keepouts),
+    )
+
+    # ------------------------------------------------------------------
     # Step 10: Autoroute (when enabled)
     # ------------------------------------------------------------------
     all_tracks: tuple[Track, ...] = ()
@@ -934,6 +1138,7 @@ def build_pcb(
             net_widths=widths,
             net_clearances=clearances,
             keepouts=tuple(keepouts),
+            gnd_via_positions=gnd_via_candidates,
         )
         all_tracks = collect_tracks(route_results, routed_only=False)
         all_vias = collect_vias(route_results)
@@ -950,13 +1155,28 @@ def build_pcb(
         # DRC until zones are filled.
 
     # ------------------------------------------------------------------
-    # Step 10b: GND stitching vias (connect F.Cu ↔ B.Cu ground planes)
+    # Step 10b: GND stitching vias (post-routing filter of candidates)
     # ------------------------------------------------------------------
     gnd_vias = _make_gnd_stitching_vias(
-        board_width_mm, board_height_mm, gnd_net_num,
-        tuple(final_footprints), tuple(keepouts),
+        gnd_net_num, gnd_via_candidates,
+        routed_tracks=all_tracks,
+        routing_vias=all_vias,
+        layer_count=layer_count,
     )
     all_vias = all_vias + gnd_vias
+
+    # ------------------------------------------------------------------
+    # Step 10c: RF via fence (GND vias around RF keepouts)
+    # ------------------------------------------------------------------
+    from kicad_pipeline.constants import RF_VIA_FENCE_SPACING_MM
+
+    rf_fence_vias = _make_rf_via_fence(
+        tuple(keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
+        footprints=tuple(final_footprints),
+    )
+    if rf_fence_vias:
+        all_vias = all_vias + rf_fence_vias
+        log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
 
     log.info(
         "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "
@@ -992,28 +1212,46 @@ def build_pcb(
 # S-expression serialiser
 # ---------------------------------------------------------------------------
 
-# Standard KiCad 9 layer table for a 2-layer board.
-# KiCad 9 renumbered all layers; some have canonical aliases.
-_LAYER_TABLE: list[tuple[int, str, str] | tuple[int, str, str, str]] = [
-    (0, "F.Cu", "signal"),
-    (2, "B.Cu", "signal"),
-    (9, "F.Adhes", "user", "F.Adhesive"),
-    (11, "B.Adhes", "user", "B.Adhesive"),
-    (13, "F.Paste", "user"),
-    (15, "B.Paste", "user"),
-    (5, "F.SilkS", "user", "F.Silkscreen"),
-    (7, "B.SilkS", "user", "B.Silkscreen"),
-    (1, "F.Mask", "user"),
-    (3, "B.Mask", "user"),
-    (17, "Dwgs.User", "user", "User.Drawings"),
-    (19, "Cmts.User", "user", "User.Comments"),
-    (25, "Edge.Cuts", "user"),
-    (27, "Margin", "user"),
-    (31, "F.CrtYd", "user", "F.Courtyard"),
-    (29, "B.CrtYd", "user", "B.Courtyard"),
-    (33, "F.Fab", "user", "F.Fabrication"),
-    (35, "B.Fab", "user", "B.Fabrication"),
-]
+def _build_layer_table(
+    layer_count: int = 2,
+) -> list[tuple[int, str, str] | tuple[int, str, str, str]]:
+    """Build the layer table for the given copper layer count.
+
+    For 2-layer boards, returns the standard F.Cu/B.Cu table.
+    For 4-layer boards, adds In1.Cu (GND plane) and In2.Cu (power plane).
+
+    Args:
+        layer_count: Number of copper layers (2 or 4).
+
+    Returns:
+        Layer definition list suitable for KiCad S-expression output.
+    """
+    table: list[tuple[int, str, str] | tuple[int, str, str, str]] = [
+        (0, "F.Cu", "signal"),
+    ]
+    if layer_count >= 4:
+        table.append((4, "In1.Cu", "power"))
+        table.append((6, "In2.Cu", "power"))
+    table.extend([
+        (2, "B.Cu", "signal"),
+        (9, "F.Adhes", "user", "F.Adhesive"),
+        (11, "B.Adhes", "user", "B.Adhesive"),
+        (13, "F.Paste", "user"),
+        (15, "B.Paste", "user"),
+        (5, "F.SilkS", "user", "F.Silkscreen"),
+        (7, "B.SilkS", "user", "B.Silkscreen"),
+        (1, "F.Mask", "user"),
+        (3, "B.Mask", "user"),
+        (17, "Dwgs.User", "user", "User.Drawings"),
+        (19, "Cmts.User", "user", "User.Comments"),
+        (25, "Edge.Cuts", "user"),
+        (27, "Margin", "user"),
+        (31, "F.CrtYd", "user", "F.Courtyard"),
+        (29, "B.CrtYd", "user", "B.Courtyard"),
+        (33, "F.Fab", "user", "F.Fabrication"),
+        (35, "B.Fab", "user", "B.Fabrication"),
+    ])
+    return table
 
 
 def _pad_sexp(pad: Pad) -> SExpNode:
@@ -1350,7 +1588,8 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
 
     # Layers
     layers_node: list[SExpNode] = ["layers"]
-    for layer_entry in _LAYER_TABLE:
+    layer_table = _build_layer_table(design.design_rules.layer_count)
+    for layer_entry in layer_table:
         layer_node: list[SExpNode] = [layer_entry[0], layer_entry[1], layer_entry[2]]
         if len(layer_entry) > 3:
             layer_node.append(layer_entry[3])

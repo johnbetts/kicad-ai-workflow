@@ -151,3 +151,26 @@ def test_min_hole_to_hole_relaxed() -> None:
     data = build_project_file("test")
     rules = data["board"]["design_settings"]["rules"]
     assert rules["min_hole_to_hole"] == 0.2
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: 4-layer stackup support
+# ---------------------------------------------------------------------------
+
+
+def test_build_project_file_4_layer() -> None:
+    """4-layer project file should include inner copper layer definitions."""
+    data = build_project_file("test_4l", layer_count=4)
+    layers = data["board"]["design_settings"]["layers"]
+    assert "In1.Cu" in layers
+    assert "In2.Cu" in layers
+    assert layers["In1.Cu"]["type"] == 1  # power plane
+    assert layers["In2.Cu"]["type"] == 1  # power plane
+    assert layers["F.Cu"]["type"] == 0  # signal
+    assert layers["B.Cu"]["type"] == 0  # signal
+
+
+def test_build_project_file_2_layer_no_layers_section() -> None:
+    """2-layer project file should not have a layers section."""
+    data = build_project_file("test_2l", layer_count=2)
+    assert "layers" not in data["board"]["design_settings"]

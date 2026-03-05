@@ -17,7 +17,19 @@ from kicad_pipeline.constants import (
     VIA_DIAMETER_SIGNAL_MM,
     VIA_DRILL_SIGNAL_MM,
 )
-from kicad_pipeline.models.pcb import Footprint, Pad, Point, Track, Via
+from kicad_pipeline.models.pcb import Footprint, Keepout, Pad, Point, Track, Via
+
+
+def _keepout_blocks_layer(keepout: Keepout, layer: str) -> bool:
+    """Return True when *keepout* should block routing on *layer*.
+
+    A keepout blocks a layer when:
+    1. Its ``layers`` tuple includes *layer* (or is empty, meaning all layers).
+    2. It prohibits tracks (``no_tracks``) or copper (``no_copper``).
+    """
+    if keepout.layers and layer not in keepout.layers:
+        return False
+    return keepout.no_tracks or keepout.no_copper
 
 
 def _pad_abs_pos(fp: Footprint, pad: Pad) -> tuple[float, float]:
@@ -344,6 +356,8 @@ def _prepare_grid(
     for ko in keepouts:
         if not ko.polygon:
             continue
+        if not _keepout_blocks_layer(ko, "F.Cu"):
+            continue
         ko_xs = [p.x for p in ko.polygon]
         ko_ys = [p.y for p in ko.polygon]
         min_col, min_row = grid.to_cell(min(ko_xs), min(ko_ys))
@@ -399,9 +413,11 @@ def _prepare_bcu_grid(
             bcu.mark(mc, row)
             bcu.mark(bcu.cols - 1 - mc, row)
 
-    # Mark keepout zones
+    # Mark keepout zones (only those that block B.Cu)
     for ko in keepouts:
         if not ko.polygon:
+            continue
+        if not _keepout_blocks_layer(ko, "B.Cu"):
             continue
         ko_xs = [p.x for p in ko.polygon]
         ko_ys = [p.y for p in ko.polygon]
@@ -430,18 +446,156 @@ def _prepare_bcu_grid(
     return bcu
 
 
+def _is_line_clear(
+    grid: _Grid,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    exclusion_mm: float,
+) -> bool:
+    """Check whether all cells along a line segment are free on the grid.
+
+    Uses Bresenham-style stepping (same as :func:`_mark_line_on_grid`) to
+    walk from ``(x1, y1)`` to ``(x2, y2)`` and returns ``True`` only if
+    every cell along the path (plus exclusion margin) is free.
+
+    Args:
+        grid: The occupancy grid to check.
+        x1: Start X in mm.
+        y1: Start Y in mm.
+        x2: End X in mm.
+        y2: End Y in mm.
+        exclusion_mm: Exclusion radius around the line in mm.
+
+    Returns:
+        ``True`` if the entire path is clear.
+    """
+    gs = grid.grid_step_mm
+    c1, r1 = grid.to_cell(x1, y1)
+    c2, r2 = grid.to_cell(x2, y2)
+    excl_cells = max(1, math.ceil(exclusion_mm / gs))
+
+    dc_total = abs(c2 - c1)
+    dr_total = abs(r2 - r1)
+    sc = 1 if c1 < c2 else -1
+    sr = 1 if r1 < r2 else -1
+    err = dc_total - dr_total
+    cc, cr = c1, r1
+
+    while True:
+        for ddc in range(-excl_cells, excl_cells + 1):
+            for ddr in range(-excl_cells, excl_cells + 1):
+                nc = cc + ddc
+                nr = cr + ddr
+                if nc < 0 or nr < 0 or nc >= grid.cols or nr >= grid.rows:
+                    return False
+                if not grid.is_free(nc, nr):
+                    return False
+        if cc == c2 and cr == r2:
+            break
+        e2 = 2 * err
+        if e2 > -dr_total:
+            err -= dr_total
+            cc += sc
+        if e2 < dc_total:
+            err += dc_total
+            cr += sr
+
+    return True
+
+
+def _route_stub_on_fcu(
+    grid: _Grid,
+    pad_x: float,
+    pad_y: float,
+    via_x: float,
+    via_y: float,
+    net_number: int,
+    width_mm: float,
+    clearance_mm: float,
+) -> tuple[Track, ...] | None:
+    """Route an F.Cu stub from pad to via using A* when direct line is blocked.
+
+    Falls back to grid-aligned routing when the diagonal pad-to-via path
+    would cross existing F.Cu tracks.
+
+    Args:
+        grid: The F.Cu occupancy grid.
+        pad_x: Pad X position in mm.
+        pad_y: Pad Y position in mm.
+        via_x: Via X position in mm.
+        via_y: Via Y position in mm.
+        net_number: Net number for the tracks.
+        width_mm: Track width in mm.
+        clearance_mm: Track clearance in mm.
+
+    Returns:
+        Tuple of F.Cu Track segments, or ``None`` if A* fails.
+    """
+    sc, sr = grid.to_cell(pad_x, pad_y)
+    gc, gr = grid.to_cell(via_x, via_y)
+
+    # Temporarily unmark start/goal so A* can enter them
+    orig_start = not grid.is_free(sc, sr)
+    orig_goal = not grid.is_free(gc, gr)
+    grid.unmark(sc, sr)
+    grid.unmark(gc, gr)
+
+    path = _astar(grid, sc, sr, gc, gr)
+
+    if path is None:
+        if orig_start:
+            grid.mark(sc, sr)
+        if orig_goal:
+            grid.mark(gc, gr)
+        return None
+
+    # Build tracks from path
+    tracks: list[Track] = []
+    for j in range(len(path) - 1):
+        x1, y1 = grid.to_mm(path[j][0], path[j][1])
+        x2, y2 = grid.to_mm(path[j + 1][0], path[j + 1][1])
+        tracks.append(
+            Track(
+                start=Point(x1, y1),
+                end=Point(x2, y2),
+                width=width_mm,
+                layer="F.Cu",
+                net_number=net_number,
+                uuid="",
+            )
+        )
+
+    # Mark path cells with exclusion
+    excl_cells = max(1, math.ceil(
+        (clearance_mm + width_mm) / grid.grid_step_mm,
+    ) - 1)
+    for cell_col, cell_row in path:
+        for dc in range(-excl_cells, excl_cells + 1):
+            for dr in range(-excl_cells, excl_cells + 1):
+                grid.mark(cell_col + dc, cell_row + dr)
+
+    return tuple(tracks)
+
+
 def _find_free_via_position(
     fcu_grid: _Grid,
     target_x: float,
     target_y: float,
     via_radius_mm: float,
     clearance_mm: float,
+    stub_origin: tuple[float, float] | None = None,
+    stub_width_mm: float = 0.25,
 ) -> tuple[float, float] | None:
     """Find a position near *target* where a via fits without overlapping F.Cu pads.
 
     Checks cells within ``via_radius + clearance`` of the target.  If
     all are free, returns the target position.  Otherwise spirals outward
     (up to 8 cells ~2 mm) searching for the first fully-clear position.
+
+    When *stub_origin* is provided, also checks that the F.Cu stub path
+    from the origin to the candidate via position is clear.
 
     Returns:
         ``(x_mm, y_mm)`` of the free position, or ``None`` if no space found.
@@ -461,8 +615,18 @@ def _find_free_via_position(
                     return False
         return True
 
+    def _check_candidate(col: int, row: int) -> bool:
+        if not _area_free(col, row):
+            return False
+        if stub_origin is not None:
+            cx, cy = fcu_grid.to_mm(col, row)
+            stub_excl = clearance_mm + stub_width_mm
+            if not _is_line_clear(fcu_grid, stub_origin[0], stub_origin[1], cx, cy, stub_excl):
+                return False
+        return True
+
     tc, tr = fcu_grid.to_cell(target_x, target_y)
-    if _area_free(tc, tr):
+    if _check_candidate(tc, tr):
         return fcu_grid.to_mm(tc, tr)
 
     # Spiral outward in expanding rings
@@ -476,7 +640,7 @@ def _find_free_via_position(
                 rr = tr + dr
                 if cc < 0 or rr < 0 or cc >= fcu_grid.cols or rr >= fcu_grid.rows:
                     continue
-                if _area_free(cc, rr):
+                if _check_candidate(cc, rr):
                     return fcu_grid.to_mm(cc, rr)
     return None
 
@@ -514,19 +678,37 @@ def _route_on_bcu(
     via_start_pos: tuple[float, float] = (start_x, start_y)
     via_goal_pos: tuple[float, float] = (goal_x, goal_y)
 
+    # Track whether stubs need A*-routed paths instead of direct diagonals
+    _start_needs_astar_stub = False
+    _goal_needs_astar_stub = False
+
     if fcu_grid is not None:
+        # Try to find via position with clear stub path first
         found_start = _find_free_via_position(
             fcu_grid, start_x, start_y, via_radius, clearance_mm,
+            stub_origin=(start_x, start_y), stub_width_mm=width_mm,
         )
         if found_start is None:
-            return None
+            # Fall back: find ANY free via position, use A* for stub
+            found_start = _find_free_via_position(
+                fcu_grid, start_x, start_y, via_radius, clearance_mm,
+            )
+            if found_start is None:
+                return None
+            _start_needs_astar_stub = True
         via_start_pos = found_start
 
         found_goal = _find_free_via_position(
             fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
+            stub_origin=(goal_x, goal_y), stub_width_mm=width_mm,
         )
         if found_goal is None:
-            return None
+            found_goal = _find_free_via_position(
+                fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
+            )
+            if found_goal is None:
+                return None
+            _goal_needs_astar_stub = True
         via_goal_pos = found_goal
 
     # Route on B.Cu between via positions (not pad positions)
@@ -583,39 +765,86 @@ def _route_on_bcu(
         uuid="",
     )
 
-    # Add F.Cu stub tracks if vias were offset from pad positions
+    # Add F.Cu stub tracks if vias were offset from pad positions.
+    # When the direct diagonal stub would cross existing F.Cu tracks,
+    # use A*-routed stubs instead (grid-aligned segments).
     stub_tracks: list[Track] = []
-    if abs(via_start_pos[0] - start_x) > 0.01 or abs(via_start_pos[1] - start_y) > 0.01:
-        stub_tracks.append(
-            Track(
-                start=Point(start_x, start_y),
-                end=Point(via_start_pos[0], via_start_pos[1]),
-                width=width_mm,
-                layer="F.Cu",
-                net_number=net_number,
-                uuid="",
-            )
-        )
-    if abs(via_goal_pos[0] - goal_x) > 0.01 or abs(via_goal_pos[1] - goal_y) > 0.01:
-        stub_tracks.append(
-            Track(
-                start=Point(goal_x, goal_y),
-                end=Point(via_goal_pos[0], via_goal_pos[1]),
-                width=width_mm,
-                layer="F.Cu",
-                net_number=net_number,
-                uuid="",
-            )
-        )
+    start_offset = (
+        abs(via_start_pos[0] - start_x) > 0.01
+        or abs(via_start_pos[1] - start_y) > 0.01
+    )
+    goal_offset = (
+        abs(via_goal_pos[0] - goal_x) > 0.01
+        or abs(via_goal_pos[1] - goal_y) > 0.01
+    )
 
-    # Mark F.Cu stub tracks on fcu_grid so subsequent F.Cu routes avoid them
-    if fcu_grid is not None and stub_tracks:
-        for stub in stub_tracks:
-            _mark_line_on_grid(
-                fcu_grid, stub.start.x, stub.start.y,
-                stub.end.x, stub.end.y,
-                clearance_mm + width_mm,
+    if start_offset:
+        if _start_needs_astar_stub and fcu_grid is not None:
+            astar_stub = _route_stub_on_fcu(
+                fcu_grid, start_x, start_y,
+                via_start_pos[0], via_start_pos[1],
+                net_number, width_mm, clearance_mm,
             )
+            if astar_stub is not None:
+                stub_tracks.extend(astar_stub)
+            else:
+                # A* also failed — add direct stub as last resort
+                stub_tracks.append(
+                    Track(
+                        start=Point(start_x, start_y),
+                        end=Point(via_start_pos[0], via_start_pos[1]),
+                        width=width_mm, layer="F.Cu",
+                        net_number=net_number, uuid="",
+                    )
+                )
+        else:
+            stub_tracks.append(
+                Track(
+                    start=Point(start_x, start_y),
+                    end=Point(via_start_pos[0], via_start_pos[1]),
+                    width=width_mm, layer="F.Cu",
+                    net_number=net_number, uuid="",
+                )
+            )
+
+    if goal_offset:
+        if _goal_needs_astar_stub and fcu_grid is not None:
+            astar_stub = _route_stub_on_fcu(
+                fcu_grid, goal_x, goal_y,
+                via_goal_pos[0], via_goal_pos[1],
+                net_number, width_mm, clearance_mm,
+            )
+            if astar_stub is not None:
+                stub_tracks.extend(astar_stub)
+            else:
+                stub_tracks.append(
+                    Track(
+                        start=Point(goal_x, goal_y),
+                        end=Point(via_goal_pos[0], via_goal_pos[1]),
+                        width=width_mm, layer="F.Cu",
+                        net_number=net_number, uuid="",
+                    )
+                )
+        else:
+            stub_tracks.append(
+                Track(
+                    start=Point(goal_x, goal_y),
+                    end=Point(via_goal_pos[0], via_goal_pos[1]),
+                    width=width_mm, layer="F.Cu",
+                    net_number=net_number, uuid="",
+                )
+            )
+
+    # Mark F.Cu stub tracks on fcu_grid so subsequent F.Cu routes avoid them.
+    # A*-routed stubs are already marked by _route_stub_on_fcu; mark direct stubs.
+    if fcu_grid is not None:
+        for stub in stub_tracks:
+            if stub.layer == "F.Cu":
+                _mark_line_on_grid(
+                    fcu_grid, stub.start.x, stub.start.y,
+                    stub.end.x, stub.end.y,
+                    clearance_mm + width_mm,
+                )
 
     # Mark path cells with exclusion on B.Cu grid
     excl_cells = max(1, math.ceil(
@@ -1204,6 +1433,7 @@ def route_all_nets(
     net_widths: dict[str, float] | None = None,
     net_clearances: dict[str, float] | None = None,
     keepouts: tuple[Keepout, ...] = (),
+    gnd_via_positions: tuple[tuple[float, float], ...] = (),
 ) -> tuple[RouteResult, ...]:
     """Route all nets in the netlist using a shared occupancy grid.
 
@@ -1216,6 +1446,10 @@ def route_all_nets(
     from *net_widths* when provided; otherwise Power/GND nets receive a
     wider trace (0.5 mm) and all other nets use 0.25 mm.
 
+    When *gnd_via_positions* is provided, those candidate positions are
+    marked as occupied on both F.Cu and B.Cu grids before routing begins,
+    preventing signal tracks from crossing future GND stitching vias.
+
     Args:
         netlist: The board netlist.
         footprints: All placed footprints.
@@ -1226,6 +1460,8 @@ def route_all_nets(
             typically from :func:`~kicad_pipeline.pcb.netclasses.net_width_map`.
         net_clearances: Optional mapping from net name to clearance in mm.
         keepouts: Keepout zones to avoid during routing.
+        gnd_via_positions: Pre-computed GND stitching via candidate
+            positions to mark as occupied on both grids.
 
     Returns:
         Tuple of RouteResult, one per routed net entry.
@@ -1282,6 +1518,15 @@ def route_all_nets(
         grid, list(footprints), keepouts=keepouts,
         net_clearances=net_clearances, net_widths=net_widths,
     )
+
+    # Mark pre-computed GND stitching via candidates as occupied on both
+    # grids so signal tracks route around future via positions.
+    if gnd_via_positions:
+        gnd_via_radius = 0.5  # half of 1.0mm GND via pad diameter
+        gnd_via_cl = _global_pad_clearance(net_clearances, net_widths)
+        for gvx, gvy in gnd_via_positions:
+            _mark_pad_area(grid, gvx, gvy, gnd_via_radius, gnd_via_radius, gnd_via_cl)
+            _mark_pad_area(bcu_grid, gvx, gvy, gnd_via_radius, gnd_via_radius, gnd_via_cl)
 
     results: list[RouteResult] = []
 
@@ -1420,4 +1665,22 @@ def collect_vias(
         if key not in seen:
             seen.add(key)
             deduped.append(v)
-    return tuple(deduped)
+
+    # Distance-based dedup: skip if any previously-kept same-net via
+    # is within via.size mm (pad diameter), preventing hole_to_hole violations
+    final: list[Via] = []
+    for v in deduped:
+        too_close = False
+        for kept in final:
+            if kept.net_number != v.net_number:
+                continue
+            dist = math.hypot(
+                v.position.x - kept.position.x,
+                v.position.y - kept.position.y,
+            )
+            if dist < v.size:
+                too_close = True
+                break
+        if not too_close:
+            final.append(v)
+    return tuple(final)

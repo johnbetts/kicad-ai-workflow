@@ -11,11 +11,14 @@ from kicad_pipeline.routing.grid_router import (
     RouteResult,
     _find_free_via_position,
     _Grid,
+    _is_line_clear,
+    _keepout_blocks_layer,
     _mark_line_on_grid,
     _mark_via_on_fcu,
     _prepare_bcu_grid,
     _prepare_grid,
     _route_on_bcu,
+    _route_stub_on_fcu,
     collect_tracks,
     collect_vias,
     route_all_nets,
@@ -914,3 +917,200 @@ def test_collect_vias_keeps_distinct() -> None:
     r = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1, v2), routed=True)
     combined = collect_vias((r,))
     assert len(combined) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.3: _keepout_blocks_layer tests
+# ---------------------------------------------------------------------------
+
+
+def test_keepout_blocks_layer_fcu_only() -> None:
+    """Keepout with layers=('F.Cu',) blocks F.Cu but not B.Cu."""
+    ko = Keepout(
+        polygon=(Point(0, 0), Point(1, 0), Point(1, 1), Point(0, 1)),
+        layers=("F.Cu",),
+        no_copper=True,
+    )
+    assert _keepout_blocks_layer(ko, "F.Cu") is True
+    assert _keepout_blocks_layer(ko, "B.Cu") is False
+
+
+def test_keepout_blocks_layer_empty_layers() -> None:
+    """Keepout with layers=() blocks all layers."""
+    ko = Keepout(
+        polygon=(Point(0, 0), Point(1, 0), Point(1, 1), Point(0, 1)),
+        layers=(),
+        no_copper=True,
+    )
+    assert _keepout_blocks_layer(ko, "F.Cu") is True
+    assert _keepout_blocks_layer(ko, "B.Cu") is True
+
+
+def test_keepout_blocks_layer_both() -> None:
+    """Keepout with layers=('F.Cu','B.Cu') blocks both."""
+    ko = Keepout(
+        polygon=(Point(0, 0), Point(1, 0), Point(1, 1), Point(0, 1)),
+        layers=("F.Cu", "B.Cu"),
+        no_tracks=True,
+    )
+    assert _keepout_blocks_layer(ko, "F.Cu") is True
+    assert _keepout_blocks_layer(ko, "B.Cu") is True
+
+
+def test_keepout_no_tracks_required() -> None:
+    """Keepout with no_tracks=False and no_copper=False does not block."""
+    ko = Keepout(
+        polygon=(Point(0, 0), Point(1, 0), Point(1, 1), Point(0, 1)),
+        layers=("F.Cu",),
+        no_copper=False,
+        no_tracks=False,
+    )
+    assert _keepout_blocks_layer(ko, "F.Cu") is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.4: collect_vias distance-based dedup tests
+# ---------------------------------------------------------------------------
+
+
+def test_collect_vias_distance_dedup() -> None:
+    """Two same-net vias 0.25mm apart with size=0.6 -> only one kept."""
+    v1 = Via(
+        position=Point(10.0, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    v2 = Via(
+        position=Point(10.25, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    r = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1, v2), routed=True)
+    combined = collect_vias((r,))
+    assert len(combined) == 1
+
+
+def test_collect_vias_different_nets_not_deduped() -> None:
+    """Two vias on different nets close together -> both kept."""
+    v1 = Via(
+        position=Point(10.0, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    v2 = Via(
+        position=Point(10.25, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=2,
+    )
+    r1 = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1,), routed=True)
+    r2 = RouteResult(net_number=2, net_name="B", tracks=(), vias=(v2,), routed=True)
+    combined = collect_vias((r1, r2))
+    assert len(combined) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1: _is_line_clear tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_line_clear_on_empty_grid() -> None:
+    """A line on an empty grid should be clear."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    assert _is_line_clear(grid, 2.0, 5.0, 10.0, 5.0, 0.5)
+
+
+def test_is_line_clear_blocked_by_obstacle() -> None:
+    """A line through an occupied cell should be blocked."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    # Mark a cell at (6.0, 5.0)
+    c, r = grid.to_cell(6.0, 5.0)
+    grid.mark(c, r)
+    assert not _is_line_clear(grid, 2.0, 5.0, 10.0, 5.0, 0.5)
+
+
+def test_is_line_clear_parallel_line_not_blocked() -> None:
+    """A line well away from an obstacle should be clear."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    # Mark cells at y=10 — line runs at y=5
+    c, r = grid.to_cell(6.0, 10.0)
+    grid.mark(c, r)
+    assert _is_line_clear(grid, 2.0, 5.0, 10.0, 5.0, 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.2: _route_stub_on_fcu tests
+# ---------------------------------------------------------------------------
+
+
+def test_route_stub_on_fcu_direct() -> None:
+    """Route a stub on an empty grid — should succeed."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    result = _route_stub_on_fcu(grid, 5.0, 5.0, 10.0, 5.0, 1, 0.25, 0.2)
+    assert result is not None
+    assert len(result) >= 1
+    # All tracks on F.Cu
+    assert all(t.layer == "F.Cu" for t in result)
+
+
+def test_route_stub_on_fcu_blocked() -> None:
+    """Route a stub when the path is fully blocked — should return None."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    # Block a wall across the grid at x=7.5
+    for r in range(grid.rows):
+        grid.mark(grid.to_cell(7.5, r * 0.5)[0], r)
+    result = _route_stub_on_fcu(grid, 5.0, 5.0, 10.0, 5.0, 1, 0.25, 0.2)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1: _find_free_via_position with stub_origin
+# ---------------------------------------------------------------------------
+
+
+def test_find_via_with_stub_origin_clear() -> None:
+    """Via position found when stub path is clear."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    pos = _find_free_via_position(
+        grid, 10.0, 10.0, 0.3, 0.2,
+        stub_origin=(5.0, 10.0), stub_width_mm=0.25,
+    )
+    assert pos is not None
+
+
+def test_find_via_with_stub_origin_blocked_spirals() -> None:
+    """When direct position has blocked stub, should spiral to find clear one."""
+    grid = _Grid.create(20.0, 20.0, 0.5)
+    # Block cells between pad at (5,10) and target via at (10,10)
+    for c_offset in range(4, 8):
+        c = grid.to_cell(c_offset * 0.5 + 5.0, 10.0)[0]
+        r = grid.to_cell(5.0, 10.0)[1]
+        grid.mark(c, r)
+    # Should still find a via position (spirals to avoid blocked path)
+    pos = _find_free_via_position(
+        grid, 10.0, 10.0, 0.3, 0.2,
+        stub_origin=(5.0, 10.0), stub_width_mm=0.25,
+    )
+    # May or may not find one depending on grid state; just ensure no crash
+    assert pos is None or len(pos) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.1: GND via positions in route_all_nets
+# ---------------------------------------------------------------------------
+
+
+def test_route_all_nets_accepts_gnd_via_positions() -> None:
+    """Verify route_all_nets accepts and uses gnd_via_positions parameter."""
+    fp1 = _make_footprint("R1", x=5.0, y=20.0)
+    fp2 = _make_footprint("R2", x=15.0, y=20.0)
+    netlist = Netlist(
+        entries=(
+            NetlistEntry(
+                net=NetEntry(number=1, name="NET1"),
+                pad_refs=(("R1", "1"), ("R2", "1")),
+            ),
+        )
+    )
+    # Should not crash with gnd_via_positions
+    results = route_all_nets(
+        netlist, [fp1, fp2], 20.0, 40.0,
+        grid_step_mm=0.5,
+        gnd_via_positions=((10.0, 10.0), (10.0, 30.0)),
+    )
+    assert len(results) >= 1

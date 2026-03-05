@@ -116,6 +116,12 @@ VIA_DRILL_DEFAULT_MM: float = 0.508
 VIA_DIAMETER_DEFAULT_MM: float = 0.9
 """Default via pad diameter (mm)."""
 
+VIA_DRILL_SIGNAL_MM: float = 0.3
+"""Signal-routing via drill diameter — JLCPCB minimum (mm)."""
+
+VIA_DIAMETER_SIGNAL_MM: float = 0.6
+"""Signal-routing via pad diameter — 0.3 drill + 2x0.15 annular ring (mm)."""
+
 THERMAL_RELIEF_GAP_MM: float = 0.3
 """Gap between the copper fill and the thermal-relief spokes (mm)."""
 
@@ -247,3 +253,22 @@ ZONE_CLEARANCE_DEFAULT_MM: float = 0.3
 
 ZONE_MIN_THICKNESS_MM: float = 0.25
 """Default minimum zone fill thickness (mm)."""
+
+RF_VIA_FENCE_SPACING_MM: float = 2.0
+"""Target via-to-via spacing along an RF via fence perimeter (mm)."""
+
+# ---------------------------------------------------------------------------
+# Voltage-based clearance thresholds (IPC-2221 simplified)
+# ---------------------------------------------------------------------------
+
+VOLTAGE_CLEARANCE_THRESHOLDS: tuple[tuple[float, float], ...] = (
+    (50.0, 0.2),
+    (100.0, 0.5),
+    (250.0, 1.0),
+    (500.0, 2.5),
+)
+"""Voltage-to-clearance mapping: (max_voltage_V, min_clearance_mm).
+
+The first entry whose voltage >= the net voltage determines clearance.
+Based on IPC-2221 simplified external-layer distances.
+"""

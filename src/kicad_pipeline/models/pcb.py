@@ -208,7 +208,7 @@ class Via:
     position: Point
     drill: float
     size: float
-    layers: tuple[str, str]  # ("F.Cu", "B.Cu")
+    layers: tuple[str, ...]  # ("F.Cu", "B.Cu") or ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu")
     net_number: int
     uuid: str = ""
 
@@ -266,6 +266,7 @@ class NetClass:
     via_drill_mm: float = 0.508
     diff_pair_width_mm: float = 0.2
     diff_pair_gap_mm: float = 0.25
+    guard_traces: bool = False
     nets: tuple[str, ...] = ()
 
 
