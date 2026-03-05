@@ -28,6 +28,19 @@ from typing import TYPE_CHECKING
 from kicad_pipeline.exceptions import PCBError
 from kicad_pipeline.models.pcb import BoardOutline, Point
 
+
+@dataclass(frozen=True)
+class LayoutResult:
+    """Result of PCB layout placement.
+
+    Attributes:
+        positions: Mapping from component ref to board position.
+        rotations: Mapping from component ref to rotation in degrees.
+    """
+
+    positions: dict[str, Point]
+    rotations: dict[str, float]
+
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import ProjectRequirements
 
@@ -427,7 +440,7 @@ def layout_pcb(
     fixed_positions: dict[str, tuple[float, float, float]] | None = None,
     board_template: object | None = None,
     keepouts: tuple[object, ...] = (),
-) -> dict[str, Point]:
+) -> LayoutResult:
     """Compute a full PCB placement for all components in *requirements*.
 
     When *board_template* is provided, uses the constraint-based solver
@@ -447,8 +460,8 @@ def layout_pcb(
         keepouts: Optional keepout zones to avoid during placement.
 
     Returns:
-        Mapping from component ref to :class:`Point` for every component in
-        *requirements*.
+        :class:`LayoutResult` with positions and rotations for every
+        component in *requirements*.
     """
     # Constraint-based path when template is available
     if board_template is not None and footprint_sizes is not None:
@@ -464,9 +477,31 @@ def layout_pcb(
                 "layout_pcb: using constraint-based solver (template=%s)",
                 board_template.name,
             )
+            # Inject fixed_positions as FIXED constraints
+            from kicad_pipeline.models.pcb import (
+                PlacementConstraint,
+                PlacementConstraintType,
+            )
+            extra_constraints: list[PlacementConstraint] = []
+            if fixed_positions:
+                for ref, (fx, fy, frot) in fixed_positions.items():
+                    extra_constraints.append(PlacementConstraint(
+                        ref=ref,
+                        constraint_type=PlacementConstraintType.FIXED,
+                        x=fx,
+                        y=fy,
+                        rotation=frot,
+                        priority=100,
+                    ))
             constraint_list = constraints_from_requirements(
                 requirements, board_template, footprint_sizes,
             )
+            if extra_constraints:
+                # Merge: extra_constraints override by ref
+                extra_refs = {c.ref for c in extra_constraints}
+                constraint_list = tuple(
+                    c for c in constraint_list if c.ref not in extra_refs
+                ) + tuple(extra_constraints)
             typed_keepouts = tuple(
                 k for k in keepouts if isinstance(k, KeepoutModel)
             )
@@ -475,6 +510,12 @@ def layout_pcb(
                 keepouts=typed_keepouts, grid_mm=0.5,
             )
             positions = dict(result.positions)
+            rotations = dict(result.rotations)
+
+            # Log any placement violations
+            if result.violations:
+                for violation in result.violations:
+                    log.warning("layout_pcb: placement violation: %s", violation)
 
             # Ensure all component refs are placed
             all_refs = {c.ref for c in requirements.components}
@@ -495,14 +536,16 @@ def layout_pcb(
                 positions.update(extra)
 
             log.info("layout_pcb: placed %d components (constraint solver)", len(positions))
-            return positions
+            return LayoutResult(positions=positions, rotations=rotations)
     # --- Zone-based fallback path (no template) ---
     # Pre-populate positions from fixed_positions (board template)
     zone_positions: dict[str, Point] = {}
+    zone_rotations: dict[str, float] = {}
     fixed_refs: set[str] = set()
     if fixed_positions:
-        for ref, (fx, fy, _rot) in fixed_positions.items():
+        for ref, (fx, fy, frot) in fixed_positions.items():
             zone_positions[ref] = Point(x=fx, y=fy)
+            zone_rotations[ref] = frot
             fixed_refs.add(ref)
             log.info("layout_pcb: fixed position for %s at (%.2f, %.2f)", ref, fx, fy)
 
@@ -555,4 +598,4 @@ def layout_pcb(
         zone_positions.update(extra)
 
     log.info("layout_pcb: placed %d components", len(zone_positions))
-    return zone_positions
+    return LayoutResult(positions=zone_positions, rotations=zone_rotations)

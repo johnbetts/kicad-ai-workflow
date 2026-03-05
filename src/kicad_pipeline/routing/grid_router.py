@@ -229,50 +229,24 @@ def _astar(
 # ---------------------------------------------------------------------------
 
 
-def route_net(
+def _resolve_pad_positions(
     request: RouteRequest,
-    footprints: list[Footprint],
-    board_width_mm: float,
-    board_height_mm: float,
-    grid_step_mm: float = 0.5,
-) -> RouteResult:
-    """Route a single net using A* on a 2-D occupancy grid.
+    fp_by_ref: dict[str, Footprint],
+) -> list[tuple[float, float]] | str:
+    """Resolve pad world positions for a route request.
 
     Args:
-        request: The routing request describing the net and its pads.
-        footprints: All footprints on the board (used to build occupancy).
-        board_width_mm: Board width in mm (defines grid extent).
-        board_height_mm: Board height in mm (defines grid extent).
-        grid_step_mm: Grid resolution in mm.
+        request: The routing request.
+        fp_by_ref: Lookup from ref to Footprint.
 
     Returns:
-        A RouteResult with all generated tracks (or failure info).
+        List of ``(x, y)`` positions, or an error string if resolution fails.
     """
-    grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
-
-    # Mark all pad positions as occupied
-    for fp in footprints:
-        for pad in fp.pads:
-            px = fp.position.x + pad.position.x
-            py = fp.position.y + pad.position.y
-            grid.mark_mm(px, py, radius_cells=1)
-
-    # Build a lookup: ref -> Footprint
-    fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
-
-    # Resolve pad world positions
     positions: list[tuple[float, float]] = []
     for ref, pad_num in request.pad_refs:
-        found_fp: Footprint | None = fp_by_ref.get(ref)
+        found_fp = fp_by_ref.get(ref)
         if found_fp is None:
-            return RouteResult(
-                net_number=request.net_number,
-                net_name=request.net_name,
-                tracks=(),
-                vias=(),
-                routed=False,
-                reason=f"Footprint '{ref}' not found",
-            )
+            return f"Footprint '{ref}' not found"
         pad_pos: tuple[float, float] | None = None
         for pad in found_fp.pads:
             if pad.number == pad_num:
@@ -282,15 +256,62 @@ def route_net(
                 )
                 break
         if pad_pos is None:
-            return RouteResult(
-                net_number=request.net_number,
-                net_name=request.net_name,
-                tracks=(),
-                vias=(),
-                routed=False,
-                reason=f"Pad '{pad_num}' not found on footprint '{ref}'",
-            )
+            return f"Pad '{pad_num}' not found on footprint '{ref}'"
         positions.append(pad_pos)
+    return positions
+
+
+def route_net(
+    request: RouteRequest,
+    footprints: list[Footprint],
+    board_width_mm: float,
+    board_height_mm: float,
+    grid_step_mm: float = 0.5,
+    grid: _Grid | None = None,
+) -> RouteResult:
+    """Route a single net using A* on a 2-D occupancy grid.
+
+    When *grid* is provided, it is used as a shared occupancy grid (for
+    multi-net routing where each net's tracks become obstacles for
+    subsequent nets).  Same-net pad cells are temporarily unmarked
+    before routing so the router can reach its own target pads.
+
+    Args:
+        request: The routing request describing the net and its pads.
+        footprints: All footprints on the board (used to build occupancy).
+        board_width_mm: Board width in mm (defines grid extent).
+        board_height_mm: Board height in mm (defines grid extent).
+        grid_step_mm: Grid resolution in mm.
+        grid: Optional shared grid.  When ``None``, a fresh grid is created
+            with all pad positions marked as occupied.
+
+    Returns:
+        A RouteResult with all generated tracks (or failure info).
+    """
+    if grid is None:
+        grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
+        # Mark all pad positions as occupied
+        for fp in footprints:
+            for pad in fp.pads:
+                px = fp.position.x + pad.position.x
+                py = fp.position.y + pad.position.y
+                grid.mark_mm(px, py, radius_cells=1)
+
+    # Build a lookup: ref -> Footprint
+    fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
+
+    # Resolve pad world positions
+    resolved = _resolve_pad_positions(request, fp_by_ref)
+    if isinstance(resolved, str):
+        return RouteResult(
+            net_number=request.net_number,
+            net_name=request.net_name,
+            tracks=(),
+            vias=(),
+            routed=False,
+            reason=resolved,
+        )
+    positions = resolved
 
     if len(positions) < 2:
         return RouteResult(
@@ -302,10 +323,11 @@ def route_net(
             reason="insufficient pad positions",
         )
 
-    all_tracks: list[Track] = []
+    # Temporarily unmark this net's own pads so the router can reach them
+    for px, py in positions:
+        grid.unmark_mm(px, py, radius_cells=1)
 
-    # Clearance radius used when marking pad cells
-    mark_radius: int = 1
+    all_tracks: list[Track] = []
 
     # Connect pads sequentially: positions[0]->positions[1]->positions[2]->...
     for i in range(len(positions) - 1):
@@ -315,26 +337,12 @@ def route_net(
         start_col, start_row = grid.to_cell(p1[0], p1[1])
         goal_col, goal_row = grid.to_cell(p2[0], p2[1])
 
-        # Pre-check: if pad clearance zones overlap, the pads are too close
-        # together to route between -- there is no free corridor available.
-        col_gap = abs(start_col - goal_col) - 2 * mark_radius
-        row_gap = abs(start_row - goal_row) - 2 * mark_radius
-        # Zones overlap in column if col_gap < 0 AND in row if row_gap < 0.
-        # For a rectangular clearance block, the zones touch/overlap when
-        # BOTH dimensions are non-positive (i.e., no free column AND row gap).
-        if col_gap <= 0 and row_gap <= 0:
-            return RouteResult(
-                net_number=request.net_number,
-                net_name=request.net_name,
-                tracks=tuple(all_tracks),
-                vias=(),
-                routed=False,
-                reason=f"No path found for net {request.net_name}",
-            )
-
         path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None:
+            # Re-mark pads before returning failure
+            for px, py in positions:
+                grid.mark_mm(px, py, radius_cells=1)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -359,9 +367,15 @@ def route_net(
                 )
             )
 
-        # Mark path cells occupied so subsequent nets route around them
+        # Mark path cells with clearance so subsequent nets don't short
         for cell_col, cell_row in path:
-            grid.mark(cell_col, cell_row)
+            for dc in range(-1, 2):
+                for dr in range(-1, 2):
+                    grid.mark(cell_col + dc, cell_row + dr)
+
+    # Re-mark pad cells for subsequent nets
+    for px, py in positions:
+        grid.mark_mm(px, py, radius_cells=1)
 
     return RouteResult(
         net_number=request.net_number,
@@ -380,7 +394,12 @@ def route_all_nets(
     grid_step_mm: float = 0.5,
     net_widths: dict[str, float] | None = None,
 ) -> tuple[RouteResult, ...]:
-    """Route all nets in the netlist.
+    """Route all nets in the netlist using a shared occupancy grid.
+
+    A single grid is created and shared across all nets so that each
+    net's routed tracks become obstacles for subsequent nets, preventing
+    shorts.  Nets are sorted by pad count ascending (simpler nets first)
+    to improve overall routability.
 
     Nets with fewer than two pads are skipped.  Trace widths are looked up
     from *net_widths* when provided; otherwise Power/GND nets receive a
@@ -398,12 +417,21 @@ def route_all_nets(
     Returns:
         Tuple of RouteResult, one per routed net entry.
     """
+    # Filter to routable nets and sort by pad count (fewer pads first)
+    routable = [e for e in netlist.entries if len(e.pad_refs) >= 2]
+    routable.sort(key=lambda e: len(e.pad_refs))
+
+    # Create a shared grid and pre-mark all pad positions
+    grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
+    for fp in footprints:
+        for pad in fp.pads:
+            px = fp.position.x + pad.position.x
+            py = fp.position.y + pad.position.y
+            grid.mark_mm(px, py, radius_cells=1)
+
     results: list[RouteResult] = []
 
-    for entry in netlist.entries:
-        if len(entry.pad_refs) < 2:
-            continue
-
+    for entry in routable:
         net_name = entry.net.name
         if net_widths is not None:
             width = net_widths.get(net_name, 0.25)
@@ -417,7 +445,10 @@ def route_all_nets(
             layer="F.Cu",
             width_mm=width,
         )
-        result = route_net(request, footprints, board_width_mm, board_height_mm, grid_step_mm)
+        result = route_net(
+            request, footprints, board_width_mm, board_height_mm,
+            grid_step_mm, grid=grid,
+        )
         results.append(result)
 
     return tuple(results)

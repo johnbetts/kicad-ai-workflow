@@ -413,8 +413,8 @@ class TestBackwardCompatibility:
         req = _make_requirements_for_constraints()
         board = _board()
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
-        positions = layout_pcb(req, board, footprint_sizes=sizes)
-        assert len(positions) == len(req.components)
+        result = layout_pcb(req, board, footprint_sizes=sizes)
+        assert len(result.positions) == len(req.components)
 
     def test_layout_pcb_with_template(self) -> None:
         """layout_pcb with template uses constraint solver."""
@@ -425,8 +425,21 @@ class TestBackwardCompatibility:
         tmpl = get_template("RPI_HAT")
         board = _board(65.0, 56.5)
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
-        positions = layout_pcb(req, board, footprint_sizes=sizes, board_template=tmpl)
-        assert len(positions) == len(req.components)
+        result = layout_pcb(req, board, footprint_sizes=sizes, board_template=tmpl)
+        assert len(result.positions) == len(req.components)
+
+    def test_layout_pcb_returns_rotations(self) -> None:
+        """layout_pcb with template returns rotations dict."""
+        from kicad_pipeline.pcb.board_templates import get_template
+        from kicad_pipeline.pcb.placement import LayoutResult, layout_pcb
+
+        req = _make_requirements_for_constraints()
+        tmpl = get_template("RPI_HAT")
+        board = _board(65.0, 56.5)
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        result = layout_pcb(req, board, footprint_sizes=sizes, board_template=tmpl)
+        assert isinstance(result, LayoutResult)
+        assert isinstance(result.rotations, dict)
 
 
 # ---------------------------------------------------------------------------

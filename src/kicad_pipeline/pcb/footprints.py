@@ -37,6 +37,34 @@ from kicad_pipeline.models.pcb import (
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Standard KiCad library IDs
+# ---------------------------------------------------------------------------
+
+_KICAD_RESISTOR_LIB_IDS: dict[str, str] = {
+    "0402": "Resistor_SMD:R_0402_1005Metric",
+    "0603": "Resistor_SMD:R_0603_1608Metric",
+    "0805": "Resistor_SMD:R_0805_2012Metric",
+    "1206": "Resistor_SMD:R_1206_3216Metric",
+    "1210": "Resistor_SMD:R_1210_3225Metric",
+}
+
+_KICAD_CAPACITOR_LIB_IDS: dict[str, str] = {
+    "0402": "Capacitor_SMD:C_0402_1005Metric",
+    "0603": "Capacitor_SMD:C_0603_1608Metric",
+    "0805": "Capacitor_SMD:C_0805_2012Metric",
+    "1206": "Capacitor_SMD:C_1206_3216Metric",
+    "1210": "Capacitor_SMD:C_1210_3225Metric",
+}
+
+_KICAD_LED_LIB_IDS: dict[str, str] = {
+    "0402": "LED_SMD:LED_0402_1005Metric",
+    "0603": "LED_SMD:LED_0603_1608Metric",
+    "0805": "LED_SMD:LED_0805_2012Metric",
+    "1206": "LED_SMD:LED_1206_3216Metric",
+    "1210": "LED_SMD:LED_1210_3225Metric",
+}
+
+# ---------------------------------------------------------------------------
 # Data-file path
 # ---------------------------------------------------------------------------
 
@@ -263,8 +291,15 @@ def make_smd_resistor_capacitor(
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
+    # Use standard KiCad lib_id: detect R vs C from ref prefix
+    ref_prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
+    if ref_prefix == "C":
+        lib_id = _KICAD_CAPACITOR_LIB_IDS.get(package, f"Capacitor_SMD:C_{package}")
+    else:
+        lib_id = _KICAD_RESISTOR_LIB_IDS.get(package, f"Resistor_SMD:R_{package}")
+
     return Footprint(
-        lib_id=f"Device:{package}",
+        lib_id=lib_id,
         ref=ref,
         value=value,
         position=Point(0.0, 0.0),
@@ -330,8 +365,9 @@ def make_smd_led(
         ),
     )
     combined_graphics = base.graphics + tri_lines
+    led_lib_id = _KICAD_LED_LIB_IDS.get(package, f"LED_SMD:LED_{package}")
     return Footprint(
-        lib_id=f"Device:LED_{package}",
+        lib_id=led_lib_id,
         ref=base.ref,
         value=base.value,
         position=base.position,
@@ -560,7 +596,7 @@ def make_generic_smd_ic(
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
     if not lib_id:
-        lib_id = f"Package_SO:SOIC-{pin_count}"
+        lib_id = f"Package_SO:SOIC-{pin_count}_P{pitch_mm:.2f}mm"
 
     return Footprint(
         lib_id=lib_id,

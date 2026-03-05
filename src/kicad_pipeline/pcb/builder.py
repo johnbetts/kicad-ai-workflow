@@ -48,7 +48,7 @@ from kicad_pipeline.models.pcb import (
 from kicad_pipeline.pcb.board_templates import get_template
 from kicad_pipeline.pcb.footprints import estimate_footprint_size, footprint_for_component
 from kicad_pipeline.pcb.netclasses import classify_nets
-from kicad_pipeline.pcb.placement import layout_pcb
+from kicad_pipeline.pcb.placement import LayoutResult, layout_pcb
 from kicad_pipeline.pcb.silkscreen import add_silkscreen_to_footprint
 from kicad_pipeline.sexp.writer import SExpNode, write_file
 
@@ -641,59 +641,61 @@ def build_pcb(
         fp_sizes[comp.ref] = sz
         total_area += sz[0] * sz[1]
 
-    # Auto-size board: ensure board is large enough for all footprints
-    import math as _math
+    # Only auto-size when no template constrains dimensions
+    if tmpl_obj is None:
+        import math as _math
 
-    # Estimate minimum board area as 3x total footprint area
-    min_board_area = total_area * 3.0
-    # Maintain ~2:1 aspect ratio: w * h = area, h = w/2 → w = sqrt(2*area)
-    min_width = _math.sqrt(min_board_area * 2.0)
-    min_height = min_width / 2.0
-    new_width = max(board_width_mm, min_width)
-    new_height = max(board_height_mm, min_height)
-    # Ensure largest footprint fits with at least 10mm margin on each side
-    max_fp_w = max((s[0] for s in fp_sizes.values()), default=0.0)
-    max_fp_h = max((s[1] for s in fp_sizes.values()), default=0.0)
-    new_width = max(new_width, max_fp_w + 20.0)
-    new_height = max(new_height, max_fp_h + 20.0)
-    # Cap aspect ratio to 2.5:1 max
-    if new_width > 2.5 * new_height:
-        new_height = new_width / 2.0
-    elif new_height > 2.5 * new_width:
-        new_width = new_height / 2.0
+        # Estimate minimum board area as 3x total footprint area
+        min_board_area = total_area * 3.0
+        # Maintain ~2:1 aspect ratio: w * h = area, h = w/2 → w = sqrt(2*area)
+        min_width = _math.sqrt(min_board_area * 2.0)
+        min_height = min_width / 2.0
+        new_width = max(board_width_mm, min_width)
+        new_height = max(board_height_mm, min_height)
+        # Ensure largest footprint fits with at least 10mm margin on each side
+        max_fp_w = max((s[0] for s in fp_sizes.values()), default=0.0)
+        max_fp_h = max((s[1] for s in fp_sizes.values()), default=0.0)
+        new_width = max(new_width, max_fp_w + 20.0)
+        new_height = max(new_height, max_fp_h + 20.0)
+        # Cap aspect ratio to 2.5:1 max
+        if new_width > 2.5 * new_height:
+            new_height = new_width / 2.0
+        elif new_height > 2.5 * new_width:
+            new_width = new_height / 2.0
 
-    if new_width > board_width_mm or new_height > board_height_mm:
-        board_width_mm = new_width
-        board_height_mm = new_height
-        outline = _make_board_outline(
-            board_width_mm, board_height_mm, origin_x, origin_y,
-            corner_radius_mm=corner_radius_mm,
-        )
-        log.info(
-            "build_pcb: auto-sized board to %.1f x %.1f mm",
-            board_width_mm,
-            board_height_mm,
-        )
+        if new_width > board_width_mm or new_height > board_height_mm:
+            board_width_mm = new_width
+            board_height_mm = new_height
+            outline = _make_board_outline(
+                board_width_mm, board_height_mm, origin_x, origin_y,
+                corner_radius_mm=corner_radius_mm,
+            )
+            log.info(
+                "build_pcb: auto-sized board to %.1f x %.1f mm",
+                board_width_mm,
+                board_height_mm,
+            )
 
     # ------------------------------------------------------------------
     # Step 5: Layout placement
     # ------------------------------------------------------------------
-    positions = layout_pcb(
+    layout_result: LayoutResult = layout_pcb(
         requirements, outline, footprint_sizes=fp_sizes,
         fixed_positions=fixed_positions,
         board_template=tmpl_obj,
     )
 
-    # Apply positions to footprints
+    # Apply positions and rotations to footprints
     footprints_with_pos: list[Footprint] = []
     for fp in pre_footprints:
-        pos = positions.get(fp.ref, Point(x=0.0, y=0.0))
+        pos = layout_result.positions.get(fp.ref, Point(x=0.0, y=0.0))
+        rot = layout_result.rotations.get(fp.ref, fp.rotation)
         fp_placed = Footprint(
             lib_id=fp.lib_id,
             ref=fp.ref,
             value=fp.value,
             position=pos,
-            rotation=fp.rotation,
+            rotation=rot,
             layer=fp.layer,
             pads=fp.pads,
             graphics=fp.graphics,

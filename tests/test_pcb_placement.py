@@ -263,15 +263,27 @@ def test_layout_pcb_all_refs_placed() -> None:
     """layout_pcb returns a position for every component in requirements."""
     req = _minimal_requirements()
     board = _simple_board()
-    positions = layout_pcb(req, board)
+    result = layout_pcb(req, board)
     all_refs = {c.ref for c in req.components}
-    assert all_refs <= set(positions.keys())
+    assert all_refs <= set(result.positions.keys())
 
 
 def test_layout_pcb_returns_points() -> None:
     """All values returned by layout_pcb are Point instances."""
     req = _minimal_requirements()
     board = _simple_board()
-    positions = layout_pcb(req, board)
-    for ref, pt in positions.items():
+    result = layout_pcb(req, board)
+    for ref, pt in result.positions.items():
         assert isinstance(pt, Point), f"{ref} value is not a Point: {pt!r}"
+
+
+def test_layout_pcb_returns_layout_result() -> None:
+    """layout_pcb returns a LayoutResult with positions and rotations."""
+    from kicad_pipeline.pcb.placement import LayoutResult
+
+    req = _minimal_requirements()
+    board = _simple_board()
+    result = layout_pcb(req, board)
+    assert isinstance(result, LayoutResult)
+    assert isinstance(result.positions, dict)
+    assert isinstance(result.rotations, dict)

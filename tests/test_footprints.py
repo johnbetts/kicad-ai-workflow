@@ -269,9 +269,9 @@ def test_rj45_mounting_pads_np_thru() -> None:
 
 
 def test_footprint_for_component_resistor() -> None:
-    """'R_0805' footprint_id → lib_id contains 'Device'."""
+    """'R_0805' footprint_id → lib_id uses standard KiCad Resistor_SMD library."""
     fp = footprint_for_component("R1", "10k", "R_0805")
-    assert "Device" in fp.lib_id
+    assert "Resistor_SMD" in fp.lib_id
 
 
 def test_footprint_for_component_led() -> None:
@@ -406,3 +406,45 @@ def test_msop10_footprint_has_10_pads() -> None:
     """MSOP-10 footprint should have exactly 10 pads."""
     fp = footprint_for_component("U1", "ADS1115", "MSOP-10")
     assert len(fp.pads) == 10
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: Standard KiCad library IDs
+# ---------------------------------------------------------------------------
+
+
+def test_footprint_lib_ids_match_kicad_library() -> None:
+    """Footprint lib_ids should use standard KiCad library names."""
+    r = make_smd_resistor_capacitor("R1", "10k", "0805")
+    assert r.lib_id == "Resistor_SMD:R_0805_2012Metric"
+
+    c = make_smd_resistor_capacitor("C1", "100nF", "0603")
+    assert c.lib_id == "Capacitor_SMD:C_0603_1608Metric"
+
+    led = make_smd_led("D1", "RED", "0805")
+    assert led.lib_id == "LED_SMD:LED_0805_2012Metric"
+
+
+def test_footprint_lib_ids_all_packages() -> None:
+    """All standard SMD packages should have valid lib_ids."""
+    for pkg in ("0402", "0603", "0805", "1206", "1210"):
+        r = make_smd_resistor_capacitor("R1", "10k", pkg)
+        assert "Resistor_SMD:R_" in r.lib_id, f"Bad lib_id for R {pkg}: {r.lib_id}"
+
+        c = make_smd_resistor_capacitor("C1", "100nF", pkg)
+        assert "Capacitor_SMD:C_" in c.lib_id, f"Bad lib_id for C {pkg}: {c.lib_id}"
+
+        led = make_smd_led("D1", "RED", pkg)
+        assert "LED_SMD:LED_" in led.lib_id, f"Bad lib_id for LED {pkg}: {led.lib_id}"
+
+
+def test_footprint_for_component_uses_standard_lib_id() -> None:
+    """footprint_for_component routes should produce standard lib_ids."""
+    r = footprint_for_component("R1", "10k", "R_0805")
+    assert "Resistor_SMD" in r.lib_id
+
+    c = footprint_for_component("C1", "100nF", "C_0603")
+    assert "Capacitor_SMD" in c.lib_id
+
+    led = footprint_for_component("D1", "RED", "LED_0805")
+    assert "LED_SMD" in led.lib_id

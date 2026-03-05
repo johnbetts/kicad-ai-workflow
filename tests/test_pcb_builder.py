@@ -528,3 +528,48 @@ def test_mounting_hole_keepouts_use_actual_positions() -> None:
             for ex, ey in expected_centres
         )
         assert matched, f"Keepout centre ({cx:.1f}, {cy:.1f}) not near any expected position"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Template preserves dimensions (no auto-sizing override)
+# ---------------------------------------------------------------------------
+
+
+def test_build_pcb_with_template_preserves_dimensions() -> None:
+    """Template dimensions must not be overridden by auto-sizing logic.
+
+    The PinSocket_2x20 (50.8mm wide) should fit within 65mm RPi HAT
+    without triggering auto-sizing to 70.8mm.
+    """
+    # Add a large PinSocket to force auto-sizing in old code
+    large_header = Component(
+        ref="J1",
+        value="PinSocket_2x20",
+        footprint="PinSocket_2x20_P2.54mm_Vertical",
+        pins=tuple(
+            Pin(number=str(i + 1), name=f"P{i + 1}", pin_type=PinType.PASSIVE)
+            for i in range(40)
+        ),
+    )
+    req = _make_requirements(extra_components=(large_header,))
+    design = build_pcb(req, board_template="RPI_HAT")
+    xs = [p.x for p in design.outline.polygon]
+    board_w = max(xs) - min(xs)
+    # Must stay at template width (65mm), NOT inflate to 70.8mm
+    assert board_w == pytest.approx(65.0, abs=0.5), (
+        f"Board width {board_w:.1f}mm exceeds template 65mm — auto-sizing override"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Builder applies solver rotations
+# ---------------------------------------------------------------------------
+
+
+def test_build_pcb_with_template_applies_rotations() -> None:
+    """Footprints built with a template should have rotations from the solver."""
+    req = _make_requirements()
+    design = build_pcb(req, board_template="RPI_HAT")
+    # The design should build without error; rotations should be numeric
+    for fp in design.footprints:
+        assert isinstance(fp.rotation, float)

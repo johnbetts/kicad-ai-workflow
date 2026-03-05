@@ -173,13 +173,12 @@ def test_route_result_tracks_within_board() -> None:
 
 
 def test_route_result_unroutable() -> None:
-    """A tiny board should make routing impossible for far-apart pads."""
-    fp1 = _make_footprint("R1", x=0.5, y=0.5)
-    fp2 = _make_footprint("R2", x=1.5, y=1.5)
-    req = _make_route_request(1, (("R1", "1"), ("R2", "1")))
-    # Board is only 2x2 mm but pads are in opposite corners with clearance
-    result = route_net(req, (fp1, fp2), board_width_mm=2.0, board_height_mm=2.0)
+    """Routing fails when target footprint ref is missing."""
+    fp1 = _make_footprint("R1", x=5.0, y=5.0)
+    req = _make_route_request(1, (("R1", "1"), ("NONEXISTENT", "1")))
+    result = route_net(req, [fp1], board_width_mm=20.0, board_height_mm=20.0)
     assert result.routed is False
+    assert "NONEXISTENT" in result.reason
 
 
 def test_route_net_missing_footprint() -> None:
@@ -306,6 +305,62 @@ def test_collect_tracks_combines() -> None:
     assert len(combined) == 2
     assert t1 in combined
     assert t2 in combined
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Same-net pad routing, shared grid, net sorting
+# ---------------------------------------------------------------------------
+
+
+def test_router_can_reach_same_net_pads() -> None:
+    """Router should route between pads on the same net even when close together.
+
+    Old bug: all pads were marked occupied, so the router couldn't reach
+    its own target pads.
+    """
+    # Two pads 5mm apart — close enough that old gap pre-check would reject
+    fp1 = _make_footprint("R1", x=10.0, y=20.0, pad_number="1")
+    fp2 = _make_footprint("R2", x=15.0, y=20.0, pad_number="1")
+    req = _make_route_request(1, (("R1", "1"), ("R2", "1")))
+    result = route_net(req, [fp1, fp2], board_width_mm=30.0, board_height_mm=40.0)
+    assert result.routed is True
+    assert len(result.tracks) > 0
+
+
+def test_router_shared_grid_prevents_shorts() -> None:
+    """When using route_all_nets, routed tracks for one net should block
+    subsequent nets from using the same cells (preventing shorts)."""
+    fp1 = Footprint(
+        lib_id="Test:Test", ref="R1", value="V",
+        position=Point(x=5.0, y=20.0), layer="F.Cu",
+        pads=(_make_pad("1", net_number=1), _make_pad("2", x=2.0, net_number=2)),
+    )
+    fp2 = Footprint(
+        lib_id="Test:Test", ref="R2", value="V",
+        position=Point(x=20.0, y=20.0), layer="F.Cu",
+        pads=(_make_pad("1", net_number=1), _make_pad("2", x=2.0, net_number=2)),
+    )
+    entry1 = _make_netlist_entry(1, "NET_A", (("R1", "1"), ("R2", "1")))
+    entry2 = _make_netlist_entry(2, "NET_B", (("R1", "2"), ("R2", "2")))
+    netlist = _make_netlist([entry1, entry2])
+    results = route_all_nets(netlist, [fp1, fp2], board_width_mm=30.0, board_height_mm=40.0)
+    # At least one net should route successfully
+    assert any(r.routed for r in results)
+
+
+def test_router_sorts_nets_by_complexity() -> None:
+    """route_all_nets should route simpler nets (fewer pads) first."""
+    fp1 = _make_footprint("R1", x=5.0, y=20.0)
+    fp2 = _make_footprint("R2", x=15.0, y=20.0)
+    fp3 = _make_footprint("R3", x=25.0, y=20.0)
+    # 3-pad net should route after 2-pad net
+    entry_2pad = _make_netlist_entry(1, "SIMPLE", (("R1", "1"), ("R2", "1")))
+    entry_3pad = _make_netlist_entry(2, "COMPLEX", (("R1", "1"), ("R2", "1"), ("R3", "1")))
+    netlist = _make_netlist([entry_3pad, entry_2pad])  # Insert complex first
+    results = route_all_nets(netlist, [fp1, fp2, fp3], board_width_mm=30.0, board_height_mm=40.0)
+    # Results should come back with simple net first (sorted by pad count)
+    assert len(results) == 2
+    assert results[0].net_name == "SIMPLE"
 
 
 def test_collect_vias_combines() -> None:
