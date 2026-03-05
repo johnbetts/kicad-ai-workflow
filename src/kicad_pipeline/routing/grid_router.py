@@ -469,19 +469,15 @@ def route_net(
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
-    # Also unmark sibling pads on the same component to create routing
-    # channels through dense pad fields (e.g. DIP switches, connectors).
-    # Without this, through-hole pads at 2.54mm pitch block access to
-    # their neighbours because clearance zones overlap.
-    target_refs = {ref for ref, _ in request.pad_refs}
-    for ref in target_refs:
+    # Track which components have THT pads that might need sibling
+    # unmark if routing fails (deferred to retry within the routing loop).
+    _tht_refs_in_net: set[str] = set()
+    for ref, _ in request.pad_refs:
         fp = fp_by_ref.get(ref)
-        if fp is None:
+        if fp is None or len(fp.pads) > 12:
             continue
-        for pad in fp.pads:
-            px = fp.position.x + pad.position.x
-            py = fp.position.y + pad.position.y
-            _unmark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, pad_cl)
+        if any(p.size_x > 1.0 or p.size_y > 1.0 for p in fp.pads):
+            _tht_refs_in_net.add(ref)
 
     # Dense IC handling: fine-pitch ICs have pad clearance zones that
     # leave no routing space between pins.  We exclude these pads from
@@ -580,6 +576,21 @@ def route_net(
         goal_col, goal_row = grid.to_cell(p2.x, p2.y)
 
         path = _astar(grid, start_col, start_row, goal_col, goal_row)
+
+        if path is None and _tht_refs_in_net:
+            # Retry: unmark sibling pads on THT components to create
+            # routing channels through dense pad fields.
+            for ref in _tht_refs_in_net:
+                fp = fp_by_ref[ref]
+                for pad in fp.pads:
+                    px = fp.position.x + pad.position.x
+                    py = fp.position.y + pad.position.y
+                    _unmark_pad_area(
+                        grid, px, py,
+                        pad.size_x / 2, pad.size_y / 2, pad_cl,
+                    )
+            _tht_refs_in_net.clear()  # only retry once
+            path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None:
             # Restore all pad markings that may have been cleared
