@@ -195,6 +195,7 @@ def _prepare_grid(
     grid: _Grid,
     footprints: list[Footprint],
     keepouts: tuple[Keepout, ...] = (),
+    net_clearances: dict[str, float] | None = None,
 ) -> None:
     """Mark pad positions, board-edge margins, and keepout zones on the grid.
 
@@ -205,13 +206,17 @@ def _prepare_grid(
         grid: The grid to prepare.
         footprints: All footprints on the board (pads are marked occupied).
         keepouts: Keepout zones whose areas are marked occupied.
+        net_clearances: Optional per-net clearance overrides for pad marking.
     """
     # Mark all pad areas with their actual size + clearance margin
     for fp in footprints:
         for pad in fp.pads:
             px = fp.position.x + pad.position.x
             py = fp.position.y + pad.position.y
-            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2)
+            cl = _PAD_CLEARANCE_MM
+            if net_clearances is not None and pad.net_name:
+                cl = max(cl, net_clearances.get(pad.net_name, cl))
+            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
 
     # Mark board-edge margins as occupied
     margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
@@ -436,8 +441,9 @@ def route_net(
         )
 
     # Temporarily unmark this net's own pads so the router can reach them
+    pad_cl = max(_PAD_CLEARANCE_MM, request.clearance_mm)
     for pi in pad_infos:
-        _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h)
+        _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
     all_tracks: list[Track] = []
 
@@ -475,7 +481,7 @@ def route_net(
         if path is None:
             # Re-mark pads before returning failure
             for pi in pad_infos:
-                _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h)
+                _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -511,7 +517,7 @@ def route_net(
 
     # Re-mark pad cells for subsequent nets
     for pi in pad_infos:
-        _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h)
+        _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
 
     return RouteResult(
         net_number=request.net_number,
@@ -573,7 +579,10 @@ def route_all_nets(
 
     # Create a shared grid and prepare it with pads, edge margins, keepouts
     grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
-    _prepare_grid(grid, list(footprints), keepouts=keepouts)
+    _prepare_grid(
+        grid, list(footprints), keepouts=keepouts,
+        net_clearances=net_clearances,
+    )
 
     results: list[RouteResult] = []
 
