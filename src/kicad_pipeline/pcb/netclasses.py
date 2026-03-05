@@ -146,3 +146,19 @@ def net_width_map(netclasses: tuple[NetClass, ...]) -> dict[str, float]:
         for net_name in nc.nets:
             result[net_name] = nc.trace_width_mm
     return result
+
+
+def net_clearance_map(netclasses: tuple[NetClass, ...]) -> dict[str, float]:
+    """Build a net_name -> clearance mapping for use by the router.
+
+    Args:
+        netclasses: Classified netclasses from :func:`classify_nets`.
+
+    Returns:
+        Dictionary mapping each net name to its clearance in mm.
+    """
+    result: dict[str, float] = {}
+    for nc in netclasses:
+        for net_name in nc.nets:
+            result[net_name] = nc.clearance_mm
+    return result

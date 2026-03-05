@@ -34,6 +34,7 @@ class RouteRequest:
     pad_refs: tuple[tuple[str, str], ...]  # ((ref, pad_num), ...)
     layer: str  # "F.Cu" or "B.Cu"
     width_mm: float = 0.25
+    clearance_mm: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,53 @@ class _Grid:
 # ---------------------------------------------------------------------------
 
 
+_PAD_CLEARANCE_MM: float = 0.3
+"""Routing clearance around pads in mm (covers most netclass clearances)."""
+
+_KEEPOUT_MARGIN_CELLS: int = 2
+"""Extra grid cells marked around keepout zone bounding boxes."""
+
+
+def _mark_pad_area(
+    grid: _Grid,
+    px: float,
+    py: float,
+    half_w: float,
+    half_h: float,
+    clearance_mm: float = _PAD_CLEARANCE_MM,
+) -> None:
+    """Mark a rectangular pad area + clearance on the routing grid."""
+    x0 = px - half_w - clearance_mm
+    y0 = py - half_h - clearance_mm
+    x1 = px + half_w + clearance_mm
+    y1 = py + half_h + clearance_mm
+    c0, r0 = grid.to_cell(x0, y0)
+    c1, r1 = grid.to_cell(x1, y1)
+    for cc in range(max(0, c0), min(grid.cols, c1 + 1)):
+        for rr in range(max(0, r0), min(grid.rows, r1 + 1)):
+            grid.mark(cc, rr)
+
+
+def _unmark_pad_area(
+    grid: _Grid,
+    px: float,
+    py: float,
+    half_w: float,
+    half_h: float,
+    clearance_mm: float = _PAD_CLEARANCE_MM,
+) -> None:
+    """Unmark a pad area + clearance so the router can reach and exit it."""
+    x0 = px - half_w - clearance_mm
+    y0 = py - half_h - clearance_mm
+    x1 = px + half_w + clearance_mm
+    y1 = py + half_h + clearance_mm
+    c0, r0 = grid.to_cell(x0, y0)
+    c1, r1 = grid.to_cell(x1, y1)
+    for cc in range(max(0, c0), min(grid.cols, c1 + 1)):
+        for rr in range(max(0, r0), min(grid.rows, r1 + 1)):
+            grid.unmark(cc, rr)
+
+
 def _prepare_grid(
     grid: _Grid,
     footprints: list[Footprint],
@@ -158,25 +206,25 @@ def _prepare_grid(
         footprints: All footprints on the board (pads are marked occupied).
         keepouts: Keepout zones whose areas are marked occupied.
     """
-    # Mark all pad positions as occupied
+    # Mark all pad areas with their actual size + clearance margin
     for fp in footprints:
         for pad in fp.pads:
             px = fp.position.x + pad.position.x
             py = fp.position.y + pad.position.y
-            grid.mark_mm(px, py, radius_cells=1)
+            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2)
 
     # Mark board-edge margins as occupied
     margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
     for col in range(grid.cols):
-        for r in range(margin_cells):
-            grid.mark(col, r)                       # top edge
-            grid.mark(col, grid.rows - 1 - r)       # bottom edge
+        for mr in range(margin_cells):
+            grid.mark(col, mr)                       # top edge
+            grid.mark(col, grid.rows - 1 - mr)       # bottom edge
     for row in range(grid.rows):
-        for c in range(margin_cells):
-            grid.mark(c, row)                        # left edge
-            grid.mark(grid.cols - 1 - c, row)        # right edge
+        for mc in range(margin_cells):
+            grid.mark(mc, row)                        # left edge
+            grid.mark(grid.cols - 1 - mc, row)        # right edge
 
-    # Mark keepout zones as occupied
+    # Mark keepout zones as occupied (with extra margin for hole_clearance)
     for ko in keepouts:
         if not ko.polygon:
             continue
@@ -184,8 +232,14 @@ def _prepare_grid(
         ko_ys = [p.y for p in ko.polygon]
         min_col, min_row = grid.to_cell(min(ko_xs), min(ko_ys))
         max_col, max_row = grid.to_cell(max(ko_xs), max(ko_ys))
-        for kc in range(min_col, max_col + 1):
-            for kr in range(min_row, max_row + 1):
+        for kc in range(
+            max(0, min_col - _KEEPOUT_MARGIN_CELLS),
+            min(grid.cols, max_col + _KEEPOUT_MARGIN_CELLS + 1),
+        ):
+            for kr in range(
+                max(0, min_row - _KEEPOUT_MARGIN_CELLS),
+                min(grid.rows, max_row + _KEEPOUT_MARGIN_CELLS + 1),
+            ):
                 grid.mark(kc, kr)
 
 
@@ -278,36 +332,48 @@ def _astar(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _PadInfo:
+    """Resolved pad position and dimensions for routing."""
+
+    x: float
+    y: float
+    half_w: float
+    half_h: float
+
+
 def _resolve_pad_positions(
     request: RouteRequest,
     fp_by_ref: dict[str, Footprint],
-) -> list[tuple[float, float]] | str:
-    """Resolve pad world positions for a route request.
+) -> list[_PadInfo] | str:
+    """Resolve pad world positions and sizes for a route request.
 
     Args:
         request: The routing request.
         fp_by_ref: Lookup from ref to Footprint.
 
     Returns:
-        List of ``(x, y)`` positions, or an error string if resolution fails.
+        List of :class:`_PadInfo`, or an error string if resolution fails.
     """
-    positions: list[tuple[float, float]] = []
+    pads: list[_PadInfo] = []
     for ref, pad_num in request.pad_refs:
         found_fp = fp_by_ref.get(ref)
         if found_fp is None:
             return f"Footprint '{ref}' not found"
-        pad_pos: tuple[float, float] | None = None
+        found_pad: _PadInfo | None = None
         for pad in found_fp.pads:
             if pad.number == pad_num:
-                pad_pos = (
-                    found_fp.position.x + pad.position.x,
-                    found_fp.position.y + pad.position.y,
+                found_pad = _PadInfo(
+                    x=found_fp.position.x + pad.position.x,
+                    y=found_fp.position.y + pad.position.y,
+                    half_w=pad.size_x / 2,
+                    half_h=pad.size_y / 2,
                 )
                 break
-        if pad_pos is None:
+        if found_pad is None:
             return f"Pad '{pad_num}' not found on footprint '{ref}'"
-        positions.append(pad_pos)
-    return positions
+        pads.append(found_pad)
+    return pads
 
 
 def route_net(
@@ -346,7 +412,7 @@ def route_net(
     # Build a lookup: ref -> Footprint
     fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
 
-    # Resolve pad world positions
+    # Resolve pad world positions and sizes
     resolved = _resolve_pad_positions(request, fp_by_ref)
     if isinstance(resolved, str):
         return RouteResult(
@@ -357,9 +423,9 @@ def route_net(
             routed=False,
             reason=resolved,
         )
-    positions = resolved
+    pad_infos = resolved
 
-    if len(positions) < 2:
+    if len(pad_infos) < 2:
         return RouteResult(
             net_number=request.net_number,
             net_name=request.net_name,
@@ -370,14 +436,19 @@ def route_net(
         )
 
     # Temporarily unmark this net's own pads so the router can reach them
-    for px, py in positions:
-        grid.unmark_mm(px, py, radius_cells=1)
+    for pi in pad_infos:
+        _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h)
 
     all_tracks: list[Track] = []
 
+    # Compute track exclusion radius: half track width + netclass clearance
+    half_track = request.width_mm / 2
+    excl_mm = half_track + request.clearance_mm
+    excl_cells = max(1, math.ceil(excl_mm / grid.grid_step_mm))
+
     # MST-style routing: always connect closest unrouted pad to routed set
-    routed_set: set[int] = {0}  # index into positions
-    unrouted: set[int] = set(range(1, len(positions)))
+    routed_set: set[int] = {0}  # index into pad_infos
+    unrouted: set[int] = set(range(1, len(pad_infos)))
 
     while unrouted:
         # Find the closest (routed, unrouted) pair by Manhattan distance
@@ -386,25 +457,25 @@ def route_net(
         best_dist = float("inf")
         for ri in routed_set:
             for ui in unrouted:
-                d = (abs(positions[ri][0] - positions[ui][0])
-                     + abs(positions[ri][1] - positions[ui][1]))
+                d = (abs(pad_infos[ri].x - pad_infos[ui].x)
+                     + abs(pad_infos[ri].y - pad_infos[ui].y))
                 if d < best_dist:
                     best_dist = d
                     best_from = ri
                     best_to = ui
 
-        p1 = positions[best_from]
-        p2 = positions[best_to]
+        p1 = pad_infos[best_from]
+        p2 = pad_infos[best_to]
 
-        start_col, start_row = grid.to_cell(p1[0], p1[1])
-        goal_col, goal_row = grid.to_cell(p2[0], p2[1])
+        start_col, start_row = grid.to_cell(p1.x, p1.y)
+        goal_col, goal_row = grid.to_cell(p2.x, p2.y)
 
         path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None:
             # Re-mark pads before returning failure
-            for px, py in positions:
-                grid.mark_mm(px, py, radius_cells=1)
+            for pi in pad_infos:
+                _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -429,19 +500,18 @@ def route_net(
                 )
             )
 
-        # Mark path cells with clearance so subsequent nets don't short
-        clearance_cells = max(1, round(0.2 / grid.grid_step_mm))
+        # Mark path cells with clearance (half track width + netclass clearance)
         for cell_col, cell_row in path:
-            for dc in range(-clearance_cells, clearance_cells + 1):
-                for dr in range(-clearance_cells, clearance_cells + 1):
+            for dc in range(-excl_cells, excl_cells + 1):
+                for dr in range(-excl_cells, excl_cells + 1):
                     grid.mark(cell_col + dc, cell_row + dr)
 
         routed_set.add(best_to)
         unrouted.discard(best_to)
 
     # Re-mark pad cells for subsequent nets
-    for px, py in positions:
-        grid.mark_mm(px, py, radius_cells=1)
+    for pi in pad_infos:
+        _mark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h)
 
     return RouteResult(
         net_number=request.net_number,
@@ -459,6 +529,7 @@ def route_all_nets(
     board_height_mm: float,
     grid_step_mm: float = 0.25,
     net_widths: dict[str, float] | None = None,
+    net_clearances: dict[str, float] | None = None,
     keepouts: tuple[Keepout, ...] = (),
 ) -> tuple[RouteResult, ...]:
     """Route all nets in the netlist using a shared occupancy grid.
@@ -480,6 +551,7 @@ def route_all_nets(
         grid_step_mm: Grid resolution in mm.
         net_widths: Optional mapping from net name to trace width in mm,
             typically from :func:`~kicad_pipeline.pcb.netclasses.net_width_map`.
+        net_clearances: Optional mapping from net name to clearance in mm.
         keepouts: Keepout zones to avoid during routing.
 
     Returns:
@@ -512,12 +584,17 @@ def route_all_nets(
         else:
             width = 0.5 if "GND" in net_name or "PWR" in net_name else 0.25
 
+        clearance = 0.2  # default netclass clearance
+        if net_clearances is not None:
+            clearance = net_clearances.get(net_name, 0.2)
+
         request = RouteRequest(
             net_number=entry.net.number,
             net_name=net_name,
             pad_refs=entry.pad_refs,
             layer="F.Cu",
             width_mm=width,
+            clearance_mm=clearance,
         )
         result = route_net(
             request, footprints, board_width_mm, board_height_mm,

@@ -780,7 +780,7 @@ def build_pcb(
     all_tracks: tuple[Track, ...] = ()
     all_vias: tuple[Via, ...] = ()
     if auto_route:
-        from kicad_pipeline.pcb.netclasses import net_width_map
+        from kicad_pipeline.pcb.netclasses import net_clearance_map, net_width_map
         from kicad_pipeline.pcb.netlist import build_netlist
         from kicad_pipeline.routing.grid_router import (
             collect_tracks,
@@ -790,11 +790,13 @@ def build_pcb(
 
         netlist = build_netlist(requirements)
         widths = net_width_map(netclasses)
+        clearances = net_clearance_map(netclasses)
         route_results = route_all_nets(
             netlist, final_footprints,
             board_width_mm, board_height_mm,
             grid_step_mm=0.25,
             net_widths=widths,
+            net_clearances=clearances,
             keepouts=tuple(keepouts),
         )
         all_tracks = collect_tracks(route_results)
