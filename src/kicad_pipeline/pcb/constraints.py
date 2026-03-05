@@ -442,7 +442,7 @@ def constraints_from_requirements(
                             ref=comp.ref,
                             constraint_type=PlacementConstraintType.NEAR,
                             target_ref=conn.ref,
-                            max_distance_mm=3.0,
+                            max_distance_mm=5.0,
                             priority=30,
                         ))
                         break
