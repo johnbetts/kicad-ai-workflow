@@ -856,7 +856,7 @@ def rpi_hat_constraints(
                         ref=comp.ref,
                         constraint_type=PlacementConstraintType.NEAR,
                         target_ref=sw_ref,
-                        max_distance_mm=8.0,
+                        max_distance_mm=15.0,
                         priority=28,
                     ))
                     break

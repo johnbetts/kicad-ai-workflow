@@ -636,11 +636,20 @@ def route_all_nets(
     return tuple(results)
 
 
-def collect_tracks(results: tuple[RouteResult, ...]) -> tuple[Track, ...]:
+def collect_tracks(
+    results: tuple[RouteResult, ...],
+    *,
+    filter_dangling: bool = True,
+) -> tuple[Track, ...]:
     """Flatten all Track objects from all RouteResults into a single tuple.
+
+    When *filter_dangling* is ``True`` (default), single-segment tracks whose
+    endpoints don't connect to any other track in the same net are removed.
+    These orphan stubs cause ``track_dangling`` DRC violations in KiCad.
 
     Args:
         results: Routing results to collect tracks from.
+        filter_dangling: Remove orphan single-segment stubs (default True).
 
     Returns:
         Combined tuple of all tracks.
@@ -648,7 +657,39 @@ def collect_tracks(results: tuple[RouteResult, ...]) -> tuple[Track, ...]:
     tracks: list[Track] = []
     for r in results:
         tracks.extend(r.tracks)
-    return tuple(tracks)
+
+    if not filter_dangling or len(tracks) < 2:
+        return tuple(tracks)
+
+    # Group tracks by net, then find dangling endpoints
+    by_net: dict[int, list[Track]] = {}
+    for t in tracks:
+        by_net.setdefault(t.net_number, []).append(t)
+
+    keep: list[Track] = []
+    for net_tracks in by_net.values():
+        if len(net_tracks) <= 1:
+            # A single-segment net is OK (direct pad-to-pad)
+            keep.extend(net_tracks)
+            continue
+
+        # Build endpoint connectivity: count how many tracks touch each point
+        eps: dict[tuple[float, float], int] = {}
+        for t in net_tracks:
+            sk = (round(t.start.x, 4), round(t.start.y, 4))
+            ek = (round(t.end.x, 4), round(t.end.y, 4))
+            eps[sk] = eps.get(sk, 0) + 1
+            eps[ek] = eps.get(ek, 0) + 1
+
+        for t in net_tracks:
+            sk = (round(t.start.x, 4), round(t.start.y, 4))
+            ek = (round(t.end.x, 4), round(t.end.y, 4))
+            # A stub has both endpoints only appearing once (no connections)
+            if eps.get(sk, 0) <= 1 and eps.get(ek, 0) <= 1:
+                continue  # orphan stub — skip
+            keep.append(t)
+
+    return tuple(keep)
 
 
 def collect_vias(results: tuple[RouteResult, ...]) -> tuple[Via, ...]:

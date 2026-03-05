@@ -282,7 +282,7 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
 
     # Larger clearance for through-hole pads to avoid silk_over_copper DRC
     has_tht = any(p.pad_type == "thru_hole" for p in fp.pads)
-    pad_label_gap = 1.5 if has_tht else 0.5
+    pad_label_gap = 1.5 if has_tht else 1.2
     ref_y = min(min_y - pad_label_gap, -_LABEL_OFFSET_MM)
     val_y = max(max_y + pad_label_gap, _LABEL_OFFSET_MM)
 

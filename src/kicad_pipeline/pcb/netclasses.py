@@ -33,7 +33,7 @@ _NETCLASS_PATTERNS: tuple[tuple[re.Pattern[str], str, float, float, float, float
         re.compile(r"^(SENS|AIN|ADC|VREF)", re.IGNORECASE),
         "HighVoltageAnalog",
         0.4,
-        0.5,
+        0.3,
         0.8,
         0.508,
     ),

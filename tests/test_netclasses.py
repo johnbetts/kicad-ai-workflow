@@ -74,7 +74,7 @@ def test_classify_nets_high_voltage_analog() -> None:
     assert "AIN0" in hva.nets
     assert "ADC_CH1" in hva.nets
     assert "VREF" in hva.nets
-    assert hva.clearance_mm == 0.5
+    assert hva.clearance_mm == 0.3
     assert hva.trace_width_mm == 0.4
 
 
