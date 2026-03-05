@@ -656,45 +656,59 @@ def solve_placement(
             )
             log.debug("EDGE(%s): %s at (%.1f, %.1f) rot=%.0f", edge.value, ref, x, y, rot)
 
-    # 3. Place NEAR
-    for ref, c in ref_constraint.items():
-        if c.constraint_type != PlacementConstraintType.NEAR or ref in positions:
-            continue
+    # 3. Place NEAR (with retry for deferred placements whose targets
+    # appear later in the priority order)
+    near_refs = [
+        (ref, c) for ref, c in ref_constraint.items()
+        if c.constraint_type == PlacementConstraintType.NEAR and ref not in positions
+    ]
+
+    def _place_near(ref: str, c: PlacementConstraint) -> bool:
         target = c.target_ref
         if target is None or target not in positions:
-            # Target not placed yet — defer
-            continue
+            return False
         target_pos = positions[target]
         max_dist = c.max_distance_mm or 5.0
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
-        # Try positions around the target
-        placed = False
-        for angle_deg in range(0, 360, 45):
-            angle = math.radians(angle_deg)
-            trial_x = target_pos.x + max_dist * math.cos(angle)
-            trial_y = target_pos.y + max_dist * math.sin(angle)
-            rx = trial_x - origin_x - w / 2
-            ry = trial_y - origin_y - h / 2
-            if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
-                positions[ref] = Point(x=trial_x, y=trial_y)
-                rotations[ref] = 0.0
-                gap = _placement_gap(w, h)
-                grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
-                log.debug("NEAR(%s): %s at (%.1f, %.1f)", target, ref, trial_x, trial_y)
-                placed = True
-                break
-        if not placed:
-            # Find nearest free spot to target
-            free = grid.find_nearest_free(
-                target_pos.x - origin_x, target_pos.y - origin_y, w, h,
-            )
-            if free is not None:
-                positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
-                rotations[ref] = 0.0
-                gap = _placement_gap(w, h)
-                grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
-            else:
-                violations.append(f"Could not place {ref} near {target}")
+        # Try positions around the target at increasing distances
+        for dist in (max_dist, max_dist * 1.5, max_dist * 2.0):
+            for angle_deg in range(0, 360, 45):
+                angle = math.radians(angle_deg)
+                trial_x = target_pos.x + dist * math.cos(angle)
+                trial_y = target_pos.y + dist * math.sin(angle)
+                rx = trial_x - origin_x - w / 2
+                ry = trial_y - origin_y - h / 2
+                if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
+                    positions[ref] = Point(x=trial_x, y=trial_y)
+                    rotations[ref] = 0.0
+                    gap = _placement_gap(w, h)
+                    grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
+                    log.debug("NEAR(%s): %s at (%.1f, %.1f)", target, ref, trial_x, trial_y)
+                    return True
+        # Fallback: nearest free spot
+        free = grid.find_nearest_free(
+            target_pos.x - origin_x, target_pos.y - origin_y, w, h,
+        )
+        if free is not None:
+            positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
+            rotations[ref] = 0.0
+            gap = _placement_gap(w, h)
+            grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
+            return True
+        violations.append(f"Could not place {ref} near {target}")
+        return False
+
+    # Multiple passes to resolve dependency chains (A -> B -> C)
+    for _pass in range(3):
+        deferred = []
+        for ref, c in near_refs:
+            if ref in positions:
+                continue
+            if not _place_near(ref, c):
+                deferred.append((ref, c))
+        near_refs = deferred
+        if not deferred:
+            break
 
     # 4. Place GROUP
     group_members: dict[str, list[str]] = {}
@@ -826,7 +840,7 @@ def rpi_hat_constraints(
             priority=60,
         ))
 
-    # DIP switches -> NEAR(IC)
+    # DIP switches -> NEAR(IC) — priority must be higher than its dependents
     sw_ref: str | None = None
     for comp in requirements.components:
         if comp.ref.startswith("SW") and ic_ref is not None:
@@ -836,7 +850,7 @@ def rpi_hat_constraints(
                 constraint_type=PlacementConstraintType.NEAR,
                 target_ref=ic_ref,
                 max_distance_mm=10.0,
-                priority=25,
+                priority=32,
             ))
 
     # Pull-up/address resistors sharing nets with SW -> NEAR(SW)
