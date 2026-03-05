@@ -167,11 +167,10 @@ def test_build_pcb_has_board_outline() -> None:
 
 
 def test_build_pcb_has_zones() -> None:
-    """PCBDesign has GND zones on both F.Cu and B.Cu."""
+    """PCBDesign has GND zone on B.Cu (back only — F.Cu used for routing)."""
     req = _make_requirements()
     design = build_pcb(req)
     layers = {z.layer for z in design.zones}
-    assert "F.Cu" in layers
     assert "B.Cu" in layers
 
 

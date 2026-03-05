@@ -759,9 +759,9 @@ def build_pcb(
     # Step 6: GND pours
     # ------------------------------------------------------------------
     gnd_net_num = net_lookup.get("GND", 1)
-    # Auto-select strategy: use "back_only" when >20 nets or analog netclass
-    has_analog = any(nc.name.lower() == "analog" for nc in netclasses)
-    gnd_strategy = "back_only" if len(nets) > 20 or has_analog else "both"
+    # Always use "back_only" — F.Cu is used for signal routing, so a GND
+    # pour on F.Cu creates clearance violations with every track.
+    gnd_strategy = "back_only"
     gnd_zones = _make_gnd_zones(outline, gnd_net_num, zone_clearance, strategy=gnd_strategy)
     zones: list[ZonePolygon] = list(gnd_zones)
 
