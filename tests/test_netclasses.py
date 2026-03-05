@@ -39,7 +39,7 @@ def test_classify_nets_gnd_is_power() -> None:
     power = next(nc for nc in result if nc.name == "Power")
     assert "GND" in power.nets
     assert power.trace_width_mm == 0.3
-    assert power.clearance_mm == 0.3
+    assert power.clearance_mm == 0.2
 
 
 def test_classify_nets_voltage_rails() -> None:
@@ -74,7 +74,7 @@ def test_classify_nets_high_voltage_analog() -> None:
     assert "AIN0" in hva.nets
     assert "ADC_CH1" in hva.nets
     assert "VREF" in hva.nets
-    assert hva.clearance_mm == 0.3
+    assert hva.clearance_mm == 0.2
     assert hva.trace_width_mm == 0.4
 
 

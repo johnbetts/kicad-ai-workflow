@@ -29,6 +29,27 @@ def _pad_abs_pos(fp: Footprint, pad: Pad) -> tuple[float, float]:
     ry = pad.position.x * sin_r + pad.position.y * cos_r
     return (fp.position.x + rx, fp.position.y + ry)
 
+
+def _pad_rotated_half_size(fp: Footprint, pad: Pad) -> tuple[float, float]:
+    """Return (half_w, half_h) of a pad after footprint rotation.
+
+    For axis-aligned rotations (0/90/180/270), swap size_x and size_y
+    when rotated 90 or 270 degrees.  For arbitrary angles, use the
+    bounding box of the rotated rectangle.
+    """
+    hw = pad.size_x / 2.0
+    hh = pad.size_y / 2.0
+    rot = fp.rotation % 360.0
+    if abs(rot - 90.0) < 0.01 or abs(rot - 270.0) < 0.01:
+        return (hh, hw)
+    if abs(rot) < 0.01 or abs(rot - 180.0) < 0.01:
+        return (hw, hh)
+    # Arbitrary rotation: compute axis-aligned bounding box
+    rad = math.radians(rot)
+    cos_r = abs(math.cos(rad))
+    sin_r = abs(math.sin(rad))
+    return (hw * cos_r + hh * sin_r, hw * sin_r + hh * cos_r)
+
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import Keepout
     from kicad_pipeline.pcb.netlist import Netlist, NetlistEntry
@@ -173,13 +194,21 @@ def _mark_pad_area(
     half_h: float,
     clearance_mm: float = _PAD_CLEARANCE_MM,
 ) -> None:
-    """Mark a rectangular pad area + clearance on the routing grid."""
+    """Mark a rectangular pad area + clearance on the routing grid.
+
+    Uses ceil for the upper bound so that any cell whose center falls
+    within one grid step of the clearance zone edge is also blocked.
+    This prevents tracks from being placed in cells that partially
+    overlap the required clearance zone.
+    """
     x0 = px - half_w - clearance_mm
     y0 = py - half_h - clearance_mm
     x1 = px + half_w + clearance_mm
     y1 = py + half_h + clearance_mm
     c0, r0 = grid.to_cell(x0, y0)
-    c1, r1 = grid.to_cell(x1, y1)
+    gs = grid.grid_step_mm
+    c1 = min(grid.cols - 1, math.ceil(x1 / gs))
+    r1 = min(grid.rows - 1, math.ceil(y1 / gs))
     for cc in range(max(0, c0), min(grid.cols, c1 + 1)):
         for rr in range(max(0, r0), min(grid.rows, r1 + 1)):
             grid.mark(cc, rr)
@@ -205,19 +234,30 @@ def _unmark_pad_area(
             grid.unmark(cc, rr)
 
 
-def _global_pad_clearance(net_clearances: dict[str, float] | None) -> float:
-    """Compute the global pad clearance (max netclass + half track width)."""
-    _htw = 0.125
+def _global_pad_clearance(
+    net_clearances: dict[str, float] | None,
+    net_widths: dict[str, float] | None = None,
+) -> float:
+    """Compute the global pad clearance (max netclass + half max track width).
+
+    Uses the widest track across all netclasses to ensure clearance zones
+    are large enough for any approaching net.  Without net_widths, falls
+    back to the default 0.25 mm track (half = 0.125 mm).
+    """
+    htw = 0.125
+    if net_widths:
+        htw = max(net_widths.values()) / 2.0
     max_cl = _PAD_CLEARANCE_MM
     if net_clearances:
         max_cl = max(max_cl, max(net_clearances.values()))
-    return max_cl + _htw
+    return max_cl + htw
 
 
 def _restore_pad_marks(
     grid: _Grid,
     footprints: list[Footprint],
     net_clearances: dict[str, float] | None = None,
+    net_widths: dict[str, float] | None = None,
 ) -> None:
     """Re-mark all pad areas after temporarily clearing same-net pads.
 
@@ -225,11 +265,12 @@ def _restore_pad_marks(
     zone for routing, nearby pad B's zone might also get cleared.  After
     routing, this function restores ALL pad marks with correct clearances.
     """
-    cl = _global_pad_clearance(net_clearances)
+    cl = _global_pad_clearance(net_clearances, net_widths)
     for fp in footprints:
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
-            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
+            phw, phh = _pad_rotated_half_size(fp, pad)
+            _mark_pad_area(grid, px, py, phw, phh, cl)
 
 
 def _remark_other_pads(
@@ -237,6 +278,7 @@ def _remark_other_pads(
     footprints: list[Footprint],
     net_pad_set: frozenset[tuple[str, str]],
     net_clearances: dict[str, float] | None = None,
+    net_widths: dict[str, float] | None = None,
 ) -> None:
     """Re-mark pads NOT in the current net to prevent cross-net contamination.
 
@@ -244,13 +286,14 @@ def _remark_other_pads(
     nets may have their clearance zones partially cleared (overlap).  This
     function re-marks all non-current-net pads to restore correct blocking.
     """
-    cl = _global_pad_clearance(net_clearances)
+    cl = _global_pad_clearance(net_clearances, net_widths)
     for fp in footprints:
         for pad in fp.pads:
             if (fp.ref, pad.number) in net_pad_set:
                 continue
             px, py = _pad_abs_pos(fp, pad)
-            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, cl)
+            phw, phh = _pad_rotated_half_size(fp, pad)
+            _mark_pad_area(grid, px, py, phw, phh, cl)
 
 
 def _prepare_grid(
@@ -258,6 +301,7 @@ def _prepare_grid(
     footprints: list[Footprint],
     keepouts: tuple[Keepout, ...] = (),
     net_clearances: dict[str, float] | None = None,
+    net_widths: dict[str, float] | None = None,
 ) -> None:
     """Mark pad positions, board-edge margins, and keepout zones on the grid.
 
@@ -271,23 +315,15 @@ def _prepare_grid(
         net_clearances: Optional per-net clearance overrides for pad marking.
     """
     # Mark all pad areas with their actual size + clearance margin.
-    # Clearance includes half the default track width (0.125mm) because
-    # KiCad measures clearance from copper edge to copper edge, not from
-    # track center to pad edge.
-    #
-    # Use the MAXIMUM clearance across all netclasses, because KiCad DRC
-    # checks clearance as max(net_A_clearance, net_B_clearance).  A pad on
-    # a 0.2mm-clearance net still needs 0.3mm clearance from a 0.3mm-class
-    # track.  Using the global max is conservative but prevents violations.
-    _half_track_width = 0.125  # half of default 0.25mm track
-    _max_cl = _PAD_CLEARANCE_MM
-    if net_clearances:
-        _max_cl = max(_max_cl, max(net_clearances.values()))
-    _pad_mark_cl = _max_cl + _half_track_width
+    # Clearance = max(netclass clearances) + half(max track width) because
+    # KiCad DRC checks clearance as max(net_A_clearance, net_B_clearance)
+    # and measures from copper edge to copper edge.
+    _pad_mark_cl = _global_pad_clearance(net_clearances, net_widths)
     for fp in footprints:
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
-            _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, _pad_mark_cl)
+            phw, phh = _pad_rotated_half_size(fp, pad)
+            _mark_pad_area(grid, px, py, phw, phh, _pad_mark_cl)
 
     # Mark board-edge margins as occupied
     margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
@@ -440,10 +476,11 @@ def _resolve_pad_positions(
         for pad in found_fp.pads:
             if pad.number == pad_num:
                 px, py = _pad_abs_pos(found_fp, pad)
+                phw, phh = _pad_rotated_half_size(found_fp, pad)
                 found_pad = _PadInfo(
                     x=px, y=py,
-                    half_w=pad.size_x / 2,
-                    half_h=pad.size_y / 2,
+                    half_w=phw,
+                    half_h=phh,
                 )
                 break
         if found_pad is None:
@@ -461,6 +498,7 @@ def route_net(
     grid: _Grid | None = None,
     keepouts: tuple[Keepout, ...] = (),
     net_clearances: dict[str, float] | None = None,
+    net_widths: dict[str, float] | None = None,
 ) -> RouteResult:
     """Route a single net using A* on a 2-D occupancy grid.
 
@@ -484,7 +522,10 @@ def route_net(
     """
     if grid is None:
         grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
-        _prepare_grid(grid, list(footprints), keepouts=keepouts)
+        _prepare_grid(
+            grid, list(footprints), keepouts=keepouts,
+            net_clearances=net_clearances, net_widths=net_widths,
+        )
 
     # Build a lookup: ref -> Footprint
     fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
@@ -515,7 +556,7 @@ def route_net(
     # Temporarily unmark same-net pad areas (including clearance) so the
     # router can reach and exit them.  After routing, ALL pad areas are
     # restored to prevent cross-net contamination.
-    pad_cl = _global_pad_clearance(net_clearances)
+    pad_cl = _global_pad_clearance(net_clearances, net_widths)
     net_pad_set = frozenset(request.pad_refs)
     for pi in pad_infos:
         _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
@@ -584,13 +625,13 @@ def route_net(
                     if (ic_ref, pad.number) not in net_pad_set:
                         continue
                     px, py = _pad_abs_pos(fp, pad)
+                    phw, phh = _pad_rotated_half_size(fp, pad)
                     _unmark_pad_area(
-                        grid, px, py,
-                        pad.size_x / 2, pad.size_y / 2, pad_cl,
+                        grid, px, py, phw, phh, pad_cl,
                     )
         elif len(non_ic_infos) == 0:
             # All pads on dense ICs: skip routing entirely
-            _restore_pad_marks(grid, footprints, net_clearances)
+            _restore_pad_marks(grid, footprints, net_clearances, net_widths)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -602,13 +643,18 @@ def route_net(
 
     # After all unmark operations, re-mark other-net pads to prevent
     # cross-net contamination from overlapping clearance zones.
-    _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
+    _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
 
     all_tracks: list[Track] = []
 
     # Track exclusion: sized per-net to satisfy the netclass clearance.
     # Default (0.2mm) -> 1 cell (0.25mm), HVA (0.3mm) -> 2 cells (0.5mm).
-    excl_cells = max(1, math.ceil(request.clearance_mm / grid.grid_step_mm))
+    # Exclusion must account for track width: adjacent tracks at distance
+    # (excl+1)*grid_step must have edge-to-edge gap ≥ clearance_mm.
+    # Required: (excl+1)*grid - width ≥ clearance → excl ≥ (cl+w)/g - 1
+    excl_cells = max(1, math.ceil(
+        (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
+    ) - 1)
 
     # MST-style routing: always connect closest unrouted pad to routed set
     routed_set: set[int] = {0}  # index into pad_infos
@@ -645,19 +691,19 @@ def route_net(
                 for pad in fp.pads:
                     extended_pads.add((ref, pad.number))
                     px, py = _pad_abs_pos(fp, pad)
+                    phw, phh = _pad_rotated_half_size(fp, pad)
                     _unmark_pad_area(
-                        grid, px, py,
-                        pad.size_x / 2, pad.size_y / 2, pad_cl,
+                        grid, px, py, phw, phh, pad_cl,
                     )
-                    _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, 0.0)
+                    _mark_pad_area(grid, px, py, phw, phh, 0.0)
             _tht_refs_in_net.clear()
             net_pad_set = frozenset(extended_pads)
-            _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
+            _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
         if path is None:
             # Restore all pad markings that may have been cleared
-            _restore_pad_marks(grid, footprints, net_clearances)
+            _restore_pad_marks(grid, footprints, net_clearances, net_widths)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -693,7 +739,7 @@ def route_net(
         # cross-net contamination from overlapping clearance zones.
         for pi in pad_infos:
             _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
-        _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
+        _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
 
         routed_set.add(best_to)
         unrouted.discard(best_to)
@@ -717,16 +763,16 @@ def route_net(
             ic_fp = fp_by_ref[ic_ref]
             ic_pad = next(p for p in ic_fp.pads if p.number == ic_pn)
             px, py = _pad_abs_pos(ic_fp, ic_pad)
+            ic_hw, ic_hh = _pad_rotated_half_size(ic_fp, ic_pad)
             _unmark_pad_area(
-                grid, px, py,
-                ic_pad.size_x / 2, ic_pad.size_y / 2, pad_cl,
+                grid, px, py, ic_hw, ic_hh, pad_cl,
             )
             # Re-unmark source pad too (track exclusion may have blocked it)
             _unmark_pad_area(
                 grid, best_pi.x, best_pi.y,
                 best_pi.half_w, best_pi.half_h, pad_cl,
             )
-            _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
+            _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
 
             start_col, start_row = grid.to_cell(best_pi.x, best_pi.y)
             goal_col, goal_row = grid.to_cell(ic_pi.x, ic_pi.y)
@@ -754,12 +800,11 @@ def route_net(
             else:
                 # Re-mark the IC pad we tried
                 _mark_pad_area(
-                    grid, px, py,
-                    ic_pad.size_x / 2, ic_pad.size_y / 2, pad_cl,
+                    grid, px, py, ic_hw, ic_hh, pad_cl,
                 )
 
     # Restore all pad markings that may have been cleared during unmark
-    _restore_pad_marks(grid, footprints, net_clearances)
+    _restore_pad_marks(grid, footprints, net_clearances, net_widths)
 
     return RouteResult(
         net_number=request.net_number,
@@ -849,7 +894,7 @@ def route_all_nets(
     grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
     _prepare_grid(
         grid, list(footprints), keepouts=keepouts,
-        net_clearances=net_clearances,
+        net_clearances=net_clearances, net_widths=net_widths,
     )
 
     results: list[RouteResult] = []
@@ -876,6 +921,7 @@ def route_all_nets(
         return route_net(
             request, footprints, board_width_mm, board_height_mm,
             grid_step_mm, grid=grid, net_clearances=net_clearances,
+            net_widths=net_widths,
         )
 
     # First pass: route all nets
