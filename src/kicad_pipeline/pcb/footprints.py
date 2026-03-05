@@ -511,8 +511,8 @@ def _parse_pin_count(footprint_id: str) -> int:
     import re
 
     # Match NxM pattern preceded by _ or start (e.g. _1x04_, _2x20_)
-    # Avoids matching decimal dimensions like 9.78x12.34mm
-    m = re.search(r"(?:^|[_])(\d+)x(\d+)", footprint_id)
+    # Negative lookahead rejects body dimensions like _3x3mm or _3x3.5mm
+    m = re.search(r"(?:^|[_])(\d+)x(\d+)(?!\.?\d*mm)", footprint_id)
     if m:
         return int(m.group(1)) * int(m.group(2))
     # Match xNN pattern (e.g. SPSTx04 in DIP switches) → 2*N (switches have 2 pins each)

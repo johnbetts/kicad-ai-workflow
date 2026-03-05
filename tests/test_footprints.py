@@ -402,6 +402,23 @@ def test_parse_pin_count_msop_10_with_suffix() -> None:
     assert _parse_pin_count("MSOP-10_P0.5mm") == 10
 
 
+def test_parse_pin_count_msop_10_with_body_dimensions() -> None:
+    """_parse_pin_count must not confuse body dimensions (3x3mm) with pin array.
+
+    Regression test: 'MSOP-10_3x3mm_P0.5mm' was returning 9 (3x3) instead of 10.
+    """
+    from kicad_pipeline.pcb.footprints import _parse_pin_count
+
+    assert _parse_pin_count("MSOP-10_3x3mm_P0.5mm") == 10
+
+
+def test_parse_pin_count_qfp_with_body_dimensions() -> None:
+    """QFP-32_7x7mm should return 32, not 49 (7x7)."""
+    from kicad_pipeline.pcb.footprints import _parse_pin_count
+
+    assert _parse_pin_count("QFP-32_7x7mm_P0.8mm") == 32
+
+
 def test_msop10_footprint_has_10_pads() -> None:
     """MSOP-10 footprint should have exactly 10 pads."""
     fp = footprint_for_component("U1", "ADS1115", "MSOP-10")
