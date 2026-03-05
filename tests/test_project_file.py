@@ -100,3 +100,36 @@ def test_write_project_file_with_netclasses(tmp_path: Path) -> None:
     content = json.loads(path.read_text())
     net_classes = content["net_settings"]["classes"]
     assert len(net_classes) == 2  # Default + Power
+
+
+# ---------------------------------------------------------------------------
+# Fix 7: Solder mask and edge clearance settings
+# ---------------------------------------------------------------------------
+
+
+def test_solder_mask_clearance_nonzero() -> None:
+    """Solder mask clearance should be set to JLCPCB default (0.05mm)."""
+    data = build_project_file("test")
+    rules = data["board"]["design_settings"]["rules"]
+    assert rules["solder_mask_clearance"] == 0.05
+
+
+def test_solder_mask_min_width_nonzero() -> None:
+    """Solder mask min width should be set to 0.1mm."""
+    data = build_project_file("test")
+    rules = data["board"]["design_settings"]["rules"]
+    assert rules["solder_mask_min_width"] == 0.1
+
+
+def test_solder_mask_to_copper_clearance() -> None:
+    """Solder mask to copper clearance should be 0.05mm."""
+    data = build_project_file("test")
+    rules = data["board"]["design_settings"]["rules"]
+    assert rules["solder_mask_to_copper_clearance"] == 0.05
+
+
+def test_copper_edge_clearance_matches_jlcpcb() -> None:
+    """min_copper_edge_clearance should be 0.3mm (JLCPCB standard)."""
+    data = build_project_file("test")
+    rules = data["board"]["design_settings"]["rules"]
+    assert rules["min_copper_edge_clearance"] == 0.3

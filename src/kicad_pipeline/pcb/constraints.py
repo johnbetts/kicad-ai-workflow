@@ -32,6 +32,9 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_GRID_MM: float = 0.5
 
+PLACEMENT_GAP_MM: float = 0.5
+"""Minimum gap between footprint courtyards to prevent solder mask bridging."""
+
 
 class _OccupancyGrid:
     """2D boolean grid tracking placed courtyards and keepouts.
@@ -554,7 +557,11 @@ def solve_placement(
             w, h = footprint_sizes.get(ref, (3.0, 3.0))
             positions[ref] = Point(x=c.x, y=c.y)
             rotations[ref] = c.rotation if c.rotation is not None else 0.0
-            grid.mark_rect(x_rel - w / 2, y_rel - h / 2, w, h)
+            gap = PLACEMENT_GAP_MM
+            grid.mark_rect(
+                x_rel - w / 2 - gap, y_rel - h / 2 - gap,
+                w + 2 * gap, h + 2 * gap,
+            )
             log.debug("FIXED: %s at (%.1f, %.1f)", ref, c.x, c.y)
 
     # 2. Place EDGE
@@ -578,7 +585,11 @@ def solve_placement(
             y += origin_y
             positions[ref] = Point(x=x, y=y)
             rotations[ref] = rot
-            grid.mark_rect(x - origin_x - w / 2, y - origin_y - h / 2, w, h)
+            gap = PLACEMENT_GAP_MM
+            grid.mark_rect(
+                x - origin_x - w / 2 - gap, y - origin_y - h / 2 - gap,
+                w + 2 * gap, h + 2 * gap,
+            )
             log.debug("EDGE(%s): %s at (%.1f, %.1f) rot=%.0f", edge.value, ref, x, y, rot)
 
     # 3. Place NEAR
@@ -603,7 +614,8 @@ def solve_placement(
             if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
                 positions[ref] = Point(x=trial_x, y=trial_y)
                 rotations[ref] = 0.0
-                grid.mark_rect(rx, ry, w, h)
+                gap = PLACEMENT_GAP_MM
+                grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
                 log.debug("NEAR(%s): %s at (%.1f, %.1f)", target, ref, trial_x, trial_y)
                 placed = True
                 break
@@ -615,7 +627,8 @@ def solve_placement(
             if free is not None:
                 positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
                 rotations[ref] = 0.0
-                grid.mark_rect(free[0], free[1], w, h)
+                gap = PLACEMENT_GAP_MM
+                grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
             else:
                 violations.append(f"Could not place {ref} near {target}")
 
@@ -644,7 +657,11 @@ def solve_placement(
             w, h = footprint_sizes.get(ref, (3.0, 3.0))
             positions[ref] = Point(x=x_cursor + w / 2, y=y_cursor + max_h / 2)
             rotations[ref] = 0.0
-            grid.mark_rect(x_cursor - origin_x, y_cursor - origin_y, w + 2.0, max_h)
+            gap = PLACEMENT_GAP_MM
+            grid.mark_rect(
+                x_cursor - origin_x - gap, y_cursor - origin_y - gap,
+                w + 2.0 + 2 * gap, max_h + 2 * gap,
+            )
             x_cursor += w + 2.0
             log.debug(
                 "GROUP(%s): %s at (%.1f, %.1f)",
@@ -659,7 +676,8 @@ def solve_placement(
         if free is not None:
             positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
             rotations[ref] = 0.0
-            grid.mark_rect(free[0], free[1], w, h)
+            gap = PLACEMENT_GAP_MM
+            grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
         else:
             violations.append(f"No space for {ref} on the board")
             positions[ref] = Point(x=board_w / 2.0 + origin_x, y=board_h / 2.0 + origin_y)

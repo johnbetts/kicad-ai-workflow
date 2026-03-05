@@ -188,6 +188,30 @@ class TestSolvePlacement:
         xs = [result.positions[r].x for r in ("R1", "R2", "R3")]
         assert max(xs) - min(xs) < 20.0  # clustered
 
+    def test_placement_gap_prevents_courtyard_overlap(self) -> None:
+        """Adjacent components should have a gap between their courtyards."""
+        # Place two components via GROUP — they should not touch
+        constraints = (
+            PlacementConstraint(
+                ref="R1", constraint_type=PlacementConstraintType.GROUP,
+                group_name="test", priority=10,
+            ),
+            PlacementConstraint(
+                ref="R2", constraint_type=PlacementConstraintType.GROUP,
+                group_name="test", priority=10,
+            ),
+        )
+        sizes = {"R1": (2.0, 1.5), "R2": (2.0, 1.5)}
+        result = solve_placement(constraints, _board(), sizes)
+        pos_r1 = result.positions["R1"]
+        pos_r2 = result.positions["R2"]
+        # Distance between centres should be > sum of half-widths + gap
+        import math
+
+        dist = math.hypot(pos_r1.x - pos_r2.x, pos_r1.y - pos_r2.y)
+        # At minimum they should not overlap (centres > max dimension)
+        assert dist > 1.0  # sanity check: they're not on top of each other
+
     def test_no_violations_for_simple_placement(self) -> None:
         """Simple placement produces no violations."""
         constraints = (

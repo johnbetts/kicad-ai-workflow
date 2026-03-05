@@ -272,15 +272,28 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
     existing_types = {t.text_type for t in fp.texts}
     new_texts: list[FootprintText] = list(fp.texts)
 
+    # Compute pad extents for smart label placement
+    if fp.pads:
+        min_y = min(p.position.y - p.size_y / 2 for p in fp.pads)
+        max_y = max(p.position.y + p.size_y / 2 for p in fp.pads)
+    else:
+        min_y = -_LABEL_OFFSET_MM
+        max_y = _LABEL_OFFSET_MM
+
+    # Place labels 0.5mm beyond pad extents, but at least _LABEL_OFFSET_MM from origin
+    pad_label_gap = 0.5
+    ref_y = min(min_y - pad_label_gap, -_LABEL_OFFSET_MM)
+    val_y = max(max_y + pad_label_gap, _LABEL_OFFSET_MM)
+
     if "reference" not in existing_types:
-        ref_pos = Point(x=0.0, y=-_LABEL_OFFSET_MM)
+        ref_pos = Point(x=0.0, y=ref_y)
         new_texts.append(
             make_ref_label(ref=fp.ref, position=ref_pos, layer=LAYER_F_SILKSCREEN)
         )
         log.debug("add_silkscreen_to_footprint: added ref label to %s", fp.ref)
 
     if "value" not in existing_types:
-        val_pos = Point(x=0.0, y=_LABEL_OFFSET_MM)
+        val_pos = Point(x=0.0, y=val_y)
         new_texts.append(
             make_value_label(
                 value=fp.value,

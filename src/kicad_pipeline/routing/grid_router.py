@@ -12,9 +12,11 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from kicad_pipeline.constants import JLCPCB_BOARD_EDGE_CLEARANCE_MM
 from kicad_pipeline.models.pcb import Footprint, Point, Track, Via
 
 if TYPE_CHECKING:
+    from kicad_pipeline.models.pcb import Keepout
     from kicad_pipeline.pcb.netlist import Netlist
 
 
@@ -137,6 +139,57 @@ class _Grid:
 
 
 # ---------------------------------------------------------------------------
+# Grid preparation helpers
+# ---------------------------------------------------------------------------
+
+
+def _prepare_grid(
+    grid: _Grid,
+    footprints: list[Footprint],
+    keepouts: tuple[Keepout, ...] = (),
+) -> None:
+    """Mark pad positions, board-edge margins, and keepout zones on the grid.
+
+    This is called once during grid creation to establish the base occupancy
+    before any routing begins.
+
+    Args:
+        grid: The grid to prepare.
+        footprints: All footprints on the board (pads are marked occupied).
+        keepouts: Keepout zones whose areas are marked occupied.
+    """
+    # Mark all pad positions as occupied
+    for fp in footprints:
+        for pad in fp.pads:
+            px = fp.position.x + pad.position.x
+            py = fp.position.y + pad.position.y
+            grid.mark_mm(px, py, radius_cells=1)
+
+    # Mark board-edge margins as occupied
+    margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
+    for col in range(grid.cols):
+        for r in range(margin_cells):
+            grid.mark(col, r)                       # top edge
+            grid.mark(col, grid.rows - 1 - r)       # bottom edge
+    for row in range(grid.rows):
+        for c in range(margin_cells):
+            grid.mark(c, row)                        # left edge
+            grid.mark(grid.cols - 1 - c, row)        # right edge
+
+    # Mark keepout zones as occupied
+    for ko in keepouts:
+        if not ko.polygon:
+            continue
+        ko_xs = [p.x for p in ko.polygon]
+        ko_ys = [p.y for p in ko.polygon]
+        min_col, min_row = grid.to_cell(min(ko_xs), min(ko_ys))
+        max_col, max_row = grid.to_cell(max(ko_xs), max(ko_ys))
+        for kc in range(min_col, max_col + 1):
+            for kr in range(min_row, max_row + 1):
+                grid.mark(kc, kr)
+
+
+# ---------------------------------------------------------------------------
 # A* pathfinder
 # ---------------------------------------------------------------------------
 
@@ -153,9 +206,7 @@ def _astar(
     A cell is traversable if:
     - it is free (grid.is_free), OR
     - it equals the start (start_col, start_row), OR
-    - it equals the goal (goal_col, goal_row), OR
-    - it is within Manhattan distance 1 of start (exit start pad zone), OR
-    - it is within Manhattan distance 1 of goal (enter goal pad zone).
+    - it equals the goal (goal_col, goal_row).
 
     Args:
         grid: The occupancy grid.
@@ -210,9 +261,7 @@ def _astar(
                 (nc == start_col and nr == start_row)
                 or (nc == goal_col and nr == goal_row)
             )
-            near_start = (abs(nc - start_col) + abs(nr - start_row)) <= 1
-            near_goal = (abs(nc - goal_col) + abs(nr - goal_row)) <= 1
-            if not (grid.is_free(nc, nr) or is_start_or_goal or near_start or near_goal):
+            if not (grid.is_free(nc, nr) or is_start_or_goal):
                 continue
             tentative_g = g + 1.0
             if tentative_g < g_score.get(neighbor, math.inf):
@@ -268,6 +317,7 @@ def route_net(
     board_height_mm: float,
     grid_step_mm: float = 0.5,
     grid: _Grid | None = None,
+    keepouts: tuple[Keepout, ...] = (),
 ) -> RouteResult:
     """Route a single net using A* on a 2-D occupancy grid.
 
@@ -284,18 +334,14 @@ def route_net(
         grid_step_mm: Grid resolution in mm.
         grid: Optional shared grid.  When ``None``, a fresh grid is created
             with all pad positions marked as occupied.
+        keepouts: Keepout zones to avoid (only used when creating fresh grid).
 
     Returns:
         A RouteResult with all generated tracks (or failure info).
     """
     if grid is None:
         grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
-        # Mark all pad positions as occupied
-        for fp in footprints:
-            for pad in fp.pads:
-                px = fp.position.x + pad.position.x
-                py = fp.position.y + pad.position.y
-                grid.mark_mm(px, py, radius_cells=1)
+        _prepare_grid(grid, list(footprints), keepouts=keepouts)
 
     # Build a lookup: ref -> Footprint
     fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
@@ -393,6 +439,7 @@ def route_all_nets(
     board_height_mm: float,
     grid_step_mm: float = 0.5,
     net_widths: dict[str, float] | None = None,
+    keepouts: tuple[Keepout, ...] = (),
 ) -> tuple[RouteResult, ...]:
     """Route all nets in the netlist using a shared occupancy grid.
 
@@ -413,6 +460,7 @@ def route_all_nets(
         grid_step_mm: Grid resolution in mm.
         net_widths: Optional mapping from net name to trace width in mm,
             typically from :func:`~kicad_pipeline.pcb.netclasses.net_width_map`.
+        keepouts: Keepout zones to avoid during routing.
 
     Returns:
         Tuple of RouteResult, one per routed net entry.
@@ -421,13 +469,9 @@ def route_all_nets(
     routable = [e for e in netlist.entries if len(e.pad_refs) >= 2]
     routable.sort(key=lambda e: len(e.pad_refs))
 
-    # Create a shared grid and pre-mark all pad positions
+    # Create a shared grid and prepare it with pads, edge margins, keepouts
     grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
-    for fp in footprints:
-        for pad in fp.pads:
-            px = fp.position.x + pad.position.x
-            py = fp.position.y + pad.position.y
-            grid.mark_mm(px, py, radius_cells=1)
+    _prepare_grid(grid, list(footprints), keepouts=keepouts)
 
     results: list[RouteResult] = []
 
