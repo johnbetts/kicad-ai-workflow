@@ -227,6 +227,7 @@ class ZonePolygon:
     thermal_relief_gap: float = 0.3
     thermal_relief_bridge: float = 0.5
     clearance_mm: float = 0.3
+    filled_polygons: tuple[tuple[Point, ...], ...] = ()
     uuid: str = ""
 
 

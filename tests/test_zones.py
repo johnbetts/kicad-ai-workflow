@@ -230,3 +230,25 @@ def test_board_outline_type() -> None:
     """make_board_outline must return a BoardOutline instance."""
     outline = make_board_outline(100.0, 80.0)
     assert isinstance(outline, BoardOutline)
+
+
+# ---------------------------------------------------------------------------
+# BUG-18: filled_polygons
+# ---------------------------------------------------------------------------
+
+
+def test_make_gnd_pour_has_filled_polygons() -> None:
+    """make_gnd_pour returns a zone with non-empty filled_polygons."""
+    outline = make_board_outline(50.0, 30.0)
+    zone = make_gnd_pour(outline, net_number=1, net_name="GND", layer="B.Cu")
+    assert len(zone.filled_polygons) == 1
+    fill_poly = zone.filled_polygons[0]
+    # Should be a closed 5-point inset rectangle
+    assert len(fill_poly) == 5
+    # Inset should be smaller than outline
+    xs = [p.x for p in fill_poly]
+    ys = [p.y for p in fill_poly]
+    assert min(xs) > 0.0
+    assert min(ys) > 0.0
+    assert max(xs) < 50.0
+    assert max(ys) < 30.0

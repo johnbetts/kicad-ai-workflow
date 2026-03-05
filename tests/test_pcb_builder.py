@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from kicad_pipeline.models.pcb import PCBDesign
+from kicad_pipeline.models.pcb import (
+    Footprint,
+    FootprintText,
+    PCBDesign,
+    Point,
+    ZonePolygon,
+)
 from kicad_pipeline.models.requirements import (
     Component,
     FeatureBlock,
@@ -19,7 +25,13 @@ from kicad_pipeline.models.requirements import (
     ProjectInfo,
     ProjectRequirements,
 )
-from kicad_pipeline.pcb.builder import build_pcb, pcb_to_sexp, write_pcb
+from kicad_pipeline.pcb.builder import (
+    _footprint_sexp,
+    _zone_sexp,
+    build_pcb,
+    pcb_to_sexp,
+    write_pcb,
+)
 from kicad_pipeline.sexp.parser import parse
 
 # ---------------------------------------------------------------------------
@@ -398,7 +410,7 @@ def test_pcb_to_sexp_zone_clearance_not_min_thickness() -> None:
     ]
     assert len(zone_nodes) >= 1
     for zone_node in zone_nodes:
-        # Find connect_pads node: ["connect_pads", "yes", ["clearance", N]]
+        # Find connect_pads node: ["connect_pads", ["clearance", N]]
         for sub in zone_node:
             if isinstance(sub, list) and sub and sub[0] == "connect_pads":
                 clearance_node = [
@@ -637,3 +649,106 @@ def test_rpi_hat_board_height_56mm() -> None:
     ys = [p.y for p in design.outline.polygon]
     board_h = max(ys) - min(ys)
     assert board_h == pytest.approx(56.0, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# BUG-18: Zone fill polygons and format
+# ---------------------------------------------------------------------------
+
+
+def test_zone_sexp_emits_fill_yes_and_filled_polygon() -> None:
+    """_zone_sexp emits (fill yes ...) and (filled_polygon ...) when filled_polygons present."""
+    zone = ZonePolygon(
+        net_number=1,
+        net_name="GND",
+        layer="B.Cu",
+        name="GND",
+        polygon=(Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10), Point(0, 0)),
+        filled_polygons=(
+            (Point(0.5, 0.5), Point(9.5, 0.5), Point(9.5, 9.5), Point(0.5, 9.5), Point(0.5, 0.5)),
+        ),
+        uuid="test-zone-uuid",
+    )
+    sexp = _zone_sexp(zone)
+
+    # Check connect_pads does NOT have "yes" as second element
+    connect_pads = [s for s in sexp if isinstance(s, list) and s and s[0] == "connect_pads"]
+    assert len(connect_pads) == 1
+    assert connect_pads[0][1] != "yes", "connect_pads should not have bare 'yes'"
+
+    # Check fill has "yes" marker
+    fill_node = [s for s in sexp if isinstance(s, list) and s and s[0] == "fill"]
+    assert len(fill_node) == 1
+    assert fill_node[0][1] == "yes", "fill should have 'yes' marker"
+
+    # Check filled_polygon is emitted
+    fp_nodes = [s for s in sexp if isinstance(s, list) and s and s[0] == "filled_polygon"]
+    assert len(fp_nodes) == 1
+    # Should have layer and pts sub-nodes
+    layer_node = [s for s in fp_nodes[0] if isinstance(s, list) and s and s[0] == "layer"]
+    assert layer_node[0][1] == "B.Cu"
+
+
+def test_zone_sexp_no_fill_yes_without_filled_polygons() -> None:
+    """_zone_sexp emits (fill ...) without 'yes' when no filled_polygons."""
+    zone = ZonePolygon(
+        net_number=1,
+        net_name="GND",
+        layer="B.Cu",
+        name="GND",
+        polygon=(Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10), Point(0, 0)),
+        uuid="test-zone-uuid",
+    )
+    sexp = _zone_sexp(zone)
+    fill_node = [s for s in sexp if isinstance(s, list) and s and s[0] == "fill"]
+    assert len(fill_node) == 1
+    assert fill_node[0][1] != "yes", "fill should NOT have 'yes' without filled_polygons"
+
+
+# ---------------------------------------------------------------------------
+# BUG-20: Silk reference position from fp.texts
+# ---------------------------------------------------------------------------
+
+
+def test_footprint_sexp_uses_silk_ref_position() -> None:
+    """_footprint_sexp uses reference text position from fp.texts if available."""
+    fp = Footprint(
+        lib_id="R_0805:R_0805_2012Metric",
+        ref="R1",
+        value="10k",
+        position=Point(10.0, 20.0),
+        texts=(
+            FootprintText(
+                text_type="reference",
+                text="R1",
+                position=Point(0.0, -3.7),
+                layer="F.SilkS",
+            ),
+            FootprintText(
+                text_type="value",
+                text="10k",
+                position=Point(0.0, 3.2),
+                layer="F.Fab",
+            ),
+        ),
+        uuid="test-fp-uuid",
+    )
+    sexp = _footprint_sexp(fp)
+
+    # Find the Reference property node
+    ref_props = [
+        s for s in sexp
+        if isinstance(s, list) and len(s) >= 3 and s[0] == "property" and s[1] == "Reference"
+    ]
+    assert len(ref_props) == 1
+    at_node = [s for s in ref_props[0] if isinstance(s, list) and s and s[0] == "at"]
+    assert at_node[0][2] == pytest.approx(-3.7), "Reference Y should use fp.texts position"
+
+    # Find the Value property node
+    val_props = [
+        s for s in sexp
+        if isinstance(s, list) and len(s) >= 3 and s[0] == "property" and s[1] == "Value"
+    ]
+    assert len(val_props) == 1
+    at_node_v = [s for s in val_props[0] if isinstance(s, list) and s and s[0] == "at"]
+    assert at_node_v[0][2] == pytest.approx(3.2), "Value Y should use fp.texts position"

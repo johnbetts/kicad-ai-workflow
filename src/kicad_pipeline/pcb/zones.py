@@ -74,6 +74,35 @@ def _rect_polygon(
     )
 
 
+def _inset_rect_polygon(
+    polygon: tuple[Point, ...],
+    inset_mm: float,
+) -> tuple[Point, ...]:
+    """Inset a rectangular polygon by *inset_mm* on all sides.
+
+    Takes the axis-aligned bounding box of *polygon* and returns a closed
+    5-point rectangle shrunk by *inset_mm*.  Used to approximate a zone
+    fill polygon (copper minus clearance from board edge).
+
+    Args:
+        polygon: The outline polygon points.
+        inset_mm: Inset distance in mm.
+
+    Returns:
+        Closed 5-point inset rectangle.
+    """
+    xs = [p.x for p in polygon]
+    ys = [p.y for p in polygon]
+    x0 = min(xs) + inset_mm
+    y0 = min(ys) + inset_mm
+    x1 = max(xs) - inset_mm
+    y1 = max(ys) - inset_mm
+    # Ensure the inset rectangle has positive area
+    if x1 <= x0 or y1 <= y0:
+        return polygon
+    return _rect_polygon(x0, y0, x1, y1)
+
+
 def _outline_bounds(
     board_outline: BoardOutline,
 ) -> tuple[float, float, float, float]:
@@ -176,6 +205,7 @@ def make_gnd_pour(
         A :class:`ZonePolygon` covering the entire board outline.
     """
     _log.debug("make_gnd_pour layer=%s net=%d", layer, net_number)
+    fill_poly = _inset_rect_polygon(board_outline.polygon, _ZONE_MIN_THICKNESS)
     return ZonePolygon(
         net_number=net_number,
         net_name=net_name,
@@ -186,6 +216,7 @@ def make_gnd_pour(
         fill=ZoneFill.SOLID,
         thermal_relief_gap=THERMAL_RELIEF_GAP_MM,
         thermal_relief_bridge=THERMAL_RELIEF_BRIDGE_MM,
+        filled_polygons=(fill_poly,),
         uuid="",
     )
 

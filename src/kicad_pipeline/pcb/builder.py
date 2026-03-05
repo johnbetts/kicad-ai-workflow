@@ -935,7 +935,7 @@ def build_pcb(
             net_clearances=clearances,
             keepouts=tuple(keepouts),
         )
-        all_tracks = collect_tracks(route_results)
+        all_tracks = collect_tracks(route_results, routed_only=False)
         all_vias = collect_vias(route_results)
         routed = sum(1 for r in route_results if r.routed)
         unrouted = sum(1 for r in route_results if not r.routed)
@@ -1094,13 +1094,19 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
     if fp.uuid:
         node.append(["uuid", fp.uuid])
 
-    # Properties for ref and value — relative to footprint origin
+    # Properties for ref and value — use silkscreen positions from fp.texts if available
+    ref_text = next((t for t in fp.texts if t.text_type == "reference"), None)
+    ref_x = ref_text.position.x if ref_text else 0.0
+    ref_y = ref_text.position.y if ref_text else -2.5
+    val_text = next((t for t in fp.texts if t.text_type == "value"), None)
+    val_x = val_text.position.x if val_text else 0.0
+    val_y = val_text.position.y if val_text else 2.5
     node.append(
         [
             "property",
             "Reference",
             fp.ref,
-            ["at", 0, -2.5, 0],
+            ["at", ref_x, ref_y, 0],
             ["layer", "F.SilkS"],
             ["effects", ["font", ["size", 1.0, 1.0]]],
         ]
@@ -1110,7 +1116,7 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
             "property",
             "Value",
             fp.value,
-            ["at", 0, 2.5, 0],
+            ["at", val_x, val_y, 0],
             ["layer", "F.Fab"],
             ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
         ]
@@ -1224,18 +1230,31 @@ def _zone_sexp(zone: ZonePolygon) -> SExpNode:
     ]
     if zone.uuid:
         node.append(["uuid", zone.uuid])
+    # KiCad 9: fill node needs "yes" marker when zone has fill data
+    fill_node: list[SExpNode] = ["fill"]
+    if zone.filled_polygons:
+        fill_node.append("yes")
+    fill_node.extend([
+        ["thermal_gap", zone.thermal_relief_gap],
+        ["thermal_bridge_width", zone.thermal_relief_bridge],
+    ])
+
     node.extend([
         ["hatch", "edge", 0.508],
-        ["connect_pads", "yes", ["clearance", zone.clearance_mm]],
+        ["connect_pads", ["clearance", zone.clearance_mm]],
         ["min_thickness", zone.min_thickness],
         ["filled_areas_thickness", False],
-        [
-            "fill",
-            ["thermal_gap", zone.thermal_relief_gap],
-            ["thermal_bridge_width", zone.thermal_relief_bridge],
-        ],
+        fill_node,
         ["polygon", pts_node],
     ])
+
+    # Emit filled_polygon entries for pre-computed zone fill
+    for fp_pts in zone.filled_polygons:
+        fp_node: list[SExpNode] = ["pts"]
+        for pt in fp_pts:
+            fp_node.append(["xy", pt.x, pt.y])
+        node.append(["filled_polygon", ["layer", zone.layer], fp_node])
+
     return node
 
 
