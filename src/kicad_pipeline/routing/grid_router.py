@@ -17,7 +17,7 @@ from kicad_pipeline.models.pcb import Footprint, Point, Track, Via
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import Keepout
-    from kicad_pipeline.pcb.netlist import Netlist
+    from kicad_pipeline.pcb.netlist import Netlist, NetlistEntry
 
 
 # ---------------------------------------------------------------------------
@@ -375,10 +375,26 @@ def route_net(
 
     all_tracks: list[Track] = []
 
-    # Connect pads sequentially: positions[0]->positions[1]->positions[2]->...
-    for i in range(len(positions) - 1):
-        p1 = positions[i]
-        p2 = positions[i + 1]
+    # MST-style routing: always connect closest unrouted pad to routed set
+    routed_set: set[int] = {0}  # index into positions
+    unrouted: set[int] = set(range(1, len(positions)))
+
+    while unrouted:
+        # Find the closest (routed, unrouted) pair by Manhattan distance
+        best_from = 0
+        best_to = next(iter(unrouted))
+        best_dist = float("inf")
+        for ri in routed_set:
+            for ui in unrouted:
+                d = (abs(positions[ri][0] - positions[ui][0])
+                     + abs(positions[ri][1] - positions[ui][1]))
+                if d < best_dist:
+                    best_dist = d
+                    best_from = ri
+                    best_to = ui
+
+        p1 = positions[best_from]
+        p2 = positions[best_to]
 
         start_col, start_row = grid.to_cell(p1[0], p1[1])
         goal_col, goal_row = grid.to_cell(p2[0], p2[1])
@@ -414,10 +430,14 @@ def route_net(
             )
 
         # Mark path cells with clearance so subsequent nets don't short
+        clearance_cells = max(1, round(0.2 / grid.grid_step_mm))
         for cell_col, cell_row in path:
-            for dc in range(-1, 2):
-                for dr in range(-1, 2):
+            for dc in range(-clearance_cells, clearance_cells + 1):
+                for dr in range(-clearance_cells, clearance_cells + 1):
                     grid.mark(cell_col + dc, cell_row + dr)
+
+        routed_set.add(best_to)
+        unrouted.discard(best_to)
 
     # Re-mark pad cells for subsequent nets
     for px, py in positions:
@@ -437,7 +457,7 @@ def route_all_nets(
     footprints: list[Footprint],
     board_width_mm: float,
     board_height_mm: float,
-    grid_step_mm: float = 0.5,
+    grid_step_mm: float = 0.25,
     net_widths: dict[str, float] | None = None,
     keepouts: tuple[Keepout, ...] = (),
 ) -> tuple[RouteResult, ...]:
@@ -465,9 +485,19 @@ def route_all_nets(
     Returns:
         Tuple of RouteResult, one per routed net entry.
     """
-    # Filter to routable nets and sort by pad count (fewer pads first)
-    routable = [e for e in netlist.entries if len(e.pad_refs) >= 2]
-    routable.sort(key=lambda e: len(e.pad_refs))
+    # Filter to routable nets: skip GND (handled by copper pour) and single-pad nets
+    routable = [
+        e for e in netlist.entries
+        if len(e.pad_refs) >= 2 and e.net.name != "GND"
+    ]
+
+    # Route short signal nets first, power nets last
+    def _sort_key(entry: NetlistEntry) -> tuple[bool, int]:
+        name = entry.net.name.upper()
+        is_power = name.startswith("+") or "VDD" in name or "VCC" in name or "VBUS" in name
+        return (is_power, len(entry.pad_refs))
+
+    routable.sort(key=_sort_key)
 
     # Create a shared grid and prepare it with pads, edge margins, keepouts
     grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)

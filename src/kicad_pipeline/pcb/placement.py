@@ -493,9 +493,16 @@ def layout_pcb(
                         rotation=frot,
                         priority=100,
                     ))
-            constraint_list = constraints_from_requirements(
-                requirements, board_template, footprint_sizes,
-            )
+            # Use HAT-specific constraints for RPi HAT boards
+            if board_template.name == "RPI_HAT":
+                from kicad_pipeline.pcb.constraints import rpi_hat_constraints
+                constraint_list = rpi_hat_constraints(
+                    requirements, board_template, footprint_sizes,
+                )
+            else:
+                constraint_list = constraints_from_requirements(
+                    requirements, board_template, footprint_sizes,
+                )
             if extra_constraints:
                 # Merge: extra_constraints override by ref
                 extra_refs = {c.ref for c in extra_constraints}

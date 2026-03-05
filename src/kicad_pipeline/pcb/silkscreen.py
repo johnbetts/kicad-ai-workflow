@@ -280,8 +280,9 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
         min_y = -_LABEL_OFFSET_MM
         max_y = _LABEL_OFFSET_MM
 
-    # Place labels 0.5mm beyond pad extents, but at least _LABEL_OFFSET_MM from origin
-    pad_label_gap = 0.5
+    # Larger clearance for through-hole pads to avoid silk_over_copper DRC
+    has_tht = any(p.pad_type == "thru_hole" for p in fp.pads)
+    pad_label_gap = 1.5 if has_tht else 0.5
     ref_y = min(min_y - pad_label_gap, -_LABEL_OFFSET_MM)
     val_y = max(max_y + pad_label_gap, _LABEL_OFFSET_MM)
 

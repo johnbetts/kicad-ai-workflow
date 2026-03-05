@@ -35,6 +35,17 @@ _DEFAULT_GRID_MM: float = 0.5
 PLACEMENT_GAP_MM: float = 0.5
 """Minimum gap between footprint courtyards to prevent solder mask bridging."""
 
+_THT_GAP_MM: float = 1.0
+"""Larger gap for through-hole components (bigger pads, solder ring)."""
+
+_THT_SIZE_THRESHOLD_MM: float = 5.0
+"""Footprint dimension above which the THT gap is used."""
+
+
+def _placement_gap(w: float, h: float) -> float:
+    """Return placement gap based on footprint dimensions."""
+    return _THT_GAP_MM if max(w, h) > _THT_SIZE_THRESHOLD_MM else PLACEMENT_GAP_MM
+
 
 class _OccupancyGrid:
     """2D boolean grid tracking placed courtyards and keepouts.
@@ -212,7 +223,10 @@ def _connector_edge(
         The recommended :class:`BoardEdge` for the connector.
     """
     if _is_screw_terminal(footprint_id):
-        # Alternate screw terminals between LEFT and BOTTOM
+        # RPi HATs: screw terminals on BOTTOM (opposite GPIO header at top)
+        if board_template_name == "RPI_HAT":
+            return BoardEdge.BOTTOM
+        # Other boards: alternate between LEFT and BOTTOM
         num = int("".join(ch for ch in ref if ch.isdigit()) or "0")
         return BoardEdge.LEFT if num % 2 == 1 else BoardEdge.BOTTOM
     fp_upper = footprint_id.upper()
@@ -474,6 +488,35 @@ def constraints_from_requirements(
                 priority=15,
             ))
 
+    # 7. Net-based grouping: components sharing the same signal net
+    # This captures star topologies (voltage dividers, filter networks)
+    # that trace_linear_chains cannot detect.  Priority 16 overrides
+    # signal chain groups (15) but not edge/near/fixed constraints (>=20).
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue
+        net_group_refs = [c.ref for c in net.connections]
+        if len(net_group_refs) < 3:
+            continue
+        group_name = f"_net_group_{net.name}"
+        for ref in net_group_refs:
+            # Don't override higher-priority constraints (NEAR, EDGE, FIXED)
+            if any(c.ref == ref and c.priority > 16 for c in constraints):
+                continue
+            # Remove existing lower-priority GROUP constraints for this ref
+            constraints = [
+                c for c in constraints
+                if not (c.ref == ref
+                        and c.constraint_type == PlacementConstraintType.GROUP
+                        and c.priority <= 16)
+            ]
+            constraints.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name=group_name,
+                priority=16,
+            ))
+
     return tuple(constraints)
 
 
@@ -525,6 +568,17 @@ def solve_placement(
     rotations: dict[str, float] = {}
     violations: list[str] = []
 
+    # Mark board-edge margin as occupied (prevent copper_edge_clearance DRC)
+    margin_cells = max(1, int(1.0 / grid_mm))
+    for mc in range(grid._cols):
+        for mr in range(margin_cells):
+            grid._cells[mr][mc] = True
+            grid._cells[grid._rows - 1 - mr][mc] = True
+    for mr2 in range(grid._rows):
+        for mc2 in range(margin_cells):
+            grid._cells[mr2][mc2] = True
+            grid._cells[mr2][grid._cols - 1 - mc2] = True
+
     # Mark keepouts on grid
     for ko in keepouts:
         ko_xs = [p.x - origin_x for p in ko.polygon]
@@ -543,19 +597,19 @@ def solve_placement(
         PlacementConstraintType.GROUP: 3,
         PlacementConstraintType.AWAY_FROM: 4,
     }
-    sorted_constraints = sorted(
+    sorted_constraints: list[PlacementConstraint] = sorted(
         constraints,
         key=lambda c: (-c.priority, type_order.get(c.constraint_type, 5)),
     )
 
     # Collect all refs from constraints
-    all_refs = {c.ref for c in constraints}
+    all_refs: set[str] = {c.ref for c in constraints}
 
     # Group constraints by ref (pick highest priority per ref)
     ref_constraint: dict[str, PlacementConstraint] = {}
-    for c in sorted_constraints:
-        if c.ref not in ref_constraint:
-            ref_constraint[c.ref] = c
+    for pc in sorted_constraints:
+        if pc.ref not in ref_constraint:
+            ref_constraint[pc.ref] = pc
 
     # 1. Place FIXED
     for ref, c in ref_constraint.items():
@@ -567,7 +621,7 @@ def solve_placement(
             w, h = footprint_sizes.get(ref, (3.0, 3.0))
             positions[ref] = Point(x=c.x, y=c.y)
             rotations[ref] = c.rotation if c.rotation is not None else 0.0
-            gap = PLACEMENT_GAP_MM
+            gap = _placement_gap(w, h)
             grid.mark_rect(
                 x_rel - w / 2 - gap, y_rel - h / 2 - gap,
                 w + 2 * gap, h + 2 * gap,
@@ -595,7 +649,7 @@ def solve_placement(
             y += origin_y
             positions[ref] = Point(x=x, y=y)
             rotations[ref] = rot
-            gap = PLACEMENT_GAP_MM
+            gap = _placement_gap(w, h)
             grid.mark_rect(
                 x - origin_x - w / 2 - gap, y - origin_y - h / 2 - gap,
                 w + 2 * gap, h + 2 * gap,
@@ -624,7 +678,7 @@ def solve_placement(
             if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
                 positions[ref] = Point(x=trial_x, y=trial_y)
                 rotations[ref] = 0.0
-                gap = PLACEMENT_GAP_MM
+                gap = _placement_gap(w, h)
                 grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
                 log.debug("NEAR(%s): %s at (%.1f, %.1f)", target, ref, trial_x, trial_y)
                 placed = True
@@ -637,7 +691,7 @@ def solve_placement(
             if free is not None:
                 positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
                 rotations[ref] = 0.0
-                gap = PLACEMENT_GAP_MM
+                gap = _placement_gap(w, h)
                 grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
             else:
                 violations.append(f"Could not place {ref} near {target}")
@@ -679,7 +733,7 @@ def solve_placement(
             y_pos = base_y + row * max_h + max_h / 2
             positions[ref] = Point(x=x_pos, y=y_pos)
             rotations[ref] = 0.0
-            gap = PLACEMENT_GAP_MM
+            gap = _placement_gap(w, h)
             grid.mark_rect(
                 x_pos - origin_x - w / 2 - gap,
                 y_pos - origin_y - max_h / 2 - gap,
@@ -698,7 +752,7 @@ def solve_placement(
         if free is not None:
             positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
             rotations[ref] = 0.0
-            gap = PLACEMENT_GAP_MM
+            gap = _placement_gap(w, h)
             grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
         else:
             violations.append(f"No space for {ref} on the board")
@@ -772,8 +826,7 @@ def rpi_hat_constraints(
                 priority=25,
             ))
 
-    # Screw terminals -> EDGE(LEFT or BOTTOM), alternating
-    screw_idx = 0
+    # Screw terminals -> EDGE(BOTTOM) for RPi HATs (opposite GPIO header)
     for comp in requirements.components:
         if not _is_connector(comp.ref, comp.footprint):
             continue
@@ -784,14 +837,12 @@ def rpi_hat_constraints(
                 for c in base
             ):
                 continue
-            edge = BoardEdge.LEFT if screw_idx % 2 == 0 else BoardEdge.BOTTOM
             extra.append(PlacementConstraint(
                 ref=comp.ref,
                 constraint_type=PlacementConstraintType.EDGE,
-                edge=edge,
+                edge=BoardEdge.BOTTOM,
                 priority=55,
             ))
-            screw_idx += 1
 
     # Voltage divider chains: pairs of R* sharing a signal net -> GROUP
     adj = build_signal_adjacency(requirements)

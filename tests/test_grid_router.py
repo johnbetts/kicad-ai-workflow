@@ -227,16 +227,13 @@ def test_route_all_nets_returns_tuple() -> None:
     assert isinstance(results, tuple)
 
 
-def test_route_gnd_uses_wider_trace() -> None:
-    """Nets with 'GND' in the name should use 0.5 mm width (fallback)."""
+def test_route_gnd_skipped_by_default() -> None:
+    """GND is handled by copper pour and should be skipped by route_all_nets."""
     fp1, fp2 = _make_simple_footprints()
     entry = _make_netlist_entry(1, "GND", (("R1", "1"), ("R2", "1")))
     netlist = _make_netlist([entry])
     results = route_all_nets(netlist, (fp1, fp2), board_width_mm=30.0, board_height_mm=40.0)
-    assert len(results) == 1
-    result = results[0]
-    if result.routed and result.tracks:
-        assert all(abs(t.width - 0.5) < 1e-9 for t in result.tracks)
+    assert len(results) == 0  # GND skipped — copper pour handles it
 
 
 def test_route_signal_uses_default_trace() -> None:

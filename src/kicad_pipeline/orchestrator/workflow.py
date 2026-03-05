@@ -292,6 +292,7 @@ class WorkflowEngine:
 
     def _generate_production(self, variant_name: str, vdir: Path) -> None:
         """Build and write production artifacts."""
+        from kicad_pipeline.pcb.board_templates import detect_template
         from kicad_pipeline.pcb.builder import build_pcb
         from kicad_pipeline.production.packager import (
             build_production_package,
@@ -300,7 +301,9 @@ class WorkflowEngine:
         from kicad_pipeline.requirements.decomposer import load_requirements
 
         req = load_requirements(vdir / "requirements.json")
-        pcb = build_pcb(req)
+        tmpl = detect_template(req.mechanical)
+        board_template = tmpl.name if tmpl is not None else None
+        pcb = build_pcb(req, board_template=board_template)
         pkg = build_production_package(pcb, variant_name, req)
         prod_dir = vdir / "production"
         prod_dir.mkdir(parents=True, exist_ok=True)

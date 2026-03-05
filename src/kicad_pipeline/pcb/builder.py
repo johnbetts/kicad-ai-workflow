@@ -42,6 +42,8 @@ from kicad_pipeline.models.pcb import (
     Pad,
     PCBDesign,
     Point,
+    Track,
+    Via,
     ZoneFill,
     ZonePolygon,
 )
@@ -506,6 +508,7 @@ def build_pcb(
     origin_x: float = 0.0,
     origin_y: float = 0.0,
     board_template: str | None = None,
+    auto_route: bool = True,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -677,12 +680,49 @@ def build_pcb(
             )
 
     # ------------------------------------------------------------------
-    # Step 5: Layout placement
+    # Step 4c: Create keepouts BEFORE placement so solver can avoid them
+    # ------------------------------------------------------------------
+    keepouts: list[Keepout] = []
+    if _has_rf_module(requirements):
+        log.info("build_pcb: RF module detected — adding antenna keepout")
+        antenna_ko = _make_antenna_keepout(
+            board_width_mm,
+            _ANTENNA_KEEPOUT_WIDTH_MM,
+            _ANTENNA_KEEPOUT_HEIGHT_MM,
+        )
+        keepouts.append(antenna_ko)
+
+    # Mounting-hole keepouts
+    mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
+    mount_radius = _KEEPOUT_MARGIN_MM
+    if (
+        mount_positions is None
+        and requirements.mechanical is not None
+        and requirements.mechanical.mounting_hole_positions
+    ):
+        mount_positions = requirements.mechanical.mounting_hole_positions
+    if template_mounting_diameter is not None:
+        mount_radius = template_mounting_diameter / 2.0 + 1.0
+    elif requirements.mechanical is not None:
+        mount_radius = requirements.mechanical.mounting_hole_diameter_mm / 2.0 + 1.0
+
+    corner_keepouts = _make_mounting_hole_keepouts(
+        board_width_mm,
+        board_height_mm,
+        _MOUNTING_HOLE_INSET_MM,
+        mount_radius,
+        mounting_positions=mount_positions,
+    )
+    keepouts.extend(corner_keepouts)
+
+    # ------------------------------------------------------------------
+    # Step 5: Layout placement (with keepouts available to solver)
     # ------------------------------------------------------------------
     layout_result: LayoutResult = layout_pcb(
         requirements, outline, footprint_sizes=fp_sizes,
         fixed_positions=fixed_positions,
         board_template=tmpl_obj,
+        keepouts=tuple(keepouts),
     )
 
     # Apply positions and rotations to footprints
@@ -726,55 +766,53 @@ def build_pcb(
     zones: list[ZonePolygon] = list(gnd_zones)
 
     # ------------------------------------------------------------------
-    # Step 7: Antenna keepout (ESP32 / RF modules)
+    # Step 7-8: Keepouts already created in step 4c (before placement)
     # ------------------------------------------------------------------
-    keepouts: list[Keepout] = []
-    if _has_rf_module(requirements):
-        log.info("build_pcb: RF module detected — adding antenna keepout")
-        antenna_ko = _make_antenna_keepout(
-            board_width_mm,
-            _ANTENNA_KEEPOUT_WIDTH_MM,
-            _ANTENNA_KEEPOUT_HEIGHT_MM,
-        )
-        keepouts.append(antenna_ko)
-
-    # ------------------------------------------------------------------
-    # Step 8: Mounting-hole keepouts
-    # ------------------------------------------------------------------
-    # Resolve mounting positions: template → mechanical → 4-corner fallback
-    mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
-    mount_radius = _KEEPOUT_MARGIN_MM
-    if (
-        mount_positions is None
-        and requirements.mechanical is not None
-        and requirements.mechanical.mounting_hole_positions
-    ):
-        mount_positions = requirements.mechanical.mounting_hole_positions
-    if template_mounting_diameter is not None:
-        mount_radius = template_mounting_diameter / 2.0 + 1.0
-    elif requirements.mechanical is not None:
-        mount_radius = requirements.mechanical.mounting_hole_diameter_mm / 2.0 + 1.0
-
-    corner_keepouts = _make_mounting_hole_keepouts(
-        board_width_mm,
-        board_height_mm,
-        _MOUNTING_HOLE_INSET_MM,
-        mount_radius,
-        mounting_positions=mount_positions,
-    )
-    keepouts.extend(corner_keepouts)
 
     # ------------------------------------------------------------------
     # Step 9: Silkscreen
     # ------------------------------------------------------------------
     final_footprints = [add_silkscreen_to_footprint(fp) for fp in footprints_with_pos]
 
+    # ------------------------------------------------------------------
+    # Step 10: Autoroute (when enabled)
+    # ------------------------------------------------------------------
+    all_tracks: tuple[Track, ...] = ()
+    all_vias: tuple[Via, ...] = ()
+    if auto_route:
+        from kicad_pipeline.pcb.netclasses import net_width_map
+        from kicad_pipeline.pcb.netlist import build_netlist
+        from kicad_pipeline.routing.grid_router import (
+            collect_tracks,
+            collect_vias,
+            route_all_nets,
+        )
+
+        netlist = build_netlist(requirements)
+        widths = net_width_map(netclasses)
+        route_results = route_all_nets(
+            netlist, final_footprints,
+            board_width_mm, board_height_mm,
+            grid_step_mm=0.25,
+            net_widths=widths,
+            keepouts=tuple(keepouts),
+        )
+        all_tracks = collect_tracks(route_results)
+        all_vias = collect_vias(route_results)
+        routed = sum(1 for r in route_results if r.routed)
+        unrouted = sum(1 for r in route_results if not r.routed)
+        log.info(
+            "build_pcb: autoroute complete — %d tracks, %d routed, %d unrouted",
+            len(all_tracks), routed, unrouted,
+        )
+
     log.info(
-        "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts",
+        "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, %d tracks",
         len(final_footprints),
         len(nets),
         len(zones),
         len(keepouts),
+        len(all_tracks),
     )
 
     return PCBDesign(
@@ -782,8 +820,8 @@ def build_pcb(
         design_rules=DesignRules(),
         nets=nets,
         footprints=tuple(final_footprints),
-        tracks=(),
-        vias=(),
+        tracks=all_tracks,
+        vias=all_vias,
         zones=tuple(zones),
         keepouts=tuple(keepouts),
         netclasses=netclasses,
