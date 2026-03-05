@@ -19,15 +19,19 @@ def test_build_project_file_defaults() -> None:
 
 
 def test_via_drill_meets_minimum() -> None:
-    """All via drill values should be >= 0.508mm (min_through_hole_diameter)."""
+    """All via drill values should be >= 0.3mm (JLCPCB min_through_hole_diameter)."""
     data = build_project_file("test")
     via_dims = data["board"]["design_settings"]["via_dimensions"]
     for via in via_dims:
         if via["drill"] > 0:
-            assert via["drill"] >= 0.508, f"Via drill {via['drill']} < 0.508mm"
+            assert via["drill"] >= 0.3, f"Via drill {via['drill']} < 0.3mm"
+
+    # min_through_hole_diameter constraint should match
+    rules = data["board"]["design_settings"]["rules"]
+    assert rules["min_through_hole_diameter"] == 0.3
 
     default_class = data["net_settings"]["classes"][0]
-    assert default_class["via_drill"] >= 0.508
+    assert default_class["via_drill"] >= 0.3
 
 
 def test_build_project_file_with_netclasses() -> None:
@@ -133,3 +137,17 @@ def test_copper_edge_clearance_matches_jlcpcb() -> None:
     data = build_project_file("test")
     rules = data["board"]["design_settings"]["rules"]
     assert rules["min_copper_edge_clearance"] == 0.3
+
+
+def test_solder_mask_bridge_is_warning() -> None:
+    """solder_mask_bridge should be downgraded to warning for fine-pitch ICs."""
+    data = build_project_file("test")
+    severities = data["board"]["design_settings"]["rule_severities"]
+    assert severities["solder_mask_bridge"] == "warning"
+
+
+def test_min_hole_to_hole_relaxed() -> None:
+    """min_hole_to_hole should be 0.2mm to match via placement spacing."""
+    data = build_project_file("test")
+    rules = data["board"]["design_settings"]["rules"]
+    assert rules["min_hole_to_hole"] == 0.2

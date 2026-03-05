@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_pipeline.models.pcb import Footprint, Keepout, NetEntry, Pad, Point, Track
+from kicad_pipeline.models.pcb import Footprint, Keepout, NetEntry, Pad, Point, Track, Via
 from kicad_pipeline.pcb.netlist import Netlist, NetlistEntry
 from kicad_pipeline.routing.grid_router import (
     RouteRequest,
     RouteResult,
+    _find_free_via_position,
     _Grid,
+    _mark_line_on_grid,
+    _mark_via_on_fcu,
+    _prepare_bcu_grid,
     _prepare_grid,
+    _route_on_bcu,
     collect_tracks,
     collect_vias,
     route_all_nets,
@@ -473,3 +478,439 @@ def test_astar_does_not_traverse_occupied_near_pads() -> None:
     path = _astar(grid, start_col, start_row, goal_col, goal_row)
     # Path is None because the wall is complete — no way around
     assert path is None
+
+
+# ---------------------------------------------------------------------------
+# B.Cu dual-layer routing tests
+# ---------------------------------------------------------------------------
+
+
+def _make_tht_pad(
+    number: str, x: float = 0.0, y: float = 0.0, net_number: int = 1,
+) -> Pad:
+    """Create a through-hole pad that penetrates both layers."""
+    return Pad(
+        number=number,
+        pad_type="thru_hole",
+        shape="circle",
+        position=Point(x=x, y=y),
+        size_x=1.6,
+        size_y=1.6,
+        layers=("F.Cu", "B.Cu"),
+        net_number=net_number,
+        net_name="NET",
+        drill_diameter=1.0,
+    )
+
+
+def test_route_on_bcu_produces_tracks_and_vias() -> None:
+    """B.Cu routing returns B.Cu-layer tracks + 2 vias."""
+    bcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
+    # No obstacles — should route easily
+    result = _route_on_bcu(
+        5.0, 15.0, 25.0, 15.0,
+        bcu_grid, net_number=1, net_name="SIG",
+        width_mm=0.25, clearance_mm=0.2,
+    )
+    assert result is not None
+    tracks, (via_start, via_goal) = result
+    assert len(tracks) > 0
+    assert all(t.layer == "B.Cu" for t in tracks)
+    assert isinstance(via_start, Via)
+    assert isinstance(via_goal, Via)
+
+
+def test_route_on_bcu_via_properties() -> None:
+    """Via drill/size/layers/net should use signal via dimensions."""
+    from kicad_pipeline.constants import VIA_DIAMETER_SIGNAL_MM, VIA_DRILL_SIGNAL_MM
+
+    bcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
+    result = _route_on_bcu(
+        5.0, 15.0, 25.0, 15.0,
+        bcu_grid, net_number=42, net_name="I2C_SDA",
+        width_mm=0.25, clearance_mm=0.2,
+    )
+    assert result is not None
+    _tracks, (via_start, via_goal) = result
+    for via in (via_start, via_goal):
+        assert via.drill == VIA_DRILL_SIGNAL_MM
+        assert via.size == VIA_DIAMETER_SIGNAL_MM
+        assert via.layers == ("F.Cu", "B.Cu")
+        assert via.net_number == 42
+
+
+def test_route_net_bcu_fallback_ic_final_leg() -> None:
+    """Dense IC pad routes via B.Cu when F.Cu is blocked."""
+    # Create a dense IC (8 fine-pitch pads) and one passive
+    ic_pads = tuple(
+        Pad(
+            number=str(i + 1), pad_type="smd", shape="rect",
+            position=Point(x=(i % 4) * 0.65, y=(i // 4) * 3.0),
+            size_x=0.4, size_y=1.2,
+            layers=("F.Cu",), net_number=i + 1, net_name=f"N{i + 1}",
+        )
+        for i in range(8)
+    )
+    ic_fp = Footprint(
+        lib_id="Test:IC", ref="U1", value="IC",
+        position=Point(x=15.0, y=15.0), layer="F.Cu",
+        pads=ic_pads,
+    )
+    res_fp = Footprint(
+        lib_id="Test:R", ref="R1", value="10k",
+        position=Point(x=5.0, y=15.0), layer="F.Cu",
+        pads=(_make_pad("1", net_number=1),),
+    )
+    req = RouteRequest(
+        net_number=1, net_name="SIG",
+        pad_refs=(("R1", "1"), ("U1", "1")),
+        layer="F.Cu", width_mm=0.25,
+    )
+    # Create a shared grid and B.Cu grid
+    grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
+    _prepare_grid(grid, [ic_fp, res_fp])
+    bcu_grid = _prepare_bcu_grid(grid, [ic_fp, res_fp])
+
+    result = route_net(
+        req, [ic_fp, res_fp],
+        board_width_mm=30.0, board_height_mm=30.0,
+        grid=grid, bcu_grid=bcu_grid,
+    )
+    # Should produce tracks (F.Cu or B.Cu) and potentially vias
+    assert len(result.tracks) > 0
+
+
+def test_route_net_bcu_fallback_mst_loop() -> None:
+    """MST segment routes via B.Cu when F.Cu is completely blocked."""
+    # Place two pads with a wall between them on F.Cu
+    fp1 = _make_footprint("R1", x=5.0, y=15.0)
+    fp2 = _make_footprint("R2", x=25.0, y=15.0)
+
+    grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
+    _prepare_grid(grid, [fp1, fp2])
+
+    # Block ALL intermediate F.Cu cells with a wall
+    for row in range(grid.rows):
+        grid.mark(grid.cols // 2, row)
+        grid.mark(grid.cols // 2 - 1, row)
+        grid.mark(grid.cols // 2 + 1, row)
+
+    bcu_grid = _prepare_bcu_grid(grid, [fp1, fp2])
+
+    req = _make_route_request(1, (("R1", "1"), ("R2", "1")))
+    result = route_net(
+        req, [fp1, fp2],
+        board_width_mm=30.0, board_height_mm=30.0,
+        grid=grid, bcu_grid=bcu_grid,
+    )
+    # Should succeed via B.Cu fallback
+    assert result.routed is True
+    # Should have B.Cu tracks
+    bcu_tracks = [t for t in result.tracks if t.layer == "B.Cu"]
+    assert len(bcu_tracks) > 0
+    # Should have vias
+    assert len(result.vias) >= 2
+
+
+def test_route_net_without_bcu_grid_unchanged() -> None:
+    """bcu_grid=None preserves existing behavior (no B.Cu fallback)."""
+    fp1, fp2 = _make_simple_footprints()
+    req = _make_route_request(1, (("R1", "1"), ("R2", "1")))
+    result = route_net(
+        req, [fp1, fp2],
+        board_width_mm=30.0, board_height_mm=40.0,
+        bcu_grid=None,
+    )
+    assert result.routed is True
+    # All tracks should be F.Cu (no B.Cu fallback available)
+    assert all(t.layer == "F.Cu" for t in result.tracks)
+    assert len(result.vias) == 0
+
+
+def test_bcu_grid_skips_smd_pads() -> None:
+    """B.Cu grid doesn't mark SMD pad areas (they're F.Cu-only)."""
+    smd_fp = _make_footprint("R1", x=15.0, y=15.0)
+    tht_fp = Footprint(
+        lib_id="Test:J", ref="J1", value="Conn",
+        position=Point(x=5.0, y=15.0), layer="F.Cu",
+        pads=(_make_tht_pad("1"),),
+    )
+    fcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
+    bcu_grid = _prepare_bcu_grid(fcu_grid, [smd_fp, tht_fp])
+
+    # THT pad position should be marked on B.Cu
+    tht_col, tht_row = bcu_grid.to_cell(5.0, 15.0)
+    assert not bcu_grid.is_free(tht_col, tht_row)
+
+    # SMD pad position should be FREE on B.Cu (it's F.Cu-only)
+    smd_col, smd_row = bcu_grid.to_cell(15.0, 15.0)
+    assert bcu_grid.is_free(smd_col, smd_row)
+
+
+def test_via_positions_marked_on_fcu_grid() -> None:
+    """After B.Cu routing, vias should be marked occupied on F.Cu grid."""
+    fcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
+    via = Via(
+        position=Point(10.0, 15.0),
+        drill=0.508, size=0.9,
+        layers=("F.Cu", "B.Cu"),
+        net_number=1,
+    )
+    # Cell should be free before marking
+    col, row = fcu_grid.to_cell(10.0, 15.0)
+    assert fcu_grid.is_free(col, row)
+
+    _mark_via_on_fcu(fcu_grid, via)
+
+    # Cell should now be occupied
+    assert not fcu_grid.is_free(col, row)
+
+
+def test_collect_vias_includes_bcu_routing_vias() -> None:
+    """collect_vias() returns non-empty when B.Cu routing produced vias."""
+    via1 = Via(
+        position=Point(5.0, 15.0),
+        drill=0.508, size=0.9,
+        layers=("F.Cu", "B.Cu"),
+        net_number=1,
+    )
+    via2 = Via(
+        position=Point(25.0, 15.0),
+        drill=0.508, size=0.9,
+        layers=("F.Cu", "B.Cu"),
+        net_number=1,
+    )
+    r = RouteResult(
+        net_number=1, net_name="SIG",
+        tracks=(), vias=(via1, via2), routed=True,
+    )
+    combined = collect_vias((r,))
+    assert len(combined) == 2
+    assert via1 in combined
+    assert via2 in combined
+
+
+# ---------------------------------------------------------------------------
+# _find_free_via_position tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_free_via_position_free_target() -> None:
+    """When target area is clear, returns grid-snapped position near target."""
+    grid = _Grid.create(30.0, 30.0, grid_step_mm=0.25)
+    result = _find_free_via_position(grid, 15.0, 15.0, via_radius_mm=0.3, clearance_mm=0.2)
+    assert result is not None
+    # Result should be grid-snapped (multiple of grid_step_mm)
+    rx, ry = result
+    assert rx % 0.25 == pytest.approx(0.0, abs=1e-6)
+    assert ry % 0.25 == pytest.approx(0.0, abs=1e-6)
+    # Should be very close to target (within one grid cell)
+    assert abs(rx - 15.0) <= 0.25
+    assert abs(ry - 15.0) <= 0.25
+
+
+def test_find_free_via_position_offset() -> None:
+    """When target is occupied, returns a nearby free position."""
+    grid = _Grid.create(30.0, 30.0, grid_step_mm=0.25)
+    # Mark a cluster of cells around target
+    tc, tr = grid.to_cell(15.0, 15.0)
+    for dc in range(-3, 4):
+        for dr in range(-3, 4):
+            grid.mark(tc + dc, tr + dr)
+    result = _find_free_via_position(grid, 15.0, 15.0, via_radius_mm=0.3, clearance_mm=0.2)
+    assert result is not None
+    # Should be offset from original position
+    rx, ry = result
+    dist = ((rx - 15.0) ** 2 + (ry - 15.0) ** 2) ** 0.5
+    assert dist > 0.1  # must be offset
+    assert dist < 3.0  # but not too far
+
+
+def test_find_free_via_position_fully_blocked() -> None:
+    """When entire search area is blocked, returns None."""
+    grid = _Grid.create(10.0, 10.0, grid_step_mm=0.25)
+    # Mark entire grid as occupied
+    for c in range(grid.cols):
+        for r in range(grid.rows):
+            grid.mark(c, r)
+    result = _find_free_via_position(grid, 5.0, 5.0, via_radius_mm=0.3, clearance_mm=0.2)
+    assert result is None
+
+
+def test_bcu_fallback_generates_fcu_stub() -> None:
+    """When via is offset from pad, an F.Cu stub track bridges pad to via."""
+    bcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.25)
+    fcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.25)
+    # Block F.Cu around start position to force via offset
+    tc, tr = fcu_grid.to_cell(5.0, 15.0)
+    for dc in range(-3, 4):
+        for dr in range(-3, 4):
+            fcu_grid.mark(tc + dc, tr + dr)
+
+    result = _route_on_bcu(
+        5.0, 15.0, 25.0, 15.0,
+        bcu_grid, net_number=1, net_name="SIG",
+        width_mm=0.25, clearance_mm=0.2,
+        fcu_grid=fcu_grid,
+    )
+    assert result is not None
+    tracks, (via_start, _via_goal) = result
+    # At least one track should be on F.Cu (the stub)
+    fcu_tracks = [t for t in tracks if t.layer == "F.Cu"]
+    assert len(fcu_tracks) >= 1
+    # The stub should start at the pad position
+    stub = fcu_tracks[0]
+    assert abs(stub.start.x - 5.0) < 0.01
+    assert abs(stub.start.y - 15.0) < 0.01
+    # Via should NOT be at the original pad position (it was offset)
+    assert abs(via_start.position.x - 5.0) > 0.1 or abs(via_start.position.y - 15.0) > 0.1
+
+
+# ---------------------------------------------------------------------------
+# collect_vias routed_only filter
+# ---------------------------------------------------------------------------
+
+
+def test_collect_vias_filters_unrouted() -> None:
+    """collect_vias with routed_only=True excludes vias from unrouted nets."""
+    v1 = Via(
+        position=Point(1, 1), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    v2 = Via(
+        position=Point(2, 2), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=2,
+    )
+    r_ok = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1,), routed=True)
+    r_fail = RouteResult(net_number=2, net_name="B", tracks=(), vias=(v2,), routed=False)
+    combined = collect_vias((r_ok, r_fail), routed_only=True)
+    assert len(combined) == 1
+    assert v1 in combined
+    assert v2 not in combined
+
+
+def test_collect_vias_includes_all() -> None:
+    """collect_vias with routed_only=False includes everything."""
+    v1 = Via(
+        position=Point(1, 1), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    v2 = Via(
+        position=Point(2, 2), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=2,
+    )
+    r_ok = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1,), routed=True)
+    r_fail = RouteResult(net_number=2, net_name="B", tracks=(), vias=(v2,), routed=False)
+    combined = collect_vias((r_ok, r_fail), routed_only=False)
+    assert len(combined) == 2
+    assert v1 in combined
+    assert v2 in combined
+
+
+# ---------------------------------------------------------------------------
+# _mark_line_on_grid tests
+# ---------------------------------------------------------------------------
+
+
+def test_mark_line_on_grid_diagonal() -> None:
+    """Diagonal line should mark cells along its path."""
+    grid = _Grid.create(20.0, 20.0, grid_step_mm=0.5)
+    # Mark a diagonal line from (2,2) to (8,6)
+    _mark_line_on_grid(grid, 2.0, 2.0, 8.0, 6.0, exclusion_mm=0.5)
+    # Midpoint of the line (~5, ~4) should be marked
+    mid_c, mid_r = grid.to_cell(5.0, 4.0)
+    assert not grid.is_free(mid_c, mid_r)
+    # Start and end should be marked
+    sc, sr = grid.to_cell(2.0, 2.0)
+    assert not grid.is_free(sc, sr)
+    ec, er = grid.to_cell(8.0, 6.0)
+    assert not grid.is_free(ec, er)
+    # A point far from the line should be free
+    fc, fr = grid.to_cell(15.0, 15.0)
+    assert grid.is_free(fc, fr)
+
+
+def test_mark_line_on_grid_horizontal() -> None:
+    """Horizontal line should mark cells along its path."""
+    grid = _Grid.create(20.0, 20.0, grid_step_mm=0.5)
+    _mark_line_on_grid(grid, 2.0, 10.0, 8.0, 10.0, exclusion_mm=0.5)
+    # Midpoint
+    mid_c, mid_r = grid.to_cell(5.0, 10.0)
+    assert not grid.is_free(mid_c, mid_r)
+
+
+def test_mark_line_on_grid_zero_length() -> None:
+    """Zero-length line should mark just the point + exclusion."""
+    grid = _Grid.create(20.0, 20.0, grid_step_mm=0.5)
+    _mark_line_on_grid(grid, 5.0, 5.0, 5.0, 5.0, exclusion_mm=0.5)
+    c, r = grid.to_cell(5.0, 5.0)
+    assert not grid.is_free(c, r)
+
+
+# ---------------------------------------------------------------------------
+# B.Cu stubs marked on F.Cu grid
+# ---------------------------------------------------------------------------
+
+
+def test_bcu_stubs_marked_on_fcu_grid() -> None:
+    """After B.Cu routing with stubs, F.Cu grid has stub cells marked."""
+    bcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.25)
+    fcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.25)
+    # Block F.Cu around start to force via offset (and thus stub)
+    tc, tr = fcu_grid.to_cell(5.0, 15.0)
+    for dc in range(-3, 4):
+        for ddr in range(-3, 4):
+            fcu_grid.mark(tc + dc, tr + ddr)
+
+    result = _route_on_bcu(
+        5.0, 15.0, 25.0, 15.0,
+        bcu_grid, net_number=1, net_name="SIG",
+        width_mm=0.25, clearance_mm=0.2,
+        fcu_grid=fcu_grid,
+    )
+    assert result is not None
+    tracks, (via_start, _via_goal) = result
+    # Find F.Cu stubs
+    fcu_stubs = [t for t in tracks if t.layer == "F.Cu"]
+    assert len(fcu_stubs) >= 1
+    # The stub midpoint should be marked on fcu_grid
+    stub = fcu_stubs[0]
+    mx = (stub.start.x + stub.end.x) / 2
+    my = (stub.start.y + stub.end.y) / 2
+    mc, mr = fcu_grid.to_cell(mx, my)
+    assert not fcu_grid.is_free(mc, mr)
+
+
+# ---------------------------------------------------------------------------
+# collect_vias deduplication tests
+# ---------------------------------------------------------------------------
+
+
+def test_collect_vias_deduplicates() -> None:
+    """Co-located vias should be collapsed to one."""
+    v1 = Via(
+        position=Point(10.0, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    v2 = Via(
+        position=Point(10.0, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    r = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1, v2), routed=True)
+    combined = collect_vias((r,))
+    assert len(combined) == 1
+
+
+def test_collect_vias_keeps_distinct() -> None:
+    """Vias far apart should both be kept."""
+    v1 = Via(
+        position=Point(5.0, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    v2 = Via(
+        position=Point(25.0, 15.0), drill=0.3, size=0.6,
+        layers=("F.Cu", "B.Cu"), net_number=1,
+    )
+    r = RouteResult(net_number=1, net_name="A", tracks=(), vias=(v1, v2), routed=True)
+    combined = collect_vias((r,))
+    assert len(combined) == 2
