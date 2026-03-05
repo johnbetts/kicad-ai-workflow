@@ -508,6 +508,7 @@ def layout_pcb(
             result = solve_placement(
                 constraint_list, board, footprint_sizes,
                 keepouts=typed_keepouts, grid_mm=0.5,
+                requirements=requirements,
             )
             positions = dict(result.positions)
             rotations = dict(result.rotations)

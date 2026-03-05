@@ -488,6 +488,7 @@ def solve_placement(
     footprint_sizes: dict[str, tuple[float, float]],
     keepouts: tuple[Keepout, ...] = (),
     grid_mm: float = _DEFAULT_GRID_MM,
+    requirements: ProjectRequirements | None = None,
 ) -> PlacementResult:
     """Solve component placement using a greedy constraint-based algorithm.
 
@@ -498,6 +499,7 @@ def solve_placement(
     3. NEAR — placed adjacent to already-placed target components.
     4. GROUP — placed as clusters in available board space.
     5. Remaining — placed in leftover space.
+    6. Rotation optimization (when *requirements* is provided).
 
     Args:
         constraints: Placement constraints for components.
@@ -505,6 +507,7 @@ def solve_placement(
         footprint_sizes: Mapping from ref to ``(width, height)`` in mm.
         keepouts: Keepout zones to avoid.
         grid_mm: Placement grid pitch in mm.
+        requirements: Optional project requirements for rotation optimization.
 
     Returns:
         :class:`PlacementResult` with positions, rotations, and violations.
@@ -702,6 +705,13 @@ def solve_placement(
             positions[ref] = Point(x=board_w / 2.0 + origin_x, y=board_h / 2.0 + origin_y)
             rotations[ref] = 0.0
 
+    # 6. Optimize rotations when requirements are available
+    if requirements is not None:
+        rotations = optimize_rotations(
+            positions, rotations, requirements,
+            footprint_sizes=footprint_sizes,
+        )
+
     return PlacementResult(
         positions=positions,
         rotations=rotations,
@@ -829,21 +839,74 @@ def _is_two_pin_passive(ref: str) -> bool:
     return prefix in ("R", "C", "L")
 
 
+def _rotated_pad_offset(
+    px: float, py: float, rotation_deg: float,
+) -> tuple[float, float]:
+    """Rotate a pad's relative ``(px, py)`` offset by *rotation_deg* degrees.
+
+    Uses the standard 2-D rotation matrix.
+
+    Args:
+        px: Pad X offset from component centre.
+        py: Pad Y offset from component centre.
+        rotation_deg: Rotation angle in degrees (counter-clockwise).
+
+    Returns:
+        Rotated ``(x, y)`` offset.
+    """
+    rad = math.radians(rotation_deg)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    return (px * cos_r - py * sin_r, px * sin_r + py * cos_r)
+
+
+def _build_pad_connectivity(
+    requirements: ProjectRequirements,
+) -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """Map ``(ref, pin_number)`` to connected ``[(neighbour_ref, pin), ...]``.
+
+    Only signal nets are considered (power/GND excluded), matching the
+    filtering in :func:`build_signal_adjacency`.
+
+    Args:
+        requirements: Project requirements with net connections.
+
+    Returns:
+        Mapping from ``(ref, pin)`` to list of connected ``(ref, pin)`` pairs.
+    """
+    result: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue
+        conns = [(c.ref, c.pin) for c in net.connections]
+        for i, (r1, p1) in enumerate(conns):
+            for r2, p2 in conns[i + 1:]:
+                result.setdefault((r1, p1), []).append((r2, p2))
+                result.setdefault((r2, p2), []).append((r1, p1))
+    return result
+
+
 def optimize_rotations(
     positions: dict[str, Point],
     rotations: dict[str, float],
     requirements: ProjectRequirements,
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, float]:
     """Optimize component rotations for shorter routing.
 
-    For 2-pin passives (R, C, L), aligns the pad axis with the direction
-    toward the nearest connected component.  For ICs (U*), tries 0/90/180/270
-    and picks the rotation minimizing total Manhattan distance to connected pads.
+    When *footprint_sizes* is provided, uses pad-aware cost: for 2-pin
+    passives, pad-1 is at ``(-w/2, 0)`` and pad-2 at ``(+w/2, 0)`` at 0
+    degrees.  Each candidate rotation {0, 90, 180, 270} is scored by summing
+    Manhattan distance from each connected pad to the neighbour's connected
+    pad (or centre when pad layout is unknown).
+
+    Without *footprint_sizes*, falls back to center-based direction snapping
+    for backward compatibility.
 
     Args:
         positions: Placed positions for all components.
         rotations: Current rotations for all components.
         requirements: Project requirements with net connections.
+        footprint_sizes: Optional mapping from ref to ``(width, height)`` mm.
 
     Returns:
         Updated rotation dict (original is not modified).
@@ -853,6 +916,110 @@ def optimize_rotations(
     # Build ref -> set of connected refs (via signal nets)
     adj = build_signal_adjacency(requirements)
 
+    # --- Pad-aware path ---
+    if footprint_sizes is not None:
+        pad_conn = _build_pad_connectivity(requirements)
+
+        # Build per-ref pin→pad-offset map for 2-pin passives
+        # Convention: pad-1 at (-w/2, 0), pad-2 at (+w/2, 0) at rotation 0
+        def _passive_pad_offsets(
+            ref: str,
+        ) -> dict[str, tuple[float, float]] | None:
+            if not _is_two_pin_passive(ref):
+                return None
+            size = footprint_sizes.get(ref)
+            if size is None:
+                return None
+            w = size[0]
+            return {"1": (-w / 2.0, 0.0), "2": (w / 2.0, 0.0)}
+
+        def _pad_world_pos(
+            ref: str,
+            pin: str,
+            rot: float,
+            pad_offsets: dict[str, tuple[float, float]] | None,
+        ) -> tuple[float, float]:
+            """Return world position of a pad given component rotation."""
+            pos = positions[ref]
+            if pad_offsets is not None and pin in pad_offsets:
+                px, py = pad_offsets[pin]
+                ox, oy = _rotated_pad_offset(px, py, rot)
+                return (pos.x + ox, pos.y + oy)
+            return (pos.x, pos.y)
+
+        # Two-pass: passives first, then ICs
+        # Pass 1: 2-pin passives
+        for ref in positions:
+            if not _is_two_pin_passive(ref):
+                continue
+            offsets = _passive_pad_offsets(ref)
+            if offsets is None:
+                continue
+            # Collect this component's pin-level connections
+            pin_conns: list[tuple[str, str, str]] = []  # (my_pin, nb_ref, nb_pin)
+            for pin in ("1", "2"):
+                for nb_ref, nb_pin in pad_conn.get((ref, pin), []):
+                    if nb_ref in positions:
+                        pin_conns.append((pin, nb_ref, nb_pin))
+            if not pin_conns:
+                continue
+
+            best_rot = result.get(ref, 0.0)
+            best_cost = float("inf")
+            for trial_rot in (0.0, 90.0, 180.0, 270.0):
+                cost = 0.0
+                for my_pin, nb_ref, nb_pin in pin_conns:
+                    mx, my = _pad_world_pos(ref, my_pin, trial_rot, offsets)
+                    nb_offsets = _passive_pad_offsets(nb_ref)
+                    nb_rot = result.get(nb_ref, 0.0)
+                    nx, ny = _pad_world_pos(nb_ref, nb_pin, nb_rot, nb_offsets)
+                    cost += abs(mx - nx) + abs(my - ny)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_rot = trial_rot
+            result[ref] = best_rot
+
+        # Pass 2: ICs (U*)
+        for ref in positions:
+            if not ref.startswith("U"):
+                continue
+            size = footprint_sizes.get(ref)
+            if size is None:
+                continue
+            # Collect IC pin connections
+            ic_pin_conns: list[tuple[str, str, str]] = []
+            for comp in requirements.components:
+                if comp.ref != ref:
+                    continue
+                for comp_pin in comp.pins:
+                    for nb_ref, nb_pin in pad_conn.get((ref, comp_pin.number), []):
+                        if nb_ref in positions:
+                            ic_pin_conns.append((comp_pin.number, nb_ref, nb_pin))
+                break
+            if not ic_pin_conns:
+                continue
+
+            # For ICs we don't have detailed pad layout — use centre-based
+            # with pad offsets on the *neighbour* side for differentiation
+            pos = positions[ref]
+            best_rot = result.get(ref, 0.0)
+            best_cost = float("inf")
+            for trial_rot in (0.0, 90.0, 180.0, 270.0):
+                cost = 0.0
+                for _my_pin, nb_ref, nb_pin in ic_pin_conns:
+                    nb_offsets = _passive_pad_offsets(nb_ref)
+                    nb_rot = result.get(nb_ref, 0.0)
+                    nx, ny = _pad_world_pos(nb_ref, nb_pin, nb_rot, nb_offsets)
+                    cost += abs(pos.x - nx) + abs(pos.y - ny)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_rot = trial_rot
+            result[ref] = best_rot
+
+        return result
+
+    # --- Fallback: center-based (no footprint_sizes) ---
+
     # 2-pin passives: align toward nearest connected neighbour
     for ref in positions:
         if not _is_two_pin_passive(ref):
@@ -860,7 +1027,6 @@ def optimize_rotations(
         neighbours = adj.get(ref, set())
         if not neighbours:
             continue
-        # Find nearest neighbour by Euclidean distance
         pos = positions[ref]
         best_neighbour: str | None = None
         best_dist = float("inf")
@@ -878,31 +1044,10 @@ def optimize_rotations(
             dx = nb_pos.x - pos.x
             dy = nb_pos.y - pos.y
             angle = math.degrees(math.atan2(dy, dx))
-            # Snap to nearest 90 degrees
             snapped = round(angle / 90.0) * 90.0
             result[ref] = snapped % 360.0
 
-    # ICs: try 0/90/180/270 and pick minimum total Manhattan distance
-    for ref in positions:
-        if not ref.startswith("U"):
-            continue
-        neighbours = adj.get(ref, set())
-        placed_neighbours = [nb for nb in neighbours if nb in positions]
-        if not placed_neighbours:
-            continue
-        pos = positions[ref]
-        best_rot = result.get(ref, 0.0)
-        best_cost = float("inf")
-        for trial_rot in (0.0, 90.0, 180.0, 270.0):
-            cost = 0.0
-            for nb in placed_neighbours:
-                nb_pos = positions[nb]
-                cost += abs(nb_pos.x - pos.x) + abs(nb_pos.y - pos.y)
-            if cost < best_cost:
-                best_cost = cost
-                best_rot = trial_rot
-        result[ref] = best_rot
-
+    # ICs: center-based is rotation-invariant, keep current rotation
     return result
 
 

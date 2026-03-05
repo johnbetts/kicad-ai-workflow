@@ -23,11 +23,13 @@ from kicad_pipeline.models.requirements import (
     ProjectRequirements,
 )
 from kicad_pipeline.pcb.constraints import (
+    _build_pad_connectivity,
     _connector_edge,
     _is_decoupling_cap,
     _is_power_net,
     _is_screw_terminal,
     _OccupancyGrid,
+    _rotated_pad_offset,
     build_signal_adjacency,
     check_courtyard_collisions,
     constraints_from_requirements,
@@ -943,7 +945,7 @@ class TestRotationOptimization:
     """Tests for FEAT-7: component rotation optimization."""
 
     def test_passive_aligns_toward_neighbour(self) -> None:
-        """2-pin passive rotates to face its connected neighbour."""
+        """2-pin passive rotates so connected pad faces its neighbour."""
         req = ProjectRequirements(
             project=ProjectInfo(name="RotTest"),
             features=(
@@ -973,12 +975,14 @@ class TestRotationOptimization:
             "U1": Point(x=30.0, y=20.0),
         }
         rotations = {"R1": 0.0, "U1": 0.0}
-        result = optimize_rotations(positions, rotations, req)
-        # R1 should be aligned toward U1 (to the right) = 0 degrees
-        assert result["R1"] == pytest.approx(0.0)
+        sizes = {"R1": (3.0, 1.6), "U1": (6.0, 4.0)}
+        result = optimize_rotations(positions, rotations, req, footprint_sizes=sizes)
+        # Pad-1 at (-w/2, 0) at 0 deg = left side. U1 is to the right.
+        # Rotation 180 puts pad-1 on the right, facing U1.
+        assert result["R1"] == pytest.approx(180.0)
 
     def test_passive_aligns_vertical(self) -> None:
-        """Passive above its neighbour rotates to 90 degrees."""
+        """Passive above its neighbour rotates so connected pad faces down."""
         req = ProjectRequirements(
             project=ProjectInfo(name="RotTest"),
             features=(
@@ -1008,8 +1012,145 @@ class TestRotationOptimization:
             "U1": Point(x=20.0, y=30.0),
         }
         rotations = {"C1": 0.0, "U1": 0.0}
+        sizes = {"C1": (2.0, 1.0), "U1": (6.0, 4.0)}
+        result = optimize_rotations(positions, rotations, req, footprint_sizes=sizes)
+        # Pad-1 at (-w/2, 0). At 270 deg, pad-1 rotates to (0, +w/2) = below centre,
+        # facing U1 which is below at y=30.
+        assert result["C1"] == pytest.approx(270.0)
+
+    def test_voltage_divider_connected_pads_face_each_other(self) -> None:
+        """R1-pad2 connects to R2-pad1; they should orient connected pads closest."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="DividerTest"),
+            features=(
+                FeatureBlock(
+                    name="Divider", description="", components=("R1", "R2"),
+                    nets=("MID",), subcircuits=(),
+                ),
+            ),
+            components=(
+                Component(ref="R1", value="10k", footprint="R_0805", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="IN"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="MID"),
+                )),
+                Component(ref="R2", value="10k", footprint="R_0805", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="MID"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="OUT"),
+                )),
+            ),
+            nets=(
+                Net(name="MID", connections=(
+                    NetConnection(ref="R1", pin="2"),
+                    NetConnection(ref="R2", pin="1"),
+                )),
+            ),
+        )
+        # R1 at left, R2 at right (same y)
+        positions = {
+            "R1": Point(x=10.0, y=20.0),
+            "R2": Point(x=20.0, y=20.0),
+        }
+        rotations = {"R1": 90.0, "R2": 90.0}  # start non-optimal
+        sizes = {"R1": (3.0, 1.6), "R2": (3.0, 1.6)}
+        result = optimize_rotations(positions, rotations, req, footprint_sizes=sizes)
+        # R1-pad2 (+w/2,0) should face right toward R2.
+        # At 0 deg, pad2 is at (+1.5, 0) = right side. Good.
+        assert result["R1"] == pytest.approx(0.0)
+        # R2-pad1 (-w/2,0) should face left toward R1.
+        # At 0 deg, pad1 is at (-1.5, 0) = left side. Good.
+        assert result["R2"] == pytest.approx(0.0)
+
+    def test_pad_aware_disabled_without_footprint_sizes(self) -> None:
+        """Without footprint_sizes, old centre-based behavior is preserved."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="FallbackTest"),
+            features=(
+                FeatureBlock(
+                    name="Test", description="", components=("R1", "U1"),
+                    nets=("SIG",), subcircuits=(),
+                ),
+            ),
+            components=(
+                Component(ref="R1", value="10k", footprint="R_0805", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+                )),
+                Component(ref="U1", value="IC", footprint="TSSOP-8", pins=(
+                    Pin(number="1", name="IN", pin_type=PinType.INPUT, net="SIG"),
+                )),
+            ),
+            nets=(
+                Net(name="SIG", connections=(
+                    NetConnection(ref="R1", pin="1"),
+                    NetConnection(ref="U1", pin="1"),
+                )),
+            ),
+        )
+        positions = {
+            "R1": Point(x=10.0, y=20.0),
+            "U1": Point(x=30.0, y=20.0),
+        }
+        rotations = {"R1": 0.0, "U1": 0.0}
+        # No footprint_sizes -> fallback to centre-based snapping
         result = optimize_rotations(positions, rotations, req)
-        assert result["C1"] == pytest.approx(90.0)
+        # Centre-based: R1 toward U1 (right) = 0 degrees
+        assert result["R1"] == pytest.approx(0.0)
+
+    def test_rotated_pad_offset_helper(self) -> None:
+        """Unit test for _rotated_pad_offset at 0/90/180/270."""
+        # 0 degrees — identity
+        x, y = _rotated_pad_offset(1.5, 0.0, 0.0)
+        assert x == pytest.approx(1.5)
+        assert y == pytest.approx(0.0)
+
+        # 90 degrees — (1.5, 0) -> (0, 1.5)
+        x, y = _rotated_pad_offset(1.5, 0.0, 90.0)
+        assert x == pytest.approx(0.0, abs=1e-10)
+        assert y == pytest.approx(1.5)
+
+        # 180 degrees — (1.5, 0) -> (-1.5, 0)
+        x, y = _rotated_pad_offset(1.5, 0.0, 180.0)
+        assert x == pytest.approx(-1.5)
+        assert y == pytest.approx(0.0, abs=1e-10)
+
+        # 270 degrees — (1.5, 0) -> (0, -1.5)
+        x, y = _rotated_pad_offset(1.5, 0.0, 270.0)
+        assert x == pytest.approx(0.0, abs=1e-10)
+        assert y == pytest.approx(-1.5)
+
+    def test_build_pad_connectivity(self) -> None:
+        """Verify pin-level mapping excludes power nets."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="PadConnTest"),
+            features=(),
+            components=(
+                Component(ref="R1", value="10k", footprint="R_0805", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+                )),
+                Component(ref="U1", value="IC", footprint="TSSOP-8", pins=(
+                    Pin(number="1", name="IN", pin_type=PinType.INPUT, net="SIG"),
+                    Pin(number="2", name="GND", pin_type=PinType.POWER_IN, net="GND"),
+                )),
+            ),
+            nets=(
+                Net(name="SIG", connections=(
+                    NetConnection(ref="R1", pin="1"),
+                    NetConnection(ref="U1", pin="1"),
+                )),
+                Net(name="GND", connections=(
+                    NetConnection(ref="R1", pin="2"),
+                    NetConnection(ref="U1", pin="2"),
+                )),
+            ),
+        )
+        pad_conn = _build_pad_connectivity(req)
+        # SIG net: R1.1 <-> U1.1
+        assert ("U1", "1") in pad_conn[("R1", "1")]
+        assert ("R1", "1") in pad_conn[("U1", "1")]
+        # GND net excluded (power net)
+        assert ("R1", "2") not in pad_conn
+        assert ("U1", "2") not in pad_conn
 
 
 # ---------------------------------------------------------------------------
