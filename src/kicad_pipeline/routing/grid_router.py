@@ -639,24 +639,18 @@ def route_net(
         if path is None and _tht_refs_in_net:
             # Retry: shrink clearance zones around sibling THT pads to
             # create routing channels BETWEEN pads (not through them).
-            # We unmark the full pad+clearance area then re-mark just
-            # the pad copper, leaving only the clearance ring free.
-            # Include THT sibling pads in net_pad_set so _remark_other_pads
-            # won't re-mark them with full clearance.
             extended_pads: set[tuple[str, str]] = set(net_pad_set)
             for ref in _tht_refs_in_net:
                 fp = fp_by_ref[ref]
                 for pad in fp.pads:
                     extended_pads.add((ref, pad.number))
                     px, py = _pad_abs_pos(fp, pad)
-                    # Unmark pad + clearance
                     _unmark_pad_area(
                         grid, px, py,
                         pad.size_x / 2, pad.size_y / 2, pad_cl,
                     )
-                    # Re-mark just the pad copper (no clearance)
                     _mark_pad_area(grid, px, py, pad.size_x / 2, pad.size_y / 2, 0.0)
-            _tht_refs_in_net.clear()  # only retry once
+            _tht_refs_in_net.clear()
             net_pad_set = frozenset(extended_pads)
             _remark_other_pads(grid, footprints, net_pad_set, net_clearances)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
