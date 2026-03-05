@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
     JLCPCB_BOARD_EDGE_CLEARANCE_MM,
+    JLCPCB_MIN_TRACE_MM,
     VIA_DIAMETER_SIGNAL_MM,
     VIA_DRILL_SIGNAL_MM,
 )
@@ -1338,6 +1339,29 @@ def route_net(
     # Final-leg IC routing: after MST loop routes all non-IC pads,
     # attempt to connect each IC pad by temporarily unmarking it.
     if _ic_pad_infos:
+        # Compute pitch-limited track width for IC stubs.  Dense ICs
+        # have fine pitch (e.g. MSOP-10: 0.5mm) — the netclass track
+        # width (e.g. 0.4mm) may be too wide to fit between adjacent
+        # pads.  Use min(netclass_width, pitch - pad_width) so stubs
+        # don't short across neighbouring pads.
+        ic_stub_width = request.width_mm
+        for ic_ref_w in ic_refs_in_net:
+            fp_w = fp_by_ref[ic_ref_w]
+            positions_w = sorted(
+                (p.position.x, p.position.y) for p in fp_w.pads
+            )
+            min_pitch = 999.0
+            for idx in range(len(positions_w) - 1):
+                dx_w = abs(positions_w[idx + 1][0] - positions_w[idx][0])
+                dy_w = abs(positions_w[idx + 1][1] - positions_w[idx][1])
+                d_w = (dx_w * dx_w + dy_w * dy_w) ** 0.5
+                if d_w > 0.01:
+                    min_pitch = min(min_pitch, d_w)
+            if min_pitch < 999.0:
+                max_pad = max(p.size_x for p in fp_w.pads)
+                pitch_limited = min_pitch - max_pad
+                if pitch_limited > JLCPCB_MIN_TRACE_MM:
+                    ic_stub_width = min(ic_stub_width, pitch_limited)
         for ic_pi, (ic_ref, ic_pn) in zip(
             _ic_pad_infos, _ic_pad_refs, strict=True,
         ):
@@ -1377,7 +1401,7 @@ def route_net(
                         Track(
                             start=Point(x1, y1),
                             end=Point(x2, y2),
-                            width=request.width_mm,
+                            width=ic_stub_width,
                             layer=request.layer,
                             net_number=request.net_number,
                             uuid="",
@@ -1394,7 +1418,7 @@ def route_net(
                     bcu_result = _route_on_bcu(
                         best_pi.x, best_pi.y, ic_pi.x, ic_pi.y,
                         bcu_grid, request.net_number, request.net_name,
-                        request.width_mm, request.clearance_mm,
+                        ic_stub_width, request.clearance_mm,
                         fcu_grid=grid,
                     )
                     if bcu_result is not None:

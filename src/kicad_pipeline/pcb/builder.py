@@ -112,6 +112,56 @@ def _new_uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _clamp_silk_to_board(
+    fp: Footprint,
+    origin_x: float,
+    origin_y: float,
+    board_w: float,
+    board_h: float,
+    margin: float = 0.3,
+) -> Footprint:
+    """Move silkscreen texts that extend beyond the board edge inward.
+
+    Silk items whose absolute position falls outside the board rectangle
+    (with *margin*) are shifted so the text stays fully on-board.  Only
+    ``reference`` and ``value`` texts are adjusted — user texts are left
+    alone.
+    """
+    changed = False
+    new_texts: list[FootprintText] = []
+    for t in fp.texts:
+        if t.text_type not in ("reference", "value"):
+            new_texts.append(t)
+            continue
+        abs_y = fp.position.y + t.position.y
+        half_h = t.effects_size / 2.0
+        new_y = t.position.y
+        if abs_y - half_h < origin_y + margin:
+            new_y = (origin_y + margin + half_h) - fp.position.y
+            changed = True
+        elif abs_y + half_h > origin_y + board_h - margin:
+            new_y = (origin_y + board_h - margin - half_h) - fp.position.y
+            changed = True
+        new_texts.append(
+            FootprintText(
+                text_type=t.text_type,
+                text=t.text,
+                position=Point(x=t.position.x, y=new_y),
+                layer=t.layer,
+                effects_size=t.effects_size,
+                hidden=t.hidden,
+            ) if new_y != t.position.y else t
+        )
+    if not changed:
+        return fp
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+    )
+
+
 def _make_board_outline(
     width: float,
     height: float,
@@ -1085,7 +1135,13 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 9: Silkscreen
     # ------------------------------------------------------------------
-    final_footprints = [add_silkscreen_to_footprint(fp) for fp in footprints_with_pos]
+    final_footprints = [
+        _clamp_silk_to_board(
+            add_silkscreen_to_footprint(fp),
+            origin_x, origin_y, board_width_mm, board_height_mm,
+        )
+        for fp in footprints_with_pos
+    ]
 
     # ------------------------------------------------------------------
     # Step 9b: Mounting hole footprints (NPTH, no net)
@@ -1127,16 +1183,16 @@ def build_pcb(
     # ------------------------------------------------------------------
     all_tracks: tuple[Track, ...] = ()
     all_vias: tuple[Via, ...] = ()
+    from kicad_pipeline.pcb.netlist import build_netlist
+    netlist = build_netlist(requirements)
     if auto_route:
         from kicad_pipeline.pcb.netclasses import net_clearance_map, net_width_map
-        from kicad_pipeline.pcb.netlist import build_netlist
         from kicad_pipeline.routing.grid_router import (
             collect_tracks,
             collect_vias,
             route_all_nets,
         )
 
-        netlist = build_netlist(requirements)
         widths = net_width_map(netclasses)
         clearances = net_clearance_map(netclasses)
         route_results = route_all_nets(
@@ -1187,6 +1243,15 @@ def build_pcb(
         if rf_fence_vias:
             all_vias = all_vias + rf_fence_vias
             log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
+
+    # ------------------------------------------------------------------
+    # Step 11: Assign net numbers to footprint pads
+    # ------------------------------------------------------------------
+    from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints
+
+    final_footprints = assign_net_numbers_to_footprints(
+        final_footprints, netlist,
+    )
 
     log.info(
         "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "

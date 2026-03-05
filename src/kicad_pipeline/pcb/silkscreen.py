@@ -280,16 +280,29 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
         min_y = -_LABEL_OFFSET_MM
         max_y = _LABEL_OFFSET_MM
 
-    # Larger clearance for through-hole pads to avoid silk_over_copper DRC
+    # Shrink text for compact footprints (0603/0402) to avoid silk DRC
+    pad_span_y = max_y - min_y
+    if pad_span_y < 2.0:
+        text_size = 0.6
+    elif pad_span_y < 4.0:
+        text_size = 0.8
+    else:
+        text_size = _REF_TEXT_SIZE_MM
+
+    # Clearance must account for text half-height so glyphs don't
+    # overlap adjacent copper.  Through-hole pads get extra margin.
     has_tht = any(p.pad_type == "thru_hole" for p in fp.pads)
-    pad_label_gap = 1.5 if has_tht else 1.2
+    pad_label_gap = 1.5 if has_tht else (text_size / 2 + 0.5)
     ref_y = min(min_y - pad_label_gap, -_LABEL_OFFSET_MM)
     val_y = max(max_y + pad_label_gap, _LABEL_OFFSET_MM)
 
     if "reference" not in existing_types:
         ref_pos = Point(x=0.0, y=ref_y)
         new_texts.append(
-            make_ref_label(ref=fp.ref, position=ref_pos, layer=LAYER_F_SILKSCREEN)
+            make_ref_label(
+                ref=fp.ref, position=ref_pos,
+                layer=LAYER_F_SILKSCREEN, size_mm=text_size,
+            )
         )
         log.debug("add_silkscreen_to_footprint: added ref label to %s", fp.ref)
 
@@ -300,6 +313,7 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
                 value=fp.value,
                 position=val_pos,
                 layer=LAYER_F_SILKSCREEN,
+                size_mm=min(text_size, _VALUE_TEXT_SIZE_MM),
                 hidden=True,
             )
         )
