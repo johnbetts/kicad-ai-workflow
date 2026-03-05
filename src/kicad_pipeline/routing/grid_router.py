@@ -526,10 +526,9 @@ def route_net(
 
     all_tracks: list[Track] = []
 
-    # Track exclusion: 1 cell on each side at 0.25mm grid provides 0.25mm
-    # clearance which satisfies the default netclass (0.2mm).  Larger values
-    # cause grid congestion that blocks later nets.
-    excl_cells = 1
+    # Track exclusion: sized per-net to satisfy the netclass clearance.
+    # Default (0.2mm) -> 1 cell (0.25mm), HVA (0.3mm) -> 2 cells (0.5mm).
+    excl_cells = max(1, math.ceil(request.clearance_mm / grid.grid_step_mm))
 
     # MST-style routing: always connect closest unrouted pad to routed set
     routed_set: set[int] = {0}  # index into pad_infos
