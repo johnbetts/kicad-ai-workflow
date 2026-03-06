@@ -219,15 +219,22 @@ def test_build_pcb_no_tracks_when_routing_disabled() -> None:
     assert len(design.tracks) == 0
 
 
-def test_build_pcb_has_gnd_stitching_vias_when_routing_disabled() -> None:
-    """PCBDesign has GND stitching vias even when auto_route is disabled."""
+def test_build_pcb_no_gnd_stitching_vias_when_routing_disabled() -> None:
+    """PCBDesign has no GND stitching vias when auto_route is disabled.
+
+    GND connectivity is handled by F.Cu + B.Cu copper pour through thermal
+    relief, so stitching vias are unnecessary and waste routing space.
+    Only RF via fence vias (if RF module present) should exist.
+    """
     req = _make_requirements()
     design = build_pcb(req, auto_route=False)
-    assert len(design.vias) > 0
-    # All stitching vias should be on GND net
+    # No signal routing vias when routing is disabled.
+    # RF via fence vias may exist if RF module detected (e.g. ESP32).
     gnd_net_num = next(n.number for n in design.nets if n.name == "GND")
     for v in design.vias:
+        # All vias should be GND RF fence vias, not stitching grid vias
         assert v.net_number == gnd_net_num
+        assert v.drill == 0.6, "Expected RF fence via drill size"
 
 
 def test_build_pcb_has_keepouts() -> None:
@@ -626,19 +633,23 @@ def test_build_pcb_rpi_hat_mounting_hole_positions() -> None:
 
 
 # ---------------------------------------------------------------------------
-# BUG-12: GND stitching vias
+# Phase 1: No GND stitching vias (copper pour handles GND connectivity)
 # ---------------------------------------------------------------------------
 
 
-def test_build_pcb_rpi_hat_has_stitching_vias() -> None:
-    """RPi HAT board generates GND stitching vias."""
+def test_build_pcb_rpi_hat_no_stitching_grid_vias() -> None:
+    """RPi HAT board has no GND stitching grid vias (copper pour suffices).
+
+    RF via fence vias may still exist if an RF module is detected.
+    """
     req = _make_requirements()
     design = build_pcb(req, board_template="RPI_HAT", auto_route=False)
-    assert len(design.vias) > 0
     gnd_net_num = next(n.number for n in design.nets if n.name == "GND")
     for v in design.vias:
         assert v.net_number == gnd_net_num
-        assert v.layers == ("F.Cu", "B.Cu")
+        # RF fence vias use 0.6mm drill; old stitching used same, but
+        # they were on an 8mm grid pattern. Verify no grid pattern.
+        assert v.drill == 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -758,78 +769,6 @@ def test_footprint_sexp_uses_silk_ref_position() -> None:
     assert at_node_v[0][2] == pytest.approx(3.2), "Value Y should use fp.texts position"
 
 
-# ---------------------------------------------------------------------------
-# GND stitching vias avoid signal tracks
-# ---------------------------------------------------------------------------
-
-
-def test_gnd_stitching_vias_avoid_tracks() -> None:
-    """GND stitching vias should not be placed near signal tracks."""
-    import math
-
-    from kicad_pipeline.models.pcb import Track, Via
-    from kicad_pipeline.pcb.builder import (
-        _compute_gnd_via_candidates,
-        _make_gnd_stitching_vias,
-    )
-
-    # Create a diagonal track across the board
-    track = Track(
-        start=Point(5.0, 5.0),
-        end=Point(75.0, 35.0),
-        width=0.25,
-        layer="F.Cu",
-        net_number=2,
-    )
-    # Create a via in the middle
-    sig_via = Via(
-        position=Point(40.0, 20.0),
-        drill=0.3, size=0.6,
-        layers=("F.Cu", "B.Cu"),
-        net_number=2,
-    )
-
-    candidates = _compute_gnd_via_candidates(
-        80.0, 40.0, footprints=(), keepouts=(),
-    )
-    vias_with = _make_gnd_stitching_vias(
-        gnd_net_num=1, candidates=candidates,
-        routed_tracks=(track,), routing_vias=(sig_via,),
-    )
-    vias_without = _make_gnd_stitching_vias(
-        gnd_net_num=1, candidates=candidates,
-    )
-
-    # With track awareness, fewer vias should be placed
-    assert len(vias_with) < len(vias_without)
-
-    # No stitching via should be within clearance of the track
-    via_radius = 0.5  # _GND_VIA_SIZE_MM / 2
-    margin = via_radius + 0.2
-    for v in vias_with:
-        # Point-to-segment distance
-        dx = track.end.x - track.start.x
-        dy = track.end.y - track.start.y
-        len_sq = dx * dx + dy * dy
-        t = max(0.0, min(1.0, (
-            (v.position.x - track.start.x) * dx
-            + (v.position.y - track.start.y) * dy
-        ) / len_sq))
-        proj_x = track.start.x + t * dx
-        proj_y = track.start.y + t * dy
-        dist = math.hypot(v.position.x - proj_x, v.position.y - proj_y)
-        assert dist >= margin + track.width / 2.0 - 0.01, (
-            f"Stitching via at ({v.position.x}, {v.position.y}) "
-            f"is {dist:.3f}mm from track (min {margin + track.width / 2.0:.3f}mm)"
-        )
-
-    # No stitching via should be within clearance of the signal via
-    for v in vias_with:
-        dist = math.hypot(
-            v.position.x - sig_via.position.x,
-            v.position.y - sig_via.position.y,
-        )
-        assert dist >= via_radius + sig_via.size / 2.0 + 0.2 - 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -935,45 +874,6 @@ def test_netclass_guard_traces_default() -> None:
     assert nc.guard_traces is False
 
 
-def test_compute_gnd_via_candidates_avoids_footprints() -> None:
-    """GND via candidates should not overlap footprint bounding boxes."""
-    from kicad_pipeline.pcb.builder import _compute_gnd_via_candidates
-
-    fp = Footprint(
-        lib_id="Test:Test",
-        ref="U1",
-        value="IC",
-        position=Point(10.0, 10.0),
-        rotation=0.0,
-        layer="F.Cu",
-        pads=(
-            Pad(
-                number="1", pad_type="smd", shape="rect",
-                position=Point(0.0, 0.0),
-                size_x=2.0, size_y=2.0,
-                layers=("F.Cu",), net_number=1, net_name="GND",
-            ),
-        ),
-    )
-    candidates = _compute_gnd_via_candidates(
-        20.0, 20.0, footprints=(fp,), keepouts=(),
-    )
-    # No candidate should be within the footprint bounding box + clearance
-    for vx, vy in candidates:
-        # fp at (10,10), pad is 2x2 -> bbox [9,9]-[11,11] + 0.5 clearance
-        in_fp = 8.5 <= vx <= 11.5 and 8.5 <= vy <= 11.5
-        assert not in_fp, f"Candidate ({vx}, {vy}) overlaps footprint"
-
-
-def test_compute_gnd_via_candidates_returns_positions() -> None:
-    """GND via candidates should be a non-empty tuple of (x, y) tuples."""
-    from kicad_pipeline.pcb.builder import _compute_gnd_via_candidates
-
-    candidates = _compute_gnd_via_candidates(
-        80.0, 40.0, footprints=(), keepouts=(),
-    )
-    assert len(candidates) > 0
-    assert all(len(c) == 2 for c in candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -1127,7 +1027,7 @@ def test_build_pcb_no_tracks_through_keepouts() -> None:
 
 
 def test_build_pcb_no_vias_at_board_edge() -> None:
-    """GND stitching vias must not be placed too close to the board edge."""
+    """Routing vias must not be placed too close to the board edge."""
     from kicad_pipeline.pcb.builder import build_pcb
 
     req = _make_rpi_hat_requirements()
@@ -1152,15 +1052,12 @@ def test_build_pcb_no_rf_fence_without_rf_module() -> None:
     req = _make_rpi_hat_requirements()
     design = build_pcb(req)
 
-    # Count GND vias (net_number typically 1 for GND)
+    # Without RF module, no GND stitching or fence vias should exist.
+    # Only signal routing vias should be present.
     gnd_net = design.get_net_number("GND")
     gnd_vias = [v for v in design.vias if v.net_number == gnd_net]
-
-    # Without RF, GND vias should come only from stitching (not fence)
-    # A 65x56mm board with 4mm spacing → max ~14x12 = 168 candidates
-    # After footprint/keepout/track exclusion, expect much fewer
-    assert len(gnd_vias) < 100, (
-        f"Suspiciously many GND vias ({len(gnd_vias)}) — "
+    assert len(gnd_vias) == 0, (
+        f"Found {len(gnd_vias)} GND vias without RF module — "
         "RF fence may be running without RF module"
     )
 

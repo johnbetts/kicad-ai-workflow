@@ -634,15 +634,20 @@ def _find_free_via_position(
     clearance_mm: float,
     stub_origin: tuple[float, float] | None = None,
     stub_width_mm: float = 0.25,
+    bcu_grid: _Grid | None = None,
 ) -> tuple[float, float] | None:
-    """Find a position near *target* where a via fits without overlapping F.Cu pads.
+    """Find a position near *target* where a via fits without overlapping pads.
 
-    Checks cells within ``via_radius + clearance`` of the target.  If
-    all are free, returns the target position.  Otherwise spirals outward
-    (up to 8 cells ~2 mm) searching for the first fully-clear position.
+    Checks cells within ``via_radius + clearance`` of the target on
+    F.Cu (and optionally B.Cu) grids.  If all are free, returns the
+    target position.  Otherwise spirals outward (up to 16 cells ~4 mm)
+    searching for the first fully-clear position.
 
     When *stub_origin* is provided, also checks that the F.Cu stub path
     from the origin to the candidate via position is clear.
+
+    When *bcu_grid* is provided, the via must also be clear on B.Cu
+    (since it spans both layers).
 
     Returns:
         ``(x_mm, y_mm)`` of the free position, or ``None`` if no space found.
@@ -659,6 +664,8 @@ def _find_free_via_position(
                 if cc < 0 or rr < 0 or cc >= fcu_grid.cols or rr >= fcu_grid.rows:
                     return False
                 if not fcu_grid.is_free(cc, rr):
+                    return False
+                if bcu_grid is not None and not bcu_grid.is_free(cc, rr):
                     return False
         return True
 
@@ -730,57 +737,52 @@ def _route_on_bcu(
     _goal_needs_astar_stub = False
 
     if fcu_grid is not None:
-        # Try to find via position with clear stub path first
+        # Try to find via position with clear stub path, checking BOTH
+        # F.Cu and B.Cu grids (via spans both layers).
         found_start = _find_free_via_position(
             fcu_grid, start_x, start_y, via_radius, clearance_mm,
             stub_origin=(start_x, start_y), stub_width_mm=width_mm,
+            bcu_grid=bcu_grid,
         )
         if found_start is None:
             # Fall back: find ANY free via position, use A* for stub
             found_start = _find_free_via_position(
                 fcu_grid, start_x, start_y, via_radius, clearance_mm,
+                bcu_grid=bcu_grid,
             )
             if found_start is None:
-                return None
+                # Last resort: F.Cu-only search (accept B.Cu congestion)
+                found_start = _find_free_via_position(
+                    fcu_grid, start_x, start_y, via_radius, clearance_mm,
+                )
+                if found_start is None:
+                    return None
             _start_needs_astar_stub = True
         via_start_pos = found_start
 
         found_goal = _find_free_via_position(
             fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
             stub_origin=(goal_x, goal_y), stub_width_mm=width_mm,
+            bcu_grid=bcu_grid,
         )
         if found_goal is None:
             found_goal = _find_free_via_position(
                 fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
+                bcu_grid=bcu_grid,
             )
             if found_goal is None:
-                return None
+                # Last resort: F.Cu-only search (accept B.Cu congestion)
+                found_goal = _find_free_via_position(
+                    fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
+                )
+                if found_goal is None:
+                    return None
             _goal_needs_astar_stub = True
         via_goal_pos = found_goal
 
     # Route on B.Cu between via positions (not pad positions)
     sc, sr = bcu_grid.to_cell(via_start_pos[0], via_start_pos[1])
     gc, gr = bcu_grid.to_cell(via_goal_pos[0], via_goal_pos[1])
-
-    # Pre-check: verify via positions have adequate clearance from
-    # existing B.Cu obstacles (other nets' tracks/vias).  A via placed
-    # in another net's exclusion zone causes clearance violations even
-    # though A* can reach it (because we unmark the goal cell).
-    via_excl_check = math.ceil((via_radius + clearance_mm) / bcu_grid.grid_step_mm)
-    for vc, vr in ((sc, sr), (gc, gr)):
-        blocked_count = 0
-        total_count = 0
-        for dc in range(-via_excl_check, via_excl_check + 1):
-            for dr in range(-via_excl_check, via_excl_check + 1):
-                if dc == 0 and dr == 0:
-                    continue  # skip center (always pad-marked)
-                total_count += 1
-                if not bcu_grid.is_free(vc + dc, vr + dr):
-                    blocked_count += 1
-        # If more than 40% of surrounding cells are occupied, another
-        # net's tracks/vias are too close for safe via placement.
-        if total_count > 0 and blocked_count > total_count * 0.4:
-            return None
 
     # Temporarily unmark start/goal so A* can enter them
     orig_start = not bcu_grid.is_free(sc, sr)
@@ -1528,52 +1530,64 @@ def route_net(
                         all_vias.extend([via_s, via_g])
                         ic_routed = True
 
-            # IC fanout: place via outward from IC body along a
-            # perpendicular line so the short F.Cu stub doesn't
-            # cross any adjacent IC pad.
+            # IC fanout: place via outward from IC body.  Try
+            # perpendicular first, then all 4 cardinal directions,
+            # checking BOTH F.Cu and B.Cu grids.
             if not ic_routed and bcu_grid is not None:
                 ic_cx = ic_fp.position.x
                 ic_cy = ic_fp.position.y
                 dx_from_center = px - ic_cx
                 dy_from_center = py - ic_cy
 
-                # Walk perpendicular to IC edge checking each cell
-                is_horizontal = abs(dx_from_center) > abs(dy_from_center)
                 via_radius = VIA_DIAMETER_SIGNAL_MM / 2.0
                 fan_via_pos: tuple[float, float] | None = None
-                for step in range(4, 40):  # 1mm to 10mm at 0.25mm grid
-                    if is_horizontal:
-                        fan_dir = -1.0 if dx_from_center < 0 else 1.0
-                        cx = px + fan_dir * step * grid.grid_step_mm
-                        cy = py
-                    else:
-                        fan_dir = -1.0 if dy_from_center < 0 else 1.0
-                        cx = px
-                        cy = py + fan_dir * step * grid.grid_step_mm
-                    col, row = grid.to_cell(cx, cy)
-                    # Check via footprint is free on BOTH layers
-                    # (via spans F.Cu → B.Cu) using global pad
-                    # clearance to account for other nets' widths.
-                    clear = True
-                    r_cells = max(1, round(
-                        (via_radius + pad_cl)
-                        / grid.grid_step_mm,
-                    ))
-                    for dc in range(-r_cells, r_cells + 1):
-                        for dr in range(-r_cells, r_cells + 1):
-                            if not grid.is_free(col + dc, row + dr):
-                                clear = False
-                                break
-                            if (bcu_grid is not None
-                                    and not bcu_grid.is_free(
-                                        col + dc, row + dr)):
-                                clear = False
-                                break
-                        if not clear:
-                            break
-                    if clear:
-                        fan_via_pos = grid.to_mm(col, row)
+                r_cells = max(1, round(
+                    (via_radius + pad_cl) / grid.grid_step_mm,
+                ))
+
+                # Build direction priority: perpendicular away from IC
+                # first, then the other 3 directions.
+                is_horizontal = abs(dx_from_center) > abs(dy_from_center)
+                if is_horizontal:
+                    primary_dir = (
+                        -1.0 if dx_from_center < 0 else 1.0, 0.0,
+                    )
+                else:
+                    primary_dir = (
+                        0.0,
+                        -1.0 if dy_from_center < 0 else 1.0,
+                    )
+                all_dirs: list[tuple[float, float]] = [primary_dir]
+                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                    d = (float(dx), float(dy))
+                    if d != primary_dir:
+                        all_dirs.append(d)
+
+                for fan_dx, fan_dy in all_dirs:
+                    if fan_via_pos is not None:
                         break
+                    for step in range(4, 40):
+                        cx = px + fan_dx * step * grid.grid_step_mm
+                        cy = py + fan_dy * step * grid.grid_step_mm
+                        col, row = grid.to_cell(cx, cy)
+                        clear = True
+                        for dc in range(-r_cells, r_cells + 1):
+                            for dr in range(-r_cells, r_cells + 1):
+                                if not grid.is_free(
+                                    col + dc, row + dr,
+                                ):
+                                    clear = False
+                                    break
+                                if (bcu_grid is not None
+                                        and not bcu_grid.is_free(
+                                            col + dc, row + dr)):
+                                    clear = False
+                                    break
+                            if not clear:
+                                break
+                        if clear:
+                            fan_via_pos = grid.to_mm(col, row)
+                            break
 
                 if fan_via_pos is not None:
                     # Route stub from IC pad to fanout via using
@@ -1841,7 +1855,6 @@ def route_all_nets(
     net_widths: dict[str, float] | None = None,
     net_clearances: dict[str, float] | None = None,
     keepouts: tuple[Keepout, ...] = (),
-    gnd_via_positions: tuple[tuple[float, float], ...] = (),
 ) -> tuple[RouteResult, ...]:
     """Route all nets in the netlist using a shared occupancy grid.
 
@@ -1854,10 +1867,6 @@ def route_all_nets(
     from *net_widths* when provided; otherwise Power/GND nets receive a
     wider trace (0.5 mm) and all other nets use 0.25 mm.
 
-    When *gnd_via_positions* is provided, those candidate positions are
-    marked as occupied on both F.Cu and B.Cu grids before routing begins,
-    preventing signal tracks from crossing future GND stitching vias.
-
     Args:
         netlist: The board netlist.
         footprints: All placed footprints.
@@ -1868,8 +1877,6 @@ def route_all_nets(
             typically from :func:`~kicad_pipeline.pcb.netclasses.net_width_map`.
         net_clearances: Optional mapping from net name to clearance in mm.
         keepouts: Keepout zones to avoid during routing.
-        gnd_via_positions: Pre-computed GND stitching via candidate
-            positions to mark as occupied on both grids.
 
     Returns:
         Tuple of RouteResult, one per routed net entry.
@@ -1926,15 +1933,6 @@ def route_all_nets(
         grid, list(footprints), keepouts=keepouts,
         net_clearances=net_clearances, net_widths=net_widths,
     )
-
-    # Mark pre-computed GND stitching via candidates as occupied on both
-    # grids so signal tracks route around future via positions.
-    if gnd_via_positions:
-        gnd_via_radius = 0.5  # half of 1.0mm GND via pad diameter
-        gnd_via_cl = _global_pad_clearance(net_clearances, net_widths)
-        for gvx, gvy in gnd_via_positions:
-            _mark_pad_area(grid, gvx, gvy, gnd_via_radius, gnd_via_radius, gnd_via_cl)
-            _mark_pad_area(bcu_grid, gvx, gvy, gnd_via_radius, gnd_via_radius, gnd_via_cl)
 
     results: list[RouteResult] = []
 

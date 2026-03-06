@@ -550,180 +550,6 @@ def _has_rf_module(requirements: ProjectRequirements) -> bool:
     return False
 
 
-_GND_VIA_SPACING_MM: float = 8.0
-"""Grid spacing for GND stitching vias in mm."""
-
-_GND_VIA_SIZE_MM: float = 1.0
-"""Pad diameter for GND stitching vias in mm."""
-
-_GND_VIA_DRILL_MM: float = 0.6
-"""Drill diameter for GND stitching vias in mm."""
-
-_GND_VIA_EDGE_MARGIN_MM: float = 2.0
-"""Minimum distance from board edge for stitching vias in mm."""
-
-_GND_VIA_FP_CLEARANCE_MM: float = 0.5
-"""Clearance from footprint bounding boxes for stitching vias in mm."""
-
-
-def _compute_gnd_via_candidates(
-    board_width_mm: float,
-    board_height_mm: float,
-    footprints: tuple[Footprint, ...],
-    keepouts: tuple[Keepout, ...],
-) -> tuple[tuple[float, float], ...]:
-    """Compute candidate positions for GND stitching vias.
-
-    Returns grid positions that avoid footprint bounding boxes and keepout
-    zones.  Track/via avoidance is NOT applied here — that is done in a
-    post-routing filter so the router can mark these candidates as occupied
-    on both F.Cu and B.Cu grids before routing begins.
-
-    Args:
-        board_width_mm: Board width in mm.
-        board_height_mm: Board height in mm.
-        footprints: All placed footprints (bounding-box exclusion).
-        keepouts: Keepout zones to avoid.
-
-    Returns:
-        Tuple of ``(x_mm, y_mm)`` candidate positions.
-    """
-    import math as _m
-
-    margin = _GND_VIA_EDGE_MARGIN_MM
-    spacing = _GND_VIA_SPACING_MM
-    clr = _GND_VIA_FP_CLEARANCE_MM
-
-    # Pre-compute footprint bounding boxes (centre +/- half-size + clearance)
-    fp_boxes: list[tuple[float, float, float, float]] = []
-    for fp in footprints:
-        pad_xs = [fp.position.x + p.position.x for p in fp.pads] if fp.pads else [fp.position.x]
-        pad_ys = [fp.position.y + p.position.y for p in fp.pads] if fp.pads else [fp.position.y]
-        half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
-        half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
-        min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=True)) - clr
-        max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=True)) + clr
-        min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=True)) - clr
-        max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=True)) + clr
-        fp_boxes.append((min_x, min_y, max_x, max_y))
-
-    # Pre-compute keepout bounding boxes
-    ko_boxes: list[tuple[float, float, float, float]] = []
-    for ko in keepouts:
-        if ko.no_vias or ko.no_copper:
-            xs = [p.x for p in ko.polygon]
-            ys = [p.y for p in ko.polygon]
-            ko_boxes.append((min(xs), min(ys), max(xs), max(ys)))
-
-    def _blocked(x: float, y: float) -> bool:
-        for bx0, by0, bx1, by1 in fp_boxes:
-            if bx0 <= x <= bx1 and by0 <= y <= by1:
-                return True
-        return any(
-            bx0 <= x <= bx1 and by0 <= y <= by1
-            for bx0, by0, bx1, by1 in ko_boxes
-        )
-
-    # Generate grid
-    cols = _m.floor((board_width_mm - 2 * margin) / spacing) + 1
-    rows = _m.floor((board_height_mm - 2 * margin) / spacing) + 1
-    x_start = margin + (board_width_mm - 2 * margin - (cols - 1) * spacing) / 2.0
-    y_start = margin + (board_height_mm - 2 * margin - (rows - 1) * spacing) / 2.0
-
-    candidates: list[tuple[float, float]] = []
-    for r in range(rows):
-        for c in range(cols):
-            vx = round(x_start + c * spacing, 3)
-            vy = round(y_start + r * spacing, 3)
-            if not _blocked(vx, vy):
-                candidates.append((vx, vy))
-
-    log.info("build_pcb: computed %d GND via candidates", len(candidates))
-    return tuple(candidates)
-
-
-def _make_gnd_stitching_vias(
-    gnd_net_num: int,
-    candidates: tuple[tuple[float, float], ...],
-    routed_tracks: tuple[Track, ...] = (),
-    routing_vias: tuple[Via, ...] = (),
-    layer_count: int = 2,
-) -> tuple[Via, ...]:
-    """Filter pre-computed GND via candidates and emit final vias.
-
-    Takes candidate positions from :func:`_compute_gnd_via_candidates` and
-    drops any that overlap routed tracks or existing routing vias.
-
-    For 4-layer boards, vias span all copper layers (F.Cu through B.Cu).
-
-    Args:
-        gnd_net_num: Net number assigned to GND.
-        candidates: Pre-computed ``(x_mm, y_mm)`` candidate positions.
-        routed_tracks: Signal tracks to avoid (prevents shorts/clearance).
-        routing_vias: Signal vias to avoid (prevents shorts/clearance).
-        layer_count: Number of copper layers (2 or 4).
-
-    Returns:
-        Tuple of :class:`Via` instances.
-    """
-    import math as _m
-
-    via_radius = _GND_VIA_SIZE_MM / 2.0
-    track_margin = via_radius + 0.2  # via radius + clearance
-
-    if layer_count >= 4:
-        via_layers: tuple[str, ...] = (LAYER_F_CU, "In1.Cu", "In2.Cu", LAYER_B_CU)
-    else:
-        via_layers = (LAYER_F_CU, LAYER_B_CU)
-
-    def _point_to_segment_dist(
-        px: float, py: float,
-        ax: float, ay: float,
-        bx: float, by: float,
-    ) -> float:
-        dx = bx - ax
-        dy = by - ay
-        len_sq = dx * dx + dy * dy
-        if len_sq < 1e-12:
-            return _m.hypot(px - ax, py - ay)
-        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / len_sq))
-        proj_x = ax + t * dx
-        proj_y = ay + t * dy
-        return _m.hypot(px - proj_x, py - proj_y)
-
-    def _near_any_track(vx: float, vy: float) -> bool:
-        for trk in routed_tracks:
-            dist = _point_to_segment_dist(
-                vx, vy, trk.start.x, trk.start.y, trk.end.x, trk.end.y,
-            )
-            if dist < track_margin + trk.width / 2.0:
-                return True
-        return False
-
-    def _near_any_via(vx: float, vy: float) -> bool:
-        for rv in routing_vias:
-            dist = _m.hypot(vx - rv.position.x, vy - rv.position.y)
-            if dist < via_radius + rv.size / 2.0 + 0.2:
-                return True
-        return False
-
-    vias: list[Via] = []
-    for vx, vy in candidates:
-        if routed_tracks and _near_any_track(vx, vy):
-            continue
-        if routing_vias and _near_any_via(vx, vy):
-            continue
-        vias.append(Via(
-            position=Point(vx, vy),
-            drill=_GND_VIA_DRILL_MM,
-            size=_GND_VIA_SIZE_MM,
-            layers=via_layers,
-            net_number=gnd_net_num,
-            uuid=_new_uuid(),
-        ))
-
-    log.info("build_pcb: generated %d GND stitching vias", len(vias))
-    return tuple(vias)
 
 
 def _make_rf_via_fence(
@@ -823,8 +649,8 @@ def _make_rf_via_fence(
 
                 vias.append(Via(
                     position=Point(vx, vy),
-                    drill=_GND_VIA_DRILL_MM,
-                    size=_GND_VIA_SIZE_MM,
+                    drill=0.6,
+                    size=1.0,
                     layers=(LAYER_F_CU, LAYER_B_CU),
                     net_number=gnd_net_num,
                     uuid=_new_uuid(),
@@ -1169,14 +995,6 @@ def build_pcb(
         )
 
     # ------------------------------------------------------------------
-    # Step 9c: Pre-compute GND stitching via candidates (before routing)
-    # ------------------------------------------------------------------
-    gnd_via_candidates = _compute_gnd_via_candidates(
-        board_width_mm, board_height_mm,
-        tuple(final_footprints), tuple(keepouts),
-    )
-
-    # ------------------------------------------------------------------
     # Step 10: Autoroute (when enabled)
     # ------------------------------------------------------------------
     all_tracks: tuple[Track, ...] = ()
@@ -1200,7 +1018,6 @@ def build_pcb(
             net_widths=widths,
             net_clearances=clearances,
             keepouts=tuple(keepouts),
-            gnd_via_positions=gnd_via_candidates,
         )
         all_tracks = collect_tracks(route_results, routed_only=False)
         all_vias = collect_vias(route_results)
@@ -1217,18 +1034,7 @@ def build_pcb(
         # DRC until zones are filled.
 
     # ------------------------------------------------------------------
-    # Step 10b: GND stitching vias (post-routing filter of candidates)
-    # ------------------------------------------------------------------
-    gnd_vias = _make_gnd_stitching_vias(
-        gnd_net_num, gnd_via_candidates,
-        routed_tracks=all_tracks,
-        routing_vias=all_vias,
-        layer_count=layer_count,
-    )
-    all_vias = all_vias + gnd_vias
-
-    # ------------------------------------------------------------------
-    # Step 10c: RF via fence (GND vias around RF keepouts, only when
+    # Step 10b: RF via fence (GND vias around RF keepouts, only when
     #           the design actually contains an RF module)
     # ------------------------------------------------------------------
     if _has_rf_module(requirements):

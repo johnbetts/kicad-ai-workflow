@@ -1091,26 +1091,14 @@ def test_find_via_with_stub_origin_blocked_spirals() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.1: GND via positions in route_all_nets
+# Phase 1: GND stitching vias removed — route_all_nets has no
+# gnd_via_positions parameter
 # ---------------------------------------------------------------------------
 
 
-def test_route_all_nets_accepts_gnd_via_positions() -> None:
-    """Verify route_all_nets accepts and uses gnd_via_positions parameter."""
-    fp1 = _make_footprint("R1", x=5.0, y=20.0)
-    fp2 = _make_footprint("R2", x=15.0, y=20.0)
-    netlist = Netlist(
-        entries=(
-            NetlistEntry(
-                net=NetEntry(number=1, name="NET1"),
-                pad_refs=(("R1", "1"), ("R2", "1")),
-            ),
-        )
-    )
-    # Should not crash with gnd_via_positions
-    results = route_all_nets(
-        netlist, [fp1, fp2], 20.0, 40.0,
-        grid_step_mm=0.5,
-        gnd_via_positions=((10.0, 10.0), (10.0, 30.0)),
-    )
-    assert len(results) >= 1
+def test_route_all_nets_no_gnd_via_param() -> None:
+    """Verify route_all_nets no longer accepts gnd_via_positions."""
+    import inspect
+
+    sig = inspect.signature(route_all_nets)
+    assert "gnd_via_positions" not in sig.parameters
