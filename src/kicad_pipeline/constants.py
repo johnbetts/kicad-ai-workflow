@@ -267,9 +267,10 @@ GND_STITCH_FP_CLEARANCE_MM: float = 2.0
 # Routing cost tuning
 # ---------------------------------------------------------------------------
 
-ROUTING_VIA_COST: float = 14.0
-"""Penalty per via transition (14x a single grid step).
+ROUTING_VIA_COST: float = 16.0
+"""Penalty per via transition (16x a single grid step).
 
+Spec mandates 14-20x normal trace segment; cost function uses 16x.
 Higher values bias the router toward single-layer traces, using vias only
 when the F.Cu detour would be longer than the via penalty.
 """

@@ -157,8 +157,8 @@ def _score_route(result: RouteResult, pad_positions: list[tuple[float, float]]) 
     ratio = actual / manhattan if manhattan > 0.01 else 1.0
     via_count = len(result.vias)
     # Composite score matching spec cost function weights:
-    #   actual_length + 14*vias + 2.5*bends + 5*max(0, ratio-1.5)
-    score = actual + 14.0 * via_count + 2.5 * bends + 5.0 * max(0.0, ratio - 1.5)
+    #   1.0*actual + 16*vias + 3*bends + 6*max(0, ratio-1.55)
+    score = actual + 16.0 * via_count + 3.0 * bends + 6.0 * max(0.0, ratio - 1.55)
     return RouteQuality(
         net_name=result.net_name,
         manhattan_ideal_mm=manhattan,
@@ -2198,7 +2198,11 @@ def route_all_nets(
             if score_entry is None:
                 continue
             q = _score_route(r, _pad_positions_for(score_entry))
-            if q.via_count > 2 or q.length_ratio > 1.55:
+            # Spec rip-up triggers: >2 vias, ratio>1.55, or >=4 bends on <40mm
+            short_net_excess_bends = (
+                q.bend_count >= 4 and q.manhattan_ideal_mm < 40.0
+            )
+            if q.via_count > 2 or q.length_ratio > 1.55 or short_net_excess_bends:
                 offenders.append((q.score, idx))
 
         if not offenders:
