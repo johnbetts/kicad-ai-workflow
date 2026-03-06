@@ -103,6 +103,71 @@ class RouteResult:
     reason: str = ""  # failure reason if not routed
 
 
+@dataclass(frozen=True)
+class RouteQuality:
+    """Quality score for a single routed net."""
+
+    net_name: str
+    manhattan_ideal_mm: float
+    actual_length_mm: float
+    length_ratio: float
+    via_count: int
+    bend_count: int
+    score: float  # composite badness (higher = worse)
+
+
+def _score_route(result: RouteResult, pad_positions: list[tuple[float, float]]) -> RouteQuality:
+    """Compute quality metrics for a routed net."""
+    # Manhattan ideal: sum of MST edges between pads
+    manhattan = 0.0
+    if len(pad_positions) >= 2:
+        # Approximate MST with sorted nearest-neighbour
+        remaining = list(range(1, len(pad_positions)))
+        connected = [0]
+        while remaining:
+            best_d = float("inf")
+            best_i = remaining[0]
+            for ci in connected:
+                for ri in remaining:
+                    d = (abs(pad_positions[ci][0] - pad_positions[ri][0])
+                         + abs(pad_positions[ci][1] - pad_positions[ri][1]))
+                    if d < best_d:
+                        best_d = d
+                        best_i = ri
+            manhattan += best_d
+            remaining.remove(best_i)
+            connected.append(best_i)
+
+    actual = 0.0
+    bends = 0
+    prev_dx: float = 0.0
+    prev_dy: float = 0.0
+    for trk in result.tracks:
+        dx = trk.end.x - trk.start.x
+        dy = trk.end.y - trk.start.y
+        actual += (dx * dx + dy * dy) ** 0.5
+        if (
+            (prev_dx != 0.0 or prev_dy != 0.0)
+            and (abs(dx - prev_dx) > 0.01 or abs(dy - prev_dy) > 0.01)
+        ):
+            bends += 1
+        prev_dx, prev_dy = dx, dy
+
+    ratio = actual / manhattan if manhattan > 0.01 else 1.0
+    via_count = len(result.vias)
+    # Composite score: length excess + via penalty + bend penalty
+    score = (ratio - 1.0) * 10.0 + via_count * 3.0 + bends * 0.5
+    return RouteQuality(
+        net_name=result.net_name,
+        manhattan_ideal_mm=manhattan,
+        actual_length_mm=actual,
+        length_ratio=ratio,
+        via_count=via_count,
+        bend_count=bends,
+        score=score,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal grid
 # ---------------------------------------------------------------------------
@@ -2052,7 +2117,99 @@ def route_all_nets(
         result = _route_entry(entry)
         results.append(result)
 
+    # Rip-up-and-retry loop: improve worst routes
+    # Build pad position lookup for quality scoring
+    def _pad_positions_for(entry: NetlistEntry) -> list[tuple[float, float]]:
+        positions: list[tuple[float, float]] = []
+        for ref, pad_num in entry.pad_refs:
+            fp = fp_by_ref.get(ref)
+            if fp is None:
+                continue
+            for pad in fp.pads:
+                if pad.number == pad_num:
+                    positions.append(_pad_abs_pos(fp, pad))
+                    break
+        return positions
+
+    # Map net_name -> entry for rip-up lookup
+    entry_by_name: dict[str, NetlistEntry] = {e.net.name: e for e in routable}
+
+    for _ripup_iter in range(3):
+        # Score all routed results
+        offenders: list[tuple[float, int]] = []  # (score, results_index)
+        for idx, r in enumerate(results):
+            if not r.routed:
+                continue
+            score_entry = entry_by_name.get(r.net_name)
+            if score_entry is None:
+                continue
+            q = _score_route(r, _pad_positions_for(score_entry))
+            if q.via_count > 2 or q.length_ratio > 1.65:
+                offenders.append((q.score, idx))
+
+        if not offenders:
+            break
+
+        # Sort by badness, rip up worst 20% (at least 1)
+        offenders.sort(key=lambda x: x[0], reverse=True)
+        n_ripup = max(1, len(offenders) // 5)
+        ripup_indices = [idx for _, idx in offenders[:n_ripup]]
+
+        # Unmark tracks from grids
+        for ri in ripup_indices:
+            rr = results[ri]
+            for trk in rr.tracks:
+                if trk.layer == "F.Cu":
+                    _unmark_route_tracks(grid, [trk], grid_step_mm)
+                elif trk.layer == "B.Cu":
+                    _unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
+
+        # Re-route ripped nets
+        new_results: list[RouteResult] = []
+        ripped_names: set[str] = set()
+        for ri in ripup_indices:
+            ripped_names.add(results[ri].net_name)
+        for ri in sorted(ripup_indices, reverse=True):
+            results.pop(ri)
+        for name in ripped_names:
+            retry_entry = entry_by_name.get(name)
+            if retry_entry is not None:
+                new_result = _route_entry(retry_entry)
+                new_results.append(new_result)
+        results.extend(new_results)
+
     return tuple(results)
+
+
+def _unmark_route_tracks(
+    grid: _Grid | None,
+    tracks: list[Track],
+    grid_step_mm: float,
+) -> None:
+    """Unmark grid cells occupied by routed tracks (for rip-up)."""
+    if grid is None:
+        return
+    for trk in tracks:
+        c1, r1 = grid.to_cell(trk.start.x, trk.start.y)
+        c2, r2 = grid.to_cell(trk.end.x, trk.end.y)
+        # Walk line between cells
+        dc = abs(c2 - c1)
+        dr = abs(r2 - r1)
+        sc = 1 if c1 < c2 else -1
+        sr = 1 if r1 < r2 else -1
+        err = dc - dr
+        cc, cr = c1, r1
+        while True:
+            grid.unmark(cc, cr)
+            if cc == c2 and cr == r2:
+                break
+            e2 = 2 * err
+            if e2 > -dr:
+                err -= dr
+                cc += sc
+            if e2 < dc:
+                err += dc
+                cr += sr
 
 
 def collect_tracks(

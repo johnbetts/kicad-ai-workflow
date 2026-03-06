@@ -19,6 +19,7 @@ from kicad_pipeline.routing.grid_router import (
     _prepare_grid,
     _route_on_bcu,
     _route_stub_on_fcu,
+    _score_route,
     _simplify_path,
     collect_tracks,
     collect_vias,
@@ -1172,3 +1173,43 @@ def test_astar_bend_penalty_reduces_bends() -> None:
 
     # With bend penalty, path should have fewer or equal bends
     assert _count_bends(path_with_bend) <= _count_bends(path_no_bend)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Rip-up-and-retry, RouteQuality scoring
+# ---------------------------------------------------------------------------
+
+
+def test_route_quality_scoring() -> None:
+    """RouteQuality correctly computes length ratio and via count."""
+    result = RouteResult(
+        net_number=1, net_name="NET1",
+        tracks=(
+            Track(start=Point(0, 0), end=Point(10, 0), width=0.25,
+                  layer="F.Cu", net_number=1),
+        ),
+        vias=(
+            Via(position=Point(5, 0), drill=0.3, size=0.6,
+                layers=("F.Cu", "B.Cu"), net_number=1),
+        ),
+        routed=True,
+    )
+    pad_positions = [(0.0, 0.0), (10.0, 0.0)]
+    q = _score_route(result, pad_positions)
+    assert q.net_name == "NET1"
+    assert q.manhattan_ideal_mm == pytest.approx(10.0)
+    assert q.actual_length_mm == pytest.approx(10.0)
+    assert q.length_ratio == pytest.approx(1.0)
+    assert q.via_count == 1
+    assert q.score > 0  # Has a via → nonzero score
+
+
+def test_route_quality_empty_route() -> None:
+    """Empty route has default quality values."""
+    result = RouteResult(
+        net_number=1, net_name="NET1",
+        tracks=(), vias=(), routed=True,
+    )
+    q = _score_route(result, [(0.0, 0.0), (5.0, 5.0)])
+    assert q.actual_length_mm == 0.0
+    assert q.via_count == 0
