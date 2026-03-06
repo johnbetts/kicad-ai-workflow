@@ -1031,7 +1031,8 @@ def rpi_hat_constraints(
                 priority=32,
             ))
 
-    # Pull-up/address resistors sharing nets with SW -> NEAR(SW, pin)
+    # Pull-up/address resistors sharing nets with SW -> NEAR(SW or U1)
+    # I2C pull-ups (nets also connecting U1) placed near U1 for shorter routes.
     if sw_ref is not None:
         # Map net_name -> SW pin number for pin-level targeting
         sw_net_pin: dict[str, str] = {}
@@ -1039,6 +1040,20 @@ def rpi_hat_constraints(
             for c in net.connections:
                 if c.ref == sw_ref:
                     sw_net_pin[net.name] = c.pin
+
+        # Identify I2C/SPI bus nets that also connect to U1 (IC).
+        # These pull-up resistors should be near U1, not SW1.
+        _bus_patterns = {"I2C", "SPI", "SCL", "SDA", "MOSI", "MISO", "SCLK"}
+        ic_net_pin: dict[str, str] = {}
+        if ic_ref is not None:
+            for net in requirements.nets:
+                name_upper = net.name.upper()
+                is_bus = any(p in name_upper for p in _bus_patterns)
+                if is_bus:
+                    for c in net.connections:
+                        if c.ref == ic_ref:
+                            ic_net_pin[net.name] = c.pin
+
         for comp in requirements.components:
             if not comp.ref.startswith("R"):
                 continue
@@ -1046,14 +1061,25 @@ def rpi_hat_constraints(
                 if net.name not in sw_net_pin:
                     continue
                 if any(c.ref == comp.ref for c in net.connections):
-                    extra.append(PlacementConstraint(
-                        ref=comp.ref,
-                        constraint_type=PlacementConstraintType.NEAR,
-                        target_ref=sw_ref,
-                        target_pin=sw_net_pin[net.name],
-                        max_distance_mm=5.0,
-                        priority=28,
-                    ))
+                    # I2C/SPI pull-ups: place near U1 for shorter bus routes
+                    if net.name in ic_net_pin and ic_ref is not None:
+                        extra.append(PlacementConstraint(
+                            ref=comp.ref,
+                            constraint_type=PlacementConstraintType.NEAR,
+                            target_ref=ic_ref,
+                            target_pin=ic_net_pin[net.name],
+                            max_distance_mm=5.0,
+                            priority=28,
+                        ))
+                    else:
+                        extra.append(PlacementConstraint(
+                            ref=comp.ref,
+                            constraint_type=PlacementConstraintType.NEAR,
+                            target_ref=sw_ref,
+                            target_pin=sw_net_pin[net.name],
+                            max_distance_mm=5.0,
+                            priority=28,
+                        ))
                     break
 
     # Screw terminals -> EDGE(BOTTOM) for RPi HATs (opposite GPIO header)

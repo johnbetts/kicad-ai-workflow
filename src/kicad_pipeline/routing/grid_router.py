@@ -2100,12 +2100,25 @@ def route_all_nets(
                 max_d = max(max_d, d)
         return max_d
 
+    # Identify IC refs for routing priority
+    _ic_refs = {
+        fp.ref for fp in footprints
+        if fp.ref.startswith("U") and len(fp.pads) >= 6
+    }
+
     def _sort_key(entry: NetlistEntry) -> tuple[int, float]:
         name = entry.net.name.upper()
         is_power = name.startswith("+") or "VDD" in name or "VCC" in name or "VBUS" in name
-        # Power nets route first (tier 0) on a clean grid for better
-        # connectivity.  Signal nets follow (tier 1), sorted by length.
-        tier = 0 if is_power else 1
+        # Tier 0: Power nets route first on a clean grid.
+        # Tier 1: IC-connected signal nets (hardest to route, need clean paths).
+        # Tier 2: All other signal nets.
+        has_ic = any(ref in _ic_refs for ref, _ in entry.pad_refs)
+        if is_power:
+            tier = 0
+        elif has_ic:
+            tier = 1
+        else:
+            tier = 2
         return (tier, _estimated_length(entry))
 
     routable.sort(key=_sort_key)
@@ -2136,6 +2149,15 @@ def route_all_nets(
         if net_clearances is not None:
             clearance = net_clearances.get(net_name, 0.2)
 
+        # Dynamic via budget: multi-pad nets need more vias for B.Cu segments
+        n_pads = len(entry.pad_refs)
+        if n_pads <= 2:
+            via_budget = 2
+        elif n_pads <= 4:
+            via_budget = 4
+        else:
+            via_budget = 6
+
         request = RouteRequest(
             net_number=entry.net.number,
             net_name=net_name,
@@ -2143,6 +2165,7 @@ def route_all_nets(
             layer="F.Cu",
             width_mm=width,
             clearance_mm=clearance,
+            max_vias=via_budget,
         )
         return route_net(
             request, footprints, board_width_mm, board_height_mm,
@@ -2196,6 +2219,8 @@ def route_all_nets(
                 width = net_widths.get(net_name, 0.25)
             else:
                 width = 0.5 if "GND" in net_name or "PWR" in net_name else 0.25
+            n_pads = len(entry.pad_refs)
+            via_budget = 2 if n_pads <= 2 else (4 if n_pads <= 4 else 6)
             request = RouteRequest(
                 net_number=entry.net.number,
                 net_name=net_name,
@@ -2203,6 +2228,7 @@ def route_all_nets(
                 layer="F.Cu",
                 width_mm=width,
                 clearance_mm=JLCPCB_MIN_CLEARANCE_MM,
+                max_vias=via_budget,
             )
             result = route_net(
                 request, footprints, board_width_mm, board_height_mm,

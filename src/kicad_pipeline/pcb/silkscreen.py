@@ -301,10 +301,14 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
 
     if "reference" not in existing_types:
         ref_pos = Point(x=0.0, y=ref_y)
-        # Compact SMD footprints (0603/0402): ref on F.Fab to avoid
-        # silk-over-copper DRC in dense layouts.
+        # Compact SMD (0603/0402) and mounting holes: ref on F.Fab to
+        # avoid silk-over-copper DRC in dense layouts.
         is_compact_smd = (not has_tht and pad_span_y < 2.0)
-        ref_layer = LAYER_F_FAB if is_compact_smd else LAYER_F_SILKSCREEN
+        is_mounting_hole = fp.ref.startswith("H")
+        ref_layer = (
+            LAYER_F_FAB if (is_compact_smd or is_mounting_hole)
+            else LAYER_F_SILKSCREEN
+        )
         new_texts.append(
             make_ref_label(
                 ref=fp.ref, position=ref_pos,

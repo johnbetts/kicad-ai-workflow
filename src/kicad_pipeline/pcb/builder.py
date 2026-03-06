@@ -718,6 +718,12 @@ def _make_gnd_stitching_vias(
     # Collect existing via positions
     via_positions = [(v.position.x, v.position.y) for v in existing_vias]
 
+    # Check if any GND copper exists (for proximity filtering)
+    _has_gnd_copper = any(
+        pad.net_number == gnd_net_number
+        for fp in footprints for pad in fp.pads
+    ) or any(trk.net_number == gnd_net_number for trk in existing_tracks)
+
     # Build grid candidates
     edge_margin = 2.0
     vias: list[Via] = []
@@ -759,6 +765,36 @@ def _make_gnd_stitching_vias(
             if too_close_track:
                 x += spacing_mm
                 continue
+
+            # Only place via if there's GND copper nearby (pad or track)
+            # to avoid dangling vias far from any GND connection.
+            # Skip this check if there are no GND pads at all (empty board).
+            if _has_gnd_copper:
+                proximity_r = spacing_mm / 2.0
+                has_gnd_nearby = False
+                for fp in footprints:
+                    for pad in fp.pads:
+                        if pad.net_number == gnd_net_number:
+                            px = fp.position.x + pad.position.x
+                            py = fp.position.y + pad.position.y
+                            if (abs(x - px) < proximity_r
+                                    and abs(y - py) < proximity_r):
+                                has_gnd_nearby = True
+                                break
+                    if has_gnd_nearby:
+                        break
+                if not has_gnd_nearby:
+                    for trk in existing_tracks:
+                        if trk.net_number == gnd_net_number:
+                            mid_x = (trk.start.x + trk.end.x) / 2
+                            mid_y = (trk.start.y + trk.end.y) / 2
+                            if (abs(x - mid_x) < proximity_r
+                                    and abs(y - mid_y) < proximity_r):
+                                has_gnd_nearby = True
+                                break
+                if not has_gnd_nearby:
+                    x += spacing_mm
+                    continue
 
             vias.append(Via(
                 position=Point(round(x, 3), round(y, 3)),
