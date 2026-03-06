@@ -859,7 +859,9 @@ def _route_on_bcu(
     width_mm: float,
     clearance_mm: float,
     fcu_grid: _Grid | None = None,
-) -> tuple[tuple[Track, ...], tuple[Via, Via]] | None:
+    start_is_tht: bool = False,
+    goal_is_tht: bool = False,
+) -> tuple[tuple[Track, ...], tuple[Via, ...]] | None:
     """Attempt to route a segment on B.Cu with vias at each end.
 
     When *fcu_grid* is provided, vias are placed at positions that do
@@ -867,6 +869,11 @@ def _route_on_bcu(
     If the via must be offset from the pad, a short F.Cu stub track is
     added to bridge pad-to-via.  Uses smaller signal vias (0.6 mm pad /
     0.3 mm drill) to reduce footprint near congested IC pads.
+
+    When *start_is_tht* or *goal_is_tht* is ``True``, that endpoint is
+    a plated through-hole pad.  THT pads already provide layer
+    transition, so the via is placed at the pad position without
+    searching for a free F.Cu location.
 
     Temporarily unmarks start/goal cells on the B.Cu grid, runs A*,
     then marks the path with exclusion.  Returns B.Cu tracks and two
@@ -886,19 +893,23 @@ def _route_on_bcu(
     _goal_needs_astar_stub = False
 
     if fcu_grid is not None:
-        # Try to find via position with clear stub path, checking BOTH
-        # F.Cu and B.Cu grids (via spans both layers).
-        found_start = _find_free_via_position(
-            fcu_grid, start_x, start_y, via_radius, clearance_mm,
-            stub_origin=(start_x, start_y), stub_width_mm=width_mm,
-            bcu_grid=bcu_grid,
-        )
-        if found_start is None:
-            # Fall back: find ANY free via position, use A* for stub
+        # THT pads already provide layer transition — place via at pad
+        if start_is_tht:
+            via_start_pos = (start_x, start_y)
+        else:
+            # Try to find via position with clear stub path, checking BOTH
+            # F.Cu and B.Cu grids (via spans both layers).
             found_start = _find_free_via_position(
                 fcu_grid, start_x, start_y, via_radius, clearance_mm,
+                stub_origin=(start_x, start_y), stub_width_mm=width_mm,
                 bcu_grid=bcu_grid,
             )
+            if found_start is None:
+                # Fall back: find ANY free via position, use A* for stub
+                found_start = _find_free_via_position(
+                    fcu_grid, start_x, start_y, via_radius, clearance_mm,
+                    bcu_grid=bcu_grid,
+                )
             if found_start is None:
                 # Last resort: F.Cu-only search (accept B.Cu congestion)
                 found_start = _find_free_via_position(
@@ -907,18 +918,21 @@ def _route_on_bcu(
                 if found_start is None:
                     return None
             _start_needs_astar_stub = True
-        via_start_pos = found_start
+            via_start_pos = found_start
 
-        found_goal = _find_free_via_position(
-            fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
-            stub_origin=(goal_x, goal_y), stub_width_mm=width_mm,
-            bcu_grid=bcu_grid,
-        )
-        if found_goal is None:
+        if goal_is_tht:
+            via_goal_pos = (goal_x, goal_y)
+        else:
             found_goal = _find_free_via_position(
                 fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
+                stub_origin=(goal_x, goal_y), stub_width_mm=width_mm,
                 bcu_grid=bcu_grid,
             )
+            if found_goal is None:
+                found_goal = _find_free_via_position(
+                    fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
+                    bcu_grid=bcu_grid,
+                )
             if found_goal is None:
                 # Last resort: F.Cu-only search (accept B.Cu congestion)
                 found_goal = _find_free_via_position(
@@ -927,7 +941,7 @@ def _route_on_bcu(
                 if found_goal is None:
                     return None
             _goal_needs_astar_stub = True
-        via_goal_pos = found_goal
+            via_goal_pos = found_goal
 
     # Route on B.Cu between via positions (not pad positions)
     sc, sr = bcu_grid.to_cell(via_start_pos[0], via_start_pos[1])
@@ -966,23 +980,28 @@ def _route_on_bcu(
             )
         )
 
-    # Build vias at (possibly offset) positions
-    via_start = Via(
-        position=Point(via_start_pos[0], via_start_pos[1]),
-        drill=via_drill,
-        size=via_size,
-        layers=("F.Cu", "B.Cu"),
-        net_number=net_number,
-        uuid="",
-    )
-    via_goal = Via(
-        position=Point(via_goal_pos[0], via_goal_pos[1]),
-        drill=via_drill,
-        size=via_size,
-        layers=("F.Cu", "B.Cu"),
-        net_number=net_number,
-        uuid="",
-    )
+    # Build vias at (possibly offset) positions — skip for THT endpoints
+    # (THT pads already provide plated through-hole layer transition)
+    via_start: Via | None = None
+    via_goal: Via | None = None
+    if not start_is_tht:
+        via_start = Via(
+            position=Point(via_start_pos[0], via_start_pos[1]),
+            drill=via_drill,
+            size=via_size,
+            layers=("F.Cu", "B.Cu"),
+            net_number=net_number,
+            uuid="",
+        )
+    if not goal_is_tht:
+        via_goal = Via(
+            position=Point(via_goal_pos[0], via_goal_pos[1]),
+            drill=via_drill,
+            size=via_size,
+            layers=("F.Cu", "B.Cu"),
+            net_number=net_number,
+            uuid="",
+        )
 
     # Add F.Cu stub tracks if vias were offset from pad positions.
     # When the direct diagonal stub would cross existing F.Cu tracks,
@@ -1074,20 +1093,22 @@ def _route_on_bcu(
             for dr in range(-excl_cells, excl_cells + 1):
                 bcu_grid.mark(cell_col + dc, cell_row + dr)
 
-    # Mark via exclusion on both grids
-    if fcu_grid is not None:
-        _mark_via_on_fcu(fcu_grid, via_start, clearance_mm)
-        _mark_via_on_fcu(fcu_grid, via_goal, clearance_mm)
-    # Mark via positions on B.Cu grid too
+    # Mark via exclusion on both grids (skip for THT — no via emitted)
+    emitted_vias: list[Via] = []
     via_excl = math.ceil((via_radius + clearance_mm) / bcu_grid.grid_step_mm)
     for via in (via_start, via_goal):
+        if via is None:
+            continue
+        emitted_vias.append(via)
+        if fcu_grid is not None:
+            _mark_via_on_fcu(fcu_grid, via, clearance_mm)
         vc, vr = bcu_grid.to_cell(via.position.x, via.position.y)
         for dc in range(-via_excl, via_excl + 1):
             for dr in range(-via_excl, via_excl + 1):
                 bcu_grid.mark(vc + dc, vr + dr)
 
     all_tracks = list(stub_tracks) + list(tracks)
-    return (tuple(all_tracks), (via_start, via_goal))
+    return (tuple(all_tracks), tuple(emitted_vias))
 
 
 def _mark_line_on_grid(
@@ -1617,12 +1638,14 @@ def route_net(
                 bcu_grid, request.net_number, request.net_name,
                 request.width_mm, request.clearance_mm,
                 fcu_grid=grid,
+                start_is_tht=p1.pad_type == "thru_hole",
+                goal_is_tht=p2.pad_type == "thru_hole",
             )
             # Re-mark unmarked THT pads on B.Cu
             for _ux, _uy, _uhw, _uhh in _bcu_unmarked:
                 _mark_pad_area(bcu_grid, _ux, _uy, _uhw, _uhh, pad_cl)
             if bcu_result is not None:
-                bcu_tracks, (via_s, via_g) = bcu_result
+                bcu_tracks, bcu_vias = bcu_result
                 # Validate F.Cu stubs don't cross other-net pads
                 # Use original net_pad_set — THT sibling extension must
                 # not relax cross-pad validation.
@@ -1631,7 +1654,7 @@ def route_net(
                     net_pad_set=_original_net_pad_set,
                 ):
                     all_tracks.extend(bcu_tracks)
-                    all_vias.extend([via_s, via_g])
+                    all_vias.extend(bcu_vias)
                     routed_set.add(best_to)
                     unrouted.discard(best_to)
                     continue
@@ -1829,6 +1852,7 @@ def route_net(
                     bcu_grid, request.net_number, request.net_name,
                     ic_stub_width, request.clearance_mm,
                     fcu_grid=grid,
+                    start_is_tht=best_pi.pad_type == "thru_hole",
                 )
                 # Re-mark unmarked THT pads on B.Cu
                 for _ux, _uy, _uhw, _uhh in _ic_bcu_unmarked:
@@ -1839,7 +1863,7 @@ def route_net(
                         best_pi.half_w, best_pi.half_h, pad_cl,
                     )
                 if bcu_result is not None:
-                    bcu_tracks, (via_s, via_g) = bcu_result
+                    bcu_tracks, bcu_vias = bcu_result
                     # Validate F.Cu stubs don't cross other-net pads
                     crosses = _track_crosses_other_pads(
                         bcu_tracks, request.net_number, footprints,
@@ -1852,7 +1876,7 @@ def route_net(
                     )
                     if not crosses:
                         all_tracks.extend(bcu_tracks)
-                        all_vias.extend([via_s, via_g])
+                        all_vias.extend(bcu_vias)
                         ic_routed = True
 
             if not ic_routed:
@@ -2157,6 +2181,7 @@ def route_net(
                                 ic_stub_width,
                                 request.clearance_mm,
                                 fcu_grid=grid,
+                                goal_is_tht=best_pi.pad_type == "thru_hole",
                             )
                             for _ux, _uy, _uhw, _uhh in _fan_bcu_um:
                                 _mark_pad_area(
@@ -2164,9 +2189,7 @@ def route_net(
                                     _uhw, _uhh, pad_cl,
                                 )
                             if bcu_fan is not None:
-                                bcu_fan_tracks, (
-                                    bcu_fan_vs, bcu_fan_vg,
-                                ) = bcu_fan
+                                bcu_fan_tracks, bcu_fan_vias = bcu_fan
                                 if not _track_crosses_other_pads(
                                     bcu_fan_tracks,
                                     request.net_number,
@@ -2174,9 +2197,7 @@ def route_net(
                                     net_pad_set=_original_net_pad_set,
                                 ):
                                     fan_segs = list(bcu_fan_tracks)
-                                    fan_via_extra = [
-                                        bcu_fan_vs, bcu_fan_vg,
-                                    ]
+                                    fan_via_extra = list(bcu_fan_vias)
                                     _fan_routed = True
                             if not _fan_routed:
                                 _log.debug(
@@ -2271,6 +2292,7 @@ def route_net(
                     bcu_grid, request.net_number, request.net_name,
                     ic_stub_width, request.clearance_mm,
                     fcu_grid=None,  # skip F.Cu check — via is on SMD pad
+                    goal_is_tht=best_pi.pad_type == "thru_hole",
                 )
                 # Re-mark unmarked THT pads on B.Cu
                 for _ux, _uy, _uhw, _uhh in _vip_bcu_um:
@@ -2284,13 +2306,13 @@ def route_net(
                         best_pi.half_w, best_pi.half_h, pad_cl,
                     )
                 if vip_result is not None:
-                    vip_tracks, (vip_vs, vip_vg) = vip_result
+                    vip_tracks, vip_vias = vip_result
                     if not _track_crosses_other_pads(
                         vip_tracks, request.net_number, footprints,
                         net_pad_set=_original_net_pad_set,
                     ):
                         all_tracks.extend(vip_tracks)
-                        all_vias.extend([vip_vs, vip_vg])
+                        all_vias.extend(vip_vias)
                         _mark_pad_area(
                             bcu_grid, px, py,
                             VIA_DIAMETER_SIGNAL_MM / 2.0,
