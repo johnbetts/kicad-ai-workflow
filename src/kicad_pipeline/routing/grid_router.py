@@ -373,6 +373,7 @@ def _track_crosses_other_pads(
     footprints: list[Footprint],
     clearance_mm: float = 0.05,
     net_pad_set: frozenset[tuple[str, str]] | None = None,
+    allow_same_ref: str | None = None,
 ) -> bool:
     """Return True if any F.Cu track crosses a pad on a different net.
 
@@ -383,8 +384,13 @@ def _track_crosses_other_pads(
     Args:
         net_pad_set: If provided, identifies same-net pads by (ref, pad_number).
             Used during routing when pad.net_number is not yet assigned.
+        allow_same_ref: If provided, allow crossings with pads on this
+            component (e.g. IC ref).  Intra-footprint clearance violations
+            are handled by DRC exclusions for dense ICs.
     """
     for fp in footprints:
+        if allow_same_ref is not None and fp.ref == allow_same_ref:
+            continue
         for pad in fp.pads:
             px, py = _pad_abs_pos(fp, pad)
             phw, phh = _pad_rotated_half_size(fp, pad)
@@ -861,6 +867,8 @@ def _route_on_bcu(
     fcu_grid: _Grid | None = None,
     start_is_tht: bool = False,
     goal_is_tht: bool = False,
+    start_via_in_pad: bool = False,
+    goal_via_in_pad: bool = False,
 ) -> tuple[tuple[Track, ...], tuple[Via, ...]] | None:
     """Attempt to route a segment on B.Cu with vias at each end.
 
@@ -893,8 +901,8 @@ def _route_on_bcu(
     _goal_needs_astar_stub = False
 
     if fcu_grid is not None:
-        # THT pads already provide layer transition — place via at pad
-        if start_is_tht:
+        # THT/via-in-pad: place via at pad without searching
+        if start_is_tht or start_via_in_pad:
             via_start_pos = (start_x, start_y)
         else:
             # Try to find via position with clear stub path, checking BOTH
@@ -920,7 +928,7 @@ def _route_on_bcu(
             _start_needs_astar_stub = True
             via_start_pos = found_start
 
-        if goal_is_tht:
+        if goal_is_tht or goal_via_in_pad:
             via_goal_pos = (goal_x, goal_y)
         else:
             found_goal = _find_free_via_position(
@@ -1578,6 +1586,15 @@ def route_net(
         goal_col, goal_row = grid.to_cell(p2.x, p2.y)
 
         path = _astar(grid, start_col, start_row, goal_col, goal_row)
+        _log.debug(
+            "MST %s: (%s) (%.1f,%.1f)->(%s) (%.1f,%.1f) F.Cu=%s",
+            request.net_name,
+            request.pad_refs[best_from][0] + "." + request.pad_refs[best_from][1],
+            p1.x, p1.y,
+            request.pad_refs[best_to][0] + "." + request.pad_refs[best_to][1],
+            p2.x, p2.y,
+            "OK" if path is not None else "FAIL",
+        )
 
         if path is None and _tht_refs_in_net:
             # Retry: shrink clearance zones around sibling THT pads to
@@ -1617,6 +1634,11 @@ def route_net(
 
         # B.Cu fallback: when F.Cu A* fails, try routing on B.Cu with vias.
         # Each B.Cu segment adds 2 vias — skip if that would exceed max_vias.
+        if path is None:
+            _log.debug(
+                "MST %s: F.Cu FAIL, trying B.Cu (vias=%d/%d)",
+                request.net_name, len(all_vias), request.max_vias,
+            )
         if (path is None and bcu_grid is not None
                 and len(all_vias) + 2 <= request.max_vias):
             # Temporarily unmark THT pads for BOTH endpoints and same-net
@@ -1749,9 +1771,15 @@ def route_net(
                         ic_stub_width,
                         max(pitch_limited, JLCPCB_MIN_TRACE_MM),
                     )
-        for ic_pi, (ic_ref, ic_pn) in zip(
-            _ic_pad_infos, _ic_pad_refs, strict=True,
-        ):
+        # Sort IC pads outermost-first so edge pads get clear escape
+        # routes before inner pads consume the corridor.
+        _ic_cx = sum(p.x for p in _ic_pad_infos) / len(_ic_pad_infos)
+        _ic_cy = sum(p.y for p in _ic_pad_infos) / len(_ic_pad_infos)
+        ic_sorted = sorted(
+            zip(_ic_pad_infos, _ic_pad_refs, strict=True),
+            key=lambda pr: -((pr[0].x - _ic_cx) ** 2 + (pr[0].y - _ic_cy) ** 2),
+        )
+        for ic_pi, (ic_ref, ic_pn) in ic_sorted:
             # Find closest routed non-IC pad
             best_pi = pad_infos[0]
             best_dist = float("inf")
