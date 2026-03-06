@@ -287,6 +287,7 @@ class WorkflowEngine:
         # applies correct clearances and track widths when routing.
         write_project_file(
             variant_name, vdir, netclasses=pcb.netclasses,
+            drc_exclusions=pcb.drc_exclusions or None,
         )
         log.info("Project file updated with netclasses: %s", vdir)
 

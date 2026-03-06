@@ -29,6 +29,7 @@ from kicad_pipeline.models.requirements import (
 from kicad_pipeline.pcb.builder import (
     _build_layer_table,
     _footprint_sexp,
+    _generate_ic_drc_exclusions,
     _make_rf_via_fence,
     _zone_sexp,
     build_pcb,
@@ -1270,3 +1271,78 @@ def test_build_pcb_pads_have_net_assignments() -> None:
             f"{fp.ref} has {len(fp.pads)} pads but none have "
             f"net assignments"
         )
+
+
+# ---------------------------------------------------------------------------
+# Intra-footprint DRC exclusion generation
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateICDrcExclusions:
+    """Tests for _generate_ic_drc_exclusions."""
+
+    def test_dense_ic_generates_exclusions(self) -> None:
+        """MSOP-10 with 0.5mm pitch generates pad-pair exclusions."""
+        pads = []
+        for i in range(5):
+            pads.append(Pad(
+                number=str(i + 1), pad_type="smd", shape="rect",
+                position=Point(x=-0.975, y=-1.0 + i * 0.5),
+                size_x=0.41, size_y=0.3,
+                layers=("F.Cu", "F.Paste", "F.Mask"),
+            ))
+        for i in range(5):
+            pads.append(Pad(
+                number=str(i + 6), pad_type="smd", shape="rect",
+                position=Point(x=0.975, y=1.0 - i * 0.5),
+                size_x=0.41, size_y=0.3,
+                layers=("F.Cu", "F.Paste", "F.Mask"),
+            ))
+        fp = Footprint(
+            lib_id="Package_SO:MSOP-10", ref="U1", value="ADS1115",
+            position=Point(x=30.0, y=30.0), rotation=0.0, layer="F.Cu",
+            pads=tuple(pads), graphics=(), texts=(),
+        )
+        exclusions = _generate_ic_drc_exclusions([fp])
+        assert len(exclusions) > 0
+        assert all(e.startswith("clearance|U1|") for e in exclusions)
+        # Adjacent pads (1,2) should be excluded
+        assert "clearance|U1|1|U1|2" in exclusions
+
+    def test_wide_pitch_no_exclusions(self) -> None:
+        """Connector with 2.54mm pitch does not generate exclusions."""
+        pads = tuple(
+            Pad(
+                number=str(i + 1), pad_type="thru_hole", shape="circle",
+                position=Point(x=0.0, y=i * 2.54),
+                size_x=1.7, size_y=1.7,
+                layers=("*.Cu", "*.Mask"),
+            )
+            for i in range(10)
+        )
+        fp = Footprint(
+            lib_id="Conn:PinHeader_1x10", ref="J1", value="Conn",
+            position=Point(x=10.0, y=10.0), rotation=0.0, layer="F.Cu",
+            pads=pads, graphics=(), texts=(),
+        )
+        exclusions = _generate_ic_drc_exclusions([fp])
+        assert len(exclusions) == 0
+
+    def test_few_pads_no_exclusions(self) -> None:
+        """Footprint with <6 pads is not treated as dense IC."""
+        pads = tuple(
+            Pad(
+                number=str(i + 1), pad_type="smd", shape="rect",
+                position=Point(x=0.0, y=i * 0.5),
+                size_x=0.3, size_y=0.2,
+                layers=("F.Cu",),
+            )
+            for i in range(4)
+        )
+        fp = Footprint(
+            lib_id="Package_SO:SOT-23", ref="U2", value="LDO",
+            position=Point(x=5.0, y=5.0), rotation=0.0, layer="F.Cu",
+            pads=pads, graphics=(), texts=(),
+        )
+        exclusions = _generate_ic_drc_exclusions([fp])
+        assert len(exclusions) == 0

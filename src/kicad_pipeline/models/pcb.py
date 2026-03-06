@@ -301,6 +301,7 @@ class PCBDesign:
     generator: str = "kicad-ai-pipeline"
     generator_version: str = "9.0"
     netclasses: tuple[NetClass, ...] = ()
+    drc_exclusions: tuple[str, ...] = ()
     title: str = ""
     date: str = ""
     revision: str = ""
