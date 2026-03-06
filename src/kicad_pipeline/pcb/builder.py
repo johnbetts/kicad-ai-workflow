@@ -552,6 +552,118 @@ def _has_rf_module(requirements: ProjectRequirements) -> bool:
 
 
 
+def _make_gnd_stitching_vias(
+    board: BoardOutline,
+    gnd_net_number: int,
+    footprints: tuple[Footprint, ...],
+    existing_vias: tuple[Via, ...],
+    existing_tracks: tuple[Track, ...],
+    spacing_mm: float = 15.0,
+) -> tuple[Via, ...]:
+    """Place GND stitching vias on a regular grid across the board.
+
+    Vias are placed on a grid with *spacing_mm* pitch (default 15mm,
+    midpoint of the 10-20mm spec range).  Positions are skipped if they
+    fall within 2mm of any footprint bounding box or within 1mm of an
+    existing via or track segment.
+
+    Args:
+        board: Board outline for dimensions.
+        gnd_net_number: Net number of the GND net.
+        footprints: All placed footprints.
+        existing_vias: Vias already placed by the router.
+        existing_tracks: Tracks already placed by the router.
+        spacing_mm: Grid spacing for stitching vias.
+
+    Returns:
+        Tuple of GND stitching vias.
+    """
+    from kicad_pipeline.constants import (
+        GND_STITCH_FP_CLEARANCE_MM,
+        VIA_DIAMETER_SIGNAL_MM,
+        VIA_DRILL_SIGNAL_MM,
+    )
+
+    # Compute board bounding box from outline
+    xs = [p.x for p in board.polygon]
+    ys = [p.y for p in board.polygon]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+
+    # Build footprint bounding boxes (with clearance)
+    fp_bboxes: list[tuple[float, float, float, float]] = []  # (x1, y1, x2, y2)
+    for fp in footprints:
+        pad_xs = [fp.position.x]
+        pad_ys = [fp.position.y]
+        for pad in fp.pads:
+            px, py = fp.position.x + pad.position.x, fp.position.y + pad.position.y
+            pad_xs.extend([px - pad.size_x / 2, px + pad.size_x / 2])
+            pad_ys.extend([py - pad.size_y / 2, py + pad.size_y / 2])
+        fp_bboxes.append((
+            min(pad_xs) - GND_STITCH_FP_CLEARANCE_MM,
+            min(pad_ys) - GND_STITCH_FP_CLEARANCE_MM,
+            max(pad_xs) + GND_STITCH_FP_CLEARANCE_MM,
+            max(pad_ys) + GND_STITCH_FP_CLEARANCE_MM,
+        ))
+
+    # Collect existing via positions
+    via_positions = [(v.position.x, v.position.y) for v in existing_vias]
+
+    # Build grid candidates
+    edge_margin = 2.0
+    vias: list[Via] = []
+    y = min_y + edge_margin
+    while y < max_y - edge_margin:
+        x = min_x + edge_margin
+        while x < max_x - edge_margin:
+            # Check footprint clearance
+            in_fp = False
+            for x1, y1, x2, y2 in fp_bboxes:
+                if x1 <= x <= x2 and y1 <= y <= y2:
+                    in_fp = True
+                    break
+            if in_fp:
+                x += spacing_mm
+                continue
+
+            # Check existing via clearance (1mm)
+            too_close_via = False
+            for vx, vy in via_positions:
+                if abs(x - vx) < 1.0 and abs(y - vy) < 1.0:
+                    too_close_via = True
+                    break
+            if too_close_via:
+                x += spacing_mm
+                continue
+
+            # Check existing track clearance (1mm)
+            too_close_track = False
+            for trk in existing_tracks:
+                # Simple AABB check for track segment
+                tx1 = min(trk.start.x, trk.end.x) - 1.0
+                ty1 = min(trk.start.y, trk.end.y) - 1.0
+                tx2 = max(trk.start.x, trk.end.x) + 1.0
+                ty2 = max(trk.start.y, trk.end.y) + 1.0
+                if tx1 <= x <= tx2 and ty1 <= y <= ty2:
+                    too_close_track = True
+                    break
+            if too_close_track:
+                x += spacing_mm
+                continue
+
+            vias.append(Via(
+                position=Point(round(x, 3), round(y, 3)),
+                drill=VIA_DRILL_SIGNAL_MM,
+                size=VIA_DIAMETER_SIGNAL_MM,
+                layers=("F.Cu", "B.Cu"),
+                net_number=gnd_net_number,
+            ))
+            x += spacing_mm
+        y += spacing_mm
+
+    return tuple(vias)
+
+
 def _make_rf_via_fence(
     keepouts: tuple[Keepout, ...],
     gnd_net_num: int,
@@ -1060,6 +1172,18 @@ def build_pcb(
         if rf_fence_vias:
             all_vias = all_vias + rf_fence_vias
             log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
+
+    # ------------------------------------------------------------------
+    # Step 10c: GND stitching vias (spec: every 10-20mm, only when routing)
+    # ------------------------------------------------------------------
+    if auto_route:
+        stitch_vias = _make_gnd_stitching_vias(
+            outline, gnd_net_num, tuple(final_footprints),
+            all_vias, all_tracks,
+        )
+        if stitch_vias:
+            all_vias = all_vias + stitch_vias
+            log.info("build_pcb: added %d GND stitching vias", len(stitch_vias))
 
     # ------------------------------------------------------------------
     # Step 11: Assign net numbers to footprint pads

@@ -89,6 +89,7 @@ class RouteRequest:
     layer: str  # "F.Cu" or "B.Cu"
     width_mm: float = 0.25
     clearance_mm: float = 0.2
+    max_vias: int = 2
 
 
 @dataclass(frozen=True)
@@ -155,8 +156,9 @@ def _score_route(result: RouteResult, pad_positions: list[tuple[float, float]]) 
 
     ratio = actual / manhattan if manhattan > 0.01 else 1.0
     via_count = len(result.vias)
-    # Composite score: length excess + via penalty + bend penalty
-    score = (ratio - 1.0) * 10.0 + via_count * 3.0 + bends * 0.5
+    # Composite score matching spec cost function weights:
+    #   actual_length + 14*vias + 2.5*bends + 5*max(0, ratio-1.5)
+    score = actual + 14.0 * via_count + 2.5 * bends + 5.0 * max(0.0, ratio - 1.5)
     return RouteQuality(
         net_name=result.net_name,
         manhattan_ideal_mm=manhattan,
@@ -1486,8 +1488,10 @@ def route_net(
             _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
 
-        # B.Cu fallback: when F.Cu A* fails, try routing on B.Cu with vias
-        if path is None and bcu_grid is not None:
+        # B.Cu fallback: when F.Cu A* fails, try routing on B.Cu with vias.
+        # Each B.Cu segment adds 2 vias — skip if that would exceed max_vias.
+        if (path is None and bcu_grid is not None
+                and len(all_vias) + 2 <= request.max_vias):
             bcu_result = _route_on_bcu(
                 p1.x, p1.y, p2.x, p2.y,
                 bcu_grid, request.net_number, request.net_name,
@@ -1698,7 +1702,10 @@ def route_net(
                         -1.0 if dy_from_center < 0 else 1.0,
                     )
                 all_dirs: list[tuple[float, float]] = [primary_dir]
-                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                for dx, dy in [
+                    (1, 0), (-1, 0), (0, 1), (0, -1),
+                    (1, 1), (1, -1), (-1, 1), (-1, -1),
+                ]:
                     d = (float(dx), float(dy))
                     if d != primary_dir:
                         all_dirs.append(d)
@@ -1706,7 +1713,7 @@ def route_net(
                 for fan_dx, fan_dy in all_dirs:
                     if fan_via_pos is not None:
                         break
-                    for step in range(4, 40):
+                    for step in range(4, 60):
                         cx = px + fan_dx * step * grid.grid_step_mm
                         cy = py + fan_dy * step * grid.grid_step_mm
                         col, row = grid.to_cell(cx, cy)
@@ -2056,9 +2063,9 @@ def route_all_nets(
     def _sort_key(entry: NetlistEntry) -> tuple[int, float]:
         name = entry.net.name.upper()
         is_power = name.startswith("+") or "VDD" in name or "VCC" in name or "VBUS" in name
-        # Power nets route at tier 1 (after short signal nets but before long
-        # signal nets) — gives them enough space while prioritising local nets.
-        tier = 1 if is_power else 0
+        # Power nets route first (tier 0) on a clean grid for better
+        # connectivity.  Signal nets follow (tier 1), sorted by length.
+        tier = 0 if is_power else 1
         return (tier, _estimated_length(entry))
 
     routable.sort(key=_sort_key)
@@ -2112,10 +2119,57 @@ def route_all_nets(
         else:
             failed_entries.append(entry)
 
-    # Retry failed nets: earlier routes may have left enough space
+    # Retry failed nets with multiple strategies:
+    # 1. Standard retry (congestion may have changed)
+    # 2. Reverse pad ordering (asymmetric congestion)
+    # 3. Relaxed clearance at JLCPCB manufacturing minimum
+    from kicad_pipeline.pcb.netlist import NetlistEntry as _NetlistEntry
+
+    still_failed: list[_NetlistEntry] = []
     for entry in failed_entries:
         result = _route_entry(entry)
-        results.append(result)
+        if result.routed:
+            results.append(result)
+            continue
+        # Try reversed pad ordering
+        reversed_pads = entry.pad_refs[::-1]
+        reversed_entry = _NetlistEntry(
+            net=entry.net,
+            pad_refs=reversed_pads,
+        )
+        result = _route_entry(reversed_entry)
+        if result.routed:
+            results.append(result)
+            continue
+        still_failed.append(entry)
+
+    # Last resort: relaxed clearance retry at JLCPCB minimum
+    if still_failed:
+        from kicad_pipeline.constants import JLCPCB_MIN_CLEARANCE_MM
+
+        relaxed_clearances = dict(net_clearances) if net_clearances else {}
+        for entry in still_failed:
+            relaxed_clearances[entry.net.name] = JLCPCB_MIN_CLEARANCE_MM
+        for entry in still_failed:
+            net_name = entry.net.name
+            if net_widths is not None:
+                width = net_widths.get(net_name, 0.25)
+            else:
+                width = 0.5 if "GND" in net_name or "PWR" in net_name else 0.25
+            request = RouteRequest(
+                net_number=entry.net.number,
+                net_name=net_name,
+                pad_refs=entry.pad_refs,
+                layer="F.Cu",
+                width_mm=width,
+                clearance_mm=JLCPCB_MIN_CLEARANCE_MM,
+            )
+            result = route_net(
+                request, footprints, board_width_mm, board_height_mm,
+                grid_step_mm, grid=grid, net_clearances=relaxed_clearances,
+                net_widths=net_widths, bcu_grid=bcu_grid,
+            )
+            results.append(result)
 
     # Rip-up-and-retry loop: improve worst routes
     # Build pad position lookup for quality scoring
@@ -2144,7 +2198,7 @@ def route_all_nets(
             if score_entry is None:
                 continue
             q = _score_route(r, _pad_positions_for(score_entry))
-            if q.via_count > 2 or q.length_ratio > 1.65:
+            if q.via_count > 2 or q.length_ratio > 1.55:
                 offenders.append((q.score, idx))
 
         if not offenders:
@@ -2178,7 +2232,159 @@ def route_all_nets(
                 new_results.append(new_result)
         results.extend(new_results)
 
+    # Post-routing clearance validation: detect and fix violations
+    results = _validate_track_clearances(
+        results, grid, bcu_grid, grid_step_mm, entry_by_name,
+        _route_entry, footprints, net_clearances, net_widths,
+        _pad_positions_for,
+    )
+
     return tuple(results)
+
+
+def _segment_min_distance(
+    ax1: float, ay1: float, ax2: float, ay2: float,
+    bx1: float, by1: float, bx2: float, by2: float,
+) -> float:
+    """Compute minimum distance between two line segments.
+
+    Checks for intersection first, then falls back to point-to-segment
+    distances for non-intersecting segments.
+    """
+    # Check for segment intersection using cross products
+    dx_a = ax2 - ax1
+    dy_a = ay2 - ay1
+    dx_b = bx2 - bx1
+    dy_b = by2 - by1
+    denom = dx_a * dy_b - dy_a * dx_b
+    if abs(denom) > 1e-12:
+        t = ((bx1 - ax1) * dy_b - (by1 - ay1) * dx_b) / denom
+        u = ((bx1 - ax1) * dy_a - (by1 - ay1) * dx_a) / denom
+        if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+            return 0.0
+
+    def _point_seg_dist(
+        px: float, py: float,
+        sx1: float, sy1: float, sx2: float, sy2: float,
+    ) -> float:
+        dx = sx2 - sx1
+        dy = sy2 - sy1
+        len_sq = dx * dx + dy * dy
+        if len_sq < 1e-12:
+            return math.sqrt((px - sx1) ** 2 + (py - sy1) ** 2)
+        t = max(0.0, min(1.0, ((px - sx1) * dx + (py - sy1) * dy) / len_sq))
+        cx = sx1 + t * dx
+        cy = sy1 + t * dy
+        return math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
+
+    return min(
+        _point_seg_dist(ax1, ay1, bx1, by1, bx2, by2),
+        _point_seg_dist(ax2, ay2, bx1, by1, bx2, by2),
+        _point_seg_dist(bx1, by1, ax1, ay1, ax2, ay2),
+        _point_seg_dist(bx2, by2, ax1, ay1, ax2, ay2),
+    )
+
+
+def _validate_track_clearances(
+    results: list[RouteResult],
+    grid: _Grid,
+    bcu_grid: _Grid,
+    grid_step_mm: float,
+    entry_by_name: dict[str, NetlistEntry],
+    route_fn: object,
+    footprints: list[Footprint],
+    net_clearances: dict[str, float] | None,
+    net_widths: dict[str, float] | None,
+    pad_positions_fn: object,
+) -> list[RouteResult]:
+    """Detect and fix cross-net clearance violations after routing.
+
+    Iterates all track pairs from different nets. If edge-to-edge distance
+    violates CLEARANCE_DEFAULT_MM, rips up the worse-scored net and re-routes.
+    """
+    from kicad_pipeline.constants import CLEARANCE_DEFAULT_MM
+
+    # Build per-net track lists
+    net_tracks: dict[int, list[Track]] = {}
+    net_result_idx: dict[int, int] = {}
+    for idx, r in enumerate(results):
+        if not r.routed:
+            continue
+        net_tracks[r.net_number] = list(r.tracks)
+        net_result_idx[r.net_number] = idx
+
+    # Check all cross-net pairs for clearance violations
+    violating_nets: set[int] = set()
+    net_nums = list(net_tracks.keys())
+    for i in range(len(net_nums)):
+        for j in range(i + 1, len(net_nums)):
+            n1, n2 = net_nums[i], net_nums[j]
+            for t1 in net_tracks[n1]:
+                for t2 in net_tracks[n2]:
+                    if t1.layer != t2.layer:
+                        continue
+                    hw1 = t1.width / 2.0
+                    hw2 = t2.width / 2.0
+                    min_gap = CLEARANCE_DEFAULT_MM
+                    edge_dist = _segment_min_distance(
+                        t1.start.x, t1.start.y, t1.end.x, t1.end.y,
+                        t2.start.x, t2.start.y, t2.end.x, t2.end.y,
+                    ) - hw1 - hw2
+                    if edge_dist < min_gap - 0.001:
+                        # Pick the net with worse score to rip up
+                        violating_nets.add(n1)
+                        violating_nets.add(n2)
+
+    if not violating_nets:
+        return results
+
+    import logging
+    log = logging.getLogger(__name__)
+    log.info("clearance validation: %d nets involved in violations", len(violating_nets))
+
+    # Score violating nets, rip up the worst half
+    scored: list[tuple[float, int]] = []
+    for net_num in violating_nets:
+        maybe_idx = net_result_idx.get(net_num)
+        if maybe_idx is None:
+            continue
+        idx = maybe_idx
+        r = results[idx]
+        entry = entry_by_name.get(r.net_name)
+        if entry is None:
+            continue
+        q = _score_route(r, pad_positions_fn(entry))  # type: ignore[operator]
+        scored.append((q.score, idx))
+
+    if not scored:
+        return results
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    n_ripup = max(1, len(scored) // 2)
+    ripup_indices = [idx for _, idx in scored[:n_ripup]]
+
+    # Unmark and rip up
+    for ri in ripup_indices:
+        rr = results[ri]
+        for trk in rr.tracks:
+            if trk.layer == "F.Cu":
+                _unmark_route_tracks(grid, [trk], grid_step_mm)
+            elif trk.layer == "B.Cu":
+                _unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
+
+    ripped_names: set[str] = set()
+    for ri in ripup_indices:
+        ripped_names.add(results[ri].net_name)
+    for ri in sorted(ripup_indices, reverse=True):
+        results.pop(ri)
+
+    for name in ripped_names:
+        retry_entry = entry_by_name.get(name)
+        if retry_entry is not None:
+            new_result = route_fn(retry_entry)  # type: ignore[operator]
+            results.append(new_result)
+
+    return results
 
 
 def _unmark_route_tracks(

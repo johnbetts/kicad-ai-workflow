@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from kicad_pipeline.models.pcb import Footprint, Pad, Point, Track, Via
 from kicad_pipeline.routing.grid_router import RouteResult
-from kicad_pipeline.routing.metrics import BoardRoutingMetrics, compute_board_metrics
+from kicad_pipeline.routing.metrics import (
+    BoardRoutingMetrics,
+    compute_board_cost,
+    compute_board_metrics,
+)
 
 
 def _make_footprint(ref: str, x: float, y: float) -> Footprint:
@@ -89,3 +93,42 @@ def test_compute_board_metrics_via_count() -> None:
     m = compute_board_metrics(results, fps)
     assert m.total_vias == 2
     assert m.max_vias_per_net == 2
+
+
+def test_compute_board_cost_formula() -> None:
+    """Board cost follows spec: total_length + 14*vias + 2.5*bends + 5*excess."""
+    results = (
+        RouteResult(
+            net_number=1, net_name="NET1",
+            tracks=(
+                Track(start=Point(0, 0), end=Point(10, 0),
+                      width=0.25, layer="F.Cu", net_number=1),
+            ),
+            vias=(
+                Via(position=Point(5, 0), drill=0.3, size=0.6,
+                    layers=("F.Cu", "B.Cu"), net_number=1),
+            ),
+            routed=True,
+        ),
+    )
+    fps = [_make_footprint("R1", 0, 0), _make_footprint("R2", 10, 0)]
+    m = compute_board_metrics(results, fps)
+    cost = compute_board_cost(m)
+    # 10mm length + 14*1 via + 0 bends + 0 ratio penalty (ratio=1.0 < 1.5)
+    assert cost > 0.0
+    assert cost == m.total_track_length_mm + 14.0 * m.total_vias
+
+
+def test_compute_board_cost_zero_nets() -> None:
+    """Board cost is 0 when no nets are routed."""
+
+    m = BoardRoutingMetrics(
+        total_track_length_mm=0.0,
+        total_vias=0,
+        nets_routed=0,
+        nets_failed=0,
+        overall_length_ratio=1.0,
+        max_vias_per_net=0,
+        per_net=(),
+    )
+    assert compute_board_cost(m) == 0.0

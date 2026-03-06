@@ -257,12 +257,18 @@ ZONE_MIN_THICKNESS_MM: float = 0.25
 RF_VIA_FENCE_SPACING_MM: float = 2.0
 """Target via-to-via spacing along an RF via fence perimeter (mm)."""
 
+GND_STITCH_SPACING_MM: float = 15.0
+"""Target spacing for GND stitching vias (mm), midpoint of 10-20mm range."""
+
+GND_STITCH_FP_CLEARANCE_MM: float = 2.0
+"""Minimum clearance from GND stitching vias to footprint bounding boxes (mm)."""
+
 # ---------------------------------------------------------------------------
 # Routing cost tuning
 # ---------------------------------------------------------------------------
 
-ROUTING_VIA_COST: float = 12.0
-"""Penalty per via transition (12x a single grid step).
+ROUTING_VIA_COST: float = 14.0
+"""Penalty per via transition (14x a single grid step).
 
 Higher values bias the router toward single-layer traces, using vias only
 when the F.Cu detour would be longer than the via penalty.

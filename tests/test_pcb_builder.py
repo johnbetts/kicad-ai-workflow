@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from kicad_pipeline.models.pcb import (
+    BoardOutline,
     Footprint,
     FootprintText,
     Pad,
     PCBDesign,
     Point,
+    Via,
     ZonePolygon,
 )
 from kicad_pipeline.models.requirements import (
@@ -30,6 +32,7 @@ from kicad_pipeline.pcb.builder import (
     _build_layer_table,
     _footprint_sexp,
     _generate_ic_drc_exclusions,
+    _make_gnd_stitching_vias,
     _make_rf_via_fence,
     _zone_sexp,
     build_pcb,
@@ -1046,19 +1049,21 @@ def test_build_pcb_no_vias_at_board_edge() -> None:
 
 
 def test_build_pcb_no_rf_fence_without_rf_module() -> None:
-    """RF via fence should not produce vias when no RF module is present."""
+    """RF via fence should not produce large-drill vias when no RF module is present."""
     from kicad_pipeline.pcb.builder import build_pcb
 
     req = _make_rpi_hat_requirements()
     design = build_pcb(req)
 
-    # Without RF module, no GND stitching or fence vias should exist.
-    # Only signal routing vias should be present.
+    # Without RF module, no RF fence vias (drill=0.6) should exist.
+    # GND stitching vias (drill=0.3) are expected.
     gnd_net = design.get_net_number("GND")
-    gnd_vias = [v for v in design.vias if v.net_number == gnd_net]
-    assert len(gnd_vias) == 0, (
-        f"Found {len(gnd_vias)} GND vias without RF module — "
-        "RF fence may be running without RF module"
+    rf_fence_vias = [
+        v for v in design.vias
+        if v.net_number == gnd_net and v.drill > 0.5
+    ]
+    assert len(rf_fence_vias) == 0, (
+        f"Found {len(rf_fence_vias)} RF fence GND vias without RF module"
     )
 
 
@@ -1245,3 +1250,69 @@ class TestGenerateICDrcExclusions:
         )
         exclusions = _generate_ic_drc_exclusions([fp])
         assert len(exclusions) == 0
+
+
+# ---------------------------------------------------------------------------
+# GND stitching vias
+# ---------------------------------------------------------------------------
+
+
+def test_gnd_stitching_vias_on_empty_board() -> None:
+    """GND stitching vias are placed on an empty 65x35mm board."""
+    board = BoardOutline(polygon=(
+        Point(0, 0), Point(65, 0), Point(65, 35), Point(0, 35), Point(0, 0),
+    ))
+    vias = _make_gnd_stitching_vias(
+        board, gnd_net_number=1,
+        footprints=(), existing_vias=(), existing_tracks=(),
+    )
+    # 65x35mm at 15mm spacing: 4 cols x 2-3 rows on an empty board
+    assert len(vias) >= 4
+    # All vias should be GND
+    for v in vias:
+        assert v.net_number == 1
+        assert v.drill == 0.3
+        assert v.size == 0.6
+
+
+def test_gnd_stitching_vias_avoid_footprints() -> None:
+    """GND stitching vias should avoid footprint areas."""
+    board = BoardOutline(polygon=(
+        Point(0, 0), Point(30, 0), Point(30, 30), Point(0, 30), Point(0, 0),
+    ))
+    # Place a large footprint in the center
+    big_fp = Footprint(
+        lib_id="Test:Test", ref="U1", value="IC",
+        position=Point(15, 15), rotation=0.0, layer="F.Cu",
+        pads=(
+            Pad(number="1", pad_type="smd", shape="rect",
+                position=Point(-5, -5), size_x=10, size_y=10,
+                layers=("F.Cu",)),
+        ),
+    )
+    vias = _make_gnd_stitching_vias(
+        board, gnd_net_number=1,
+        footprints=(big_fp,), existing_vias=(), existing_tracks=(),
+    )
+    # No via should be within 2mm of the footprint bbox
+    for v in vias:
+        # Footprint covers 10..20, 10..20 (position 15 + pad offset -5, size 10)
+        assert not (8.0 <= v.position.x <= 22.0 and 8.0 <= v.position.y <= 22.0)
+
+
+def test_gnd_stitching_vias_avoid_existing_vias() -> None:
+    """GND stitching vias should not overlap existing vias."""
+    board = BoardOutline(polygon=(
+        Point(0, 0), Point(30, 0), Point(30, 30), Point(0, 30), Point(0, 0),
+    ))
+    existing = (
+        Via(position=Point(15, 15), drill=0.3, size=0.6,
+            layers=("F.Cu", "B.Cu"), net_number=2),
+    )
+    vias = _make_gnd_stitching_vias(
+        board, gnd_net_number=1,
+        footprints=(), existing_vias=existing, existing_tracks=(),
+    )
+    for v in vias:
+        dist = abs(v.position.x - 15.0) + abs(v.position.y - 15.0)
+        assert dist >= 1.0

@@ -100,3 +100,24 @@ def compute_board_metrics(
         max_vias_per_net=max_vias,
         per_net=tuple(per_net),
     )
+
+
+def compute_board_cost(metrics: BoardRoutingMetrics) -> float:
+    """Compute aggregate board-level routing cost from metrics.
+
+    Uses the spec cost formula:
+        total_length + 14*total_vias + sum(2.5*bends) + sum(5*max(0,ratio-1.5))
+
+    Returns:
+        Board-level cost score (lower is better).
+    """
+    bend_penalty = sum(q.bend_count for q in metrics.per_net) * 2.5
+    ratio_penalty = sum(
+        5.0 * max(0.0, q.length_ratio - 1.5) for q in metrics.per_net
+    )
+    return (
+        metrics.total_track_length_mm
+        + 14.0 * metrics.total_vias
+        + bend_penalty
+        + ratio_penalty
+    )

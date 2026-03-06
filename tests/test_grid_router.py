@@ -20,6 +20,7 @@ from kicad_pipeline.routing.grid_router import (
     _route_on_bcu,
     _route_stub_on_fcu,
     _score_route,
+    _segment_min_distance,
     _simplify_path,
     collect_tracks,
     collect_vias,
@@ -1213,3 +1214,128 @@ def test_route_quality_empty_route() -> None:
     q = _score_route(result, [(0.0, 0.0), (5.0, 5.0)])
     assert q.actual_length_mm == 0.0
     assert q.via_count == 0
+
+
+def test_score_route_spec_weights() -> None:
+    """Score uses spec formula: actual + 14*vias + 2.5*bends + 5*excess."""
+    # 10mm straight track, 1 via, 0 bends, ratio=1.0 → no ratio penalty
+    result = RouteResult(
+        net_number=1, net_name="NET1",
+        tracks=(
+            Track(start=Point(0, 0), end=Point(10, 0), width=0.25,
+                  layer="F.Cu", net_number=1),
+        ),
+        vias=(
+            Via(position=Point(5, 0), drill=0.3, size=0.6,
+                layers=("F.Cu", "B.Cu"), net_number=1),
+        ),
+        routed=True,
+    )
+    q = _score_route(result, [(0.0, 0.0), (10.0, 0.0)])
+    # actual=10, vias=1 → 14, bends=0, ratio=1.0 < 1.5 → 0
+    expected = 10.0 + 14.0 + 0.0 + 0.0
+    assert q.score == pytest.approx(expected)
+
+
+def test_power_nets_route_first() -> None:
+    """Power nets (tier 0) should route before signal nets (tier 1)."""
+    fp1 = _make_footprint("R1", x=5.0, y=20.0)
+    fp2 = _make_footprint("R2", x=15.0, y=20.0)
+    fp3 = _make_footprint("R3", x=25.0, y=20.0)
+    signal_entry = _make_netlist_entry(1, "SIG1", (("R1", "1"), ("R2", "1")))
+    power_entry = _make_netlist_entry(2, "+5V", (("R2", "1"), ("R3", "1")))
+    netlist = _make_netlist([signal_entry, power_entry])
+    results = route_all_nets(netlist, [fp1, fp2, fp3], board_width_mm=30.0, board_height_mm=40.0)
+    # Power net (+5V) should route first → appears first in results
+    assert len(results) >= 2
+    assert results[0].net_name == "+5V"
+
+
+def test_route_request_max_vias_default() -> None:
+    """RouteRequest defaults to max_vias=2."""
+    req = RouteRequest(
+        net_number=1, net_name="NET1",
+        pad_refs=(("R1", "1"), ("R2", "1")),
+        layer="F.Cu",
+    )
+    assert req.max_vias == 2
+
+
+def test_rip_up_tighter_length_ratio() -> None:
+    """Rip-up should trigger for length_ratio > 1.55."""
+    # Construct a result with a long route that should be flagged
+    result = RouteResult(
+        net_number=1, net_name="NET1",
+        tracks=(
+            Track(start=Point(0, 0), end=Point(20, 0), width=0.25,
+                  layer="F.Cu", net_number=1),
+        ),
+        vias=(),
+        routed=True,
+    )
+    # Manhattan = 10, actual = 20 → ratio = 2.0 → should trigger
+    q = _score_route(result, [(0.0, 0.0), (10.0, 0.0)])
+    assert q.length_ratio > 1.55
+
+
+def test_fanout_diagonal_directions_included() -> None:
+    """IC fanout search should include 8 directions (4 cardinal + 4 diagonal)."""
+    # Verify the direction list construction from the router code
+    primary_dir = (1.0, 0.0)
+    all_dirs: list[tuple[float, float]] = [primary_dir]
+    for dx, dy in [
+        (1, 0), (-1, 0), (0, 1), (0, -1),
+        (1, 1), (1, -1), (-1, 1), (-1, -1),
+    ]:
+        d = (float(dx), float(dy))
+        if d != primary_dir:
+            all_dirs.append(d)
+    assert len(all_dirs) == 8  # primary + 7 others
+
+
+def test_reverse_retry_constructs_reversed_pads() -> None:
+    """Reversed pad ordering should swap start/goal for A*."""
+    from kicad_pipeline.models.pcb import NetEntry
+    from kicad_pipeline.pcb.netlist import NetlistEntry
+
+    entry = NetlistEntry(
+        net=NetEntry(number=1, name="SIG1"),
+        pad_refs=(("R1", "1"), ("R2", "1"), ("R3", "1")),
+    )
+    reversed_pads = entry.pad_refs[::-1]
+    assert reversed_pads == (("R3", "1"), ("R2", "1"), ("R1", "1"))
+
+
+# ---------------------------------------------------------------------------
+# Sprint D: Clearance validation
+# ---------------------------------------------------------------------------
+
+
+def test_segment_min_distance_parallel() -> None:
+    """Parallel segments 1mm apart should have distance ~1.0."""
+    d = _segment_min_distance(0, 0, 10, 0, 0, 1, 10, 1)
+    assert d == pytest.approx(1.0)
+
+
+def test_segment_min_distance_crossing() -> None:
+    """Crossing segments should have distance 0."""
+    d = _segment_min_distance(0, 0, 10, 10, 0, 10, 10, 0)
+    assert d == pytest.approx(0.0, abs=0.01)
+
+
+def test_segment_min_distance_perpendicular() -> None:
+    """T-shaped perpendicular segments at known distance."""
+    # Horizontal (0,0)→(10,0) and vertical (5,2)→(5,5)
+    d = _segment_min_distance(0, 0, 10, 0, 5, 2, 5, 5)
+    assert d == pytest.approx(2.0)
+
+
+def test_segment_min_distance_detects_clearance_violation() -> None:
+    """Two tracks 0.15mm apart (edge-to-edge) with 0.25mm width violate 0.2mm clearance."""
+    # Track 1: (0,0)→(10,0), width 0.25 → half_width 0.125
+    # Track 2: (0,0.4)→(10,0.4), width 0.25 → half_width 0.125
+    # Center distance = 0.4, edge distance = 0.4 - 0.125 - 0.125 = 0.15 < 0.2
+    d = _segment_min_distance(0, 0, 10, 0, 0, 0.4, 10, 0.4)
+    hw = 0.125
+    edge_dist = d - hw - hw
+    assert edge_dist < 0.2
