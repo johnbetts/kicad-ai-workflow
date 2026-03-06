@@ -913,7 +913,7 @@ class TestRPiHATPlacement:
         assert j3_edge[0].edge == BoardEdge.BOTTOM
 
     def test_rpi_hat_voltage_divider_near_target(self) -> None:
-        """Voltage divider resistors get NEAR constraints on RPi HAT."""
+        """Voltage divider resistors get NEAR constraints with pin targeting on RPi HAT."""
         from kicad_pipeline.pcb.board_templates import get_template
 
         req = self._make_hat_requirements()
@@ -926,8 +926,10 @@ class TestRPiHATPlacement:
         r2_near = [c for c in r2 if c.constraint_type == PlacementConstraintType.NEAR]
         assert len(r1_near) >= 1
         assert len(r2_near) >= 1
-        # Resistors should be placed near a relevant target (connector or switch)
-        assert r1_near[0].target_ref is not None
+        # Resistors should target SW1's specific pin on the shared net
+        assert r1_near[0].target_ref == "SW1"
+        assert r1_near[0].target_pin == "1"  # SW1 pin on AIN0 net
+        assert r1_near[0].max_distance_mm == 5.0
 
     def test_rpi_hat_full_placement_no_violations(self) -> None:
         """Full RPi HAT placement produces no violations."""

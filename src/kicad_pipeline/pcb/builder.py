@@ -1776,15 +1776,54 @@ def write_pcb(
 
 
 def _fill_zones(pcb_path: Path) -> None:
-    """Log that zone fill requires KiCad GUI.
+    """Fill copper zones using KiCad's Python API (``pcbnew``).
 
-    KiCad 9's ``kicad-cli`` does not expose a ``fill-zones`` subcommand.
-    Zone fill only happens when the PCB is opened in the KiCad GUI.
-    GND stitching vias will show as "dangling" and GND pads as
-    "unconnected" in CLI DRC until zones are filled interactively.
+    KiCad 9's ``kicad-cli`` does not expose a ``fill-zones`` subcommand,
+    but the bundled Python interpreter includes the ``pcbnew`` module.
+    This function shells out to KiCad's Python to load the board,
+    fill all zones, and save the result.
+
+    Falls back to a log warning if KiCad's Python is not available.
     """
-    log.info(
-        "Zone fill requires KiCad GUI; CLI DRC will report GND "
-        "stitching vias as dangling until the board is opened in KiCad. "
-        "(%s)", pcb_path,
+    import shutil
+    import subprocess
+
+    # Locate KiCad's bundled Python (macOS path)
+    kicad_python = shutil.which("python3", path="/Applications/KiCad/KiCad.app"
+                                "/Contents/Frameworks/Python.framework"
+                                "/Versions/Current/bin")
+    if kicad_python is None:
+        log.warning(
+            "Zone fill requires KiCad's bundled Python (pcbnew); "
+            "CLI DRC will report GND stitching vias as dangling until "
+            "zones are filled. (%s)", pcb_path,
+        )
+        return
+
+    script = (
+        "import pcbnew, sys\n"
+        f"board = pcbnew.LoadBoard({str(pcb_path)!r})\n"
+        "filler = pcbnew.ZONE_FILLER(board)\n"
+        "zones = board.Zones()\n"
+        "if zones.size() == 0:\n"
+        "    sys.exit(0)\n"
+        "filler.Fill(zones)\n"
+        f"pcbnew.SaveBoard({str(pcb_path)!r}, board)\n"
     )
+    try:
+        result = subprocess.run(
+            [kicad_python, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            log.info("Zone fill complete via pcbnew (%s)", pcb_path)
+        else:
+            log.warning(
+                "Zone fill failed (exit %d): %s",
+                result.returncode,
+                result.stderr.strip()[:200],
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        log.warning("Zone fill unavailable: %s", exc)

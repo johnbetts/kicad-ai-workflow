@@ -716,9 +716,11 @@ def solve_placement(
     ]
 
     # Build pin position lookup for pin-level NEAR targeting
+    # Compute offsets for any component that is a NEAR target (ICs, switches, etc.)
+    near_targets = {c.target_ref for _, c in near_refs if c.target_ref is not None}
     pin_offsets: dict[str, dict[str, tuple[float, float]]] = {}
     for comp in (requirements.components if requirements is not None else []):
-        if comp.ref.startswith("U"):
+        if comp.ref.startswith("U") or comp.ref in near_targets:
             # Estimate pin offsets from footprint dimensions
             w, h = footprint_sizes.get(comp.ref, (3.0, 3.0))
             comp_pins: dict[str, tuple[float, float]] = {}
@@ -758,8 +760,11 @@ def solve_placement(
                 )
         max_dist = c.max_distance_mm or 5.0
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
-        # Try positions around the target at increasing distances
-        for dist in (max_dist, max_dist * 1.5, max_dist * 2.0):
+        # Try positions around the target starting CLOSE and expanding outward
+        min_dist = max(w, h) * 0.75  # minimum clearance from target center
+        distances = [min_dist + (max_dist - min_dist) * i / 3 for i in range(4)]
+        distances.extend([max_dist * 1.5, max_dist * 2.0])
+        for dist in distances:
             for angle_deg in range(0, 360, 45):
                 angle = math.radians(angle_deg)
                 trial_x = target_pos.x + dist * math.cos(angle)
@@ -959,24 +964,27 @@ def rpi_hat_constraints(
                 priority=32,
             ))
 
-    # Pull-up/address resistors sharing nets with SW -> NEAR(SW)
+    # Pull-up/address resistors sharing nets with SW -> NEAR(SW, pin)
     if sw_ref is not None:
-        sw_nets: set[str] = set()
+        # Map net_name -> SW pin number for pin-level targeting
+        sw_net_pin: dict[str, str] = {}
         for net in requirements.nets:
-            if any(c.ref == sw_ref for c in net.connections):
-                sw_nets.add(net.name)
+            for c in net.connections:
+                if c.ref == sw_ref:
+                    sw_net_pin[net.name] = c.pin
         for comp in requirements.components:
             if not comp.ref.startswith("R"):
                 continue
             for net in requirements.nets:
-                if net.name not in sw_nets:
+                if net.name not in sw_net_pin:
                     continue
                 if any(c.ref == comp.ref for c in net.connections):
                     extra.append(PlacementConstraint(
                         ref=comp.ref,
                         constraint_type=PlacementConstraintType.NEAR,
                         target_ref=sw_ref,
-                        max_distance_mm=15.0,
+                        target_pin=sw_net_pin[net.name],
+                        max_distance_mm=5.0,
                         priority=28,
                     ))
                     break
@@ -1049,12 +1057,12 @@ def rpi_hat_constraints(
 
     # Merge: higher-priority extras override base
     merged: dict[str, PlacementConstraint] = {}
-    for c in base:
-        if c.ref not in merged or c.priority > merged[c.ref].priority:
-            merged[c.ref] = c
-    for c in extra:
-        if c.ref not in merged or c.priority > merged[c.ref].priority:
-            merged[c.ref] = c
+    for bc in base:
+        if bc.ref not in merged or bc.priority > merged[bc.ref].priority:
+            merged[bc.ref] = bc
+    for ec in extra:
+        if ec.ref not in merged or ec.priority > merged[ec.ref].priority:
+            merged[ec.ref] = ec
 
     return tuple(merged.values())
 
