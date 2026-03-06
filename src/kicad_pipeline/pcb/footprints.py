@@ -950,7 +950,7 @@ def make_mounting_hole(
     crtyd_size = drill_diameter + 2 * PCB_COURTYARD_CLEARANCE_MM
     graphics = _courtyard_rect(crtyd_size, crtyd_size)
     texts = (
-        _ref_text(ref, -(crtyd_size / 2.0 + 0.5), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(crtyd_size / 2.0 + 0.5), LAYER_F_FAB),
         _val_text("MountingHole", crtyd_size / 2.0 + 0.5, LAYER_F_FAB),
     )
     return Footprint(

@@ -2533,6 +2533,7 @@ def _validate_track_clearances(
         for ri in sorted(ripup_indices, reverse=True):
             results.pop(ri)
 
+        log.debug("clearance rip-up: %s", ", ".join(sorted(ripped_names)))
         for name in ripped_names:
             retry_entry = entry_by_name.get(name)
             if retry_entry is not None:
