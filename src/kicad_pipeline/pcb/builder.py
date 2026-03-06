@@ -1281,6 +1281,7 @@ def build_pcb(
             net_widths=widths,
             net_clearances=clearances,
             keepouts=tuple(keepouts),
+            corner_radius_mm=corner_radius_mm,
         )
         all_tracks = collect_tracks(route_results, routed_only=False)
         all_vias = collect_vias(route_results)

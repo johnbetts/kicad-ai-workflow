@@ -459,6 +459,7 @@ def _prepare_grid(
     keepouts: tuple[Keepout, ...] = (),
     net_clearances: dict[str, float] | None = None,
     net_widths: dict[str, float] | None = None,
+    corner_radius_mm: float = 0.0,
 ) -> None:
     """Mark pad positions, board-edge margins, and keepout zones on the grid.
 
@@ -493,6 +494,33 @@ def _prepare_grid(
             grid.mark(mc, row)                        # left edge
             grid.mark(grid.cols - 1 - mc, row)        # right edge
 
+    # Mark rounded-corner regions as occupied so tracks stay inside the arc
+    if corner_radius_mm > 0:
+        r_cells = math.ceil(
+            (corner_radius_mm + JLCPCB_BOARD_EDGE_CLEARANCE_MM) / grid.grid_step_mm,
+        )
+        # Four corner regions: check each cell's distance from the corner arc centre
+        corners = [
+            (r_cells, r_cells),                                    # top-left
+            (grid.cols - 1 - r_cells, r_cells),                    # top-right
+            (r_cells, grid.rows - 1 - r_cells),                    # bottom-left
+            (grid.cols - 1 - r_cells, grid.rows - 1 - r_cells),   # bottom-right
+        ]
+        for cx, cy in corners:
+            for dc in range(-r_cells, r_cells + 1):
+                for dr in range(-r_cells, r_cells + 1):
+                    cc, cr = cx + dc, cy + dr
+                    if 0 <= cc < grid.cols and 0 <= cr < grid.rows:
+                        # Cell is inside the corner region — mark if it's
+                        # outside the arc (farther from board centre than the
+                        # arc centre).
+                        dist = math.hypot(
+                            (cc - cx) * grid.grid_step_mm,
+                            (cr - cy) * grid.grid_step_mm,
+                        )
+                        if dist > corner_radius_mm:
+                            grid.mark(cc, cr)
+
     # Mark keepout zones as occupied (with extra margin for hole_clearance)
     for ko in keepouts:
         if not ko.polygon:
@@ -520,6 +548,7 @@ def _prepare_bcu_grid(
     keepouts: tuple[Keepout, ...] = (),
     net_clearances: dict[str, float] | None = None,
     net_widths: dict[str, float] | None = None,
+    corner_radius_mm: float = 0.0,
 ) -> _Grid:
     """Create and prepare a B.Cu routing grid.
 
@@ -553,6 +582,29 @@ def _prepare_bcu_grid(
         for mc in range(margin_cells):
             bcu.mark(mc, row)
             bcu.mark(bcu.cols - 1 - mc, row)
+
+    # Mark rounded-corner regions (same logic as F.Cu grid)
+    if corner_radius_mm > 0:
+        r_cells = math.ceil(
+            (corner_radius_mm + JLCPCB_BOARD_EDGE_CLEARANCE_MM) / bcu.grid_step_mm,
+        )
+        corners = [
+            (r_cells, r_cells),
+            (bcu.cols - 1 - r_cells, r_cells),
+            (r_cells, bcu.rows - 1 - r_cells),
+            (bcu.cols - 1 - r_cells, bcu.rows - 1 - r_cells),
+        ]
+        for cx, cy in corners:
+            for dc in range(-r_cells, r_cells + 1):
+                for dr in range(-r_cells, r_cells + 1):
+                    cc, cr = cx + dc, cy + dr
+                    if 0 <= cc < bcu.cols and 0 <= cr < bcu.rows:
+                        dist = math.hypot(
+                            (cc - cx) * bcu.grid_step_mm,
+                            (cr - cy) * bcu.grid_step_mm,
+                        )
+                        if dist > corner_radius_mm:
+                            bcu.mark(cc, cr)
 
     # Mark keepout zones (only those that block B.Cu)
     for ko in keepouts:
@@ -1105,6 +1157,7 @@ def _astar(
     goal_row: int,
     bend_penalty: float = ROUTING_BEND_PENALTY,
     use_congestion: bool = True,
+    diag: bool = False,
 ) -> list[tuple[int, int]] | None:
     """Find a path from start to goal on the grid using A*.
 
@@ -1145,6 +1198,13 @@ def _astar(
     g_score: dict[tuple[int, int], float] = {(start_col, start_row): 0.0}
     closed: set[tuple[int, int]] = set()
 
+    # Orthogonal + optional diagonal neighbors
+    neighbors: tuple[tuple[int, int], ...] = (
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+    )
+    if diag:
+        neighbors = (*neighbors, (-1, -1), (-1, 1), (1, -1), (1, 1))
+
     while open_heap:
         _f, g, col, row, prev_dc, prev_dr = heapq.heappop(open_heap)
         node = (col, row)
@@ -1163,8 +1223,7 @@ def _astar(
             path.reverse()
             return path
 
-        # 4-directional neighbors
-        for dc, dr in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        for dc, dr in neighbors:
             nc, nr = col + dc, row + dr
             if nc < 0 or nc >= grid.cols or nr < 0 or nr >= grid.rows:
                 continue
@@ -1178,8 +1237,14 @@ def _astar(
             if not (grid.is_free(nc, nr) or is_start_or_goal):
                 continue
 
+            # Diagonal moves cost sqrt(2), orthogonal cost 1
+            is_diag = (dc != 0 and dr != 0)
+            base = 1.4142 if is_diag else 1.0
+
             # Base step cost with optional congestion weighting
-            step_cost = grid.get_cost(nc, nr) if use_congestion else 1.0
+            step_cost = (
+                grid.get_cost(nc, nr) * base if use_congestion else base
+            )
 
             # Bend penalty: direction change from parent costs extra
             if (
@@ -1647,20 +1712,29 @@ def route_net(
                     best_dist = d
                     best_pi = pi
 
-            # Temporarily unmark just this IC pad's clearance
+            # Temporarily unmark ALL pads on this IC to create routing
+            # corridor (clearance zones between adjacent fine-pitch pads
+            # block A* on a coarse grid).
             ic_fp = fp_by_ref[ic_ref]
             ic_pad = next(p for p in ic_fp.pads if p.number == ic_pn)
             px, py = _pad_abs_pos(ic_fp, ic_pad)
             ic_hw, ic_hh = _pad_rotated_half_size(ic_fp, ic_pad)
-            _unmark_pad_area(
-                grid, px, py, ic_hw, ic_hh, pad_cl,
-            )
+            for _ip in ic_fp.pads:
+                _ipx, _ipy = _pad_abs_pos(ic_fp, _ip)
+                _iphw, _iphh = _pad_rotated_half_size(ic_fp, _ip)
+                _unmark_pad_area(grid, _ipx, _ipy, _iphw, _iphh, pad_cl)
             # Re-unmark source pad too (track exclusion may have blocked it)
             _unmark_pad_area(
                 grid, best_pi.x, best_pi.y,
                 best_pi.half_w, best_pi.half_h, pad_cl,
             )
+            # Remark non-IC other-net pads (but NOT the IC's own pads)
             _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
+            # Re-unmark IC pads again (remark_other_pads re-marks them)
+            for _ip in ic_fp.pads:
+                _ipx, _ipy = _pad_abs_pos(ic_fp, _ip)
+                _iphw, _iphh = _pad_rotated_half_size(ic_fp, _ip)
+                _unmark_pad_area(grid, _ipx, _ipy, _iphw, _iphh, pad_cl)
 
             start_col, start_row = grid.to_cell(best_pi.x, best_pi.y)
             goal_col, goal_row = grid.to_cell(ic_pi.x, ic_pi.y)
@@ -1753,7 +1827,7 @@ def route_net(
                 for fan_dx, fan_dy in all_dirs:
                     if fan_via_pos is not None:
                         break
-                    for step in range(4, 60):
+                    for step in range(4, 120):
                         cx = px + fan_dx * step * grid.grid_step_mm
                         cy = py + fan_dy * step * grid.grid_step_mm
                         col, row = grid.to_cell(cx, cy)
@@ -1810,6 +1884,7 @@ def route_net(
                     stub_path = _astar(
                         grid, ic_col, ic_row,
                         fan_via_col, fan_via_row,
+                        diag=True,
                     )
                     # Re-mark IC pads
                     for _rpx, _rpy, _rhw, _rhh in _ic_pads_unmarked:
@@ -1917,6 +1992,7 @@ def route_net(
                             grid,
                             fan_via_col, fan_via_row,
                             tgt_col, tgt_row,
+                            diag=True,
                         )
                         # Re-mark temporarily unmarked THT pads
                         for _rpx, _rpy, _rhw, _rhh in _tht_fp_unmarked:
@@ -2044,6 +2120,7 @@ def route_all_nets(
     net_widths: dict[str, float] | None = None,
     net_clearances: dict[str, float] | None = None,
     keepouts: tuple[Keepout, ...] = (),
+    corner_radius_mm: float = 0.0,
 ) -> tuple[RouteResult, ...]:
     """Route all nets in the netlist using a shared occupancy grid.
 
@@ -2128,12 +2205,14 @@ def route_all_nets(
     _prepare_grid(
         grid, list(footprints), keepouts=keepouts,
         net_clearances=net_clearances, net_widths=net_widths,
+        corner_radius_mm=corner_radius_mm,
     )
 
     # Create B.Cu grid for dual-layer fallback routing
     bcu_grid = _prepare_bcu_grid(
         grid, list(footprints), keepouts=keepouts,
         net_clearances=net_clearances, net_widths=net_widths,
+        corner_radius_mm=corner_radius_mm,
     )
 
     results: list[RouteResult] = []
