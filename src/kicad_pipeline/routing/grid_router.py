@@ -924,6 +924,10 @@ def _route_on_bcu(
                     fcu_grid, start_x, start_y, via_radius, clearance_mm,
                 )
                 if found_start is None:
+                    _log.debug(
+                        "B.Cu via search FAIL start (%.1f,%.1f) net=%s",
+                        start_x, start_y, net_name,
+                    )
                     return None
             _start_needs_astar_stub = True
             via_start_pos = found_start
@@ -947,6 +951,10 @@ def _route_on_bcu(
                     fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
                 )
                 if found_goal is None:
+                    _log.debug(
+                        "B.Cu via search FAIL goal (%.1f,%.1f) net=%s",
+                        goal_x, goal_y, net_name,
+                    )
                     return None
             _goal_needs_astar_stub = True
             via_goal_pos = found_goal
@@ -964,6 +972,11 @@ def _route_on_bcu(
     path = _astar(bcu_grid, sc, sr, gc, gr)
 
     if path is None:
+        _log.debug(
+            "B.Cu A* FAIL via (%.1f,%.1f)->(%.1f,%.1f) net=%s",
+            via_start_pos[0], via_start_pos[1],
+            via_goal_pos[0], via_goal_pos[1], net_name,
+        )
         # Restore original state
         if orig_start:
             bcu_grid.mark(sc, sr)
@@ -1639,6 +1652,12 @@ def route_net(
                 "MST %s: F.Cu FAIL, trying B.Cu (vias=%d/%d)",
                 request.net_name, len(all_vias), request.max_vias,
             )
+        if path is None and (bcu_grid is None or len(all_vias) + 2 > request.max_vias):
+            _log.debug(
+                "MST %s: B.Cu skip (bcu=%s, vias=%d/%d)",
+                request.net_name, bcu_grid is not None,
+                len(all_vias), request.max_vias,
+            )
         if (path is None and bcu_grid is not None
                 and len(all_vias) + 2 <= request.max_vias):
             # Temporarily unmark THT pads for BOTH endpoints and same-net
@@ -1671,15 +1690,22 @@ def route_net(
                 # Validate F.Cu stubs don't cross other-net pads
                 # Use original net_pad_set — THT sibling extension must
                 # not relax cross-pad validation.
-                if not _track_crosses_other_pads(
+                crosses = _track_crosses_other_pads(
                     bcu_tracks, request.net_number, footprints,
                     net_pad_set=_original_net_pad_set,
-                ):
+                )
+                _log.debug(
+                    "MST %s: B.Cu result=%d tracks, crosses=%s",
+                    request.net_name, len(bcu_tracks), crosses,
+                )
+                if not crosses:
                     all_tracks.extend(bcu_tracks)
                     all_vias.extend(bcu_vias)
                     routed_set.add(best_to)
                     unrouted.discard(best_to)
                     continue
+            else:
+                _log.debug("MST %s: B.Cu FAIL (None)", request.net_name)
 
         if path is None:
             # If either pad is on a dense IC, defer to IC final-leg
