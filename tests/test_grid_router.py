@@ -19,6 +19,7 @@ from kicad_pipeline.routing.grid_router import (
     _prepare_grid,
     _route_on_bcu,
     _route_stub_on_fcu,
+    _simplify_path,
     collect_tracks,
     collect_vias,
     route_all_nets,
@@ -1102,3 +1103,72 @@ def test_route_all_nets_no_gnd_via_param() -> None:
 
     sig = inspect.signature(route_all_nets)
     assert "gnd_via_positions" not in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Routing quality — bend penalty, simplification, congestion
+# ---------------------------------------------------------------------------
+
+
+def test_simplify_path_removes_colinear() -> None:
+    """Colinear intermediate points are removed by _simplify_path."""
+    path = [(0, 0), (1, 0), (2, 0), (3, 0), (3, 1), (3, 2)]
+    result = _simplify_path(path)
+    assert result == [(0, 0), (3, 0), (3, 2)]
+
+
+def test_simplify_path_preserves_bends() -> None:
+    """Non-colinear points are preserved."""
+    path = [(0, 0), (1, 0), (1, 1)]
+    result = _simplify_path(path)
+    assert result == [(0, 0), (1, 0), (1, 1)]
+
+
+def test_simplify_path_short() -> None:
+    """Paths with <=2 points are returned unchanged."""
+    assert _simplify_path([(0, 0)]) == [(0, 0)]
+    assert _simplify_path([(0, 0), (1, 0)]) == [(0, 0), (1, 0)]
+
+
+def test_grid_congestion_increases_cost() -> None:
+    """Cells with congestion return higher traversal cost."""
+    grid = _Grid.create(10.0, 10.0, 0.5)
+    col, row = 5, 5
+    assert grid.get_cost(col, row) == 1.0
+    # Add congestion
+    grid.add_congestion(col, row, radius=0)
+    assert grid.get_cost(col, row) > 1.0
+    # More congestion = higher cost
+    for _ in range(5):
+        grid.add_congestion(col, row, radius=0)
+    cost = grid.get_cost(col, row)
+    from kicad_pipeline.constants import ROUTING_CONGESTION_MAX
+    assert cost <= ROUTING_CONGESTION_MAX
+
+
+def test_astar_bend_penalty_reduces_bends() -> None:
+    """A* with bend penalty should produce paths with fewer direction changes."""
+    from kicad_pipeline.routing.grid_router import _astar
+
+    grid = _Grid.create(20.0, 20.0, 1.0)
+
+    # Route with and without bend penalty
+    path_no_bend = _astar(grid, 0, 0, 15, 10, bend_penalty=0.0)
+    path_with_bend = _astar(grid, 0, 0, 15, 10, bend_penalty=1.0)
+
+    assert path_no_bend is not None
+    assert path_with_bend is not None
+
+    def _count_bends(p: list[tuple[int, int]]) -> int:
+        bends = 0
+        for i in range(2, len(p)):
+            dc1 = p[i - 1][0] - p[i - 2][0]
+            dr1 = p[i - 1][1] - p[i - 2][1]
+            dc2 = p[i][0] - p[i - 1][0]
+            dr2 = p[i][1] - p[i - 1][1]
+            if dc1 != dc2 or dr1 != dr2:
+                bends += 1
+        return bends
+
+    # With bend penalty, path should have fewer or equal bends
+    assert _count_bends(path_with_bend) <= _count_bends(path_no_bend)

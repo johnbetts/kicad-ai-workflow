@@ -258,6 +258,29 @@ RF_VIA_FENCE_SPACING_MM: float = 2.0
 """Target via-to-via spacing along an RF via fence perimeter (mm)."""
 
 # ---------------------------------------------------------------------------
+# Routing cost tuning
+# ---------------------------------------------------------------------------
+
+ROUTING_VIA_COST: float = 12.0
+"""Penalty per via transition (12x a single grid step).
+
+Higher values bias the router toward single-layer traces, using vias only
+when the F.Cu detour would be longer than the via penalty.
+"""
+
+ROUTING_BEND_PENALTY: float = 0.3
+"""Extra cost added on each direction change during A* routing.
+
+Discourages staircase / zigzag paths, producing cleaner traces.
+"""
+
+ROUTING_CONGESTION_MAX: float = 4.0
+"""Maximum cost multiplier applied near existing routed tracks.
+
+Biases later nets away from congested areas, improving overall routability.
+"""
+
+# ---------------------------------------------------------------------------
 # Voltage-based clearance thresholds (IPC-2221 simplified)
 # ---------------------------------------------------------------------------
 

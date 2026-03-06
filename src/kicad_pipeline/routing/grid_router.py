@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 from kicad_pipeline.constants import (
     JLCPCB_BOARD_EDGE_CLEARANCE_MM,
     JLCPCB_MIN_TRACE_MM,
+    ROUTING_BEND_PENALTY,
+    ROUTING_CONGESTION_MAX,
     VIA_DIAMETER_SIGNAL_MM,
     VIA_DRILL_SIGNAL_MM,
 )
@@ -119,10 +121,13 @@ class _Grid:
     rows: int
     grid_step_mm: float
     _cells: list[list[bool]] = field(default_factory=list)  # _cells[col][row]
+    _congestion: list[list[int]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self._cells:
             self._cells = [[False] * self.rows for _ in range(self.cols)]
+        if not self._congestion:
+            self._congestion = [[0] * self.rows for _ in range(self.cols)]
 
     # ------------------------------------------------------------------
     # Class method constructor
@@ -189,6 +194,28 @@ class _Grid:
         for dc in range(-radius_cells, radius_cells + 1):
             for dr in range(-radius_cells, radius_cells + 1):
                 self.unmark(base_col + dc, base_row + dr)
+
+    def add_congestion(self, col: int, row: int, radius: int = 1) -> None:
+        """Increment congestion counter around a cell."""
+        for dc in range(-radius, radius + 1):
+            for dr in range(-radius, radius + 1):
+                nc, nr = col + dc, row + dr
+                if 0 <= nc < self.cols and 0 <= nr < self.rows:
+                    self._congestion[nc][nr] += 1
+
+    def get_cost(self, col: int, row: int) -> float:
+        """Return traversal cost for a cell accounting for congestion.
+
+        Base cost is 1.0; rises toward ``ROUTING_CONGESTION_MAX`` as
+        congestion increases (threshold = 4 overlapping tracks).
+        """
+        if col < 0 or col >= self.cols or row < 0 or row >= self.rows:
+            return 1.0
+        cong = self._congestion[col][row]
+        if cong <= 0:
+            return 1.0
+        ratio = min(1.0, cong / 4.0)
+        return 1.0 + ratio * (ROUTING_CONGESTION_MAX - 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -800,11 +827,12 @@ def _route_on_bcu(
             bcu_grid.mark(gc, gr)
         return None
 
-    # Build B.Cu tracks
+    # Build B.Cu tracks (simplified to remove colinear intermediates)
     tracks: list[Track] = []
-    for j in range(len(path) - 1):
-        x1, y1 = bcu_grid.to_mm(path[j][0], path[j][1])
-        x2, y2 = bcu_grid.to_mm(path[j + 1][0], path[j + 1][1])
+    sim_bcu = _simplify_path(path)
+    for j in range(len(sim_bcu) - 1):
+        x1, y1 = bcu_grid.to_mm(sim_bcu[j][0], sim_bcu[j][1])
+        x2, y2 = bcu_grid.to_mm(sim_bcu[j + 1][0], sim_bcu[j + 1][1])
         tracks.append(
             Track(
                 start=Point(x1, y1),
@@ -1008,6 +1036,8 @@ def _astar(
     start_row: int,
     goal_col: int,
     goal_row: int,
+    bend_penalty: float = ROUTING_BEND_PENALTY,
+    use_congestion: bool = True,
 ) -> list[tuple[int, int]] | None:
     """Find a path from start to goal on the grid using A*.
 
@@ -1016,31 +1046,40 @@ def _astar(
     - it equals the start (start_col, start_row), OR
     - it equals the goal (goal_col, goal_row).
 
+    When *bend_penalty* > 0, direction changes incur extra cost,
+    producing smoother paths with fewer bends.  When *use_congestion*
+    is True, cells near previously routed tracks cost more.
+
     Args:
         grid: The occupancy grid.
         start_col: Start column index.
         start_row: Start row index.
         goal_col: Goal column index.
         goal_row: Goal row index.
+        bend_penalty: Extra cost per direction change.
+        use_congestion: Apply congestion-based cost weighting.
 
     Returns:
         Ordered list of (col, row) cells from start to goal inclusive,
         or None if no path exists.
     """
 
-    def heuristic(c: int, r: int) -> int:
-        return abs(c - goal_col) + abs(r - goal_row)
+    def heuristic(c: int, r: int) -> float:
+        return float(abs(c - goal_col) + abs(r - goal_row))
 
-    # Priority queue: (f, g, col, row)
-    open_heap: list[tuple[float, float, int, int]] = []
-    heapq.heappush(open_heap, (float(heuristic(start_col, start_row)), 0.0, start_col, start_row))
+    # Priority queue: (f, g, col, row, prev_dc, prev_dr)
+    open_heap: list[tuple[float, float, int, int, int, int]] = []
+    heapq.heappush(open_heap, (
+        heuristic(start_col, start_row), 0.0,
+        start_col, start_row, 0, 0,
+    ))
 
     came_from: dict[tuple[int, int], tuple[int, int]] = {}
     g_score: dict[tuple[int, int], float] = {(start_col, start_row): 0.0}
     closed: set[tuple[int, int]] = set()
 
     while open_heap:
-        _f, g, col, row = heapq.heappop(open_heap)
+        _f, g, col, row, prev_dc, prev_dr = heapq.heappop(open_heap)
         node = (col, row)
 
         if node in closed:
@@ -1071,14 +1110,47 @@ def _astar(
             )
             if not (grid.is_free(nc, nr) or is_start_or_goal):
                 continue
-            tentative_g = g + 1.0
+
+            # Base step cost with optional congestion weighting
+            step_cost = grid.get_cost(nc, nr) if use_congestion else 1.0
+
+            # Bend penalty: direction change from parent costs extra
+            if (
+                bend_penalty > 0
+                and (prev_dc != 0 or prev_dr != 0)
+                and (dc != prev_dc or dr != prev_dr)
+            ):
+                step_cost += bend_penalty
+
+            tentative_g = g + step_cost
             if tentative_g < g_score.get(neighbor, math.inf):
                 g_score[neighbor] = tentative_g
                 came_from[neighbor] = node
                 f = tentative_g + heuristic(nc, nr)
-                heapq.heappush(open_heap, (f, tentative_g, nc, nr))
+                heapq.heappush(open_heap, (f, tentative_g, nc, nr, dc, dr))
 
     return None
+
+
+def _simplify_path(path: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Remove intermediate colinear points from a grid path.
+
+    Input:  [(0,0), (1,0), (2,0), (2,1)]
+    Output: [(0,0), (2,0), (2,1)]
+    """
+    if len(path) <= 2:
+        return path
+    result: list[tuple[int, int]] = [path[0]]
+    for i in range(1, len(path) - 1):
+        # Check if direction from prev to current == current to next
+        dc1 = path[i][0] - path[i - 1][0]
+        dr1 = path[i][1] - path[i - 1][1]
+        dc2 = path[i + 1][0] - path[i][0]
+        dr2 = path[i + 1][1] - path[i][1]
+        if dc1 != dc2 or dr1 != dr2:
+            result.append(path[i])
+    result.append(path[-1])
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1390,10 +1462,11 @@ def route_net(
                 reason=f"No path found for net {request.net_name}",
             )
 
-        # Convert path to Track segments
-        for j in range(len(path) - 1):
-            x1, y1 = grid.to_mm(path[j][0], path[j][1])
-            x2, y2 = grid.to_mm(path[j + 1][0], path[j + 1][1])
+        # Simplify path (remove colinear intermediates) for track output
+        simplified = _simplify_path(path)
+        for j in range(len(simplified) - 1):
+            x1, y1 = grid.to_mm(simplified[j][0], simplified[j][1])
+            x2, y2 = grid.to_mm(simplified[j + 1][0], simplified[j + 1][1])
             all_tracks.append(
                 Track(
                     start=Point(x1, y1),
@@ -1405,11 +1478,12 @@ def route_net(
                 )
             )
 
-        # Mark path cells with clearance (half track width + netclass clearance)
+        # Mark path cells with clearance + congestion
         for cell_col, cell_row in path:
             for dc in range(-excl_cells, excl_cells + 1):
                 for dr in range(-excl_cells, excl_cells + 1):
                     grid.mark(cell_col + dc, cell_row + dr)
+            grid.add_congestion(cell_col, cell_row, radius=2)
 
         # Re-unmark same-net pads so subsequent MST connections can still
         # reach unrouted target pads, then re-mark other-net pads to prevent
@@ -1485,9 +1559,10 @@ def route_net(
             ic_routed = False
             if path is not None:
                 fcu_segs: list[Track] = []
-                for j in range(len(path) - 1):
-                    x1, y1 = grid.to_mm(path[j][0], path[j][1])
-                    x2, y2 = grid.to_mm(path[j + 1][0], path[j + 1][1])
+                sim_path = _simplify_path(path)
+                for j in range(len(sim_path) - 1):
+                    x1, y1 = grid.to_mm(sim_path[j][0], sim_path[j][1])
+                    x2, y2 = grid.to_mm(sim_path[j + 1][0], sim_path[j + 1][1])
                     fcu_segs.append(
                         Track(
                             start=Point(x1, y1),
@@ -1632,14 +1707,15 @@ def route_net(
                     fan_stubs: list[Track] = []
                     stub_ok = False
                     if stub_path is not None:
-                        for _si in range(len(stub_path) - 1):
+                        sim_stub = _simplify_path(stub_path)
+                        for _si in range(len(sim_stub) - 1):
                             sx, sy = grid.to_mm(
-                                stub_path[_si][0],
-                                stub_path[_si][1],
+                                sim_stub[_si][0],
+                                sim_stub[_si][1],
                             )
                             ex, ey = grid.to_mm(
-                                stub_path[_si + 1][0],
-                                stub_path[_si + 1][1],
+                                sim_stub[_si + 1][0],
+                                sim_stub[_si + 1][1],
                             )
                             fan_stubs.append(Track(
                                 start=Point(sx, sy),
@@ -1737,14 +1813,15 @@ def route_net(
                             )
                         if fcu_fan_path is not None:
                             fan_segs: list[Track] = []
-                            for j in range(len(fcu_fan_path) - 1):
+                            sim_fan = _simplify_path(fcu_fan_path)
+                            for j in range(len(sim_fan) - 1):
                                 sx, sy = grid.to_mm(
-                                    fcu_fan_path[j][0],
-                                    fcu_fan_path[j][1],
+                                    sim_fan[j][0],
+                                    sim_fan[j][1],
                                 )
                                 ex, ey = grid.to_mm(
-                                    fcu_fan_path[j + 1][0],
-                                    fcu_fan_path[j + 1][1],
+                                    sim_fan[j + 1][0],
+                                    sim_fan[j + 1][1],
                                 )
                                 fan_segs.append(Track(
                                     start=Point(sx, sy),
