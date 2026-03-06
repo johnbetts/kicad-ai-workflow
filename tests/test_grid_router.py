@@ -15,6 +15,8 @@ from kicad_pipeline.routing.grid_router import (
     _keepout_blocks_layer,
     _mark_line_on_grid,
     _mark_via_on_fcu,
+    _mst_seed,
+    _PadInfo,
     _prepare_bcu_grid,
     _prepare_grid,
     _route_on_bcu,
@@ -1375,3 +1377,51 @@ def test_segment_min_distance_detects_clearance_violation() -> None:
     hw = 0.125
     edge_dist = d - hw - hw
     assert edge_dist < 0.2
+
+
+# ---------------------------------------------------------------------------
+# MST seed selection
+# ---------------------------------------------------------------------------
+
+
+def test_mst_seed_is_centroid_nearest() -> None:
+    """With 3 pads in an L-shape, seed is the pad closest to centroid."""
+    # L-shape: (0,0), (10,0), (10,10) -> centroid (6.67, 3.33)
+    # Manhattan distances to centroid: pad0=10.0, pad1=6.67, pad2=10.0
+    # Pad 1 at (10,0) is closest to centroid
+    pads = [
+        _PadInfo(x=0.0, y=0.0, half_w=0.5, half_h=0.5),
+        _PadInfo(x=10.0, y=0.0, half_w=0.5, half_h=0.5),
+        _PadInfo(x=10.0, y=10.0, half_w=0.5, half_h=0.5),
+    ]
+    assert _mst_seed(pads) == 1
+
+
+def test_mst_seed_single_pad() -> None:
+    """Single pad always returns index 0."""
+    pads = [_PadInfo(x=5.0, y=5.0, half_w=0.5, half_h=0.5)]
+    assert _mst_seed(pads) == 0
+
+
+def test_mst_seed_symmetric_picks_first_minimum() -> None:
+    """Two pads equidistant from centroid: picks lower index."""
+    pads = [
+        _PadInfo(x=0.0, y=0.0, half_w=0.5, half_h=0.5),
+        _PadInfo(x=10.0, y=0.0, half_w=0.5, half_h=0.5),
+    ]
+    # Centroid at (5,0), both at distance 5 -> min() picks index 0
+    assert _mst_seed(pads) == 0
+
+
+def test_mst_centroid_seed_not_always_zero() -> None:
+    """Centroid seed differs from index 0 for asymmetric pad layouts."""
+    # 4 pads clustered at right side, one outlier at left
+    pads = [
+        _PadInfo(x=0.0, y=0.0, half_w=0.5, half_h=0.5),   # outlier
+        _PadInfo(x=20.0, y=0.0, half_w=0.5, half_h=0.5),
+        _PadInfo(x=20.0, y=5.0, half_w=0.5, half_h=0.5),
+        _PadInfo(x=20.0, y=10.0, half_w=0.5, half_h=0.5),
+    ]
+    # Centroid at (15, 3.75). Pad 1 at (20,0) dist=8.75, pad 2 at (20,5) dist=6.25
+    seed = _mst_seed(pads)
+    assert seed != 0  # should pick one of the cluster pads, not the outlier

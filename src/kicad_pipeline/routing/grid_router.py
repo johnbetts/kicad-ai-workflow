@@ -1272,6 +1272,20 @@ def _resolve_pad_positions(
     return pads
 
 
+def _mst_seed(pad_infos: list[_PadInfo]) -> int:
+    """Pick the MST seed pad closest to the centroid of all pads.
+
+    Centroid-based seeding produces more balanced spanning trees with
+    shorter total path length compared to always starting at index 0.
+    """
+    if len(pad_infos) <= 1:
+        return 0
+    cx = sum(p.x for p in pad_infos) / len(pad_infos)
+    cy = sum(p.y for p in pad_infos) / len(pad_infos)
+    return min(range(len(pad_infos)),
+               key=lambda i: abs(pad_infos[i].x - cx) + abs(pad_infos[i].y - cy))
+
+
 def route_net(
     request: RouteRequest,
     footprints: list[Footprint],
@@ -1443,9 +1457,10 @@ def route_net(
         (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
     ) - 1)
 
-    # MST-style routing: always connect closest unrouted pad to routed set
-    routed_set: set[int] = {0}  # index into pad_infos
-    unrouted: set[int] = set(range(1, len(pad_infos)))
+    # MST-style routing: seed at pad closest to centroid for balanced trees
+    seed = _mst_seed(pad_infos)
+    routed_set: set[int] = {seed}
+    unrouted: set[int] = set(range(len(pad_infos))) - {seed}
 
     while unrouted:
         # Find the closest (routed, unrouted) pair by Manhattan distance

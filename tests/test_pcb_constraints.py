@@ -766,12 +766,21 @@ class TestSignalPathAnalysis:
         )
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
         constraints = constraints_from_requirements(req, None, sizes)
-        # Signal chain should create GROUP constraints at priority 15
+        # R1 gets NEAR(J1) and R2 gets NEAR(U1) at priority 25 (section 4b),
+        # which supersedes signal chain GROUP at priority 15. U1 (non-passive)
+        # still gets a chain GROUP. Verify NEAR constraints exist for passives
+        # and at least one chain GROUP remains.
+        r1_near = [c for c in constraints
+                   if c.ref == "R1" and c.constraint_type == PlacementConstraintType.NEAR]
+        r2_near = [c for c in constraints
+                   if c.ref == "R2" and c.constraint_type == PlacementConstraintType.NEAR]
+        assert len(r1_near) >= 1, "R1 should have NEAR constraint to J1"
+        assert len(r2_near) >= 1, "R2 should have NEAR constraint to U1"
         chain_groups = [
             c for c in constraints
             if c.constraint_type == PlacementConstraintType.GROUP and c.priority == 15
         ]
-        assert len(chain_groups) >= 2  # At least R1 and R2 in the chain
+        assert len(chain_groups) >= 1  # U1 still in the chain
 
 
 # ---------------------------------------------------------------------------
@@ -1369,16 +1378,22 @@ class TestNetBasedGrouping:
             ),
         )
         constraints = constraints_from_requirements(req, None, _sizes("R1", "R2", "C1", "U1"))
-        # R1, R2, C1, U1 should share a net group for AIN0
+        # Passives (R1, R2, C1) get NEAR(U1) at priority 25 (section 4b),
+        # which is more specific than net-based GROUP. Verify they're all
+        # placed near U1 via NEAR or share a net group.
+        near_u1 = [
+            c for c in constraints
+            if c.constraint_type == PlacementConstraintType.NEAR and c.target_ref == "U1"
+        ]
         ain0_groups = [
             c for c in constraints
             if c.constraint_type == PlacementConstraintType.GROUP
             and c.group_name is not None
             and c.group_name.startswith("_net_group_")
         ]
-        ain0_refs = {c.ref for c in ain0_groups}
-        # At least 3 of the 4 should be in the same net group
-        assert len(ain0_refs & {"R1", "R2", "C1", "U1"}) >= 3
+        # Passives get NEAR(U1) + possibly U1 in net group = all 4 co-located
+        all_constrained = {c.ref for c in near_u1} | {c.ref for c in ain0_groups}
+        assert len(all_constrained & {"R1", "R2", "C1", "U1"}) >= 3
 
     def test_power_nets_not_grouped(self) -> None:
         """Power/GND nets should NOT trigger net-based grouping."""
@@ -1562,3 +1577,142 @@ class TestLayoutPcbRpiHatDispatch:
         assert abs(result.positions["J1"].y - 3.502) < 0.01
         # U1 should also be placed
         assert "U1" in result.positions
+
+
+# ---------------------------------------------------------------------------
+# Passive NEAR constraints (section 4b)
+# ---------------------------------------------------------------------------
+
+
+def _make_switch_resistor_requirements() -> ProjectRequirements:
+    """Requirements with resistors sharing signal nets with a switch."""
+    return ProjectRequirements(
+        project=ProjectInfo(name="SwitchTest"),
+        features=(
+            FeatureBlock(
+                name="Buttons",
+                description="4 switches with pull-ups",
+                components=("SW1", "R9", "R10", "R11", "R12"),
+                nets=("BTN0", "BTN1", "BTN2", "BTN3"),
+                subcircuits=(),
+            ),
+        ),
+        components=(
+            Component(ref="SW1", value="Switch", footprint="SW_SPST_4Pin", pins=(
+                Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="BTN0"),
+                Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="BTN1"),
+                Pin(number="3", name="3", pin_type=PinType.PASSIVE, net="BTN2"),
+                Pin(number="4", name="4", pin_type=PinType.PASSIVE, net="BTN3"),
+            )),
+            Component(ref="R9", value="10k", footprint="R_0603", pins=(
+                Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="BTN0"),
+                Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="+3V3"),
+            )),
+            Component(ref="R10", value="10k", footprint="R_0603", pins=(
+                Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="BTN1"),
+                Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="+3V3"),
+            )),
+            Component(ref="R11", value="10k", footprint="R_0603", pins=(
+                Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="BTN2"),
+                Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="+3V3"),
+            )),
+            Component(ref="R12", value="10k", footprint="R_0603", pins=(
+                Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="BTN3"),
+                Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="+3V3"),
+            )),
+        ),
+        nets=(
+            Net(name="BTN0", connections=(
+                NetConnection(ref="SW1", pin="1"),
+                NetConnection(ref="R9", pin="1"),
+            )),
+            Net(name="BTN1", connections=(
+                NetConnection(ref="SW1", pin="2"),
+                NetConnection(ref="R10", pin="1"),
+            )),
+            Net(name="BTN2", connections=(
+                NetConnection(ref="SW1", pin="3"),
+                NetConnection(ref="R11", pin="1"),
+            )),
+            Net(name="BTN3", connections=(
+                NetConnection(ref="SW1", pin="4"),
+                NetConnection(ref="R12", pin="1"),
+            )),
+            Net(name="+3V3", connections=(
+                NetConnection(ref="R9", pin="2"),
+                NetConnection(ref="R10", pin="2"),
+                NetConnection(ref="R11", pin="2"),
+                NetConnection(ref="R12", pin="2"),
+            )),
+        ),
+    )
+
+
+class TestPassiveNearConstraints:
+    """Tests for section 4b: generic passive NEAR constraints."""
+
+    def test_passive_near_constraint_for_switch_resistors(self) -> None:
+        """Resistors sharing signal nets with SW get NEAR constraint."""
+        req = _make_switch_resistor_requirements()
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        constraints = constraints_from_requirements(req, None, sizes)
+        for ref in ("R9", "R10", "R11", "R12"):
+            near = [
+                c for c in constraints
+                if c.ref == ref and c.constraint_type == PlacementConstraintType.NEAR
+            ]
+            assert len(near) >= 1, f"{ref} should have NEAR constraint"
+            assert near[0].target_ref == "SW1"
+            assert near[0].max_distance_mm == pytest.approx(5.0)
+
+    def test_passive_near_skips_power_nets(self) -> None:
+        """Passive on power net only doesn't get NEAR to power pin."""
+        # R9 also has +3V3 on pin 2, but NEAR should come from BTN0, not +3V3
+        req = _make_switch_resistor_requirements()
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        constraints = constraints_from_requirements(req, None, sizes)
+        r9_near = [
+            c for c in constraints
+            if c.ref == "R9" and c.constraint_type == PlacementConstraintType.NEAR
+        ]
+        assert len(r9_near) >= 1
+        # target_pin should be from signal net BTN0 (SW1 pin "1"), not from +3V3
+        assert r9_near[0].target_ref == "SW1"
+        assert r9_near[0].target_pin == "1"
+
+    def test_passive_near_skips_already_constrained(self) -> None:
+        """Decoupling cap already NEAR from section 4 doesn't get duplicate."""
+        req = _make_requirements_for_constraints()
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        constraints = constraints_from_requirements(req, None, sizes)
+        c1_near = [
+            c for c in constraints
+            if c.ref == "C1" and c.constraint_type == PlacementConstraintType.NEAR
+        ]
+        # Should have exactly 1 NEAR (from decoupling, not duplicated by 4b)
+        assert len(c1_near) == 1
+        assert c1_near[0].max_distance_mm == pytest.approx(3.0)  # decoupling distance
+
+    def test_passive_near_pin_level_targeting(self) -> None:
+        """Passive NEAR constraint records the specific target pin."""
+        req = _make_switch_resistor_requirements()
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        constraints = constraints_from_requirements(req, None, sizes)
+        r10_near = [
+            c for c in constraints
+            if c.ref == "R10" and c.constraint_type == PlacementConstraintType.NEAR
+        ]
+        assert len(r10_near) >= 1
+        assert r10_near[0].target_pin == "2"  # SW1 pin 2 on BTN1
+
+    def test_passive_near_priority(self) -> None:
+        """Passive NEAR constraints have priority 25."""
+        req = _make_switch_resistor_requirements()
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        constraints = constraints_from_requirements(req, None, sizes)
+        r9_near = [
+            c for c in constraints
+            if c.ref == "R9" and c.constraint_type == PlacementConstraintType.NEAR
+        ]
+        assert len(r9_near) >= 1
+        assert r9_near[0].priority == 25

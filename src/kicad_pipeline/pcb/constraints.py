@@ -451,6 +451,45 @@ def constraints_from_requirements(
                     continue
                 break
 
+    # 4b. Passives sharing signal nets with ICs/switches/connectors -> NEAR
+    passive_prefixes = ("R", "C", "L", "D")
+    dominant_prefixes = ("U", "J", "P", "Q", "SW")
+    already_near = {c.ref for c in constraints
+                    if c.constraint_type == PlacementConstraintType.NEAR}
+
+    for comp in requirements.components:
+        ref_alpha = "".join(ch for ch in comp.ref if ch.isalpha())
+        if ref_alpha not in passive_prefixes:
+            continue
+        if comp.ref in already_near:
+            continue  # already has NEAR from decoupling cap logic (section 4)
+
+        # Find dominant component sharing a signal net
+        best_target: tuple[str, str] | None = None
+        for net in requirements.nets:
+            if _is_power_net(net.name):
+                continue
+            comp_in_net = any(c.ref == comp.ref for c in net.connections)
+            if not comp_in_net:
+                continue
+            for conn in net.connections:
+                conn_alpha = "".join(ch for ch in conn.ref if ch.isalpha())
+                if conn_alpha in dominant_prefixes and conn.ref != comp.ref:
+                    best_target = (conn.ref, conn.pin)
+                    break
+            if best_target:
+                break
+
+        if best_target:
+            constraints.append(PlacementConstraint(
+                ref=comp.ref,
+                constraint_type=PlacementConstraintType.NEAR,
+                target_ref=best_target[0],
+                target_pin=best_target[1],
+                max_distance_mm=5.0,
+                priority=25,
+            ))
+
     # 5. FeatureBlock -> GROUP
     for fb in requirements.features:
         if len(fb.components) > 1:
