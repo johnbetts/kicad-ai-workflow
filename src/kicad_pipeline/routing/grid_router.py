@@ -2450,88 +2450,94 @@ def _validate_track_clearances(
 
     Iterates all track pairs from different nets. If edge-to-edge distance
     violates CLEARANCE_DEFAULT_MM, rips up the worse-scored net and re-routes.
+    Repeats up to 3 times to resolve cascading violations.
     """
+    import logging
+
     from kicad_pipeline.constants import CLEARANCE_DEFAULT_MM
 
-    # Build per-net track lists
-    net_tracks: dict[int, list[Track]] = {}
-    net_result_idx: dict[int, int] = {}
-    for idx, r in enumerate(results):
-        if not r.routed:
-            continue
-        net_tracks[r.net_number] = list(r.tracks)
-        net_result_idx[r.net_number] = idx
-
-    # Check all cross-net pairs for clearance violations
-    violating_nets: set[int] = set()
-    net_nums = list(net_tracks.keys())
-    for i in range(len(net_nums)):
-        for j in range(i + 1, len(net_nums)):
-            n1, n2 = net_nums[i], net_nums[j]
-            for t1 in net_tracks[n1]:
-                for t2 in net_tracks[n2]:
-                    if t1.layer != t2.layer:
-                        continue
-                    hw1 = t1.width / 2.0
-                    hw2 = t2.width / 2.0
-                    min_gap = CLEARANCE_DEFAULT_MM
-                    edge_dist = _segment_min_distance(
-                        t1.start.x, t1.start.y, t1.end.x, t1.end.y,
-                        t2.start.x, t2.start.y, t2.end.x, t2.end.y,
-                    ) - hw1 - hw2
-                    if edge_dist < min_gap - 0.001:
-                        # Pick the net with worse score to rip up
-                        violating_nets.add(n1)
-                        violating_nets.add(n2)
-
-    if not violating_nets:
-        return results
-
-    import logging
     log = logging.getLogger(__name__)
-    log.info("clearance validation: %d nets involved in violations", len(violating_nets))
 
-    # Score violating nets, rip up the worst half
-    scored: list[tuple[float, int]] = []
-    for net_num in violating_nets:
-        maybe_idx = net_result_idx.get(net_num)
-        if maybe_idx is None:
-            continue
-        idx = maybe_idx
-        r = results[idx]
-        entry = entry_by_name.get(r.net_name)
-        if entry is None:
-            continue
-        q = _score_route(r, pad_positions_fn(entry))  # type: ignore[operator]
-        scored.append((q.score, idx))
+    for iteration in range(3):
+        # Build per-net track lists
+        net_tracks: dict[int, list[Track]] = {}
+        net_result_idx: dict[int, int] = {}
+        for idx, r in enumerate(results):
+            if not r.routed:
+                continue
+            net_tracks[r.net_number] = list(r.tracks)
+            net_result_idx[r.net_number] = idx
 
-    if not scored:
-        return results
+        # Check all cross-net pairs for clearance violations
+        violating_nets: set[int] = set()
+        net_nums = list(net_tracks.keys())
+        for i in range(len(net_nums)):
+            for j in range(i + 1, len(net_nums)):
+                n1, n2 = net_nums[i], net_nums[j]
+                for t1 in net_tracks[n1]:
+                    for t2 in net_tracks[n2]:
+                        if t1.layer != t2.layer:
+                            continue
+                        hw1 = t1.width / 2.0
+                        hw2 = t2.width / 2.0
+                        min_gap = CLEARANCE_DEFAULT_MM
+                        edge_dist = _segment_min_distance(
+                            t1.start.x, t1.start.y, t1.end.x, t1.end.y,
+                            t2.start.x, t2.start.y, t2.end.x, t2.end.y,
+                        ) - hw1 - hw2
+                        if edge_dist < min_gap - 0.001:
+                            violating_nets.add(n1)
+                            violating_nets.add(n2)
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    n_ripup = max(1, len(scored) // 2)
-    ripup_indices = [idx for _, idx in scored[:n_ripup]]
+        if not violating_nets:
+            return results
 
-    # Unmark and rip up
-    for ri in ripup_indices:
-        rr = results[ri]
-        for trk in rr.tracks:
-            if trk.layer == "F.Cu":
-                _unmark_route_tracks(grid, [trk], grid_step_mm)
-            elif trk.layer == "B.Cu":
-                _unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
+        log.info(
+            "clearance validation (iter %d): %d nets involved in violations",
+            iteration + 1, len(violating_nets),
+        )
 
-    ripped_names: set[str] = set()
-    for ri in ripup_indices:
-        ripped_names.add(results[ri].net_name)
-    for ri in sorted(ripup_indices, reverse=True):
-        results.pop(ri)
+        # Score violating nets, rip up the worst half
+        scored: list[tuple[float, int]] = []
+        for net_num in violating_nets:
+            maybe_idx = net_result_idx.get(net_num)
+            if maybe_idx is None:
+                continue
+            idx = maybe_idx
+            r = results[idx]
+            entry = entry_by_name.get(r.net_name)
+            if entry is None:
+                continue
+            q = _score_route(r, pad_positions_fn(entry))  # type: ignore[operator]
+            scored.append((q.score, idx))
 
-    for name in ripped_names:
-        retry_entry = entry_by_name.get(name)
-        if retry_entry is not None:
-            new_result = route_fn(retry_entry)  # type: ignore[operator]
-            results.append(new_result)
+        if not scored:
+            return results
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        n_ripup = max(1, len(scored) // 2)
+        ripup_indices = [idx for _, idx in scored[:n_ripup]]
+
+        # Unmark and rip up
+        for ri in ripup_indices:
+            rr = results[ri]
+            for trk in rr.tracks:
+                if trk.layer == "F.Cu":
+                    _unmark_route_tracks(grid, [trk], grid_step_mm)
+                elif trk.layer == "B.Cu":
+                    _unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
+
+        ripped_names: set[str] = set()
+        for ri in ripup_indices:
+            ripped_names.add(results[ri].net_name)
+        for ri in sorted(ripup_indices, reverse=True):
+            results.pop(ri)
+
+        for name in ripped_names:
+            retry_entry = entry_by_name.get(name)
+            if retry_entry is not None:
+                new_result = route_fn(retry_entry)  # type: ignore[operator]
+                results.append(new_result)
 
     return results
 
