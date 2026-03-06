@@ -1718,3 +1718,83 @@ class TestPassiveNearConstraints:
         ]
         assert len(r9_near) >= 1
         assert r9_near[0].priority == 25
+
+    def test_passive_placed_outward_from_pin(self) -> None:
+        """Passive placed outward from target pin, not at arbitrary angle."""
+        # SW1 fixed at center, R9 NEAR SW1 pin "5" (right side, bottom)
+        # Pin 5 is on the right side of SW1 (positive x offset).
+        # R9 should be placed further right (outward from center through pin).
+        req = ProjectRequirements(
+            project=ProjectInfo(name="OutwardTest"),
+            features=(),
+            components=(
+                Component(ref="SW1", value="DIP4", footprint="DIP-SW_4", pins=(
+                    Pin(number="5", name="5", pin_type=PinType.PASSIVE, net="SIG"),
+                )),
+                Component(ref="R9", value="10k", footprint="R_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                )),
+            ),
+            nets=(
+                Net(name="SIG", connections=(
+                    NetConnection(ref="SW1", pin="5"),
+                    NetConnection(ref="R9", pin="1"),
+                )),
+            ),
+        )
+        sw_constraints = (
+            PlacementConstraint(
+                ref="SW1", constraint_type=PlacementConstraintType.FIXED,
+                x=40.0, y=20.0, priority=100,
+            ),
+            PlacementConstraint(
+                ref="R9", constraint_type=PlacementConstraintType.NEAR,
+                target_ref="SW1", target_pin="5",
+                max_distance_mm=5.0, priority=28,
+            ),
+        )
+        sizes = {"SW1": (7.62, 10.16), "R9": (1.6, 0.8)}
+        result = solve_placement(
+            sw_constraints, _board(), sizes, requirements=req,
+        )
+        # R9 should be to the RIGHT of SW1 (x > SW1.x) since pin 5 is right side
+        assert result.positions["R9"].x > 40.0
+
+    def test_connector_cap_placed_inward(self) -> None:
+        """Cap NEAR an edge connector placed on board-interior side."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="InwardTest"),
+            features=(),
+            components=(
+                Component(ref="J2", value="Conn", footprint="TerminalBlock_1x02", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                )),
+                Component(ref="C2", value="100nF", footprint="C_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                )),
+            ),
+            nets=(
+                Net(name="SIG", connections=(
+                    NetConnection(ref="J2", pin="1"),
+                    NetConnection(ref="C2", pin="1"),
+                )),
+            ),
+        )
+        conn_constraints = (
+            # J2 on the LEFT edge at (5, 20)
+            PlacementConstraint(
+                ref="J2", constraint_type=PlacementConstraintType.EDGE,
+                edge=BoardEdge.LEFT, x=5.0, y=20.0, priority=50,
+            ),
+            PlacementConstraint(
+                ref="C2", constraint_type=PlacementConstraintType.NEAR,
+                target_ref="J2", target_pin="1",
+                max_distance_mm=5.0, priority=25,
+            ),
+        )
+        sizes = {"J2": (5.0, 10.0), "C2": (1.6, 0.8)}
+        result = solve_placement(
+            conn_constraints, _board(), sizes, requirements=req,
+        )
+        # C2 should be to the RIGHT of J2 (inward from edge)
+        assert result.positions["C2"].x > result.positions["J2"].x

@@ -744,8 +744,11 @@ def solve_placement(
         target = c.target_ref
         if target is None or target not in positions:
             return False
-        target_pos = positions[target]
-        # Pin-level targeting: search around specific pin position
+        target_center = positions[target]
+        pin_pos = target_center
+        preferred_angle: float | None = None
+
+        # Pin-level targeting: compute pin position AND outward direction
         if c.target_pin is not None and target in pin_offsets:
             pin_off = pin_offsets[target].get(c.target_pin)
             if pin_off is not None:
@@ -754,21 +757,39 @@ def solve_placement(
                 sin_r = math.sin(rot_rad)
                 rpx = pin_off[0] * cos_r - pin_off[1] * sin_r
                 rpy = pin_off[0] * sin_r + pin_off[1] * cos_r
-                target_pos = Point(
-                    x=target_pos.x + rpx,
-                    y=target_pos.y + rpy,
+                pin_pos = Point(
+                    x=target_center.x + rpx,
+                    y=target_center.y + rpy,
                 )
+                # Outward direction: from component center through pin
+                if abs(rpx) > 0.01 or abs(rpy) > 0.01:
+                    preferred_angle = math.atan2(rpy, rpx)
+                    # For edge-mounted targets (connectors), flip inward —
+                    # passives should be on the board-interior side
+                    target_constraint = ref_constraint.get(target)
+                    if (target_constraint is not None
+                            and target_constraint.constraint_type
+                            == PlacementConstraintType.EDGE):
+                        preferred_angle += math.pi  # flip 180°
+
         max_dist = c.max_distance_mm or 5.0
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
-        # Try positions around the target starting CLOSE and expanding outward
-        min_dist = max(w, h) * 0.75  # minimum clearance from target center
+
+        # Build angle search order: prefer outward from pin, then nearby
+        if preferred_angle is not None:
+            angles = [preferred_angle + math.radians(d)
+                      for d in (0, 45, -45, 90, -90, 135, -135, 180)]
+        else:
+            angles = [math.radians(a) for a in range(0, 360, 45)]
+
+        # Search from close to far, starting at the pin position
+        min_dist = max(w, h) * 0.75
         distances = [min_dist + (max_dist - min_dist) * i / 3 for i in range(4)]
         distances.extend([max_dist * 1.5, max_dist * 2.0])
         for dist in distances:
-            for angle_deg in range(0, 360, 45):
-                angle = math.radians(angle_deg)
-                trial_x = target_pos.x + dist * math.cos(angle)
-                trial_y = target_pos.y + dist * math.sin(angle)
+            for angle in angles:
+                trial_x = pin_pos.x + dist * math.cos(angle)
+                trial_y = pin_pos.y + dist * math.sin(angle)
                 rx = trial_x - origin_x - w / 2
                 ry = trial_y - origin_y - h / 2
                 if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
@@ -776,11 +797,13 @@ def solve_placement(
                     rotations[ref] = 0.0
                     gap = _placement_gap(w, h)
                     grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
-                    log.debug("NEAR(%s): %s at (%.1f, %.1f)", target, ref, trial_x, trial_y)
+                    log.debug("NEAR(%s.%s): %s at (%.1f, %.1f) angle=%.0f°",
+                              target, c.target_pin or "?", ref, trial_x, trial_y,
+                              math.degrees(angle))
                     return True
-        # Fallback: nearest free spot
+        # Fallback: nearest free spot to pin position
         free = grid.find_nearest_free(
-            target_pos.x - origin_x, target_pos.y - origin_y, w, h,
+            pin_pos.x - origin_x, pin_pos.y - origin_y, w, h,
         )
         if free is not None:
             positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
