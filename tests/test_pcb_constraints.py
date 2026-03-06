@@ -1760,6 +1760,161 @@ class TestPassiveNearConstraints:
         # R9 should be to the RIGHT of SW1 (x > SW1.x) since pin 5 is right side
         assert result.positions["R9"].x > 40.0
 
+    def test_dip_pin_offset_right_side_mirrored(self) -> None:
+        """Right-side DIP pins use mirrored Y-order (bottom-to-top)."""
+        # 8-pin DIP: pins 1-4 left (top→bottom), 5-8 right (bottom→top)
+        req = ProjectRequirements(
+            project=ProjectInfo(name="DIPMirrorTest"),
+            features=(),
+            components=(
+                Component(ref="SW1", value="DIP4", footprint="DIP-SW_4", pins=tuple(
+                    Pin(number=str(i), name=str(i), pin_type=PinType.PASSIVE, net=f"N{i}")
+                    for i in range(1, 9)
+                )),
+                Component(ref="R9", value="10k", footprint="R_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="N5"),
+                )),
+            ),
+            nets=tuple(
+                Net(name=f"N{i}", connections=(
+                    NetConnection(ref="SW1", pin=str(i)),
+                    NetConnection(ref="R9", pin="1")
+                    if i == 5
+                    else NetConnection(ref="SW1", pin=str(i)),
+                ))
+                for i in range(1, 9)
+            ),
+        )
+        w, h = 7.62, 10.16
+        constraints = (
+            PlacementConstraint(
+                ref="SW1", constraint_type=PlacementConstraintType.FIXED,
+                x=40.0, y=20.0, priority=100,
+            ),
+            PlacementConstraint(
+                ref="R9", constraint_type=PlacementConstraintType.NEAR,
+                target_ref="SW1", target_pin="5",
+                max_distance_mm=5.0, priority=28,
+            ),
+        )
+        sizes = {"SW1": (w, h), "R9": (1.6, 0.8)}
+        result = solve_placement(constraints, _board(), sizes, requirements=req)
+        # Pin 5 is first right-side pin → should be at bottom-right (+w/2, +h/2)
+        # So R9 should be placed below-right of SW1 center (y > 20)
+        r9 = result.positions["R9"]
+        assert r9.x > 40.0, f"R9 should be right of SW1, got x={r9.x}"
+        # Pin 8 (last right) should be at top-right — verify via R9 placement
+        # which targets pin 5 (bottom-right), so R9.y should be > SW1.y
+        assert r9.y > 20.0, f"R9 near pin 5 (bottom-right) should have y > 20, got y={r9.y}"
+
+    def test_edge_target_passive_placed_inward_without_pin(self) -> None:
+        """NEAR(J, no target_pin) + J has EDGE → passive placed toward board center."""
+        req = ProjectRequirements(
+            project=ProjectInfo(name="InwardNoPinTest"),
+            features=(),
+            components=(
+                Component(ref="J3", value="Conn", footprint="TerminalBlock_1x02", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                )),
+                Component(ref="C4", value="100nF", footprint="C_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SIG"),
+                )),
+            ),
+            nets=(
+                Net(name="SIG", connections=(
+                    NetConnection(ref="J3", pin="1"),
+                    NetConnection(ref="C4", pin="1"),
+                )),
+            ),
+        )
+        constraints = (
+            # J3 on LEFT edge
+            PlacementConstraint(
+                ref="J3", constraint_type=PlacementConstraintType.EDGE,
+                edge=BoardEdge.LEFT, x=5.0, y=20.0, priority=50,
+            ),
+            # C4 NEAR J3 but NO target_pin
+            PlacementConstraint(
+                ref="C4", constraint_type=PlacementConstraintType.NEAR,
+                target_ref="J3",
+                max_distance_mm=5.0, priority=25,
+            ),
+        )
+        sizes = {"J3": (5.0, 10.0), "C4": (1.6, 0.8)}
+        result = solve_placement(constraints, _board(), sizes, requirements=req)
+        # C4 should be to the RIGHT (inward) of J3 on the LEFT edge
+        assert result.positions["C4"].x > result.positions["J3"].x, (
+            f"C4 should be inward (right) of J3, got C4.x={result.positions['C4'].x} "
+            f"vs J3.x={result.positions['J3'].x}"
+        )
+
+    def test_channel_grouping_has_target_pin(self) -> None:
+        """Channel grouping constraints include target_pin from SENS net."""
+        from kicad_pipeline.pcb.board_templates import get_template
+
+        req = ProjectRequirements(
+            project=ProjectInfo(name="ChannelPinTest"),
+            features=(),
+            components=(
+                Component(ref="J1", value="PinHeader_2x20", footprint="PinHeader_2x20_P2.54mm",
+                          pins=()),
+                Component(ref="J2", value="Conn", footprint="TerminalBlock_1x02", pins=(
+                    Pin(number="1", name="SENS1", pin_type=PinType.PASSIVE, net="SENS1"),
+                )),
+                Component(ref="R1", value="100k", footprint="R_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="SENS1"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="AIN1"),
+                )),
+                Component(ref="R2", value="10k", footprint="R_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="AIN1"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+                )),
+                Component(ref="C1", value="100nF", footprint="C_0603", pins=(
+                    Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="AIN1"),
+                    Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+                )),
+                Component(ref="U1", value="ADS1115", footprint="MSOP-10", pins=(
+                    Pin(number="1", name="AIN1", pin_type=PinType.INPUT, net="AIN1"),
+                )),
+            ),
+            nets=(
+                Net(name="SENS1", connections=(
+                    NetConnection(ref="J2", pin="1"),
+                    NetConnection(ref="R1", pin="1"),
+                )),
+                Net(name="AIN1", connections=(
+                    NetConnection(ref="R1", pin="2"),
+                    NetConnection(ref="R2", pin="1"),
+                    NetConnection(ref="C1", pin="1"),
+                    NetConnection(ref="U1", pin="1"),
+                )),
+                Net(name="GND", connections=(
+                    NetConnection(ref="R2", pin="2"),
+                    NetConnection(ref="C1", pin="2"),
+                )),
+            ),
+        )
+        tmpl = get_template("RPI_HAT")
+        sizes = {"J1": (50.8, 5.08), "J2": (5.0, 10.0), "R1": (1.6, 0.8),
+                 "R2": (1.6, 0.8), "C1": (1.6, 0.8), "U1": (5.0, 3.0)}
+        result = rpi_hat_constraints(req, tmpl, sizes)
+        # Find channel grouping constraints for R1, R2, C1
+        channel_constraints = [
+            c for c in result
+            if c.ref in ("R1", "R2", "C1")
+            and c.constraint_type == PlacementConstraintType.NEAR
+            and c.target_ref == "J2"
+        ]
+        assert len(channel_constraints) >= 1, "Should have channel grouping constraints"
+        for cc in channel_constraints:
+            assert cc.target_pin == "1", (
+                f"Channel constraint for {cc.ref} should have target_pin='1', "
+                f"got {cc.target_pin}"
+            )
+            assert cc.max_distance_mm == 8.0, (
+                f"Channel constraint distance should be 8.0mm, got {cc.max_distance_mm}"
+            )
+
     def test_connector_cap_placed_inward(self) -> None:
         """Cap NEAR an edge connector placed on board-interior side."""
         req = ProjectRequirements(

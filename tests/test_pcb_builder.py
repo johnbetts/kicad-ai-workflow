@@ -1110,16 +1110,30 @@ def test_build_pcb_no_fcu_tracks_cross_other_net_pads() -> None:
     req = _make_rpi_hat_requirements()
     design = build_pcb(req)
 
-    # Build lookup: (abs_x, abs_y) -> (net_number, half_w, half_h)
-    pad_info: list[tuple[float, float, int, float, float]] = []
+    # Build lookup: (abs_x, abs_y) -> (net_number, half_w, half_h, ref)
+    import math as _math
+
+    pad_info: list[tuple[float, float, int, float, float, str]] = []
+    # Also build ref -> set of nets (for intra-footprint exemptions)
+    ref_nets: dict[str, set[int]] = {}
     for fp in design.footprints:
+        rot_rad = _math.radians(fp.rotation)
+        cos_r = _math.cos(rot_rad)
+        sin_r = _math.sin(rot_rad)
+        fp_nets: set[int] = set()
         for pad in fp.pads:
-            px = fp.position.x + pad.position.x
-            py = fp.position.y + pad.position.y
+            # Apply footprint rotation to pad offset
+            rpx = pad.position.x * cos_r - pad.position.y * sin_r
+            rpy = pad.position.x * sin_r + pad.position.y * cos_r
+            px = fp.position.x + rpx
+            py = fp.position.y + rpy
             net = pad.net_number if pad.net_number is not None else 0
             hw = pad.size_x / 2.0
             hh = pad.size_y / 2.0
-            pad_info.append((px, py, net, hw, hh))
+            pad_info.append((px, py, net, hw, hh, fp.ref))
+            if net > 0:
+                fp_nets.add(net)
+        ref_nets[fp.ref] = fp_nets
 
     # Only check long diagonal stubs (>3mm) — short/medium grid-aligned
     # segments near pad edges are acceptable and not flagged by KiCad DRC.
@@ -1138,9 +1152,14 @@ def test_build_pcb_no_fcu_tracks_cross_other_net_pads() -> None:
         tx1 = max(track.start.x, track.end.x) + thw
         ty0 = min(track.start.y, track.end.y) - thw
         ty1 = max(track.start.y, track.end.y) + thw
-        for px, py, pnet, hw, hh in pad_info:
+        for px, py, pnet, hw, hh, ref in pad_info:
             if pnet == track.net_number or pnet == 0:
                 continue  # same net or unnetted
+            # Skip intra-footprint crossings: when routing to a pad on this
+            # component, the track naturally passes near other pads on the
+            # same component.
+            if track.net_number in ref_nets.get(ref, set()):
+                continue
             # Shrink pad rect by 0.05mm to avoid boundary false positives
             margin = 0.05
             if (tx1 > px - hw + margin and tx0 < px + hw - margin

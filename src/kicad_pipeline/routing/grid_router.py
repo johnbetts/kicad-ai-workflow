@@ -1448,6 +1448,12 @@ def route_net(
     all_tracks: list[Track] = []
     all_vias: list[Via] = []
 
+    # Keep the original net pad set for cross-pad checks — the THT sibling
+    # unmark extends net_pad_set for grid purposes but should NOT relax
+    # the track-crosses-pad validation (e.g. J2 pad 2 = GND must stay
+    # flagged even though J2 pad 1 = SENS0 is same-net).
+    _original_net_pad_set = net_pad_set
+
     # Track exclusion: sized per-net to satisfy the netclass clearance.
     # Default (0.2mm) -> 1 cell (0.25mm), HVA (0.3mm) -> 2 cells (0.5mm).
     # Exclusion must account for track width: adjacent tracks at distance
@@ -1502,6 +1508,23 @@ def route_net(
             net_pad_set = frozenset(extended_pads)
             _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
+            # Validate: discard if THT-retry path crosses other-net pads
+            if path is not None:
+                trial = _simplify_path(path)
+                trial_segs = [
+                    Track(
+                        start=Point(*grid.to_mm(trial[k][0], trial[k][1])),
+                        end=Point(*grid.to_mm(trial[k + 1][0], trial[k + 1][1])),
+                        width=request.width_mm, layer="F.Cu",
+                        net_number=request.net_number, uuid="",
+                    )
+                    for k in range(len(trial) - 1)
+                ]
+                if _track_crosses_other_pads(
+                    trial_segs, request.net_number, footprints,
+                    net_pad_set=_original_net_pad_set,
+                ):
+                    path = None  # discard — fall through to B.Cu
 
         # B.Cu fallback: when F.Cu A* fails, try routing on B.Cu with vias.
         # Each B.Cu segment adds 2 vias — skip if that would exceed max_vias.
@@ -1516,9 +1539,11 @@ def route_net(
             if bcu_result is not None:
                 bcu_tracks, (via_s, via_g) = bcu_result
                 # Validate F.Cu stubs don't cross other-net pads
+                # Use original net_pad_set — THT sibling extension must
+                # not relax cross-pad validation.
                 if not _track_crosses_other_pads(
                     bcu_tracks, request.net_number, footprints,
-                    net_pad_set=net_pad_set,
+                    net_pad_set=_original_net_pad_set,
                 ):
                     all_tracks.extend(bcu_tracks)
                     all_vias.extend([via_s, via_g])
@@ -1660,7 +1685,7 @@ def route_net(
                 # Validate: discard if path crosses other-net pads
                 if not _track_crosses_other_pads(
                     fcu_segs, request.net_number, footprints,
-                    net_pad_set=net_pad_set,
+                    net_pad_set=_original_net_pad_set,
                 ):
                     all_tracks.extend(fcu_segs)
                     # Mark path with exclusion
@@ -1683,7 +1708,7 @@ def route_net(
                     # Validate F.Cu stubs don't cross other-net pads
                     if not _track_crosses_other_pads(
                         bcu_tracks, request.net_number, footprints,
-                        net_pad_set=net_pad_set,
+                        net_pad_set=_original_net_pad_set,
                     ):
                         all_tracks.extend(bcu_tracks)
                         all_vias.extend([via_s, via_g])
@@ -1815,7 +1840,7 @@ def route_net(
                         stub_ok = not _track_crosses_other_pads(
                             fan_stubs, request.net_number,
                             footprints,
-                            net_pad_set=net_pad_set,
+                            net_pad_set=_original_net_pad_set,
                         )
                     if stub_ok:
                         # Route from fanout via to the target pad.
@@ -1933,7 +1958,7 @@ def route_net(
                                 and _track_crosses_other_pads(
                                     fan_segs, request.net_number,
                                     footprints,
-                                    net_pad_set=net_pad_set,
+                                    net_pad_set=_original_net_pad_set,
                                 )
                             )
                             if not crosses:

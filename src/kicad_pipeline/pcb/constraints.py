@@ -729,7 +729,11 @@ def solve_placement(
                         for c in net.connections if c.ref == comp.ref]
             for pidx, pin in enumerate(sorted(set(pin_list))):
                 n_pins = max(1, len(set(pin_list)))
-                # Left-right distribution
+                # Single pin → center
+                if n_pins == 1:
+                    comp_pins[pin] = (0.0, 0.0)
+                    continue
+                # Left-right distribution (DIP convention)
                 if pidx < n_pins // 2:
                     denom_l = max(1, n_pins // 2 - 1)
                     y_off = -h / 2.0 + h * pidx / denom_l if n_pins > 2 else 0.0
@@ -737,7 +741,7 @@ def solve_placement(
                 else:
                     ridx = pidx - n_pins // 2
                     denom = max(1, n_pins - n_pins // 2 - 1)
-                    comp_pins[pin] = (w / 2.0, -h / 2.0 + h * ridx / denom if denom > 0 else 0.0)
+                    comp_pins[pin] = (w / 2.0, h / 2.0 - h * ridx / denom if denom > 0 else 0.0)
             pin_offsets[comp.ref] = comp_pins
 
     def _place_near(ref: str, c: PlacementConstraint) -> bool:
@@ -764,13 +768,23 @@ def solve_placement(
                 # Outward direction: from component center through pin
                 if abs(rpx) > 0.01 or abs(rpy) > 0.01:
                     preferred_angle = math.atan2(rpy, rpx)
-                    # For edge-mounted targets (connectors), flip inward —
-                    # passives should be on the board-interior side
-                    target_constraint = ref_constraint.get(target)
-                    if (target_constraint is not None
-                            and target_constraint.constraint_type
-                            == PlacementConstraintType.EDGE):
-                        preferred_angle += math.pi  # flip 180°
+
+        # For edge-mounted targets (connectors), flip inward —
+        # passives should be on the board-interior side
+        target_constraint = ref_constraint.get(target)
+        if (target_constraint is not None
+                and target_constraint.constraint_type
+                == PlacementConstraintType.EDGE):
+            if preferred_angle is not None:
+                preferred_angle += math.pi  # flip outward → inward
+            else:
+                # No pin info — point toward board center
+                board_cx = origin_x + board_w / 2.0
+                board_cy = origin_y + board_h / 2.0
+                preferred_angle = math.atan2(
+                    board_cy - target_center.y,
+                    board_cx - target_center.x,
+                )
 
         max_dist = c.max_distance_mm or 5.0
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
@@ -1050,6 +1064,12 @@ def rpi_hat_constraints(
             continue
         anchor_j = j_refs[0]
         top_r = r_refs[0]
+        # Capture the J terminal pin from this SENS net
+        j_pin: str | None = None
+        for conn in net.connections:
+            if conn.ref == anchor_j:
+                j_pin = conn.pin
+                break
         # Find the ADC-side net that top_r also connects to
         channel_parts = [top_r]
         for other_net in requirements.nets:
@@ -1073,7 +1093,8 @@ def rpi_hat_constraints(
                 ref=ref,
                 constraint_type=PlacementConstraintType.NEAR,
                 target_ref=anchor_j,
-                max_distance_mm=12.0,
+                target_pin=j_pin,
+                max_distance_mm=8.0,
                 priority=35,
             ))
             channel_assigned.add(ref)
