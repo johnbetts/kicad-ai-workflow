@@ -69,6 +69,7 @@ class PlacementConstraint:
     ref: str
     constraint_type: PlacementConstraintType
     target_ref: str | None = None
+    target_pin: str | None = None
     edge: BoardEdge | None = None
     x: float | None = None
     y: float | None = None

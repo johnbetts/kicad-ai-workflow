@@ -656,7 +656,7 @@ class TestDecouplingCapProximity:
         assert not _is_decoupling_cap("C5", "470uF")
 
     def test_decoupling_cap_near_constraint_distance(self) -> None:
-        """Decoupling caps are placed within 5mm of their IC."""
+        """Decoupling caps are placed within 3mm of their IC power pin."""
         req = _make_requirements_for_constraints()
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
         constraints = constraints_from_requirements(req, None, sizes)
@@ -665,7 +665,20 @@ class TestDecouplingCapProximity:
             if c.ref == "C1" and c.constraint_type == PlacementConstraintType.NEAR
         ]
         assert len(c1_near) >= 1
-        assert c1_near[0].max_distance_mm == pytest.approx(5.0)
+        assert c1_near[0].max_distance_mm == pytest.approx(3.0)
+
+    def test_decoupling_cap_has_target_pin(self) -> None:
+        """Decoupling cap NEAR constraint records the IC power pin."""
+        req = _make_requirements_for_constraints()
+        sizes = {c.ref: (3.0, 3.0) for c in req.components}
+        constraints = constraints_from_requirements(req, None, sizes)
+        c1_near = [
+            c for c in constraints
+            if c.ref == "C1" and c.constraint_type == PlacementConstraintType.NEAR
+        ]
+        assert len(c1_near) >= 1
+        # target_pin should be set to the specific IC pin on the shared power net
+        assert c1_near[0].target_pin is not None
 
 
 # ---------------------------------------------------------------------------

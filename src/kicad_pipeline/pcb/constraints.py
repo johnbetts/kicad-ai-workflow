@@ -428,10 +428,10 @@ def constraints_from_requirements(
                 priority=50,
             ))
 
-    # 4. Decoupling caps -> NEAR their associated IC
+    # 4. Decoupling caps -> NEAR their associated IC (pin-level targeting)
     for comp in requirements.components:
         if _is_decoupling_cap(comp.ref, comp.value):
-            # Find IC sharing a power net
+            # Find IC sharing a power net, record the specific IC pin
             for net in requirements.nets:
                 cap_in_net = any(c.ref == comp.ref for c in net.connections)
                 if not cap_in_net:
@@ -442,7 +442,8 @@ def constraints_from_requirements(
                             ref=comp.ref,
                             constraint_type=PlacementConstraintType.NEAR,
                             target_ref=conn.ref,
-                            max_distance_mm=5.0,
+                            target_pin=conn.pin,
+                            max_distance_mm=3.0,
                             priority=30,
                         ))
                         break
@@ -675,11 +676,47 @@ def solve_placement(
         if c.constraint_type == PlacementConstraintType.NEAR and ref not in positions
     ]
 
+    # Build pin position lookup for pin-level NEAR targeting
+    pin_offsets: dict[str, dict[str, tuple[float, float]]] = {}
+    for comp in (requirements.components if requirements is not None else []):
+        if comp.ref.startswith("U"):
+            # Estimate pin offsets from footprint dimensions
+            w, h = footprint_sizes.get(comp.ref, (3.0, 3.0))
+            comp_pins: dict[str, tuple[float, float]] = {}
+            # Simple heuristic: distribute pins around perimeter
+            pin_list = [c.pin for net in (requirements.nets if requirements is not None else [])
+                        for c in net.connections if c.ref == comp.ref]
+            for pidx, pin in enumerate(sorted(set(pin_list))):
+                n_pins = max(1, len(set(pin_list)))
+                # Left-right distribution
+                if pidx < n_pins // 2:
+                    denom_l = max(1, n_pins // 2 - 1)
+                    y_off = -h / 2.0 + h * pidx / denom_l if n_pins > 2 else 0.0
+                    comp_pins[pin] = (-w / 2.0, y_off)
+                else:
+                    ridx = pidx - n_pins // 2
+                    denom = max(1, n_pins - n_pins // 2 - 1)
+                    comp_pins[pin] = (w / 2.0, -h / 2.0 + h * ridx / denom if denom > 0 else 0.0)
+            pin_offsets[comp.ref] = comp_pins
+
     def _place_near(ref: str, c: PlacementConstraint) -> bool:
         target = c.target_ref
         if target is None or target not in positions:
             return False
         target_pos = positions[target]
+        # Pin-level targeting: search around specific pin position
+        if c.target_pin is not None and target in pin_offsets:
+            pin_off = pin_offsets[target].get(c.target_pin)
+            if pin_off is not None:
+                rot_rad = math.radians(rotations.get(target, 0.0))
+                cos_r = math.cos(rot_rad)
+                sin_r = math.sin(rot_rad)
+                rpx = pin_off[0] * cos_r - pin_off[1] * sin_r
+                rpy = pin_off[0] * sin_r + pin_off[1] * cos_r
+                target_pos = Point(
+                    x=target_pos.x + rpx,
+                    y=target_pos.y + rpy,
+                )
         max_dist = c.max_distance_mm or 5.0
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
         # Try positions around the target at increasing distances
@@ -722,7 +759,20 @@ def solve_placement(
         if not deferred:
             break
 
-    # 4. Place GROUP
+    # 4. Place GROUP (sorted by connectivity degree — highest first for
+    # central positions and shorter average routes)
+    def _connectivity_degree(ref: str) -> int:
+        """Count non-power signal nets this component participates in."""
+        if requirements is None:
+            return 0
+        count = 0
+        for net in requirements.nets:
+            if _is_power_net(net.name):
+                continue
+            if any(c.ref == ref for c in net.connections):
+                count += 1
+        return count
+
     group_members: dict[str, list[str]] = {}
     for ref, c in ref_constraint.items():
         if c.constraint_type == PlacementConstraintType.GROUP and ref not in positions:
@@ -730,6 +780,8 @@ def solve_placement(
             group_members.setdefault(gname, []).append(ref)
 
     for gname, refs in group_members.items():
+        # Sort by connectivity (highest first) for better central placement
+        refs.sort(key=_connectivity_degree, reverse=True)
         # Compute uniform cell size for the group
         item_w = max(footprint_sizes.get(r, (3.0, 3.0))[0] + 2.0 for r in refs)
         max_h = max(footprint_sizes.get(r, (3.0, 3.0))[1] for r in refs) + 2.0
@@ -770,8 +822,11 @@ def solve_placement(
                 gname, ref, positions[ref].x, positions[ref].y, row, col,
             )
 
-    # 5. Place any remaining unplaced refs
-    unplaced = [ref for ref in all_refs if ref not in positions]
+    # 5. Place any remaining unplaced refs (highest connectivity first)
+    unplaced = sorted(
+        [ref for ref in all_refs if ref not in positions],
+        key=_connectivity_degree, reverse=True,
+    )
     for ref in unplaced:
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
         free = grid.find_nearest_free(board_w / 2.0, board_h / 2.0, w, h)
