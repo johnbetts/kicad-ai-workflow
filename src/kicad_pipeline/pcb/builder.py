@@ -1028,6 +1028,19 @@ def build_pcb(
             len(all_tracks), routed, unrouted,
         )
 
+        # Log board-level routing quality metrics
+        from kicad_pipeline.routing.metrics import compute_board_metrics
+
+        metrics = compute_board_metrics(route_results, final_footprints)
+        log.info(
+            "build_pcb: routing %.1fmm total (%.2fx ideal), %d vias, %d/%d nets",
+            metrics.total_track_length_mm,
+            metrics.overall_length_ratio,
+            metrics.total_vias,
+            metrics.nets_routed,
+            metrics.nets_routed + metrics.nets_failed,
+        )
+
         # Note: GND pads on F.Cu connect to the B.Cu GND pour through
         # the zone fill (applied when opening in KiCad).  THT pads already
         # have plated holes.  SMD GND pads may show as "unconnected" in
