@@ -762,6 +762,26 @@ def _route_on_bcu(
     sc, sr = bcu_grid.to_cell(via_start_pos[0], via_start_pos[1])
     gc, gr = bcu_grid.to_cell(via_goal_pos[0], via_goal_pos[1])
 
+    # Pre-check: verify via positions have adequate clearance from
+    # existing B.Cu obstacles (other nets' tracks/vias).  A via placed
+    # in another net's exclusion zone causes clearance violations even
+    # though A* can reach it (because we unmark the goal cell).
+    via_excl_check = math.ceil((via_radius + clearance_mm) / bcu_grid.grid_step_mm)
+    for vc, vr in ((sc, sr), (gc, gr)):
+        blocked_count = 0
+        total_count = 0
+        for dc in range(-via_excl_check, via_excl_check + 1):
+            for dr in range(-via_excl_check, via_excl_check + 1):
+                if dc == 0 and dr == 0:
+                    continue  # skip center (always pad-marked)
+                total_count += 1
+                if not bcu_grid.is_free(vc + dc, vr + dr):
+                    blocked_count += 1
+        # If more than 40% of surrounding cells are occupied, another
+        # net's tracks/vias are too close for safe via placement.
+        if total_count > 0 and blocked_count > total_count * 0.4:
+            return None
+
     # Temporarily unmark start/goal so A* can enter them
     orig_start = not bcu_grid.is_free(sc, sr)
     orig_goal = not bcu_grid.is_free(gc, gr)
@@ -1531,8 +1551,9 @@ def route_net(
                         cx = px
                         cy = py + fan_dir * step * grid.grid_step_mm
                     col, row = grid.to_cell(cx, cy)
-                    # Check via footprint is free (use global
-                    # pad clearance to account for other nets' widths)
+                    # Check via footprint is free on BOTH layers
+                    # (via spans F.Cu → B.Cu) using global pad
+                    # clearance to account for other nets' widths.
                     clear = True
                     r_cells = max(1, round(
                         (via_radius + pad_cl)
@@ -1541,6 +1562,11 @@ def route_net(
                     for dc in range(-r_cells, r_cells + 1):
                         for dr in range(-r_cells, r_cells + 1):
                             if not grid.is_free(col + dc, row + dr):
+                                clear = False
+                                break
+                            if (bcu_grid is not None
+                                    and not bcu_grid.is_free(
+                                        col + dc, row + dr)):
                                 clear = False
                                 break
                         if not clear:
@@ -1757,11 +1783,11 @@ def route_net(
                                             excl_cells + 1,
                                         ):
                                             grid.mark(cc + dc, cr + dr)
-                                # Mark fanout via + stub on F.Cu
-                                # Use global pad clearance (accounts for
-                                # half-width of other nets' tracks) so
-                                # subsequent fanout stubs maintain adequate
-                                # spacing from this via.
+                                # Mark fanout via on BOTH F.Cu and B.Cu
+                                # grids.  Use global pad clearance (accounts
+                                # for half-width of other nets' tracks) so
+                                # subsequent routes maintain adequate spacing
+                                # from this via on either layer.
                                 _mark_pad_area(
                                     grid,
                                     fan_via_pos[0],
@@ -1770,6 +1796,15 @@ def route_net(
                                     VIA_DIAMETER_SIGNAL_MM / 2.0,
                                     pad_cl,
                                 )
+                                if bcu_grid is not None:
+                                    _mark_pad_area(
+                                        bcu_grid,
+                                        fan_via_pos[0],
+                                        fan_via_pos[1],
+                                        VIA_DIAMETER_SIGNAL_MM / 2.0,
+                                        VIA_DIAMETER_SIGNAL_MM / 2.0,
+                                        pad_cl,
+                                    )
                                 for _fs in fan_stubs:
                                     _mark_line_on_grid(
                                         grid,
