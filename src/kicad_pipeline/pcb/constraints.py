@@ -429,10 +429,13 @@ def constraints_from_requirements(
             ))
 
     # 4. Decoupling caps -> NEAR their associated IC (pin-level targeting)
+    _gnd_names = {"GND", "AGND", "DGND", "VSS", "GNDA", "GNDD"}
     for comp in requirements.components:
         if _is_decoupling_cap(comp.ref, comp.value):
-            # Find IC sharing a power net, record the specific IC pin
+            # Find IC sharing a POWER net (skip GND — target the supply pin)
             for net in requirements.nets:
+                if net.name.upper() in _gnd_names:
+                    continue  # skip ground nets
                 cap_in_net = any(c.ref == comp.ref for c in net.connections)
                 if not cap_in_net:
                     continue
@@ -443,7 +446,8 @@ def constraints_from_requirements(
                             constraint_type=PlacementConstraintType.NEAR,
                             target_ref=conn.ref,
                             target_pin=conn.pin,
-                            max_distance_mm=3.0,
+                            max_distance_mm=5.0,
+                            min_distance_mm=3.0,
                             priority=30,
                         ))
                         break
@@ -787,6 +791,7 @@ def solve_placement(
                 )
 
         max_dist = c.max_distance_mm or 5.0
+        enforce_min = c.min_distance_mm or 0.0
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
 
         # Build angle search order: prefer outward from pin, then nearby
@@ -797,7 +802,7 @@ def solve_placement(
             angles = [math.radians(a) for a in range(0, 360, 45)]
 
         # Search from close to far, starting at the pin position
-        min_dist = max(w, h) * 0.75
+        min_dist = max(max(w, h) * 0.75, enforce_min)
         distances = [min_dist + (max_dist - min_dist) * i / 3 for i in range(4)]
         distances.extend([max_dist * 1.5, max_dist * 2.0])
         for dist in distances:
@@ -808,22 +813,44 @@ def solve_placement(
                 ry = trial_y - origin_y - h / 2
                 if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
                     positions[ref] = Point(x=trial_x, y=trial_y)
-                    rotations[ref] = 0.0
+                    # Set initial rotation: align passive toward target pin
+                    if preferred_angle is not None and _is_two_pin_passive(ref):
+                        angle_deg = math.degrees(preferred_angle) % 360
+                        # Snap to nearest 90° — pad axis should point toward pin
+                        rotations[ref] = round(angle_deg / 90.0) * 90.0 % 360.0
+                    else:
+                        rotations[ref] = 0.0
                     gap = _placement_gap(w, h)
                     grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
                     log.debug("NEAR(%s.%s): %s at (%.1f, %.1f) angle=%.0f°",
                               target, c.target_pin or "?", ref, trial_x, trial_y,
                               math.degrees(angle))
                     return True
-        # Fallback: nearest free spot to pin position
+        # Fallback: nearest free spot to pin position (respecting min_distance)
         free = grid.find_nearest_free(
             pin_pos.x - origin_x, pin_pos.y - origin_y, w, h,
         )
         if free is not None:
-            positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
+            fx = free[0] + origin_x
+            fy = free[1] + origin_y
+            # Enforce min_distance from target center (avoid courtyard overlap)
+            if enforce_min > 0:
+                dist_to_target = math.hypot(
+                    fx - target_center.x, fy - target_center.y,
+                )
+                if dist_to_target < enforce_min:
+                    # Push outward from target center
+                    angle = math.atan2(
+                        fy - target_center.y, fx - target_center.x,
+                    )
+                    fx = target_center.x + enforce_min * math.cos(angle)
+                    fy = target_center.y + enforce_min * math.sin(angle)
+            positions[ref] = Point(x=fx, y=fy)
             rotations[ref] = 0.0
             gap = _placement_gap(w, h)
-            grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
+            gx = fx - origin_x - w / 2
+            gy = fy - origin_y - h / 2
+            grid.mark_rect(gx - gap, gy - gap, w + 2 * gap, h + 2 * gap)
             return True
         violations.append(f"Could not place {ref} near {target}")
         return False
@@ -922,11 +949,14 @@ def solve_placement(
             rotations[ref] = 0.0
 
     # 6. Optimize rotations when requirements are available
+    # Two iterations: neighbours' rotations affect each other, so a second
+    # pass picks up improvements missed when neighbours hadn't settled yet.
     if requirements is not None:
-        rotations = optimize_rotations(
-            positions, rotations, requirements,
-            footprint_sizes=footprint_sizes,
-        )
+        for _ in range(2):
+            rotations = optimize_rotations(
+                positions, rotations, requirements,
+                footprint_sizes=footprint_sizes,
+            )
 
     return PlacementResult(
         positions=positions,

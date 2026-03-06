@@ -235,9 +235,9 @@ def _silk_side_marks(
     """
     hw = body_w / 2.0
     if pad_edge_x is not None:
-        # Push silk marks 0.25mm outside the pad edge (> half silk line width)
-        hw = max(hw, pad_edge_x + 0.25)
-    hh = body_h / 2.0 * 0.6  # 60 % of half-height
+        # Push silk marks outside pad edge + mask expansion + half silk width
+        hw = max(hw, pad_edge_x + 0.35)
+    hh = body_h / 2.0 * 0.45  # 45 % of half-height (avoid pad mask)
     layer = LAYER_F_SILKSCREEN
     w = PCB_SILKSCREEN_LINE_WIDTH_MM
     return (
@@ -296,12 +296,19 @@ def make_smd_resistor_capacitor(
     )
     # Pad edge for silkscreen clearance: pitch/2 + pad_w/2
     pad_edge_x = pitch / 2.0 + pad_w / 2.0
-    graphics: tuple[FootprintLine, ...] = (
-        *_courtyard_rect(body_w, body_h),
-        *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
-    )
+    # For compact packages (0603/0402) skip silk marks — they inevitably
+    # overlap mask apertures after rotation in dense layouts.
+    if body_h <= 1.0:
+        graphics = _courtyard_rect(body_w, body_h)
+    else:
+        graphics = (
+            *_courtyard_rect(body_w, body_h),
+            *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
+        )
+    # Compact packages: ref on F.Fab to avoid silk-over-copper DRC
+    ref_layer = LAYER_F_FAB if body_h <= 1.0 else LAYER_F_SILKSCREEN
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), ref_layer),
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
     # Use standard KiCad lib_id: detect R vs C from ref prefix

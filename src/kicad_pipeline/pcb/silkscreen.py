@@ -13,6 +13,7 @@ import datetime
 import logging
 
 from kicad_pipeline.constants import (
+    LAYER_F_FAB,
     LAYER_F_SILKSCREEN,
     PCB_SILKSCREEN_LINE_WIDTH_MM,
 )
@@ -292,16 +293,22 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
     # Clearance must account for text half-height so glyphs don't
     # overlap adjacent copper.  Through-hole pads get extra margin.
     has_tht = any(p.pad_type == "thru_hole" for p in fp.pads)
-    pad_label_gap = 1.5 if has_tht else (text_size / 2 + 0.5)
+    # 0.75 * text_size covers typical glyph height; 0.7mm gap keeps
+    # silk safely clear of mask apertures.
+    pad_label_gap = 1.5 if has_tht else (0.75 * text_size / 2 + 0.7)
     ref_y = min(min_y - pad_label_gap, -_LABEL_OFFSET_MM)
     val_y = max(max_y + pad_label_gap, _LABEL_OFFSET_MM)
 
     if "reference" not in existing_types:
         ref_pos = Point(x=0.0, y=ref_y)
+        # Compact SMD footprints (0603/0402): ref on F.Fab to avoid
+        # silk-over-copper DRC in dense layouts.
+        is_compact_smd = (not has_tht and pad_span_y < 2.0)
+        ref_layer = LAYER_F_FAB if is_compact_smd else LAYER_F_SILKSCREEN
         new_texts.append(
             make_ref_label(
                 ref=fp.ref, position=ref_pos,
-                layer=LAYER_F_SILKSCREEN, size_mm=text_size,
+                layer=ref_layer, size_mm=text_size,
             )
         )
         log.debug("add_silkscreen_to_footprint: added ref label to %s", fp.ref)
