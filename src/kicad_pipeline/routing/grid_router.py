@@ -1415,6 +1415,7 @@ def route_net(
     net_clearances: dict[str, float] | None = None,
     net_widths: dict[str, float] | None = None,
     bcu_grid: _Grid | None = None,
+    placed_via_positions: list[tuple[float, float]] | None = None,
 ) -> RouteResult:
     """Route a single net using A* on a 2-D occupancy grid.
 
@@ -1887,6 +1888,12 @@ def route_net(
             zip(_ic_pad_infos, _ic_pad_refs, strict=True),
             key=lambda pr: -((pr[0].x - _ic_cx) ** 2 + (pr[0].y - _ic_cy) ** 2),
         )
+        # Track via positions placed during IC final-leg to prevent
+        # via-in-pad on adjacent pins (shorts with 0.6mm via on
+        # 0.5mm pitch).
+        _ic_via_positions: list[tuple[float, float]] = []
+        _vip_min_dist = VIA_DIAMETER_SIGNAL_MM + request.clearance_mm
+
         for ic_pi, (ic_ref, ic_pn) in ic_sorted:
             # Find closest routed non-IC pad
             best_pi = pad_infos[0]
@@ -2000,7 +2007,7 @@ def route_net(
                     )
                 if bcu_result is not None:
                     bcu_tracks, bcu_vias = bcu_result
-                    # Validate F.Cu stubs don't cross other-net pads
+                    # Validate F.Cu stubs don't cross other-net pads.
                     crosses = _track_crosses_other_pads(
                         bcu_tracks, request.net_number, footprints,
                         net_pad_set=_original_net_pad_set,
@@ -2013,6 +2020,10 @@ def route_net(
                     if not crosses:
                         all_tracks.extend(bcu_tracks)
                         all_vias.extend(bcu_vias)
+                        for _bv in bcu_vias:
+                            _ic_via_positions.append(
+                                (_bv.position.x, _bv.position.y),
+                            )
                         ic_routed = True
 
             if not ic_routed:
@@ -2092,6 +2103,23 @@ def route_net(
                         if not clear:
                             continue
                         _cand_pos = grid.to_mm(col, row)
+                        # Skip if too close to an existing via
+                        # (prevents shorts on fine-pitch IC areas).
+                        _fan_too_close = any(
+                            ((_cand_pos[0] - vx) ** 2
+                             + (_cand_pos[1] - vy) ** 2)
+                            ** 0.5 < _vip_min_dist
+                            for vx, vy in _ic_via_positions
+                        )
+                        if not _fan_too_close and placed_via_positions:
+                            _fan_too_close = any(
+                                ((_cand_pos[0] - vx) ** 2
+                                 + (_cand_pos[1] - vy) ** 2)
+                                ** 0.5 < _vip_min_dist
+                                for vx, vy in placed_via_positions
+                            )
+                        if _fan_too_close:
+                            continue
                         # Temporarily unmark ALL IC pads (with zero
                         # clearance) to create routing space, then
                         # also unmark the via target cell.
@@ -2376,12 +2404,27 @@ def route_net(
                                 _fs.end.x, _fs.end.y,
                                 excl_cells,
                             )
+                        _ic_via_positions.append(fan_via_pos)
                         ic_routed = True
 
             # Via-in-pad fallback: when all F.Cu routing fails, place
             # a via directly on the IC pad and route on B.Cu.  This is
             # standard practice for dense ICs (MSOP-10, QFN, etc.).
-            if not ic_routed and bcu_grid is not None:
+            # Skip if an existing via is too close (would short on
+            # fine-pitch ICs where via diameter > pin pitch).
+            _vip_too_close = any(
+                ((vx - px) ** 2 + (vy - py) ** 2) ** 0.5 < _vip_min_dist
+                for vx, vy in _ic_via_positions
+            )
+            # Also check vias placed by OTHER nets (passed from
+            # route_all_nets).
+            if not _vip_too_close and placed_via_positions is not None:
+                _vip_too_close = any(
+                    ((vx - px) ** 2 + (vy - py) ** 2) ** 0.5
+                    < _vip_min_dist
+                    for vx, vy in placed_via_positions
+                )
+            if not ic_routed and bcu_grid is not None and not _vip_too_close:
                 # Unmark target pad and same-net THT pads on B.Cu
                 # to open corridors through connector pad forests.
                 _vip_bcu_um: list[
@@ -2436,6 +2479,7 @@ def route_net(
                             VIA_DIAMETER_SIGNAL_MM / 2.0,
                             pad_cl,
                         )
+                        _ic_via_positions.append((px, py))
                         ic_routed = True
                         _log.debug(
                             "IC final-leg %s pad %s: via-in-pad OK",
@@ -2455,7 +2499,9 @@ def route_net(
                     "IC final-leg %s pad %s: UNROUTED",
                     ic_ref, ic_pn,
                 )
-                # Re-mark the IC pad — couldn't route without crossing
+
+            if not ic_routed:
+                # Re-mark the IC pad — couldn't route
                 _mark_pad_area(
                     grid, px, py, ic_hw, ic_hh, pad_cl,
                 )
@@ -2590,6 +2636,9 @@ def route_all_nets(
     )
 
     results: list[RouteResult] = []
+    # Track all placed via positions across nets to prevent via-in-pad
+    # shorts on adjacent IC pads.
+    all_placed_vias: list[tuple[float, float]] = []
 
     def _route_entry(entry: NetlistEntry) -> RouteResult:
         net_name = entry.net.name
@@ -2624,7 +2673,13 @@ def route_all_nets(
             request, footprints, board_width_mm, board_height_mm,
             grid_step_mm, grid=grid, net_clearances=net_clearances,
             net_widths=net_widths, bcu_grid=bcu_grid,
+            placed_via_positions=all_placed_vias,
         )
+
+    def _record_vias(result: RouteResult) -> None:
+        """Record via positions from a successful route."""
+        for v in result.vias:
+            all_placed_vias.append((v.position.x, v.position.y))
 
     # First pass: route all nets
     failed_entries: list[NetlistEntry] = []
@@ -2632,6 +2687,7 @@ def route_all_nets(
         result = _route_entry(entry)
         if result.routed:
             results.append(result)
+            _record_vias(result)
         else:
             failed_entries.append(entry)
 
@@ -2646,6 +2702,7 @@ def route_all_nets(
         result = _route_entry(entry)
         if result.routed:
             results.append(result)
+            _record_vias(result)
             continue
         # Try reversed pad ordering
         reversed_pads = entry.pad_refs[::-1]
@@ -2656,6 +2713,7 @@ def route_all_nets(
         result = _route_entry(reversed_entry)
         if result.routed:
             results.append(result)
+            _record_vias(result)
             continue
         still_failed.append(entry)
 
@@ -2687,8 +2745,11 @@ def route_all_nets(
                 request, footprints, board_width_mm, board_height_mm,
                 grid_step_mm, grid=grid, net_clearances=relaxed_clearances,
                 net_widths=net_widths, bcu_grid=bcu_grid,
+                placed_via_positions=all_placed_vias,
             )
             results.append(result)
+            if result.routed:
+                _record_vias(result)
 
     # Rip-up-and-retry loop: improve worst routes
     # Build pad position lookup for quality scoring
