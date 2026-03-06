@@ -1598,12 +1598,29 @@ def route_net(
         # Each B.Cu segment adds 2 vias — skip if that would exceed max_vias.
         if (path is None and bcu_grid is not None
                 and len(all_vias) + 2 <= request.max_vias):
+            # Temporarily unmark THT pads for BOTH endpoints and same-net
+            # siblings on B.Cu — THT clearance zones create walls that
+            # block B.Cu routing through connector pad forests.
+            _bcu_unmarked: list[tuple[float, float, float, float]] = []
+            for pi in pad_infos:
+                if pi.pad_type == "thru_hole":
+                    _unmark_pad_area(
+                        bcu_grid, pi.x, pi.y,
+                        pi.half_w + pad_cl, pi.half_h + pad_cl,
+                        pad_cl * 0.5,
+                    )
+                    _bcu_unmarked.append(
+                        (pi.x, pi.y, pi.half_w, pi.half_h),
+                    )
             bcu_result = _route_on_bcu(
                 p1.x, p1.y, p2.x, p2.y,
                 bcu_grid, request.net_number, request.net_name,
                 request.width_mm, request.clearance_mm,
                 fcu_grid=grid,
             )
+            # Re-mark unmarked THT pads on B.Cu
+            for _ux, _uy, _uhw, _uhh in _bcu_unmarked:
+                _mark_pad_area(bcu_grid, _ux, _uy, _uhw, _uhh, pad_cl)
             if bcu_result is not None:
                 bcu_tracks, (via_s, via_g) = bcu_result
                 # Validate F.Cu stubs don't cross other-net pads
@@ -1785,20 +1802,55 @@ def route_net(
                     ic_routed = True
 
             if not ic_routed and bcu_grid is not None:
-                # F.Cu failed or crossed other pads — try B.Cu fallback
+                # F.Cu failed or crossed other pads — try B.Cu fallback.
+                # Temporarily unmark same-net THT pads on B.Cu to open
+                # corridors through connector pad forests.
+                _ic_bcu_unmarked: list[tuple[float, float, float, float]] = []
+                for pi in pad_infos:
+                    if pi.pad_type == "thru_hole":
+                        _unmark_pad_area(
+                            bcu_grid, pi.x, pi.y,
+                            pi.half_w + pad_cl, pi.half_h + pad_cl,
+                            pad_cl * 0.5,
+                        )
+                        _ic_bcu_unmarked.append(
+                            (pi.x, pi.y, pi.half_w, pi.half_h),
+                        )
+                # Also unmark the target pad (may be THT) for approach
+                if best_pi.pad_type == "thru_hole":
+                    _unmark_pad_area(
+                        bcu_grid, best_pi.x, best_pi.y,
+                        best_pi.half_w + pad_cl,
+                        best_pi.half_h + pad_cl,
+                        ic_pad_cl,
+                    )
                 bcu_result = _route_on_bcu(
                     best_pi.x, best_pi.y, ic_pi.x, ic_pi.y,
                     bcu_grid, request.net_number, request.net_name,
                     ic_stub_width, request.clearance_mm,
                     fcu_grid=grid,
                 )
+                # Re-mark unmarked THT pads on B.Cu
+                for _ux, _uy, _uhw, _uhh in _ic_bcu_unmarked:
+                    _mark_pad_area(bcu_grid, _ux, _uy, _uhw, _uhh, pad_cl)
+                if best_pi.pad_type == "thru_hole":
+                    _mark_pad_area(
+                        bcu_grid, best_pi.x, best_pi.y,
+                        best_pi.half_w, best_pi.half_h, pad_cl,
+                    )
                 if bcu_result is not None:
                     bcu_tracks, (via_s, via_g) = bcu_result
                     # Validate F.Cu stubs don't cross other-net pads
-                    if not _track_crosses_other_pads(
+                    crosses = _track_crosses_other_pads(
                         bcu_tracks, request.net_number, footprints,
                         net_pad_set=_original_net_pad_set,
-                    ):
+                    )
+                    _log.debug(
+                        "IC final-leg %s pad %s: B.Cu route OK "
+                        "(crosses=%s, %d tracks)",
+                        ic_ref, ic_pn, crosses, len(bcu_tracks),
+                    )
+                    if not crosses:
                         all_tracks.extend(bcu_tracks)
                         all_vias.extend([via_s, via_g])
                         ic_routed = True
@@ -2080,6 +2132,22 @@ def route_net(
                         # B.Cu fallback for fanout-via → target pad
                         if (not _fan_routed
                                 and bcu_grid is not None):
+                            # Unmark same-net THT pads on B.Cu
+                            _fan_bcu_um: list[
+                                tuple[float, float, float, float]
+                            ] = []
+                            for pi in pad_infos:
+                                if pi.pad_type == "thru_hole":
+                                    _unmark_pad_area(
+                                        bcu_grid, pi.x, pi.y,
+                                        pi.half_w + pad_cl,
+                                        pi.half_h + pad_cl,
+                                        pad_cl * 0.5,
+                                    )
+                                    _fan_bcu_um.append((
+                                        pi.x, pi.y,
+                                        pi.half_w, pi.half_h,
+                                    ))
                             bcu_fan = _route_on_bcu(
                                 fan_via_pos[0], fan_via_pos[1],
                                 best_pi.x, best_pi.y,
@@ -2090,6 +2158,11 @@ def route_net(
                                 request.clearance_mm,
                                 fcu_grid=grid,
                             )
+                            for _ux, _uy, _uhw, _uhh in _fan_bcu_um:
+                                _mark_pad_area(
+                                    bcu_grid, _ux, _uy,
+                                    _uhw, _uhh, pad_cl,
+                                )
                             if bcu_fan is not None:
                                 bcu_fan_tracks, (
                                     bcu_fan_vs, bcu_fan_vg,
@@ -2171,9 +2244,22 @@ def route_net(
             # a via directly on the IC pad and route on B.Cu.  This is
             # standard practice for dense ICs (MSOP-10, QFN, etc.).
             if not ic_routed and bcu_grid is not None:
-                # Unmark target pad and surrounding area on B.Cu
-                # so A* can approach the THT pad through its
-                # clearance zone.
+                # Unmark target pad and same-net THT pads on B.Cu
+                # to open corridors through connector pad forests.
+                _vip_bcu_um: list[
+                    tuple[float, float, float, float]
+                ] = []
+                for pi in pad_infos:
+                    if pi.pad_type == "thru_hole":
+                        _unmark_pad_area(
+                            bcu_grid, pi.x, pi.y,
+                            pi.half_w + pad_cl,
+                            pi.half_h + pad_cl,
+                            pad_cl * 0.5,
+                        )
+                        _vip_bcu_um.append((
+                            pi.x, pi.y, pi.half_w, pi.half_h,
+                        ))
                 _unmark_pad_area(
                     bcu_grid, best_pi.x, best_pi.y,
                     best_pi.half_w + pad_cl,
@@ -2186,6 +2272,11 @@ def route_net(
                     ic_stub_width, request.clearance_mm,
                     fcu_grid=None,  # skip F.Cu check — via is on SMD pad
                 )
+                # Re-mark unmarked THT pads on B.Cu
+                for _ux, _uy, _uhw, _uhh in _vip_bcu_um:
+                    _mark_pad_area(
+                        bcu_grid, _ux, _uy, _uhw, _uhh, pad_cl,
+                    )
                 if vip_result is None and best_pi.pad_type == "thru_hole":
                     # Re-mark target pad on B.Cu
                     _mark_pad_area(
@@ -2659,7 +2750,7 @@ def _validate_track_clearances(
         n_ripup = max(1, len(scored) // 2)
         ripup_indices = [idx for _, idx in scored[:n_ripup]]
 
-        # Unmark and rip up
+        # Unmark tracks and vias from ripped routes
         for ri in ripup_indices:
             rr = results[ri]
             for trk in rr.tracks:
@@ -2667,6 +2758,13 @@ def _validate_track_clearances(
                     _unmark_route_tracks(grid, [trk], grid_step_mm)
                 elif trk.layer == "B.Cu":
                     _unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
+            # Unmark vias on BOTH grids (vias span both layers)
+            for via in rr.vias:
+                vc, vr_ = grid.to_cell(
+                    via.position.x, via.position.y,
+                )
+                grid.unmark(vc, vr_)
+                bcu_grid.unmark(vc, vr_)
 
         ripped_names: set[str] = set()
         for ri in ripup_indices:
