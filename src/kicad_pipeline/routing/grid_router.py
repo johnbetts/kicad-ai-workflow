@@ -2747,6 +2747,14 @@ def _validate_track_clearances(
                            if results[i].net_name in previously_ripped]
             scored = never_ripped + prev_ripped
 
+        # Deprioritize nets with B.Cu routes (vias) — they are
+        # harder to re-route and may lose B.Cu corridors.
+        fcu_only = [(s, i) for s, i in scored
+                    if not results[i].vias]
+        has_vias = [(s, i) for s, i in scored
+                    if results[i].vias]
+        scored = fcu_only + has_vias
+
         n_ripup = max(1, len(scored) // 2)
         ripup_indices = [idx for _, idx in scored[:n_ripup]]
 
