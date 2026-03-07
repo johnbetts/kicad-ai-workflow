@@ -38,6 +38,7 @@ class FixedComponentDef:
         y_mm: Y position in mm from the board origin.
         rotation: Rotation angle in degrees.
         description: Human-readable description of the component.
+        layer: Copper layer override (e.g. ``"B.Cu"`` for bottom-side connectors).
     """
 
     ref_pattern: str
@@ -45,6 +46,7 @@ class FixedComponentDef:
     y_mm: float
     rotation: float = 0.0
     description: str = ""
+    layer: str = "F.Cu"
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ _TEMPLATES: dict[str, BoardTemplate] = {
                 x_mm=32.504,
                 y_mm=3.502,
                 description="40-pin GPIO header center (pin 1 at 8.374, 4.772)",
+                layer="B.Cu",
             ),
         ),
         description="Raspberry Pi HAT (Hardware Attached on Top) form factor",

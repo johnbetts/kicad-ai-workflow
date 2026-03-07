@@ -164,3 +164,24 @@ class ConfigurationError(KiCadPipelineError):
 
 class PartsError(KiCadPipelineError):
     """Raised when part lookup or selection fails."""
+
+
+# ---------------------------------------------------------------------------
+# IPC (KiCad 9 live connection)
+# ---------------------------------------------------------------------------
+
+
+class IPCError(KiCadPipelineError):
+    """Base exception for all IPC communication failures."""
+
+
+class IPCUnavailableError(IPCError):
+    """Raised when kicad-python is not installed or KiCad is not running."""
+
+
+class IPCConnectionError(IPCError):
+    """Raised when the IPC socket connection fails."""
+
+
+class IPCSyncError(IPCError):
+    """Raised when board state synchronisation fails."""

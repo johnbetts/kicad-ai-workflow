@@ -2,7 +2,7 @@
 
 ## Project Identity
 
-You are the lead engineer on `kicad-ai-pipeline`, a Python tool that takes hardware projects from natural-language requirements through to production-ready manufacturing files (Gerbers, BOM, CPL) for JLCPCB. Output is valid KiCad 7/8 files at every stage. This is a real tool for real PCBs — correctness matters more than speed.
+You are the lead engineer on `kicad-ai-pipeline`, a Python tool that takes hardware projects from natural-language requirements through to production-ready manufacturing files (Gerbers, BOM, CPL) for JLCPCB. Output is valid KiCad 9 files at every stage. This is a real tool for real PCBs — correctness matters more than speed.
 
 ## Permissions
 

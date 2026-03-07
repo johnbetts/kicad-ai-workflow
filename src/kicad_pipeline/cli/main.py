@@ -33,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     pcb_p = subparsers.add_parser("pcb", help="Generate KiCad PCB")
     pcb_p.add_argument("--requirements", "-r", required=True, help="Requirements JSON")
     pcb_p.add_argument("--output", "-o", required=True, help="Output .kicad_pcb file")
+    pcb_p.add_argument(
+        "--live", action="store_true", default=False,
+        help="Connect to running KiCad via IPC for zone fill and board sync",
+    )
 
     # route subcommand
     route_p = subparsers.add_parser("route", help="Autoroute PCB")
@@ -83,6 +87,29 @@ def build_parser() -> argparse.ArgumentParser:
     pipe_p.add_argument("--requirements", "-r", required=True, help="Requirements JSON")
     pipe_p.add_argument("--output", "-o", required=True, help="Output directory")
     pipe_p.add_argument("--name", "-n", default="project", help="Project name")
+    pipe_p.add_argument(
+        "--live", action="store_true", default=False,
+        help="Connect to running KiCad via IPC for zone fill and board sync",
+    )
+
+    # enrich subcommand (post-process existing PCB)
+    enrich_p = subparsers.add_parser(
+        "enrich", help="Enrich existing .kicad_pcb with 3D models and layer flips",
+    )
+    enrich_p.add_argument("--pcb", "-p", required=True, help="Input .kicad_pcb file")
+    enrich_p.add_argument("--output", "-o", default=None, help="Output path (default: overwrite)")
+    enrich_p.add_argument(
+        "--flip-to-bcu", action="append", default=[], metavar="REF",
+        help="Ref(s) to move to B.Cu (repeatable)",
+    )
+    enrich_p.add_argument(
+        "--no-3d-models", action="store_true", default=False,
+        help="Skip 3D model injection",
+    )
+    enrich_p.add_argument(
+        "--model-var", default="${KICAD9_3DMODEL_DIR}",
+        help="3D model env var (default: ${KICAD9_3DMODEL_DIR})",
+    )
 
     # project subcommand (orchestrated workflow)
     from kicad_pipeline.cli.project_cmd import add_project_subparser
@@ -90,6 +117,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_project_subparser(subparsers)
 
     return parser
+
+
+def _try_ipc_connect(args: argparse.Namespace) -> object | None:
+    """Try to connect to KiCad via IPC.  Warns and returns None on failure."""
+    try:
+        from kicad_pipeline.ipc.connection import connect
+
+        conn = connect()
+        print(f"Connected to KiCad IPC ({conn.info.kicad_version})")
+        return conn
+    except Exception as exc:
+        print(f"WARNING: KiCad IPC unavailable ({exc}), using file-based workflow",
+              file=sys.stderr)
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_produce(args)
     if args.command == "pipeline":
         return _cmd_pipeline(args)
+    if args.command == "enrich":
+        return _cmd_enrich(args)
     if args.command == "project":
         from kicad_pipeline.cli.project_cmd import dispatch_project
 
@@ -174,7 +217,14 @@ def _cmd_pcb(args: argparse.Namespace) -> int:
     try:
         req = load_requirements(Path(args.requirements))
         design = build_pcb(req)
-        write_pcb(design, args.output)
+
+        ipc_conn = _try_ipc_connect(args) if getattr(args, "live", False) else None
+        try:
+            write_pcb(design, args.output, ipc_connection=ipc_conn)
+        finally:
+            if ipc_conn is not None:
+                ipc_conn.close()
+
         print(f"PCB written to {args.output}")
         return 0
     except Exception as exc:
@@ -303,6 +353,28 @@ def _cmd_produce(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_enrich(args: argparse.Namespace) -> int:
+    """Handle 'enrich' subcommand — post-process existing .kicad_pcb."""
+    from kicad_pipeline.pcb.enrich import enrich_pcb_file
+
+    try:
+        flip_refs = tuple(args.flip_to_bcu) if args.flip_to_bcu else ()
+        add_models = not args.no_3d_models
+        enrich_pcb_file(
+            pcb_path=args.pcb,
+            output_path=args.output,
+            flip_refs=flip_refs,
+            add_3d_models=add_models,
+            model_var=args.model_var,
+        )
+        out = args.output or args.pcb
+        print(f"Enriched PCB written to {out}")
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
 def _cmd_pipeline(args: argparse.Namespace) -> int:
     """Handle full 'pipeline' subcommand."""
     from pathlib import Path
@@ -330,7 +402,13 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         print("[3/4] Generating PCB...")
         design = build_pcb(req)
         pcb_path = out / f"{args.name}.kicad_pcb"
-        write_pcb(design, str(pcb_path))
+
+        ipc_conn = _try_ipc_connect(args) if getattr(args, "live", False) else None
+        try:
+            write_pcb(design, str(pcb_path), ipc_connection=ipc_conn)
+        finally:
+            if ipc_conn is not None:
+                ipc_conn.close()
 
         print("[3.5/4] Generating project file...")
         from kicad_pipeline.project_file import write_project_file

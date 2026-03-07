@@ -108,7 +108,6 @@ class LibSymbol:
     lib_id: str  # "Device:R", "kicad-ai:ESP32-S3-WROOM-1"
     pins: tuple[LibPin, ...]
     shapes: tuple[LibPolyline | LibRectangle | LibCircle, ...]  # drawing primitives
-    extends: str | None = None  # for unit-based symbols
 
 
 @dataclass(frozen=True)

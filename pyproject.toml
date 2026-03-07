@@ -19,6 +19,9 @@ dev = [
 github = [
     "PyGithub>=2.0",
 ]
+ipc = [
+    "kicad-python>=0.5.0",
+]
 
 [project.scripts]
 kicad-pipeline = "kicad_pipeline.cli.main:main"
@@ -34,6 +37,10 @@ addopts = "-x --tb=short"
 strict = true
 python_version = "3.10"
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = "kipy.*"
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py310"

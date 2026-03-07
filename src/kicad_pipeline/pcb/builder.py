@@ -996,6 +996,7 @@ def build_pcb(
     # Step 0: Board template (if specified)
     # ------------------------------------------------------------------
     fixed_positions: dict[str, tuple[float, float, float]] | None = None
+    layer_overrides: dict[str, str] = {}
     corner_radius_mm: float = 0.0
     template_mounting_positions: tuple[tuple[float, float], ...] | None = None
     template_mounting_diameter: float | None = None
@@ -1047,9 +1048,11 @@ def build_pcb(
                     fixed_positions[matched_ref] = (
                         fc.x_mm, fc.y_mm, fc.rotation,
                     )
+                    if fc.layer != "F.Cu":
+                        layer_overrides[matched_ref] = fc.layer
                     log.info(
-                        "build_pcb: template fixed %s at (%.1f, %.1f)",
-                        matched_ref, fc.x_mm, fc.y_mm,
+                        "build_pcb: template fixed %s at (%.1f, %.1f) layer=%s",
+                        matched_ref, fc.x_mm, fc.y_mm, fc.layer,
                     )
 
     # ------------------------------------------------------------------
@@ -1090,7 +1093,10 @@ def build_pcb(
     # ------------------------------------------------------------------
     pre_footprints: list[Footprint] = []
     for comp in requirements.components:
-        fp = footprint_for_component(comp.ref, comp.value, comp.footprint, comp.lcsc)
+        comp_layer = layer_overrides.get(comp.ref, LAYER_F_CU)
+        fp = footprint_for_component(
+            comp.ref, comp.value, comp.footprint, comp.lcsc, layer=comp_layer,
+        )
         fp = _apply_nets_to_footprint(fp, comp, net_lookup)
         pre_footprints.append(fp)
 
@@ -1185,6 +1191,12 @@ def build_pcb(
         keepouts=tuple(keepouts),
     )
 
+    # Merge layer overrides from layout result (constraint solver)
+    if layout_result.layers:
+        for ref, lyr in layout_result.layers.items():
+            if ref not in layer_overrides:
+                layer_overrides[ref] = lyr
+
     # Apply positions and rotations to footprints
     footprints_with_pos: list[Footprint] = []
     for fp in pre_footprints:
@@ -1203,6 +1215,7 @@ def build_pcb(
             lcsc=fp.lcsc,
             uuid=fp.uuid,
             attr=fp.attr,
+            models=fp.models,
         )
         footprints_with_pos.append(fp_placed)
 
@@ -1653,7 +1666,8 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
     ref_text = next((t for t in fp.texts if t.text_type == "reference"), None)
     ref_x = ref_text.position.x if ref_text else 0.0
     ref_y = ref_text.position.y if ref_text else -2.5
-    ref_layer = ref_text.layer if ref_text else "F.SilkS"
+    _default_silk = "B.SilkS" if fp.layer == LAYER_B_CU else "F.SilkS"
+    ref_layer = ref_text.layer if ref_text else _default_silk
     ref_size = ref_text.effects_size if ref_text else 1.0
     ref_hidden = ref_text.hidden if ref_text else False
     val_text = next((t for t in fp.texts if t.text_type == "value"), None)
@@ -1680,7 +1694,7 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
             "Value",
             fp.value,
             ["at", val_x, val_y, 0],
-            ["layer", "F.Fab"],
+            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
             ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
         ]
     )
@@ -1730,6 +1744,17 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
 
     for pad in fp.pads:
         node.append(_pad_sexp(pad))
+
+    # 3D model references
+    for model in fp.models:
+        model_node: list[SExpNode] = [
+            "model",
+            model.path,
+            ["offset", ["xyz", model.offset[0], model.offset[1], model.offset[2]]],
+            ["scale", ["xyz", model.scale[0], model.scale[1], model.scale[2]]],
+            ["rotate", ["xyz", model.rotate[0], model.rotate[1], model.rotate[2]]],
+        ]
+        node.append(model_node)
 
     return node
 
@@ -1996,15 +2021,18 @@ def write_pcb(
     path: str | Path,
     *,
     fill_zones: bool = True,
+    ipc_connection: object | None = None,
 ) -> None:
     """Serialise *design* and write it to a ``.kicad_pcb`` file.
 
     Args:
         design: The PCB design to write.
         path: Destination file path.  The parent directory must exist.
-        fill_zones: If True, attempt to fill zones via ``kicad-cli`` after
-            writing.  Requires ``kicad-cli`` on PATH; logs a warning if
-            unavailable.
+        fill_zones: If True, attempt to fill zones after writing.
+        ipc_connection: Optional :class:`~kicad_pipeline.ipc.connection.KiCadConnection`.
+            When provided, uses IPC to push the file and refill zones in the
+            running KiCad instance.  Falls back to the subprocess approach
+            if IPC zone fill fails.
 
     Raises:
         PCBError: If serialisation fails for any reason.
@@ -2022,7 +2050,32 @@ def write_pcb(
     log.info("write_pcb: wrote %s", dest)
 
     if fill_zones:
-        _fill_zones(dest)
+        if ipc_connection is not None:
+            _fill_zones_ipc(dest, ipc_connection)
+        else:
+            _fill_zones(dest)
+
+
+def _fill_zones_ipc(pcb_path: Path, ipc_connection: object) -> None:
+    """Fill copper zones using KiCad's IPC API, falling back to subprocess."""
+    try:
+        from kicad_pipeline.ipc.board_ops import push_pcb_to_kicad, refill_zones
+        from kicad_pipeline.ipc.connection import KiCadConnection
+
+        if not isinstance(ipc_connection, KiCadConnection):
+            log.warning("ipc_connection is not a KiCadConnection; falling back to subprocess")
+            _fill_zones(pcb_path)
+            return
+
+        push_pcb_to_kicad(pcb_path, ipc_connection)
+        refill_zones(ipc_connection)
+        log.info("Zone fill complete via IPC (%s)", pcb_path)
+    except Exception as exc:
+        log.warning(
+            "IPC zone fill failed (%s), falling back to subprocess: %s",
+            pcb_path, exc,
+        )
+        _fill_zones(pcb_path)
 
 
 def _fill_zones(pcb_path: Path) -> None:

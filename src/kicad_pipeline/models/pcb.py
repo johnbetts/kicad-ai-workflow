@@ -78,6 +78,7 @@ class PlacementConstraint:
     min_distance_mm: float | None = None
     group_name: str | None = None
     priority: int = 0
+    layer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +174,23 @@ FootprintGraphic: TypeAlias = FootprintLine | FootprintArc | FootprintCircle
 
 
 @dataclass(frozen=True)
+class Footprint3DModel:
+    """Reference to a 3D model file for a footprint.
+
+    Attributes:
+        path: Model file path, typically using ``${KICAD9_3DMODEL_DIR}/...``.
+        offset: Translation offset ``(x, y, z)`` in mm.
+        scale: Scale factors ``(x, y, z)``.
+        rotate: Rotation angles ``(x, y, z)`` in degrees.
+    """
+
+    path: str
+    offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    rotate: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True)
 class Footprint:
     """A placed footprint on the PCB."""
 
@@ -188,6 +206,7 @@ class Footprint:
     lcsc: str | None = None
     uuid: str = ""
     attr: str = "smd"  # "smd", "through_hole"
+    models: tuple[Footprint3DModel, ...] = ()
 
 
 @dataclass(frozen=True)

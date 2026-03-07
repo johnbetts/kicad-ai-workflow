@@ -36,10 +36,12 @@ class LayoutResult:
     Attributes:
         positions: Mapping from component ref to board position.
         rotations: Mapping from component ref to rotation in degrees.
+        layers: Mapping from component ref to layer override (e.g. ``"B.Cu"``).
     """
 
     positions: dict[str, Point]
     rotations: dict[str, float]
+    layers: dict[str, str] | None = None
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import ProjectRequirements
@@ -543,8 +545,17 @@ def layout_pcb(
                 )
                 positions.update(extra)
 
+            # Collect layer overrides from constraints
+            layer_overrides: dict[str, str] = {}
+            for c in constraint_list:
+                if c.layer is not None:
+                    layer_overrides[c.ref] = c.layer
+
             log.info("layout_pcb: placed %d components (constraint solver)", len(positions))
-            return LayoutResult(positions=positions, rotations=rotations)
+            return LayoutResult(
+                positions=positions, rotations=rotations,
+                layers=layer_overrides if layer_overrides else None,
+            )
     # --- Zone-based fallback path (no template) ---
     # Pre-populate positions from fixed_positions (board template)
     zone_positions: dict[str, Point] = {}

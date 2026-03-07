@@ -410,6 +410,9 @@ def constraints_from_requirements(
                         matched_ref = comp.ref
                         break
             if matched_ref is not None:
+                layer_override: str | None = None
+                if fc.layer != "F.Cu":
+                    layer_override = fc.layer
                 constraints.append(PlacementConstraint(
                     ref=matched_ref,
                     constraint_type=PlacementConstraintType.FIXED,
@@ -417,6 +420,7 @@ def constraints_from_requirements(
                     y=fc.y_mm,
                     rotation=fc.rotation,
                     priority=100,
+                    layer=layer_override,
                 ))
 
     # 2. Build net-to-refs map for proximity analysis

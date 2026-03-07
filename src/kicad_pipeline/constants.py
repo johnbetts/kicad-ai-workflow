@@ -277,6 +277,13 @@ GND_STITCH_FP_CLEARANCE_MM: float = 2.0
 """Minimum clearance from GND stitching vias to footprint bounding boxes (mm)."""
 
 # ---------------------------------------------------------------------------
+# 3D model paths
+# ---------------------------------------------------------------------------
+
+KICAD_3DMODEL_VAR: str = "${KICAD9_3DMODEL_DIR}"
+"""KiCad environment variable prefix for 3D model file paths."""
+
+# ---------------------------------------------------------------------------
 # Routing cost tuning
 # ---------------------------------------------------------------------------
 

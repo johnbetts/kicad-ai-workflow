@@ -1027,8 +1027,6 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
         ``SExpNode`` list.
     """
     body: list[SExpNode] = ["symbol", sym.lib_id]
-    if sym.extends is not None:
-        body.append(["extends", sym.extends])
 
     # KiCad 9 required attributes
     body.append(["exclude_from_sim", False])

@@ -13,9 +13,13 @@ import math
 from pathlib import Path
 
 from kicad_pipeline.constants import (
+    KICAD_3DMODEL_VAR,
+    LAYER_B_COURTYARD,
     LAYER_B_CU,
+    LAYER_B_FAB,
     LAYER_B_MASK,
     LAYER_B_PASTE,
+    LAYER_B_SILKSCREEN,
     LAYER_F_COURTYARD,
     LAYER_F_CU,
     LAYER_F_FAB,
@@ -28,6 +32,7 @@ from kicad_pipeline.constants import (
 from kicad_pipeline.exceptions import ConfigurationError, PCBError
 from kicad_pipeline.models.pcb import (
     Footprint,
+    Footprint3DModel,
     FootprintLine,
     FootprintText,
     Pad,
@@ -35,6 +40,109 @@ from kicad_pipeline.models.pcb import (
 )
 
 _log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Layer flip mapping (F↔B)
+# ---------------------------------------------------------------------------
+
+_LAYER_FLIP_MAP: dict[str, str] = {
+    LAYER_F_CU: LAYER_B_CU,
+    LAYER_B_CU: LAYER_F_CU,
+    LAYER_F_SILKSCREEN: LAYER_B_SILKSCREEN,
+    LAYER_B_SILKSCREEN: LAYER_F_SILKSCREEN,
+    LAYER_F_FAB: LAYER_B_FAB,
+    LAYER_B_FAB: LAYER_F_FAB,
+    LAYER_F_COURTYARD: LAYER_B_COURTYARD,
+    LAYER_B_COURTYARD: LAYER_F_COURTYARD,
+    LAYER_F_MASK: LAYER_B_MASK,
+    LAYER_B_MASK: LAYER_F_MASK,
+    LAYER_F_PASTE: LAYER_B_PASTE,
+    LAYER_B_PASTE: LAYER_F_PASTE,
+}
+
+
+def _flip_layer(layer: str) -> str:
+    """Flip a layer from front to back or vice versa.
+
+    Returns the input unchanged if no flip mapping exists (e.g. Edge.Cuts).
+    """
+    return _LAYER_FLIP_MAP.get(layer, layer)
+
+
+# ---------------------------------------------------------------------------
+# 3D model path mapping
+# ---------------------------------------------------------------------------
+
+_3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
+    # (pattern_prefix, 3d_directory, name_template)
+    # SMD passives
+    ("R_0402", "Resistor_SMD.3dshapes", "R_0402_1005Metric.step"),
+    ("R_0603", "Resistor_SMD.3dshapes", "R_0603_1608Metric.step"),
+    ("R_0805", "Resistor_SMD.3dshapes", "R_0805_2012Metric.step"),
+    ("R_1206", "Resistor_SMD.3dshapes", "R_1206_3216Metric.step"),
+    ("R_1210", "Resistor_SMD.3dshapes", "R_1210_3225Metric.step"),
+    ("C_0402", "Capacitor_SMD.3dshapes", "C_0402_1005Metric.step"),
+    ("C_0603", "Capacitor_SMD.3dshapes", "C_0603_1608Metric.step"),
+    ("C_0805", "Capacitor_SMD.3dshapes", "C_0805_2012Metric.step"),
+    ("C_1206", "Capacitor_SMD.3dshapes", "C_1206_3216Metric.step"),
+    ("C_1210", "Capacitor_SMD.3dshapes", "C_1210_3225Metric.step"),
+    # LEDs
+    ("LED_0402", "LED_SMD.3dshapes", "LED_0402_1005Metric.step"),
+    ("LED_0603", "LED_SMD.3dshapes", "LED_0603_1608Metric.step"),
+    ("LED_0805", "LED_SMD.3dshapes", "LED_0805_2012Metric.step"),
+    ("LED_1206", "LED_SMD.3dshapes", "LED_1206_3216Metric.step"),
+    # Transistors
+    ("SOT-23-5", "Package_TO_SOT_SMD.3dshapes", "SOT-23-5.step"),
+    ("SOT-23", "Package_TO_SOT_SMD.3dshapes", "SOT-23.step"),
+    ("SOT-223", "Package_TO_SOT_SMD.3dshapes", "SOT-223-3_TabPin2.step"),
+)
+
+
+def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel | None:
+    """Determine the 3D model path for a given KiCad lib_id.
+
+    Args:
+        lib_id: KiCad library identifier (e.g. ``"Resistor_SMD:R_0805_2012Metric"``).
+        layer: Component layer — B.Cu connectors use PinSocket models.
+
+    Returns:
+        A :class:`Footprint3DModel` or ``None`` if no mapping found.
+    """
+    # Extract the footprint name (after ':') for pattern matching
+    name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    upper = name.upper()
+
+    # Pin headers / sockets
+    if "PINHEADER" in upper or "PINSOCKET" in upper:
+        # Determine directory based on actual layer
+        if layer == LAYER_B_CU or "PINSOCKET" in upper:
+            dir_name = "Connector_PinSocket_2.54mm.3dshapes"
+            model_name = name.replace("PinHeader", "PinSocket")
+        else:
+            dir_name = "Connector_PinHeader_2.54mm.3dshapes"
+            model_name = name
+        path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
+        return Footprint3DModel(path=path)
+
+    # IC packages (SOIC, MSOP, TSSOP, QFP, QFN, etc.)
+    for prefix in ("SOIC", "MSOP", "TSSOP", "SSOP", "QFP", "QFN", "LQFP", "DFN", "SOP"):
+        if upper.startswith(prefix):
+            path = f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/{name}.step"
+            return Footprint3DModel(path=path)
+
+    # Terminal blocks
+    if "TERMINALBLOCK" in upper:
+        path = f"{KICAD_3DMODEL_VAR}/Connector_TerminalBlock.3dshapes/{name}.step"
+        return Footprint3DModel(path=path)
+
+    # Static pattern map for passives/transistors
+    for pattern, directory, model_file in _3D_MODEL_MAP:
+        if upper.startswith(pattern.upper()):
+            path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
+            return Footprint3DModel(path=path)
+
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Standard KiCad library IDs
@@ -208,12 +316,14 @@ def _val_text(value: str, y_offset: float, layer: str) -> FootprintText:
 
 
 def _courtyard_rect(
-    body_w: float, body_h: float, clearance: float = PCB_COURTYARD_CLEARANCE_MM
+    body_w: float,
+    body_h: float,
+    clearance: float = PCB_COURTYARD_CLEARANCE_MM,
+    layer: str = LAYER_F_COURTYARD,
 ) -> tuple[FootprintLine, ...]:
     """Build a rectangular courtyard from body dimensions + clearance."""
     hw = body_w / 2.0 + clearance
     hh = body_h / 2.0 + clearance
-    layer = LAYER_F_COURTYARD
     w = PCB_SILKSCREEN_LINE_WIDTH_MM
     return (
         FootprintLine(start=Point(-hw, -hh), end=Point(hw, -hh), layer=layer, width=w),
@@ -318,6 +428,9 @@ def make_smd_resistor_capacitor(
     else:
         lib_id = _KICAD_RESISTOR_LIB_IDS.get(package, f"Resistor_SMD:R_{package}")
 
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+
     return Footprint(
         lib_id=lib_id,
         ref=ref,
@@ -328,6 +441,7 @@ def make_smd_resistor_capacitor(
         graphics=graphics,
         texts=texts,
         attr="smd",
+        models=models,
     )
 
 
@@ -386,6 +500,8 @@ def make_smd_led(
     )
     combined_graphics = base.graphics + tri_lines
     led_lib_id = _KICAD_LED_LIB_IDS.get(package, f"LED_SMD:LED_{package}")
+    model = _model_for_package(led_lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
         lib_id=led_lib_id,
         ref=base.ref,
@@ -396,6 +512,7 @@ def make_smd_led(
         graphics=combined_graphics,
         texts=base.texts,
         attr=base.attr,
+        models=models,
     )
 
 
@@ -445,8 +562,11 @@ def make_sot23(
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
+    sot_lib_id = f"Package_TO_SOT_SMD:{variant}"
+    model = _model_for_package(sot_lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
-        lib_id=f"Package_TO_SOT_SMD:{variant}",
+        lib_id=sot_lib_id,
         ref=ref,
         value=value,
         position=Point(0.0, 0.0),
@@ -455,6 +575,7 @@ def make_sot23(
         graphics=graphics,
         texts=texts,
         attr="smd",
+        models=models,
     )
 
 
@@ -619,6 +740,9 @@ def make_generic_smd_ic(
     if not lib_id:
         lib_id = f"Package_SO:SOIC-{pin_count}_P{pitch_mm:.2f}mm"
 
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+
     return Footprint(
         lib_id=lib_id,
         ref=ref,
@@ -629,6 +753,7 @@ def make_generic_smd_ic(
         graphics=graphics,
         texts=texts,
         attr="smd",
+        models=models,
     )
 
 
@@ -640,6 +765,7 @@ def make_pin_header_socket(
     rows: int = 1,
     lib_id: str = "",
     row_swap: bool = False,
+    layer: str = LAYER_F_CU,
 ) -> Footprint:
     """Generate a through-hole pin header or socket footprint.
 
@@ -653,11 +779,15 @@ def make_pin_header_socket(
         row_swap: If True, swap row direction (negate Y). Useful for
             RPi-style headers where pin numbering follows the opposite
             row convention.
+        layer: Copper layer for the footprint (``F.Cu`` or ``B.Cu``).
 
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    _log.debug("make_pin_header_socket ref=%s pins=%d rows=%d", ref, pin_count, rows)
+    _log.debug(
+        "make_pin_header_socket ref=%s pins=%d rows=%d layer=%s",
+        ref, pin_count, rows, layer,
+    )
     drill_mm = 1.0
     pad_diam = 1.7
     cols = pin_count // max(rows, 1)
@@ -674,31 +804,54 @@ def make_pin_header_socket(
             pads.append(_thru_pad(str(pin_num), x, y, pad_diam, drill_mm))
             pin_num += 1
 
+    is_back = layer == LAYER_B_CU
+    silk_layer = LAYER_B_SILKSCREEN if is_back else LAYER_F_SILKSCREEN
+    fab_layer = LAYER_B_FAB if is_back else LAYER_F_FAB
+    crtyd_layer = LAYER_B_COURTYARD if is_back else LAYER_F_COURTYARD
+
     body_w = (cols - 1) * pitch_mm + pad_diam + 1.5
     body_h = (rows - 1) * row_pitch + pad_diam + 1.5
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, layer=crtyd_layer),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), silk_layer),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, fab_layer),
     )
     if not lib_id:
-        lib_prefix = f"Connector_PinHeader_{pitch_mm:.2f}mm"
-        pitch_str = f"P{pitch_mm:.2f}mm_Vertical"
-        if rows > 1:
-            lib_id = f"{lib_prefix}:PinHeader_{rows}x{cols:02d}_{pitch_str}"
+        if is_back:
+            lib_prefix = f"Connector_PinSocket_{pitch_mm:.2f}mm"
+            pitch_str = f"P{pitch_mm:.2f}mm_Vertical"
+            if rows > 1:
+                lib_id = f"{lib_prefix}:PinSocket_{rows}x{cols:02d}_{pitch_str}"
+            else:
+                lib_id = f"{lib_prefix}:PinSocket_1x{cols:02d}_{pitch_str}"
         else:
-            lib_id = f"{lib_prefix}:PinHeader_1x{cols:02d}_{pitch_str}"
+            lib_prefix = f"Connector_PinHeader_{pitch_mm:.2f}mm"
+            pitch_str = f"P{pitch_mm:.2f}mm_Vertical"
+            if rows > 1:
+                lib_id = f"{lib_prefix}:PinHeader_{rows}x{cols:02d}_{pitch_str}"
+            else:
+                lib_id = f"{lib_prefix}:PinHeader_1x{cols:02d}_{pitch_str}"
+
+    # For B.Cu connectors, rewrite PinHeader→PinSocket in lib_id
+    if is_back and "PinHeader" in lib_id:
+        lib_id = lib_id.replace("PinHeader", "PinSocket").replace(
+            "Connector_PinHeader", "Connector_PinSocket"
+        )
+
+    model = _model_for_package(lib_id, layer)
+    models = (model,) if model is not None else ()
 
     return Footprint(
         lib_id=lib_id,
         ref=ref,
         value=value,
         position=Point(0.0, 0.0),
-        layer=LAYER_F_CU,
+        layer=layer,
         pads=tuple(pads),
         graphics=graphics,
         texts=texts,
         attr="through_hole",
+        models=models,
     )
 
 
@@ -742,6 +895,9 @@ def make_terminal_block(
     )
     lib_id = f"Connector_TerminalBlock:TerminalBlock_{pin_count}P_P{pitch_mm:.2f}mm"
 
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+
     return Footprint(
         lib_id=lib_id,
         ref=ref,
@@ -752,6 +908,7 @@ def make_terminal_block(
         graphics=graphics,
         texts=texts,
         attr="through_hole",
+        models=models,
     )
 
 
@@ -976,6 +1133,7 @@ def footprint_for_component(
     value: str,
     footprint_id: str,
     lcsc: str | None = None,
+    layer: str = LAYER_F_CU,
 ) -> Footprint:
     """Route to the appropriate footprint generator based on *footprint_id*.
 
@@ -999,11 +1157,12 @@ def footprint_for_component(
         value: Component value string.
         footprint_id: Footprint identifier string from the requirements.
         lcsc: Optional LCSC part number (stored on the returned footprint).
+        layer: Copper layer for the footprint (default ``F.Cu``).
 
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    _log.debug("footprint_for_component ref=%s id=%s", ref, footprint_id)
+    _log.debug("footprint_for_component ref=%s id=%s layer=%s", ref, footprint_id, layer)
     fid = footprint_id.strip()
     upper = fid.upper()
 
@@ -1050,6 +1209,7 @@ def footprint_for_component(
         rpi_swap = "2X20" in upper or "RPI" in upper or "RASPBERRY" in upper
         fp = make_pin_header_socket(
             ref, value, pin_count, pitch, rows, lib_id=fid, row_swap=rpi_swap,
+            layer=layer,
         )
 
     # Terminal blocks
@@ -1102,6 +1262,7 @@ def footprint_for_component(
             lcsc=lcsc,
             uuid=fp.uuid,
             attr=fp.attr,
+            models=fp.models,
         )
     return fp
 
