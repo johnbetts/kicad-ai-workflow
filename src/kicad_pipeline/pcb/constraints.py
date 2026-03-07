@@ -230,6 +230,15 @@ def _connector_edge(
         num = int("".join(ch for ch in ref if ch.isdigit()) or "0")
         return BoardEdge.LEFT if num % 2 == 1 else BoardEdge.BOTTOM
     fp_upper = footprint_id.upper()
+    # RPi HAT: only large multi-row connectors (GPIO header) go on TOP;
+    # small connectors (Conn_01x02 etc.) go on BOTTOM to avoid GPIO overlap
+    if board_template_name == "RPI_HAT":
+        is_gpio_header = any(kw in fp_upper for kw in ("2X20", "02X20", "STACKING"))
+        if is_gpio_header:
+            return BoardEdge.TOP
+        # Small connectors on bottom edge
+        num = int("".join(ch for ch in ref if ch.isdigit()) or "0")
+        return BoardEdge.BOTTOM if num % 2 == 0 else BoardEdge.LEFT
     if any(kw in fp_upper for kw in ("PINSOCKET", "PINHEADER", "CONN_", "STACKING")):
         return BoardEdge.TOP
     return BoardEdge.LEFT
@@ -972,6 +981,13 @@ def solve_placement(
                 footprint_sizes=footprint_sizes,
             )
 
+    # 7. Align 2-pin passives to their connected pads on multi-pin components
+    if requirements is not None:
+        positions, rotations = align_passives_to_pads(
+            positions, rotations, requirements, footprint_sizes,
+            board_w, board_h, origin_x, origin_y,
+        )
+
     return PlacementResult(
         positions=positions,
         rotations=rotations,
@@ -1179,6 +1195,175 @@ def rpi_hat_constraints(
             merged[ec.ref] = ec
 
     return tuple(merged.values())
+
+
+# ---------------------------------------------------------------------------
+# Passive-to-pad alignment
+# ---------------------------------------------------------------------------
+
+
+def _get_component_pad_offsets(
+    ref: str,
+    requirements: ProjectRequirements,
+) -> dict[str, tuple[float, float]] | None:
+    """Return pad offsets ``{pin_number: (dx, dy)}`` for a component.
+
+    Generates the footprint to extract actual pad positions.  Returns
+    ``None`` if the component or footprint is not found.
+    """
+    from kicad_pipeline.pcb.footprints import footprint_for_component
+
+    comp = None
+    for c in requirements.components:
+        if c.ref == ref:
+            comp = c
+            break
+    if comp is None:
+        return None
+
+    try:
+        fp = footprint_for_component(comp.ref, comp.value, comp.footprint)
+    except Exception:
+        return None
+
+    return {pad.number: (pad.position.x, pad.position.y) for pad in fp.pads}
+
+
+def align_passives_to_pads(
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    requirements: ProjectRequirements,
+    footprint_sizes: dict[str, tuple[float, float]],
+    board_w: float,
+    board_h: float,
+    origin_x: float,
+    origin_y: float,
+) -> tuple[dict[str, Point], dict[str, float]]:
+    """Shift 2-pin passives to align with connected pads on multi-pin parts.
+
+    For each 2-pin passive (R, C, L) connected to a pad on a component with
+    3+ pins, shift the passive so that the connected pin is at the same Y (or
+    X) coordinate as the target pad on the multi-pin component.  This creates
+    straight routing paths, reducing bends and trace length.
+
+    Args:
+        positions: Component positions (modified in-place).
+        rotations: Component rotations (modified in-place).
+        requirements: Project requirements with net connections.
+        footprint_sizes: Component size estimates.
+        board_w: Board width in mm.
+        board_h: Board height in mm.
+        origin_x: Board origin X offset.
+        origin_y: Board origin Y offset.
+
+    Returns:
+        Updated ``(positions, rotations)`` dicts.
+    """
+    pad_conn = _build_pad_connectivity(requirements)
+    positions = dict(positions)
+    rotations = dict(rotations)
+
+    # Cache pad offsets for multi-pin components
+    pad_offsets_cache: dict[str, dict[str, tuple[float, float]] | None] = {}
+
+    def _get_cached_offsets(
+        ref: str,
+    ) -> dict[str, tuple[float, float]] | None:
+        if ref not in pad_offsets_cache:
+            pad_offsets_cache[ref] = _get_component_pad_offsets(ref, requirements)
+        return pad_offsets_cache[ref]
+
+    # Identify multi-pin components suitable for pad alignment (switches,
+    # connectors with 4+ pins — NOT ICs which have dense pad layouts)
+    multipin_refs: set[str] = set()
+    for comp in requirements.components:
+        if len(comp.pins) < 4:
+            continue
+        # Only align to switches and connectors, not ICs
+        prefix = "".join(ch for ch in comp.ref if ch.isalpha()).upper()
+        if prefix in ("SW", "J", "K"):
+            multipin_refs.add(comp.ref)
+
+    for ref in list(positions):
+        if not _is_two_pin_passive(ref):
+            continue
+        size = footprint_sizes.get(ref)
+        if size is None:
+            continue
+
+        # Find connections from this passive to multi-pin components
+        target_ref: str | None = None
+        my_pin: str | None = None
+        target_pin: str | None = None
+        for pin in ("1", "2"):
+            for nb_ref, nb_pin in pad_conn.get((ref, pin), []):
+                if nb_ref in multipin_refs and nb_ref in positions:
+                    target_ref = nb_ref
+                    my_pin = pin
+                    target_pin = nb_pin
+                    break
+            if target_ref is not None:
+                break
+
+        if target_ref is None or my_pin is None or target_pin is None:
+            continue
+
+        # Get target pad's absolute position
+        target_offsets = _get_cached_offsets(target_ref)
+        if target_offsets is None or target_pin not in target_offsets:
+            continue
+
+        target_pos = positions[target_ref]
+        target_rot = rotations.get(target_ref, 0.0)
+        pad_dx, pad_dy = target_offsets[target_pin]
+        rot_dx, rot_dy = _rotated_pad_offset(pad_dx, pad_dy, target_rot)
+        # Absolute pad position
+        pad_abs_x = target_pos.x + rot_dx
+        pad_abs_y = target_pos.y + rot_dy
+
+        passive_w, passive_h = size
+
+        # Check if pad is on left/right or top/bottom side of the component
+        # For corner pads (equal dx/dy), prefer horizontal approach
+        if abs(pad_dx) >= abs(pad_dy):
+            # Pad is on left or right side — approach horizontally
+            if rot_dx > 0:
+                # Pad is on right side — passive goes further right
+                new_x = pad_abs_x + passive_w / 2.0 + 0.5
+                best_rot = 180.0 if my_pin == "1" else 0.0
+            else:
+                # Pad is on left side — passive goes further left
+                new_x = pad_abs_x - passive_w / 2.0 - 0.5
+                best_rot = 0.0 if my_pin == "1" else 180.0
+            new_y = pad_abs_y
+        else:
+            # Pad is on top or bottom — approach vertically
+            if rot_dy > 0:
+                # Pad is below center — passive goes further down
+                new_y = pad_abs_y + passive_w / 2.0 + 0.5
+                best_rot = 270.0 if my_pin == "1" else 90.0
+            else:
+                # Pad is above center — passive goes up
+                new_y = pad_abs_y - passive_w / 2.0 - 0.5
+                best_rot = 90.0 if my_pin == "1" else 270.0
+            new_x = pad_abs_x
+
+        # Verify new position is within board bounds
+        local_x = new_x - origin_x
+        local_y = new_y - origin_y
+        gw, gh = passive_w, passive_h
+        if best_rot in (90.0, 270.0):
+            gw, gh = gh, gw
+
+        margin = 1.0  # mm margin from board edge
+        if (local_x - gw / 2.0 >= margin
+                and local_y - gh / 2.0 >= margin
+                and local_x + gw / 2.0 <= board_w - margin
+                and local_y + gh / 2.0 <= board_h - margin):
+            positions[ref] = Point(x=new_x, y=new_y)
+            rotations[ref] = best_rot
+
+    return positions, rotations
 
 
 # ---------------------------------------------------------------------------

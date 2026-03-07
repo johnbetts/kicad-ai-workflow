@@ -18,6 +18,7 @@ from kicad_pipeline.models.requirements import (
     ProjectInfo,
     ProjectRequirements,
 )
+from kicad_pipeline.pcb.builder import build_pcb, write_pcb
 from kicad_pipeline.project_file import write_project_file
 from kicad_pipeline.schematic.builder import build_schematic, write_schematic
 
@@ -347,7 +348,7 @@ def build_requirements() -> ProjectRequirements:
 
 
 def main() -> None:
-    """Generate schematic and write to output directory."""
+    """Generate schematic, PCB, and project file to output directory."""
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
 
@@ -358,7 +359,13 @@ def main() -> None:
     write_schematic(sch, str(sch_path))
     print(f"Schematic written to {sch_path}")
 
-    write_project_file("ADS1115_4CH_ADC", out_dir)
+    # Generate PCB with auto-routing
+    pcb = build_pcb(req, auto_route=True)
+    pcb_path = out_dir / "ADS1115_4CH_ADC.kicad_pcb"
+    write_pcb(pcb, str(pcb_path))
+    print(f"PCB written to {pcb_path}")
+
+    write_project_file("ADS1115_4CH_ADC", out_dir, drc_exclusions=pcb.drc_exclusions)
     print(f"Project file written to {out_dir / 'ADS1115_4CH_ADC.kicad_pro'}")
 
 

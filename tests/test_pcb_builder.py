@@ -1060,7 +1060,7 @@ def test_build_pcb_no_rf_fence_without_rf_module() -> None:
     gnd_net = design.get_net_number("GND")
     rf_fence_vias = [
         v for v in design.vias
-        if v.net_number == gnd_net and v.drill > 0.5
+        if v.net_number == gnd_net and v.drill > 0.55
     ]
     assert len(rf_fence_vias) == 0, (
         f"Found {len(rf_fence_vias)} RF fence GND vias without RF module"

@@ -2824,7 +2824,108 @@ def route_all_nets(
         _pad_positions_for,
     )
 
+    # Drop tracks that cross other-net pads (post-simplification check)
+    results = _drop_pad_crossing_tracks(results, footprints)
+
     return tuple(results)
+
+
+def _point_to_segment_dist(
+    px: float, py: float,
+    sx1: float, sy1: float, sx2: float, sy2: float,
+) -> float:
+    """Compute minimum distance from point (px, py) to line segment (sx1,sy1)-(sx2,sy2)."""
+    dx = sx2 - sx1
+    dy = sy2 - sy1
+    len_sq = dx * dx + dy * dy
+    if len_sq < 1e-12:
+        return math.sqrt((px - sx1) ** 2 + (py - sy1) ** 2)
+    t = max(0.0, min(1.0, ((px - sx1) * dx + (py - sy1) * dy) / len_sq))
+    cx = sx1 + t * dx
+    cy = sy1 + t * dy
+    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
+
+
+def _drop_pad_crossing_tracks(
+    results: list[RouteResult],
+    footprints: list[Footprint],
+) -> list[RouteResult]:
+    """Remove individual tracks that cross pads of other nets.
+
+    After track simplification, merged diagonal segments may cross pad areas
+    that weren't in the original A* path.  This post-route filter detects
+    and drops those offending segments.
+    """
+    import math as _math
+
+    # Build pad info: (abs_x, abs_y, net_number, half_w, half_h, ref)
+    pad_info: list[tuple[float, float, int, float, float, str]] = []
+    ref_nets: dict[str, set[int]] = {}
+    for fp in footprints:
+        rot_rad = _math.radians(fp.rotation)
+        cos_r = _math.cos(rot_rad)
+        sin_r = _math.sin(rot_rad)
+        fp_nets: set[int] = set()
+        for pad in fp.pads:
+            rpx = pad.position.x * cos_r - pad.position.y * sin_r
+            rpy = pad.position.x * sin_r + pad.position.y * cos_r
+            px = fp.position.x + rpx
+            py = fp.position.y + rpy
+            net = pad.net_number if pad.net_number is not None else 0
+            pad_info.append((px, py, net, pad.size_x / 2.0, pad.size_y / 2.0, fp.ref))
+            if net > 0:
+                fp_nets.add(net)
+        ref_nets[fp.ref] = fp_nets
+
+    updated: list[RouteResult] = []
+    for r in results:
+        if not r.routed or not r.tracks:
+            updated.append(r)
+            continue
+
+        good_tracks: list[Track] = []
+        for track in r.tracks:
+            # Only check long diagonal segments (>3mm)
+            dx = abs(track.end.x - track.start.x)
+            dy = abs(track.end.y - track.start.y)
+            seg_len = (dx * dx + dy * dy) ** 0.5
+            if seg_len < 3.0:
+                good_tracks.append(track)
+                continue
+
+            thw = track.width / 2.0
+            crosses = False
+            for px, py, pnet, hw, hh, ref in pad_info:
+                if pnet == track.net_number or pnet == 0:
+                    continue
+                # Skip intra-footprint crossings
+                if track.net_number in ref_nets.get(ref, set()):
+                    continue
+                # Use point-to-segment distance for precise check
+                dist = _point_to_segment_dist(
+                    px, py,
+                    track.start.x, track.start.y,
+                    track.end.x, track.end.y,
+                )
+                # Track crosses pad if track edge (dist - half_width)
+                # is less than pad half-size
+                pad_radius = max(hw, hh)
+                if dist < pad_radius + thw - 0.05:
+                    crosses = True
+                    break
+
+            if not crosses:
+                good_tracks.append(track)
+
+        updated.append(RouteResult(
+            net_name=r.net_name,
+            net_number=r.net_number,
+            routed=r.routed,
+            tracks=tuple(good_tracks),
+            vias=r.vias,
+        ))
+
+    return updated
 
 
 def _segment_min_distance(

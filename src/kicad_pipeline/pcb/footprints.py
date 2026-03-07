@@ -1258,8 +1258,8 @@ def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
     if upper.startswith("RJ45"):
         return (16.5, 14.0)
 
-    # Pin headers/sockets
-    if upper.startswith(("PINHEADER", "PINSOCKET")):
+    # Pin headers/sockets/connectors (Conn_01x02, Conn_02x20_Stacking, etc.)
+    if upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
         pin_count = _parse_pin_count(fid)
         pitch = _parse_pitch(fid)
         rows = 2 if "2X" in upper or "2x" in fid else 1
