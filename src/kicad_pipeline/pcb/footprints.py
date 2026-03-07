@@ -1040,8 +1040,8 @@ def footprint_for_component(
     elif upper.startswith("RJ45"):
         fp = make_rj45(ref, value)
 
-    # Pin headers and sockets
-    elif upper.startswith(("PINHEADER", "PINSOCKET")):
+    # Pin headers and sockets (including Conn_NxM patterns)
+    elif upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
         pin_count = _parse_pin_count(fid)
         pitch = _parse_pitch(fid)
         # Detect dual-row from "2x" in the footprint ID
@@ -1058,8 +1058,8 @@ def footprint_for_component(
         pitch = _parse_pitch(fid)
         fp = make_terminal_block(ref, value, pin_count, pitch)
 
-    # DIP switches
-    elif upper.startswith("SW_DIP"):
+    # DIP switches (SW_DIP* or DIP_Switch*)
+    elif upper.startswith(("SW_DIP", "DIP_SWITCH")):
         pin_count = _parse_pin_count(fid)
         if pin_count < 4:
             pin_count = 8  # sensible default
