@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from kicad_pipeline.models.schematic import (
     GlobalLabel,
+    Label,
+    LibPin,
+    LibSymbol,
     Point,
     Schematic,
     SymbolInstance,
+    Wire,
 )
 from kicad_pipeline.schematic.erc import (
     ERCReport,
@@ -209,3 +213,243 @@ def test_erc_matched_global_labels_pass() -> None:
     report = run_erc(sch)
     gl_violations = [v for v in report.violations if v.rule == "unmatched_global_label"]
     assert len(gl_violations) == 0
+
+
+# ---------------------------------------------------------------------------
+# wire_pin_misaligned
+# ---------------------------------------------------------------------------
+
+
+def _make_lib_pin(
+    number: str,
+    name: str,
+    x: float,
+    y: float,
+    rotation: float = 180.0,
+    length: float = 2.54,
+) -> LibPin:
+    """Build a minimal LibPin."""
+    from kicad_pipeline.models.schematic import FontEffect
+
+    return LibPin(
+        number=number,
+        name=name,
+        pin_type="passive",
+        at=Point(x, y),
+        rotation=rotation,
+        length=length,
+        name_effects=FontEffect(),
+        number_effects=FontEffect(),
+    )
+
+
+def test_erc_wire_pin_aligned_passes() -> None:
+    """Wire endpoints matching pin positions → no wire_pin_misaligned violation."""
+    # A resistor with 2 pins at x=+2.54 and x=-2.54 (rotation 0/180).
+    # Pin at (2.54, 0) with rotation=0 → tip at (2.54+2.54, 0) = (5.08, 0) rel
+    # After Y-negation in placement: connection at symbol_x + 5.08, symbol_y + 0
+    # Pin at (-2.54, 0) with rotation=180 → tip at (-2.54-2.54, 0) = (-5.08, 0) rel
+    lib_r = LibSymbol(
+        lib_id="Device:R",
+        pins=(
+            _make_lib_pin("1", "~", 2.54, 0.0, rotation=0.0, length=2.54),
+            _make_lib_pin("2", "~", -2.54, 0.0, rotation=180.0, length=2.54),
+        ),
+        shapes=(),
+    )
+    sym = SymbolInstance(
+        lib_id="Device:R",
+        ref="R1",
+        value="10k",
+        footprint="R_0805",
+        position=Point(100.0, 50.0),
+    )
+    # Pin 1 tip: (100 + 5.08, 50) = (105.08, 50)
+    # Pin 2 tip: (100 - 5.08, 50) = (94.92, 50)
+    # Wire from pin 1 tip to a label, and from pin 2 tip to a label
+    wire1 = Wire(start=Point(105.08, 50.0), end=Point(120.0, 50.0))
+    wire2 = Wire(start=Point(94.92, 50.0), end=Point(80.0, 50.0))
+    lbl1 = Label(text="NET1", position=Point(120.0, 50.0))
+    lbl2 = Label(text="NET2", position=Point(80.0, 50.0))
+
+    sch = Schematic(
+        lib_symbols=(lib_r,),
+        symbols=(sym,),
+        power_symbols=(),
+        wires=(wire1, wire2),
+        junctions=(),
+        no_connects=(),
+        labels=(lbl1, lbl2),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    misaligned = [v for v in report.violations if v.rule == "wire_pin_misaligned"]
+    assert len(misaligned) == 0
+
+
+def test_erc_wire_pin_misaligned_warns() -> None:
+    """Wire endpoint not on any pin/label/junction → WARNING."""
+    lib_r = LibSymbol(
+        lib_id="Device:R",
+        pins=(
+            _make_lib_pin("1", "~", 2.54, 0.0, rotation=0.0, length=2.54),
+            _make_lib_pin("2", "~", -2.54, 0.0, rotation=180.0, length=2.54),
+        ),
+        shapes=(),
+    )
+    sym = SymbolInstance(
+        lib_id="Device:R",
+        ref="R1",
+        value="10k",
+        footprint="R_0805",
+        position=Point(100.0, 50.0),
+    )
+    # Wire start matches pin 1 tip, but end is in empty space
+    wire = Wire(start=Point(105.08, 50.0), end=Point(200.0, 200.0))
+
+    sch = Schematic(
+        lib_symbols=(lib_r,),
+        symbols=(sym,),
+        power_symbols=(),
+        wires=(wire,),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    misaligned = [v for v in report.violations if v.rule == "wire_pin_misaligned"]
+    assert len(misaligned) == 1
+    assert misaligned[0].severity == ERCSeverity.WARNING
+    assert "200.0" in misaligned[0].message
+
+
+# ---------------------------------------------------------------------------
+# symbol_overlap
+# ---------------------------------------------------------------------------
+
+
+def test_erc_symbol_overlap_warns() -> None:
+    """Two symbols with overlapping bounding boxes → WARNING."""
+    lib_r = LibSymbol(
+        lib_id="Device:R",
+        pins=(
+            _make_lib_pin("1", "~", 2.54, 0.0, rotation=0.0, length=2.54),
+            _make_lib_pin("2", "~", -2.54, 0.0, rotation=180.0, length=2.54),
+        ),
+        shapes=(),
+    )
+    # Place two resistors at the same position — guaranteed overlap
+    sym1 = SymbolInstance(
+        lib_id="Device:R",
+        ref="R1",
+        value="10k",
+        footprint="R_0805",
+        position=Point(100.0, 50.0),
+    )
+    sym2 = SymbolInstance(
+        lib_id="Device:R",
+        ref="R2",
+        value="4.7k",
+        footprint="R_0805",
+        position=Point(100.0, 50.0),
+    )
+
+    sch = Schematic(
+        lib_symbols=(lib_r,),
+        symbols=(sym1, sym2),
+        power_symbols=(),
+        wires=(),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    overlaps = [v for v in report.violations if v.rule == "symbol_overlap"]
+    assert len(overlaps) == 1
+    assert overlaps[0].severity == ERCSeverity.WARNING
+    assert "R1" in overlaps[0].message
+    assert "R2" in overlaps[0].message
+
+
+def test_erc_symbol_no_overlap_passes() -> None:
+    """Well-spaced symbols → no symbol_overlap violation."""
+    lib_r = LibSymbol(
+        lib_id="Device:R",
+        pins=(
+            _make_lib_pin("1", "~", 2.54, 0.0, rotation=0.0, length=2.54),
+            _make_lib_pin("2", "~", -2.54, 0.0, rotation=180.0, length=2.54),
+        ),
+        shapes=(),
+    )
+    sym1 = SymbolInstance(
+        lib_id="Device:R",
+        ref="R1",
+        value="10k",
+        footprint="R_0805",
+        position=Point(0.0, 0.0),
+    )
+    # 50mm apart — well beyond any resistor bbox
+    sym2 = SymbolInstance(
+        lib_id="Device:R",
+        ref="R2",
+        value="4.7k",
+        footprint="R_0805",
+        position=Point(50.0, 50.0),
+    )
+
+    sch = Schematic(
+        lib_symbols=(lib_r,),
+        symbols=(sym1, sym2),
+        power_symbols=(),
+        wires=(),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    overlaps = [v for v in report.violations if v.rule == "symbol_overlap"]
+    assert len(overlaps) == 0
+
+
+def test_erc_power_symbol_overlap_ignored() -> None:
+    """Power symbols at same position → no symbol_overlap violation."""
+    lib_r = LibSymbol(
+        lib_id="Device:R",
+        pins=(
+            _make_lib_pin("1", "~", 2.54, 0.0, rotation=0.0, length=2.54),
+            _make_lib_pin("2", "~", -2.54, 0.0, rotation=180.0, length=2.54),
+        ),
+        shapes=(),
+    )
+    # Power symbols have # prefix — should be excluded from overlap check
+    pwr1 = SymbolInstance(
+        lib_id="power:+3.3V",
+        ref="#PWR01",
+        value="+3.3V",
+        footprint="",
+        position=Point(100.0, 50.0),
+    )
+    pwr2 = SymbolInstance(
+        lib_id="power:GND",
+        ref="#PWR02",
+        value="GND",
+        footprint="",
+        position=Point(100.0, 50.0),
+    )
+
+    sch = Schematic(
+        lib_symbols=(lib_r,),
+        symbols=(pwr1, pwr2),
+        power_symbols=(),
+        wires=(),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    overlaps = [v for v in report.violations if v.rule == "symbol_overlap"]
+    assert len(overlaps) == 0
