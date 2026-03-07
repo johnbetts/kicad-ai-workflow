@@ -497,23 +497,24 @@ class TestConstraintsFromRequirements:
         assert len(group_constraints) >= 1
 
     def test_template_fixed_components_get_fixed_constraints(self) -> None:
-        """Template fixed components generate FIXED constraints."""
+        """Template fixed components generate FIXED constraints.
+
+        The RPi HAT template's GPIO header (ref_pattern=J1) should match
+        the 2x20 header J2 (not the 2-pin screw terminal J1) because small
+        connectors (< 10 pins) are skipped for GPIO header matching.
+        """
         from kicad_pipeline.pcb.board_templates import get_template
 
         req = _make_requirements_for_constraints()
         tmpl = get_template("RPI_HAT")
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
-        # J2 matches template's J1 pattern? No. Let me use a req with J1 as header.
-        # Actually J1 in template is ref_pattern="J1" matching J1 in components
         constraints = constraints_from_requirements(req, tmpl, sizes)
-        # J1 in template is the GPIO header at fixed position
-        # But our J1 is a screw terminal... template ref_pattern is "J1"
-        # which matches our J1 component ref
-        j1_fixed = [
+        # J2 (2x20 header) should get FIXED via GPIO fallback matching
+        j2_fixed = [
             c for c in constraints
-            if c.ref == "J1" and c.constraint_type == PlacementConstraintType.FIXED
+            if c.ref == "J2" and c.constraint_type == PlacementConstraintType.FIXED
         ]
-        assert len(j1_fixed) == 1
+        assert len(j2_fixed) == 1
 
     def test_no_constraints_for_none_template(self) -> None:
         """Without a template, no FIXED constraints are generated."""

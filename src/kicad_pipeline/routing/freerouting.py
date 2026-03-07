@@ -181,15 +181,16 @@ def route_with_freerouting(
 # SES parser
 # ---------------------------------------------------------------------------
 
-# Regex to match a wire path statement:
-#   (path "LAYER" WIDTH x1 y1 x2 y2 ...)
+# Regex to match a wire path statement (quoted or unquoted layer names):
+#   (path "F.Cu" 250 x1 y1 x2 y2 ...)
+#   (path F.Cu 250 x1 y1 x2 y2 ...)
 _PATH_RE = re.compile(
-    r'\(path\s+"([^"]+)"\s+([\d.]+)((?:\s+[-\d.]+){4,})\s*\)',
+    r'\(path\s+(?:"([^"]+)"|([A-Za-z_.]+))\s+([\d.]+)((?:\s+[-\d.]+){4,})\s*\)',
     re.DOTALL,
 )
 
 # Regex to extract the net name containing wire paths
-_NET_OUT_RE = re.compile(r'\(net\s+"([^"]+)"(.*?)\)', re.DOTALL)
+_NET_OUT_RE = re.compile(r'\(net\s+(?:"([^"]+)"|(\S+))(.*?)\)', re.DOTALL)
 
 
 def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
@@ -225,14 +226,15 @@ def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
     search_text = network_out_match.group(1) if network_out_match else ses_content
 
     # Find net blocks: we use a simple bracket-counting approach for each
-    # occurrence of (net "...") to capture its full content.
-    net_block_re = re.compile(r'\(net\s+"([^"]+)"')
+    # occurrence of (net NAME ...) to capture its full content.
+    # FreeRouting may use quoted or unquoted net names.
+    net_block_re = re.compile(r'\(net\s+(?:"([^"]+)"|(\S+))')
     pos = 0
     while True:
         m = net_block_re.search(search_text, pos)
         if m is None:
             break
-        net_name = m.group(1)
+        net_name = m.group(1) or m.group(2)
         net_number = net_name_to_num.get(net_name, 0)
 
         # Find the matching closing parenthesis for this (net ... block
@@ -250,18 +252,26 @@ def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
 
         net_block = search_text[block_start:block_end]
 
-        # Find all (path ...) within this net block
+        # Find all (path ...) within this net block — handle both
+        # quoted and unquoted layer names and coordinates in mm*1000
         for path_m in _PATH_RE.finditer(net_block):
-            layer = path_m.group(1)
-            width = float(path_m.group(2))
-            coords_str = path_m.group(3).strip()
+            layer = path_m.group(1) or path_m.group(2)
+            width_raw = float(path_m.group(3))
+            coords_str = path_m.group(4).strip()
             coord_vals = [float(v) for v in coords_str.split()]
+
+            # FreeRouting uses resolution mm 1000 — convert to mm
+            is_scaled = any(abs(v) > 200.0 for v in coord_vals)
+            scale = 0.001 if is_scaled else 1.0
+            width = width_raw * scale
 
             # Each consecutive pair of (x, y) values forms a track segment
             if len(coord_vals) >= 4 and len(coord_vals) % 2 == 0:
                 for j in range(0, len(coord_vals) - 2, 2):
-                    x0, y0 = coord_vals[j], coord_vals[j + 1]
-                    x1, y1 = coord_vals[j + 2], coord_vals[j + 3]
+                    x0 = coord_vals[j] * scale
+                    y0 = coord_vals[j + 1] * scale
+                    x1 = coord_vals[j + 2] * scale
+                    y1 = coord_vals[j + 3] * scale
                     tracks.append(
                         Track(
                             start=Point(x=x0, y=y0),
@@ -317,14 +327,14 @@ def ses_to_vias(
     network_out_match = re.search(r"\(network_out(.*)", ses_content, re.DOTALL)
     search_text = network_out_match.group(1) if network_out_match else ses_content
 
-    # Find net blocks and extract vias from each
-    net_block_re = re.compile(r'\(net\s+"([^"]+)"')
+    # Find net blocks and extract vias from each (quoted or unquoted names)
+    net_block_re = re.compile(r'\(net\s+(?:"([^"]+)"|(\S+))')
     pos = 0
     while True:
         m = net_block_re.search(search_text, pos)
         if m is None:
             break
-        net_name = m.group(1)
+        net_name = m.group(1) or m.group(2)
         net_number = net_name_to_num.get(net_name, 0)
 
         # Find matching closing parenthesis
@@ -344,11 +354,14 @@ def ses_to_vias(
 
         # Find all (via ...) within this net block
         for via_m in _VIA_RE.finditer(net_block):
-            x = float(via_m.group(1))
-            y = float(via_m.group(2))
+            x_raw = float(via_m.group(1))
+            y_raw = float(via_m.group(2))
+            # FreeRouting uses resolution mm 1000 — detect and scale
+            is_scaled = abs(x_raw) > 200.0 or abs(y_raw) > 200.0
+            scale = 0.001 if is_scaled else 1.0
             vias.append(
                 Via(
-                    position=Point(x=x, y=y),
+                    position=Point(x=x_raw * scale, y=y_raw * scale),
                     size=via_size,
                     drill=via_drill,
                     layers=("F.Cu", "B.Cu"),

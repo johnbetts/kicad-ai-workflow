@@ -384,17 +384,31 @@ def constraints_from_requirements(
     # 1. Template fixed components
     if board_template is not None:
         for fc in board_template.fixed_components:
+            matched_ref: str | None = None
+            is_gpio_template = "GPIO" in fc.description.upper()
+            # Exact ref match — but for GPIO headers, skip small connectors
             for comp in requirements.components:
                 if comp.ref == fc.ref_pattern:
-                    constraints.append(PlacementConstraint(
-                        ref=comp.ref,
-                        constraint_type=PlacementConstraintType.FIXED,
-                        x=fc.x_mm,
-                        y=fc.y_mm,
-                        rotation=fc.rotation,
-                        priority=100,
-                    ))
+                    if is_gpio_template and len(comp.pins) < 10:
+                        continue  # skip small connector with matching ref
+                    matched_ref = comp.ref
                     break
+            # Fallback: for GPIO header templates, match any 2x20 connector
+            if matched_ref is None and is_gpio_template:
+                for comp in requirements.components:
+                    fp_upper = comp.footprint.upper()
+                    if "02X20" in fp_upper or "2X20" in fp_upper:
+                        matched_ref = comp.ref
+                        break
+            if matched_ref is not None:
+                constraints.append(PlacementConstraint(
+                    ref=matched_ref,
+                    constraint_type=PlacementConstraintType.FIXED,
+                    x=fc.x_mm,
+                    y=fc.y_mm,
+                    rotation=fc.rotation,
+                    priority=100,
+                ))
 
     # 2. Build net-to-refs map for proximity analysis
     net_refs: dict[str, set[str]] = {}
