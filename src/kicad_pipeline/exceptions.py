@@ -160,3 +160,7 @@ class FileFormatError(KiCadPipelineError):
 
 class ConfigurationError(KiCadPipelineError):
     """Raised when pipeline configuration is invalid."""
+
+
+class PartsError(KiCadPipelineError):
+    """Raised when part lookup or selection fails."""

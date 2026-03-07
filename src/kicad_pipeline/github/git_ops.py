@@ -201,6 +201,109 @@ def get_recent_commits(
     return tuple(commits)
 
 
+def push(repo_path: str = ".", remote: str = "origin", branch: str = "") -> bool:
+    """Push current branch to remote.
+
+    Args:
+        repo_path: Path to the git repository root.
+        remote: Remote name.
+        branch: Branch name (empty = current branch).
+
+    Returns:
+        ``True`` if the push succeeded, ``False`` otherwise.
+    """
+    args = ["push", remote]
+    if branch:
+        args.append(branch)
+    rc, _out, _err = _run_git(args, cwd=repo_path)
+    return rc == 0
+
+
+def init_from_github(url: str, local_path: str) -> bool:
+    """Clone a GitHub repository to a local path.
+
+    Args:
+        url: GitHub repository URL.
+        local_path: Local directory to clone into.
+
+    Returns:
+        ``True`` if the clone succeeded, ``False`` otherwise.
+    """
+    result = subprocess.run(
+        ["git", "clone", url, local_path],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result.returncode == 0
+
+
+def checkpoint(repo_path: str, message: str) -> bool:
+    """Stage all KiCad files, commit, and push.
+
+    Args:
+        repo_path: Path to the git repository root.
+        message: Commit message.
+
+    Returns:
+        ``True`` if the commit and push succeeded.
+    """
+    # Stage KiCad project files.
+    kicad_patterns = [
+        "*.kicad_sch", "*.kicad_pcb", "*.kicad_pro",
+        "*.kicad_sym", "*.kicad_mod",
+        "output/",
+    ]
+    _run_git(["add", *kicad_patterns], cwd=repo_path)
+
+    # Also stage any production output.
+    _run_git(["add", "output/"], cwd=repo_path)
+
+    # Check if there's anything to commit.
+    status = get_status(repo_path)
+    if status.is_clean:
+        return True
+
+    if not commit(message, repo_path):
+        return False
+
+    return push(repo_path)
+
+
+def create_design_review_pr(
+    repo_path: str,
+    title: str,
+    body: str,
+    base: str = "main",
+) -> str:
+    """Create a GitHub pull request for design review.
+
+    Args:
+        repo_path: Path to the git repository root.
+        title: PR title.
+        body: PR body (markdown).
+        base: Base branch for the PR.
+
+    Returns:
+        PR URL string, or empty string on failure.
+    """
+    result = subprocess.run(
+        [
+            "gh", "pr", "create",
+            "--title", title,
+            "--body", body,
+            "--base", base,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=repo_path,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return ""
+
+
 def generate_semantic_commit_message(phase: str, description: str) -> str:
     """Generate a conventional commit message.
 
