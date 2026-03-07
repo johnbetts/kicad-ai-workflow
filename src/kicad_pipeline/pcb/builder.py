@@ -1293,46 +1293,103 @@ def build_pcb(
     all_vias: tuple[Via, ...] = ()
     from kicad_pipeline.pcb.netlist import build_netlist
     netlist = build_netlist(requirements)
+    freerouting_used = False
     if auto_route:
-        from kicad_pipeline.pcb.netclasses import net_clearance_map, net_width_map
-        from kicad_pipeline.routing.grid_router import (
-            collect_tracks,
-            collect_vias,
-            route_all_nets,
+        # --- Try FreeRouting first (handles complex boards better) ---
+        from kicad_pipeline.routing.freerouting import (
+            find_freerouting_jar,
+            route_with_freerouting,
+            ses_to_tracks,
+            ses_to_vias,
         )
 
-        widths = net_width_map(netclasses)
-        clearances = net_clearance_map(netclasses)
-        route_results = route_all_nets(
-            netlist, final_footprints,
-            board_width_mm, board_height_mm,
-            grid_step_mm=0.25,
-            net_widths=widths,
-            net_clearances=clearances,
-            keepouts=tuple(keepouts),
-            corner_radius_mm=corner_radius_mm,
-        )
-        all_tracks = collect_tracks(route_results, routed_only=False)
-        all_vias = collect_vias(route_results)
-        routed = sum(1 for r in route_results if r.routed)
-        unrouted = sum(1 for r in route_results if not r.routed)
-        log.info(
-            "build_pcb: autoroute complete — %d tracks, %d routed, %d unrouted",
-            len(all_tracks), routed, unrouted,
-        )
+        jar_path = find_freerouting_jar()
+        if jar_path is not None:
+            log.info("build_pcb: FreeRouting JAR found at %s", jar_path)
+            # Build a pre-route design (placement + nets, no tracks)
+            from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints
+            pre_route_fps = assign_net_numbers_to_footprints(
+                list(final_footprints), netlist,
+            )
+            pre_route_design = PCBDesign(
+                outline=outline,
+                design_rules=DesignRules(),
+                nets=nets,
+                footprints=tuple(pre_route_fps),
+                tracks=(),
+                vias=(),
+                zones=(),
+                keepouts=tuple(keepouts),
+                netclasses=netclasses,
+            )
+            import tempfile
+            dsn_dir = tempfile.mkdtemp(prefix="kicad_freeroute_")
+            dsn_path = Path(dsn_dir) / "design.dsn"
+            from kicad_pipeline.routing.dsn_export import write_dsn
+            write_dsn(pre_route_design, dsn_path)
+            log.info("build_pcb: exported DSN to %s", dsn_path)
 
-        # Log board-level routing quality metrics
-        from kicad_pipeline.routing.metrics import compute_board_metrics
+            fr_result = route_with_freerouting(
+                str(dsn_path), jar_path=jar_path, timeout_seconds=300,
+            )
+            if fr_result.success and fr_result.ses_file is not None:
+                ses_content = Path(fr_result.ses_file).read_text(encoding="utf-8")
+                all_tracks = ses_to_tracks(ses_content, pre_route_design)
+                all_vias = ses_to_vias(ses_content, pre_route_design)
+                freerouting_used = True
+                log.info(
+                    "build_pcb: FreeRouting complete — %d tracks, %d vias",
+                    len(all_tracks), len(all_vias),
+                )
+            else:
+                log.warning(
+                    "build_pcb: FreeRouting failed (%s), falling back to grid router",
+                    fr_result.error,
+                )
+        else:
+            log.info("build_pcb: FreeRouting JAR not found, using grid router")
 
-        metrics = compute_board_metrics(route_results, final_footprints)
-        log.info(
-            "build_pcb: routing %.1fmm total (%.2fx ideal), %d vias, %d/%d nets",
-            metrics.total_track_length_mm,
-            metrics.overall_length_ratio,
-            metrics.total_vias,
-            metrics.nets_routed,
-            metrics.nets_routed + metrics.nets_failed,
-        )
+        # --- Fall back to grid router if FreeRouting unavailable/failed ---
+        if not freerouting_used:
+            from kicad_pipeline.pcb.netclasses import net_clearance_map, net_width_map
+            from kicad_pipeline.routing.grid_router import (
+                collect_tracks,
+                collect_vias,
+                route_all_nets,
+            )
+
+            widths = net_width_map(netclasses)
+            clearances = net_clearance_map(netclasses)
+            route_results = route_all_nets(
+                netlist, final_footprints,
+                board_width_mm, board_height_mm,
+                grid_step_mm=0.25,
+                net_widths=widths,
+                net_clearances=clearances,
+                keepouts=tuple(keepouts),
+                corner_radius_mm=corner_radius_mm,
+            )
+            all_tracks = collect_tracks(route_results, routed_only=False)
+            all_vias = collect_vias(route_results)
+            routed = sum(1 for r in route_results if r.routed)
+            unrouted = sum(1 for r in route_results if not r.routed)
+            log.info(
+                "build_pcb: autoroute complete — %d tracks, %d routed, %d unrouted",
+                len(all_tracks), routed, unrouted,
+            )
+
+            # Log board-level routing quality metrics
+            from kicad_pipeline.routing.metrics import compute_board_metrics
+
+            metrics = compute_board_metrics(route_results, final_footprints)
+            log.info(
+                "build_pcb: routing %.1fmm total (%.2fx ideal), %d vias, %d/%d nets",
+                metrics.total_track_length_mm,
+                metrics.overall_length_ratio,
+                metrics.total_vias,
+                metrics.nets_routed,
+                metrics.nets_routed + metrics.nets_failed,
+            )
 
         # Note: GND pads on F.Cu connect to the B.Cu GND pour through
         # the zone fill (applied when opening in KiCad).  THT pads already
@@ -1355,9 +1412,9 @@ def build_pcb(
             log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
 
     # ------------------------------------------------------------------
-    # Step 10c: GND stitching vias (spec: every 10-20mm, only when routing)
+    # Step 10c: GND stitching vias (spec: every 10-20mm, only for grid router)
     # ------------------------------------------------------------------
-    if auto_route:
+    if auto_route and not freerouting_used:
         stitch_vias = _make_gnd_stitching_vias(
             outline, gnd_net_num, tuple(final_footprints),
             all_vias, all_tracks,

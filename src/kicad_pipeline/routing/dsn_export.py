@@ -66,6 +66,20 @@ def _parser_section() -> list[str]:
 
 def _structure_section(pcb: PCBDesign) -> list[str]:
     x0, y0, x1, y1 = _board_bounds(pcb)
+    # Use netclass defaults if available
+    trace_w = _DEFAULT_TRACE_WIDTH_MM
+    clearance = _DEFAULT_CLEARANCE_MM
+    via_dia = _VIA_DIAMETER_MM
+    via_drill = _VIA_DRILL_MM
+    if pcb.netclasses:
+        for nc in pcb.netclasses:
+            if nc.name == "Default":
+                trace_w = nc.trace_width_mm
+                clearance = nc.clearance_mm
+                via_dia = nc.via_diameter_mm
+                via_drill = nc.via_drill_mm
+                break
+
     lines: list[str] = [
         "(structure",
         '  (layer "F.Cu"',
@@ -78,12 +92,28 @@ def _structure_section(pcb: PCBDesign) -> list[str]:
         "      (index 1)))",
         "  (boundary",
         f'    (rect pcb {_fmt(x0)} {_fmt(y0)} {_fmt(x1)} {_fmt(y1)}))',
-        f'  (via "Via[0-1]_{_fmt(_VIA_DIAMETER_MM)}:{_fmt(_VIA_DRILL_MM)}_mm"'
-        f" {_fmt(_VIA_DIAMETER_MM)} {_fmt(_VIA_DRILL_MM)})",
+        f'  (via "Via[0-1]_{_fmt(via_dia)}:{_fmt(via_drill)}_mm")',
         "  (rule",
-        f"    (width {_fmt(_DEFAULT_TRACE_WIDTH_MM)})",
-        f"    (clearance {_fmt(_DEFAULT_CLEARANCE_MM)})))",
+        f"    (width {_fmt(trace_w)})",
+        f"    (clearance {_fmt(clearance)}))",
     ]
+
+    # Emit per-netclass rules for FreeRouting
+    if pcb.netclasses:
+        for nc in pcb.netclasses:
+            if nc.name == "Default":
+                continue
+            if not nc.nets:
+                continue
+            lines.append(f'  (class "{nc.name}"')
+            lines.append("    (rule")
+            lines.append(f"      (width {_fmt(nc.trace_width_mm)})")
+            lines.append(f"      (clearance {_fmt(nc.clearance_mm)}))")
+            for net_name in nc.nets:
+                lines.append(f'    (net "{net_name}")')
+            lines.append("  )")
+
+    lines.append(")")
     return lines
 
 

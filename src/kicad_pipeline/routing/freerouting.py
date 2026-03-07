@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.pcb import PCBDesign, Track
+    from kicad_pipeline.models.pcb import PCBDesign, Track, Via
 
 # ---------------------------------------------------------------------------
 # Common search locations for the FreeRouting JAR
@@ -25,9 +25,26 @@ _DEFAULT_SEARCH_DIRS: tuple[str, ...] = (
     os.path.expanduser("~/.local/share/freerouting/"),
     "/usr/local/share/freerouting/",
     "/opt/freerouting/",
+    # KiCad plugin locations (macOS / Linux / Windows)
+    os.path.expanduser(
+        "~/Documents/KiCad/9.0/3rdparty/plugins/"
+        "app_freerouting_kicad-plugin/jar/"
+    ),
+    os.path.expanduser(
+        "~/Documents/KiCad/8.0/3rdparty/plugins/"
+        "app_freerouting_kicad-plugin/jar/"
+    ),
+    os.path.expanduser(
+        "~/.local/share/kicad/9.0/3rdparty/plugins/"
+        "app_freerouting_kicad-plugin/jar/"
+    ),
 )
 
-_JAR_NAME: str = "freerouting.jar"
+_JAR_NAMES: tuple[str, ...] = (
+    "freerouting.jar",
+    "freerouting-2.1.0.jar",
+    "freerouting-2.0.1.jar",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +81,10 @@ def find_freerouting_jar(search_dirs: list[str] | None = None) -> str | None:
     dirs_to_check.extend(_DEFAULT_SEARCH_DIRS)
 
     for directory in dirs_to_check:
-        candidate = os.path.join(directory, _JAR_NAME)
-        if os.path.isfile(candidate):
-            return candidate
+        for jar_name in _JAR_NAMES:
+            candidate = os.path.join(directory, jar_name)
+            if os.path.isfile(candidate):
+                return candidate
     return None
 
 
@@ -114,6 +132,7 @@ def route_with_freerouting(
         "java",
         "-jar",
         resolved_jar,
+        "--gui.enabled=false",
         "-de",
         dsn_path,
         "-do",
@@ -256,3 +275,87 @@ def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
         pos = m.end()
 
     return tuple(tracks)
+
+
+# Regex to match a via statement in SES:
+#   (via "Via[0-1]_0.9:0.508_mm" x y)
+_VIA_RE = re.compile(
+    r'\(via\s+"[^"]*"\s+([-\d.]+)\s+([-\d.]+)\s*\)',
+)
+
+
+def ses_to_vias(
+    ses_content: str,
+    pcb: PCBDesign,
+    via_size: float = 0.9,
+    via_drill: float = 0.508,
+) -> tuple[Via, ...]:
+    """Parse via statements from a Specctra SES session file.
+
+    Handles via placements of the form::
+
+        (via "Via[0-1]_0.9:0.508_mm" x y)
+
+    Each via becomes a :class:`Via` with ``F.Cu``/``B.Cu`` layers.
+
+    Args:
+        ses_content: Raw text content of the ``.ses`` file.
+        pcb: PCB design used for net-name to net-number resolution.
+        via_size: Via annular ring diameter in mm.
+        via_drill: Via drill diameter in mm.
+
+    Returns:
+        Tuple of :class:`Via` objects parsed from the session file.
+    """
+    from kicad_pipeline.models.pcb import Point, Via
+
+    net_name_to_num: dict[str, int] = {n.name: n.number for n in pcb.nets}
+
+    vias: list[Via] = []
+
+    # Extract the network_out section
+    network_out_match = re.search(r"\(network_out(.*)", ses_content, re.DOTALL)
+    search_text = network_out_match.group(1) if network_out_match else ses_content
+
+    # Find net blocks and extract vias from each
+    net_block_re = re.compile(r'\(net\s+"([^"]+)"')
+    pos = 0
+    while True:
+        m = net_block_re.search(search_text, pos)
+        if m is None:
+            break
+        net_name = m.group(1)
+        net_number = net_name_to_num.get(net_name, 0)
+
+        # Find matching closing parenthesis
+        block_start = m.start()
+        depth = 0
+        block_end = block_start
+        for i in range(block_start, len(search_text)):
+            if search_text[i] == "(":
+                depth += 1
+            elif search_text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    block_end = i + 1
+                    break
+
+        net_block = search_text[block_start:block_end]
+
+        # Find all (via ...) within this net block
+        for via_m in _VIA_RE.finditer(net_block):
+            x = float(via_m.group(1))
+            y = float(via_m.group(2))
+            vias.append(
+                Via(
+                    position=Point(x=x, y=y),
+                    size=via_size,
+                    drill=via_drill,
+                    layers=("F.Cu", "B.Cu"),
+                    net_number=net_number,
+                )
+            )
+
+        pos = m.end()
+
+    return tuple(vias)

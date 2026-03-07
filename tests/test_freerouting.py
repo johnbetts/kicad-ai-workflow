@@ -23,6 +23,7 @@ from kicad_pipeline.routing.freerouting import (
     find_freerouting_jar,
     route_with_freerouting,
     ses_to_tracks,
+    ses_to_vias,
 )
 
 # ---------------------------------------------------------------------------
@@ -308,3 +309,63 @@ def test_ses_to_tracks_multi_segment() -> None:
     pcb = _make_pcb()
     tracks = ses_to_tracks(_MULTI_SEGMENT_SES, pcb)
     assert len(tracks) == 2
+
+
+# ---------------------------------------------------------------------------
+# ses_to_vias
+# ---------------------------------------------------------------------------
+
+_VIA_SES = """\
+(session "test.ses"
+  (routes
+    (network_out
+      (net "GND"
+        (wire (path "F.Cu" 0.25 0 0 5 0))
+        (via "Via[0-1]_0.9:0.508_mm" 10.5 20.3)
+      )
+      (net "VCC"
+        (via "Via[0-1]_0.9:0.508_mm" 30.0 15.0)
+      )
+    )))
+"""
+
+
+def test_ses_to_vias_empty_content() -> None:
+    """Empty SES content should produce an empty tuple."""
+    pcb = _make_pcb()
+    result = ses_to_vias("", pcb)
+    assert result == ()
+
+
+def test_ses_to_vias_parses_via() -> None:
+    """Via statements in SES should produce Via objects."""
+    pcb = _make_pcb()
+    vias = ses_to_vias(_VIA_SES, pcb)
+    assert len(vias) == 2
+
+
+def test_ses_to_vias_coordinates() -> None:
+    """Parsed via positions should match SES values."""
+    pcb = _make_pcb()
+    vias = ses_to_vias(_VIA_SES, pcb)
+    assert len(vias) >= 1
+    v = vias[0]
+    assert abs(v.position.x - 10.5) < 1e-6
+    assert abs(v.position.y - 20.3) < 1e-6
+
+
+def test_ses_to_vias_net_lookup() -> None:
+    """Via net numbers should map correctly from pcb.nets."""
+    pcb = _make_pcb()
+    vias = ses_to_vias(_VIA_SES, pcb)
+    # First via is in GND net (number 1)
+    assert vias[0].net_number == 1
+    # Second via is in VCC net (number 2)
+    assert vias[1].net_number == 2
+
+
+def test_ses_to_vias_layers() -> None:
+    """Parsed vias should have F.Cu and B.Cu layers."""
+    pcb = _make_pcb()
+    vias = ses_to_vias(_VIA_SES, pcb)
+    assert vias[0].layers == ("F.Cu", "B.Cu")

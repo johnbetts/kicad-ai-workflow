@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from kicad_pipeline.models.pcb import (
@@ -1497,7 +1499,8 @@ class TestBuilderAutoRoute:
         pcb = build_pcb(req, auto_route=False)
         assert len(pcb.tracks) == 0
 
-    def test_build_pcb_auto_route_enabled(self) -> None:
+    @patch("kicad_pipeline.routing.freerouting.find_freerouting_jar", return_value=None)
+    def test_build_pcb_auto_route_enabled(self, _mock_jar: MagicMock) -> None:
         """build_pcb with auto_route=True returns tracks for routable nets."""
         from kicad_pipeline.pcb.builder import build_pcb
 
