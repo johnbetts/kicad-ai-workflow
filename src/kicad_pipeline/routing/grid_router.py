@@ -2332,6 +2332,7 @@ def route_net(
                             ic_stub_width,
                             request.clearance_mm,
                             fcu_grid=grid,
+                            start_via_in_pad=True,
                             goal_is_tht=best_pi.pad_type == "thru_hole",
                         )
                         for _ux, _uy, _uhw, _uhh in _fan_bcu_um:
@@ -2951,15 +2952,6 @@ def _validate_track_clearances(
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # Break rip-up oscillation: on iteration 2+, prefer ripping nets
-        # that haven't been ripped before so both sides get a chance.
-        if previously_ripped:
-            never_ripped = [(s, i) for s, i in scored
-                            if results[i].net_name not in previously_ripped]
-            prev_ripped = [(s, i) for s, i in scored
-                           if results[i].net_name in previously_ripped]
-            scored = never_ripped + prev_ripped
-
         # Deprioritize nets with B.Cu routes (vias) — they are
         # harder to re-route and may lose B.Cu corridors.
         fcu_only = [(s, i) for s, i in scored
@@ -2967,6 +2959,16 @@ def _validate_track_clearances(
         has_vias = [(s, i) for s, i in scored
                     if results[i].vias]
         scored = fcu_only + has_vias
+
+        # Break rip-up oscillation: on iteration 2+, prefer ripping nets
+        # that haven't been ripped before so both sides get a chance.
+        # Applied AFTER fcu_only sort so anti-oscillation takes priority.
+        if previously_ripped:
+            never_ripped = [(s, i) for s, i in scored
+                            if results[i].net_name not in previously_ripped]
+            prev_ripped = [(s, i) for s, i in scored
+                           if results[i].net_name in previously_ripped]
+            scored = never_ripped + prev_ripped
 
         n_ripup = max(1, len(scored) // 2)
         ripup_indices = [idx for _, idx in scored[:n_ripup]]

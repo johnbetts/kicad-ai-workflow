@@ -668,6 +668,7 @@ def _make_gnd_stitching_vias(
     existing_vias: tuple[Via, ...],
     existing_tracks: tuple[Track, ...],
     spacing_mm: float = 15.0,
+    keepout_zones: tuple[Keepout, ...] = (),
 ) -> tuple[Via, ...]:
     """Place GND stitching vias on a regular grid across the board.
 
@@ -738,6 +739,18 @@ def _make_gnd_stitching_vias(
                     in_fp = True
                     break
             if in_fp:
+                x += spacing_mm
+                continue
+
+            # Check keepout zones
+            in_keepout = False
+            for ko in keepout_zones:
+                ko_xs = [p.x for p in ko.polygon]
+                ko_ys = [p.y for p in ko.polygon]
+                if min(ko_xs) <= x <= max(ko_xs) and min(ko_ys) <= y <= max(ko_ys):
+                    in_keepout = True
+                    break
+            if in_keepout:
                 x += spacing_mm
                 continue
 
@@ -1332,6 +1345,7 @@ def build_pcb(
         stitch_vias = _make_gnd_stitching_vias(
             outline, gnd_net_num, tuple(final_footprints),
             all_vias, all_tracks,
+            keepout_zones=tuple(keepouts),
         )
         if stitch_vias:
             all_vias = all_vias + stitch_vias
