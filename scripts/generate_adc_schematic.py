@@ -331,7 +331,11 @@ def build_requirements() -> ProjectRequirements:
         features=features,
         components=all_comps,
         nets=tuple(all_nets),
-        mechanical=MechanicalConstraints(board_width_mm=80.0, board_height_mm=60.0),
+        mechanical=MechanicalConstraints(
+        board_width_mm=65.0,
+        board_height_mm=56.0,
+        board_template="RPI_HAT",
+    ),
         power_budget=PowerBudget(
             rails=(
                 PowerRail(name="+5V", voltage=5.0, current_ma=500.0, source_ref="J5"),

@@ -1028,10 +1028,26 @@ def build_pcb(
             fixed_positions = {}
             for fc in tmpl.fixed_components:
                 # Match template ref_pattern against actual component refs
+                matched = False
                 for comp in requirements.components:
                     if comp.ref == fc.ref_pattern:
                         fixed_positions[comp.ref] = (fc.x_mm, fc.y_mm, fc.rotation)
+                        matched = True
                         break
+                # Fallback: for GPIO header templates, match any 2x20 connector
+                if not matched and "GPIO" in fc.description.upper():
+                    for comp in requirements.components:
+                        fp_upper = comp.footprint.upper()
+                        if "02X20" in fp_upper or "2X20" in fp_upper:
+                            fixed_positions[comp.ref] = (
+                                fc.x_mm, fc.y_mm, fc.rotation,
+                            )
+                            log.info(
+                                "build_pcb: template fixed %s at (%.1f, %.1f) "
+                                "(matched 2x20 connector for %s)",
+                                comp.ref, fc.x_mm, fc.y_mm, fc.ref_pattern,
+                            )
+                            break
 
     # ------------------------------------------------------------------
     # Step 1: Board dimensions

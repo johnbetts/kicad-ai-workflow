@@ -230,7 +230,7 @@ def _connector_edge(
         num = int("".join(ch for ch in ref if ch.isdigit()) or "0")
         return BoardEdge.LEFT if num % 2 == 1 else BoardEdge.BOTTOM
     fp_upper = footprint_id.upper()
-    if "PINSOCKET" in fp_upper or "PINHEADER" in fp_upper:
+    if any(kw in fp_upper for kw in ("PINSOCKET", "PINHEADER", "CONN_", "STACKING")):
         return BoardEdge.TOP
     return BoardEdge.LEFT
 
