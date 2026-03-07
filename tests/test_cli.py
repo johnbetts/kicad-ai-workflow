@@ -106,10 +106,10 @@ def test_main_validate_stub_returns_0() -> None:
     assert result == 0
 
 
-def test_main_produce_stub_returns_0() -> None:
-    """main(['produce', '-p', 'x.kicad_pcb', '-o', 'out/']) returns 0 (stub)."""
+def test_main_produce_requires_requirements() -> None:
+    """produce without --requirements returns 1 (needs requirements to build PCB)."""
     result = main(["produce", "-p", "x.kicad_pcb", "-o", "out/"])
-    assert result == 0
+    assert result == 1
 
 
 def test_requirements_validate_flag() -> None:

@@ -79,6 +79,19 @@ JLCPCB_MAX_BOARD_SIZE_MM: tuple[float, float] = (500.0, 500.0)
 """Maximum board dimensions (width_mm, height_mm) accepted by JLCPCB."""
 
 # ---------------------------------------------------------------------------
+# LCSC / JLCPCB parts search
+# ---------------------------------------------------------------------------
+
+LCSC_API_BASE_URL: str = "https://wmsc.lcsc.com/ftps/wm/product/detail"
+"""LCSC product detail API endpoint (public, no auth)."""
+
+LCSC_STOCK_TIMEOUT_SECONDS: float = 10.0
+"""Default timeout for LCSC HTTP requests (seconds)."""
+
+JLCPCB_PARTS_SEARCH_URL: str = "https://jlcpcb.com/parts/componentSearch?searchTxt="
+"""JLCPCB parts search URL prefix for manual part lookup."""
+
+# ---------------------------------------------------------------------------
 # Net-class trace widths
 # ---------------------------------------------------------------------------
 
