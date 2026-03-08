@@ -59,7 +59,7 @@ from kicad_pipeline.models.schematic import (
     TextProperty,
     Wire,
 )
-from kicad_pipeline.schematic.placement import layout_schematic
+from kicad_pipeline.schematic.placement import layout_compact, layout_schematic
 from kicad_pipeline.schematic.wiring import route_net
 from kicad_pipeline.sexp.parser import parse_file
 from kicad_pipeline.sexp.writer import SExpNode, write_file
@@ -739,6 +739,7 @@ def _refine_feature_map_by_connectivity(
 
 def build_schematic(
     requirements: ProjectRequirements,
+    compact: bool = False,
 ) -> Schematic:
     """Build a complete :class:`Schematic` from *requirements*.
 
@@ -753,6 +754,10 @@ def build_schematic(
 
     Args:
         requirements: Fully-populated project requirements document.
+        compact: When ``True``, use a tight grid layout instead of
+            zone-based placement.  Intended for hierarchical sub-sheets
+            where components should be packed compactly with a left
+            margin reserved for hierarchical labels.
 
     Returns:
         A complete :class:`Schematic` ready for serialisation.
@@ -819,10 +824,15 @@ def build_schematic(
         for r in refs_on_net:
             adjacency.setdefault(r, set()).update(refs_on_net - {r})
 
-    positions = layout_schematic(
-        all_refs, feature_map, pin_count_map=pin_count_map, paper=paper,
-        adjacency=adjacency,
-    )
+    if compact:
+        positions = layout_compact(
+            all_refs, pin_count_map=pin_count_map, adjacency=adjacency,
+        )
+    else:
+        positions = layout_schematic(
+            all_refs, feature_map, pin_count_map=pin_count_map, paper=paper,
+            adjacency=adjacency,
+        )
 
     # ------------------------------------------------------------------
     # Step 3: Build lib_symbols + symbol instances
@@ -1487,12 +1497,20 @@ def schematic_to_sexp(
 # ---------------------------------------------------------------------------
 
 
-def write_schematic(schematic: Schematic, path: str | Path) -> None:
+def write_schematic(
+    schematic: Schematic,
+    path: str | Path,
+    project_name: str | None = None,
+) -> None:
     """Serialise *schematic* and write it to a ``.kicad_sch`` file.
 
     Args:
         schematic: The schematic to write.
         path: Destination file path.  The parent directory must exist.
+        project_name: Override project name for the ``(instances ...)`` block.
+            When ``None``, falls back to the file stem.  In hierarchical
+            designs **all** sheets must share the same project name for
+            KiCad 9 to resolve ref designators.
 
     Raises:
         :class:`~kicad_pipeline.exceptions.SchematicError`: If serialisation
@@ -1512,8 +1530,9 @@ def write_schematic(schematic: Schematic, path: str | Path) -> None:
                 inst.ref,
             )
 
-    # Derive project name from filename stem so KiCad instance references match.
-    proj_name = dest.stem
+    # Use explicit project name when provided (hierarchical designs),
+    # otherwise derive from filename stem.
+    proj_name = project_name if project_name is not None else dest.stem
     try:
         sexp = schematic_to_sexp(schematic, project_name=proj_name)
         write_file(sexp, dest)
@@ -1553,7 +1572,10 @@ def write_hierarchical_schematic(
         else:
             filename = f"{stem}.kicad_sch"
         path = output_dir / filename
-        write_schematic(sch, path)
+        # All sheets in a hierarchical design must share the same project
+        # name in their (instances (project "NAME" ...)) blocks so KiCad 9
+        # can resolve ref designators across sheets.
+        write_schematic(sch, path, project_name=project_name)
         written.append(path)
 
     log.info("write_hierarchical_schematic: wrote %d files to %s", len(written), output_dir)

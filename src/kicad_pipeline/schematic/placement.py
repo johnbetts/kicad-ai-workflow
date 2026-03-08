@@ -485,3 +485,76 @@ def snap_to_grid(value: float, grid: float = SCHEMATIC_WIRE_GRID_MM) -> float:
         Grid-snapped coordinate.
     """
     return round(value / grid) * grid
+
+
+# ---------------------------------------------------------------------------
+# Compact layout for sub-sheets
+# ---------------------------------------------------------------------------
+
+# Default margins for compact sub-sheet placement (mm).
+_COMPACT_MARGIN_LEFT: float = 30.0  # room for hierarchical labels at x=5..25
+_COMPACT_MARGIN_TOP: float = 25.0
+_COMPACT_MAX_WIDTH: float = 180.0  # leave right margin on A4
+
+
+def layout_compact(
+    symbol_refs: list[str],
+    pin_count_map: dict[str, int] | None = None,
+    adjacency: dict[str, set[str]] | None = None,
+    margin_left: float = _COMPACT_MARGIN_LEFT,
+    margin_top: float = _COMPACT_MARGIN_TOP,
+    max_width: float = _COMPACT_MAX_WIDTH,
+) -> dict[str, Point]:
+    """Place components in a compact grid for sub-sheet schematics.
+
+    Unlike :func:`layout_schematic`, this does **not** spread components
+    across 4 named zones.  Instead it packs them in rows starting from
+    ``(margin_left, margin_top)``, wrapping when exceeding *max_width*.
+    The left margin is intentionally generous to leave room for
+    hierarchical labels.
+
+    Args:
+        symbol_refs: Component reference designators to place.
+        pin_count_map: Mapping from ref to pin count for spacing.
+        adjacency: Optional connectivity map for ordering.
+        margin_left: Left margin in mm (default 30).
+        margin_top: Top margin in mm (default 25).
+        max_width: Maximum X extent before wrapping (default 180).
+
+    Returns:
+        Mapping from component ref to grid-snapped :class:`Point`.
+    """
+    grid = SCHEMATIC_WIRE_GRID_MM
+
+    # Order by connectivity if available
+    refs = list(symbol_refs)
+    if adjacency is not None and len(refs) > 2:
+        refs = _sort_by_connectivity(refs, adjacency)
+
+    positions: dict[str, Point] = {}
+    cur_x = margin_left
+    cur_y = margin_top
+    row_max_h: float = 0.0
+
+    for ref in refs:
+        pc = (pin_count_map or {}).get(ref, 2)
+        h_spacing = _h_spacing_for_pins(pc, grid)
+
+        # Wrap to next row if exceeding max width
+        if cur_x + h_spacing > margin_left + max_width and cur_x > margin_left:
+            cur_y += row_max_h + 10.0  # inter-row gap
+            cur_x = margin_left
+            row_max_h = 0.0
+
+        x = snap_to_grid(cur_x, grid)
+        y = snap_to_grid(cur_y, grid)
+        positions[ref] = Point(x=x, y=y)
+
+        # Estimate body height from pin count
+        effective_pins = pc // 2 if pc > 10 else pc
+        body_h = max(effective_pins * 2.54, 5.08) + 12.0  # body + label clearance
+        row_max_h = max(row_max_h, body_h)
+        cur_x += h_spacing
+
+    log.debug("layout_compact: placed %d refs in compact grid", len(positions))
+    return positions

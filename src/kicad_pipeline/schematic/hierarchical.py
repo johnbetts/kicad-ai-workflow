@@ -248,8 +248,9 @@ def build_sub_sheet(
 ) -> Schematic:
     """Build a sub-sheet schematic for a single feature.
 
-    Uses the standard :func:`build_schematic` for component placement and
-    wiring, then adds hierarchical labels for inter-feature nets.
+    Uses :func:`build_schematic` with ``compact=True`` for tight component
+    placement, then adds hierarchical labels for inter-feature nets.
+    Labels are vertically centred on the component bounding box.
 
     Args:
         feature: The feature block this sub-sheet represents.
@@ -262,34 +263,51 @@ def build_sub_sheet(
     """
     from kicad_pipeline.schematic.builder import build_schematic
 
-    sch = build_schematic(sub_req)
+    sch = build_schematic(sub_req, compact=True)
 
-    # Add hierarchical labels for inter-feature nets at the right edge
-    h_labels: list[HierarchicalLabel] = []
-    label_y = 10.0  # starting Y position for hierarchical labels
-
-    # Find which inter-feature nets have connections in this sub-sheet
+    # Collect which inter-feature nets need hierarchical labels
     fb_refs = set(feature.components)
+    label_entries: list[tuple[str, str]] = []  # (net_name, direction)
     for net in sub_req.nets:
         if net.name not in inter_nets:
             continue
         if net.name in power_nets:
             continue
-
-        # Count connections in this feature vs total in parent
         feat_conns = sum(1 for c in net.connections if c.ref in fb_refs)
         total_conns = len(net.connections)
         direction = _infer_pin_direction(net.name, feat_conns, total_conns)
+        label_entries.append((net.name, direction))
 
+    if not label_entries:
+        return sch
+
+    # Compute component bounding box for vertical centering of labels
+    all_positions = [inst.position for inst in sch.symbols]
+    if all_positions:
+        min_y = min(p.y for p in all_positions)
+        max_y = max(p.y for p in all_positions)
+    else:
+        min_y = 25.0
+        max_y = 50.0
+
+    center_y = (min_y + max_y) / 2.0
+    n_labels = len(label_entries)
+    total_label_span = (n_labels - 1) * SHEET_SYMBOL_PIN_SPACING_MM
+    label_start_y = center_y - total_label_span / 2.0
+    # Ensure labels don't go above top margin
+    label_start_y = max(label_start_y, 10.0)
+
+    h_labels: list[HierarchicalLabel] = []
+    for idx, (net_name, direction) in enumerate(label_entries):
+        label_y = label_start_y + idx * SHEET_SYMBOL_PIN_SPACING_MM
         h_labels.append(HierarchicalLabel(
-            text=net.name,
+            text=net_name,
             shape=direction,
             position=Point(x=5.0, y=label_y),
             rotation=180.0,  # left-side label
             effects=FontEffect(),
             uuid=_new_uuid(),
         ))
-        label_y += SHEET_SYMBOL_PIN_SPACING_MM
 
     return replace(sch, hierarchical_labels=tuple(h_labels))
 

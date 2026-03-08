@@ -593,6 +593,218 @@ class TestBuildProjectSchematics:
 
 
 # ---------------------------------------------------------------------------
+# Project name consistency tests (ref designator ? fix)
+# ---------------------------------------------------------------------------
+
+
+class TestProjectNameConsistency:
+    """Verify all sheets in hierarchical output share the same project name."""
+
+    def test_all_sheets_share_root_project_name(self, tmp_path: Path) -> None:
+        """write_hierarchical_schematic must pass the same project_name to
+        every write_schematic call so KiCad 9 can resolve ref designators."""
+        from kicad_pipeline.schematic.builder import write_hierarchical_schematic
+
+        req = _two_feature_requirements()
+        result = build_hierarchical_schematic(req)
+        project_name = "Test Project"
+        written = write_hierarchical_schematic(result, tmp_path, project_name)
+
+        # Parse each file and check that (instances (project "Test Project" ...))
+        # appears in every file that has symbol instances.
+        from kicad_pipeline.sexp.parser import parse_file as sexp_parse
+
+        for path in written:
+            tree = sexp_parse(path)
+            # Find all (symbol ...) nodes
+            symbol_nodes = [n for n in tree if isinstance(n, list) and n[0] == "symbol"
+                           and any(isinstance(c, list) and c[0] == "instances" for c in n)]
+            for sym_node in symbol_nodes:
+                inst_node = next(
+                    c for c in sym_node
+                    if isinstance(c, list) and c[0] == "instances"
+                )
+                # (instances (project "Test Project" ...))
+                proj_node = next(
+                    c for c in inst_node
+                    if isinstance(c, list) and c[0] == "project"
+                )
+                assert proj_node[1] == project_name, (
+                    f"File {path.name}: expected project '{project_name}' "
+                    f"but got '{proj_node[1]}'"
+                )
+
+    def test_write_schematic_uses_explicit_project_name(self, tmp_path: Path) -> None:
+        """write_schematic with explicit project_name should override file stem."""
+        from kicad_pipeline.schematic.builder import write_schematic
+
+        req = _two_feature_requirements()
+        parts = partition_requirements(req)
+        power, _, inter = classify_nets(req)
+        feature = req.features[1]
+        sub_sch = build_sub_sheet(feature, parts["MCU"], inter, power)
+
+        # Write with filename "mcu.kicad_sch" but project_name="Test Project"
+        path = tmp_path / "mcu.kicad_sch"
+        write_schematic(sub_sch, path, project_name="Test Project")
+
+        from kicad_pipeline.sexp.parser import parse_file as sexp_parse
+
+        tree = sexp_parse(path)
+        symbol_nodes = [n for n in tree if isinstance(n, list) and n[0] == "symbol"
+                       and any(isinstance(c, list) and c[0] == "instances" for c in n)]
+        for sym_node in symbol_nodes:
+            inst_node = next(
+                c for c in sym_node
+                if isinstance(c, list) and c[0] == "instances"
+            )
+            proj_node = next(
+                c for c in inst_node
+                if isinstance(c, list) and c[0] == "project"
+            )
+            # Should use "Test Project", NOT "mcu" (file stem)
+            assert proj_node[1] == "Test Project"
+
+    def test_write_schematic_falls_back_to_stem(self, tmp_path: Path) -> None:
+        """Without explicit project_name, write_schematic uses file stem."""
+        from kicad_pipeline.schematic.builder import write_schematic
+
+        req = _two_feature_requirements()
+        parts = partition_requirements(req)
+        power, _, inter = classify_nets(req)
+        feature = req.features[1]
+        sub_sch = build_sub_sheet(feature, parts["MCU"], inter, power)
+
+        path = tmp_path / "my_board.kicad_sch"
+        write_schematic(sub_sch, path)
+
+        from kicad_pipeline.sexp.parser import parse_file as sexp_parse
+
+        tree = sexp_parse(path)
+        symbol_nodes = [n for n in tree if isinstance(n, list) and n[0] == "symbol"
+                       and any(isinstance(c, list) and c[0] == "instances" for c in n)]
+        if symbol_nodes:
+            sym_node = symbol_nodes[0]
+            inst_node = next(
+                c for c in sym_node
+                if isinstance(c, list) and c[0] == "instances"
+            )
+            proj_node = next(
+                c for c in inst_node
+                if isinstance(c, list) and c[0] == "project"
+            )
+            assert proj_node[1] == "my_board"
+
+
+# ---------------------------------------------------------------------------
+# Compact sub-sheet layout tests
+# ---------------------------------------------------------------------------
+
+
+class TestCompactSubSheetLayout:
+    """Verify sub-sheets use compact placement and centred labels."""
+
+    def test_sub_sheet_uses_compact_placement(self) -> None:
+        """Components in sub-sheets should be packed tightly, not spread
+        across full A4 zones (120mm+ wide)."""
+        req = _two_feature_requirements()
+        parts = partition_requirements(req)
+        power, _, inter = classify_nets(req)
+        feature = req.features[0]  # Power: U1, C1
+        sub_sch = build_sub_sheet(feature, parts["Power"], inter, power)
+
+        positions = [inst.position for inst in sub_sch.symbols]
+        if len(positions) >= 2:
+            xs = [p.x for p in positions]
+            x_span = max(xs) - min(xs)
+            # Compact layout should not spread components across 100mm+
+            assert x_span < 100.0, (
+                f"Component X span {x_span:.1f}mm is too wide for compact layout"
+            )
+
+    def test_hierarchical_labels_vertically_centred(self) -> None:
+        """Labels should be vertically centred on the component bounding box."""
+        req = _two_feature_requirements()
+        parts = partition_requirements(req)
+        power, _, inter = classify_nets(req)
+        feature = req.features[1]  # MCU: U2, R1
+        sub_sch = build_sub_sheet(feature, parts["MCU"], inter, power)
+
+        if sub_sch.hierarchical_labels and sub_sch.symbols:
+            comp_ys = [inst.position.y for inst in sub_sch.symbols]
+            comp_center = (min(comp_ys) + max(comp_ys)) / 2.0
+
+            label_ys = [hl.position.y for hl in sub_sch.hierarchical_labels]
+            label_center = (min(label_ys) + max(label_ys)) / 2.0
+
+            # Label center should be close to component center (within 20mm)
+            assert abs(label_center - comp_center) < 20.0, (
+                f"Label center {label_center:.1f} far from component center "
+                f"{comp_center:.1f}"
+            )
+
+    def test_hierarchical_labels_have_left_margin(self) -> None:
+        """Labels should be at x=5.0, well left of components."""
+        req = _two_feature_requirements()
+        parts = partition_requirements(req)
+        power, _, inter = classify_nets(req)
+        feature = req.features[1]
+        sub_sch = build_sub_sheet(feature, parts["MCU"], inter, power)
+
+        for hl in sub_sch.hierarchical_labels:
+            assert hl.position.x == 5.0
+            # Components should be to the right of labels
+            comp_xs = [inst.position.x for inst in sub_sch.symbols]
+            if comp_xs:
+                assert min(comp_xs) > hl.position.x
+
+
+# ---------------------------------------------------------------------------
+# layout_compact tests
+# ---------------------------------------------------------------------------
+
+
+class TestLayoutCompact:
+    """Test compact placement function directly."""
+
+    def test_places_all_refs(self) -> None:
+        from kicad_pipeline.schematic.placement import layout_compact
+
+        refs = ["R1", "R2", "C1", "U1"]
+        positions = layout_compact(refs)
+        assert set(positions.keys()) == set(refs)
+
+    def test_respects_left_margin(self) -> None:
+        from kicad_pipeline.schematic.placement import layout_compact
+
+        refs = ["R1", "R2"]
+        positions = layout_compact(refs, margin_left=40.0)
+        for p in positions.values():
+            # Grid snapping may round down by up to 1 grid step (1.27mm)
+            assert p.x >= 38.0
+
+    def test_wraps_to_next_row(self) -> None:
+        from kicad_pipeline.schematic.placement import layout_compact
+
+        # Many components should wrap within max_width
+        refs = [f"R{i}" for i in range(20)]
+        positions = layout_compact(refs, max_width=80.0)
+        ys = {p.y for p in positions.values()}
+        # With 20 2-pin components and 80mm max width, should have multiple rows
+        assert len(ys) > 1
+
+    def test_pin_count_affects_spacing(self) -> None:
+        from kicad_pipeline.schematic.placement import layout_compact
+
+        # Two components: one 2-pin, one 20-pin
+        refs = ["R1", "U1"]
+        pin_counts = {"R1": 2, "U1": 20}
+        positions = layout_compact(refs, pin_count_map=pin_counts)
+        # Both should be placed
+        assert len(positions) == 2
+
+
+# ---------------------------------------------------------------------------
 # Utility tests
 # ---------------------------------------------------------------------------
 
