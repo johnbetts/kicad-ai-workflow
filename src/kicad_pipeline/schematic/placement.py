@@ -269,18 +269,18 @@ def place_in_zone(
         Mapping from component ref to grid-snapped :class:`Point`.
     """
     result: dict[str, Point] = {}
-    default_v_spacing = 20.32  # 16 * 1.27mm grid — compact for passives
 
     if pin_counts is None or len(pin_counts) != len(refs):
-        # No pin info: simple grid with compact spacing
-        h_spacing = 25.4  # 20 * 1.27mm
+        # No pin info: compact grid with tighter defaults
+        h_spacing = snap_to_grid(20.32, grid)  # 16 * 1.27mm
+        v_spacing = snap_to_grid(15.24, grid)  # 12 * 1.27mm
         if symbols_per_row is None:
             symbols_per_row = max(1, int(zone.width / h_spacing))
         for idx, ref in enumerate(refs):
             col = idx % symbols_per_row
             row = idx // symbols_per_row
             raw_x = zone.origin_x + col * h_spacing
-            raw_y = zone.origin_y + row * default_v_spacing
+            raw_y = zone.origin_y + row * v_spacing
             x = snap_to_grid(raw_x, grid)
             y = snap_to_grid(raw_y, grid)
             result[ref] = Point(x=x, y=y)
@@ -294,17 +294,17 @@ def place_in_zone(
 
     cumulative_y = 0.0
 
-    # Place large components side by side, adapting columns to zone width
-    # Use ~45mm spacing between large components (enough for IC body + labels)
-    large_spacing = snap_to_grid(45.0, grid)
-    large_cols = max(2, int(zone.width / large_spacing))
-    for row_start in range(0, len(large_indices), large_cols):
-        row_items = large_indices[row_start:row_start + large_cols]
+    # Place large components: use pin-count-aware horizontal spacing
+    for row_start in range(0, len(large_indices), 2):
+        row_items = large_indices[row_start:row_start + 2]
+        # Compute per-row horizontal spacing from the largest component in this row
+        row_max_pc = max(pin_counts[i] for i in row_items)
+        large_h = max(snap_to_grid(_h_spacing_for_pins(row_max_pc, grid), grid), 25.4)
         max_row_h = 0.0
         for col_idx, i in enumerate(row_items):
             ref = refs[i]
             pc = pin_counts[i]
-            x = snap_to_grid(zone.origin_x + col_idx * large_spacing, grid)
+            x = snap_to_grid(zone.origin_x + col_idx * large_h, grid)
             y = snap_to_grid(zone.origin_y + cumulative_y, grid)
             result[ref] = Point(x=x, y=y)
             log.debug("place_in_zone: %s → (%.3f, %.3f) in zone %s [large]", ref, x, y, zone.name)
@@ -312,16 +312,17 @@ def place_in_zone(
             body_h = max(effective_pins * 2.54, 5.08)
             body_h = min(body_h, zone.height * 0.5)
             max_row_h = max(max_row_h, body_h)
-        cumulative_y += max_row_h + 10.0
+        cumulative_y += max_row_h + 8.0
 
-    # Place small components: uniform grid
+    # Place small components: pin-count-aware spacing per row
     if small_indices:
         n_small = len(small_indices)
 
-        # Compute columns: use fixed spacing, don't spread across full zone
-        max_h_spacing = 35.56  # 28 * 1.27mm — clears label+pin+body+pin+label
-        cols = max(1, min(n_small, int(zone.width / max_h_spacing)))
-        h_spacing = snap_to_grid(max_h_spacing, grid)
+        # Compute per-row horizontal spacing from max pin count in first row
+        first_row_pcs = [pin_counts[small_indices[j]] for j in range(min(n_small, 6))]
+        max_pc_first = max(first_row_pcs) if first_row_pcs else 2
+        h_spacing = snap_to_grid(_h_spacing_for_pins(max_pc_first, grid), grid)
+        cols = max(1, min(n_small, int(zone.width / h_spacing)))
 
         for local_idx, global_idx in enumerate(small_indices):
             ref = refs[global_idx]
@@ -329,16 +330,24 @@ def place_in_zone(
             col = local_idx % cols
             row = local_idx // cols
 
-            # Compute row height from pin counts in this row
-            row_start = row * cols
-            row_end = min(row_start + cols, n_small)
-            row_pcs = [pin_counts[small_indices[j]] for j in range(row_start, row_end)]
+            # Compute row height: body height + size-scaled label clearance
+            row_start_idx = row * cols
+            row_end_idx = min(row_start_idx + cols, n_small)
+            row_pcs = [pin_counts[small_indices[j]] for j in range(row_start_idx, row_end_idx)]
             max_pc = max(row_pcs) if row_pcs else 2
             body_h = max(max_pc * 2.54, 5.08)
-            clearance = 20.0 if body_h <= 10.0 else 22.0
+            # Scale label clearance by body size
+            if body_h <= 5.08:
+                clearance = 10.0  # 2-pin passives: tight
+            elif body_h <= 10.0:
+                clearance = 12.0  # 4-6 pin: moderate
+            else:
+                clearance = 15.0  # 8+ pin: generous
             row_height = body_h + clearance
 
-            raw_x = zone.origin_x + col * h_spacing
+            # Recompute h_spacing per row from max pin count
+            row_h_spacing = snap_to_grid(_h_spacing_for_pins(max_pc, grid), grid)
+            raw_x = zone.origin_x + col * row_h_spacing
             if col == 0 and local_idx > 0:
                 cumulative_y += row_height
             raw_y = zone.origin_y + cumulative_y

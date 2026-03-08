@@ -599,3 +599,74 @@ def test_power_consolidation_multi_pin_same_side() -> None:
     assert len(gnd_syms) == 1
     # Should have junctions for interior T-connections (4 pins, 2 interior)
     assert len(sch.junctions) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Ref designator '?' validation
+# ---------------------------------------------------------------------------
+
+
+def test_write_schematic_warns_on_unannotated_ref(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """write_schematic emits WARNING when symbols contain '?' refs."""
+    import logging
+    from dataclasses import replace as dreplace
+
+    from kicad_pipeline.models.schematic import Point, SymbolInstance
+
+    reqs = _minimal_requirements()
+    sch = build_schematic(reqs)
+
+    # Inject an unannotated ref into symbols
+    bad_inst = SymbolInstance(
+        lib_id="Device:R",
+        ref="R?",
+        value="10k",
+        footprint="Resistor_SMD:R_0603_1608Metric",
+        position=Point(x=50.0, y=50.0),
+    )
+    sch_bad = dreplace(sch, symbols=(*sch.symbols, bad_inst))
+
+    dest = tmp_path / "test_warn.kicad_sch"
+    with caplog.at_level(logging.WARNING, logger="kicad_pipeline.schematic.builder"):
+        write_schematic(sch_bad, dest)
+
+    assert any("R?" in rec.message for rec in caplog.records)
+    assert dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# Contextual spacing tests
+# ---------------------------------------------------------------------------
+
+
+def test_place_in_zone_small_passives_tighter_than_ics() -> None:
+    """2-pin passives should have tighter vertical spacing than 8+ pin ICs."""
+    zone = SCHEMATIC_ZONES["POWER"]
+
+    # 4 passives (2 pins each) — should use tight spacing
+    passive_pos = place_in_zone(
+        ["R1", "R2", "R3", "R4"],
+        zone,
+        pin_counts=[2, 2, 2, 2],
+        symbols_per_row=2,
+    )
+    dy_passive = passive_pos["R3"].y - passive_pos["R1"].y
+
+    # 4 ICs (10 pins each) — should use wider spacing
+    ic_pos = place_in_zone(
+        ["U1", "U2", "U3", "U4"],
+        zone,
+        pin_counts=[10, 10, 10, 10],
+        symbols_per_row=2,
+    )
+    # U3 is in the small bucket (10 < large_threshold=8 is False, 10>=8 so large)
+    # For large: U3 is in second row
+    dy_ic = ic_pos["U3"].y - ic_pos["U1"].y
+
+    assert dy_passive < dy_ic, (
+        f"Passive vertical spacing ({dy_passive}mm) should be less than "
+        f"IC spacing ({dy_ic}mm)"
+    )

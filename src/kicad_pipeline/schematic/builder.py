@@ -1429,6 +1429,17 @@ def write_schematic(schematic: Schematic, path: str | Path) -> None:
     """
     dest = Path(path)
     log.info("write_schematic → %s", dest)
+
+    # Warn about unannotated ref designators (contain '?')
+    for inst in schematic.symbols:
+        if "?" in inst.ref:
+            log.warning(
+                "write_schematic: ref designator '%s' contains '?' — "
+                "KiCad will show unannotated designators. "
+                "Run annotation before writing.",
+                inst.ref,
+            )
+
     # Derive project name from filename stem so KiCad instance references match.
     proj_name = dest.stem
     try:
