@@ -5,7 +5,7 @@ verify every structural and semantic requirement that KiCad 9 enforces.
 
 Functional checks:
   - Required top-level sections present (version, generator, lib_symbols, etc.)
-  - symbol_instances maps every symbol UUID to its reference designator
+  - Per-symbol (instances ...) blocks map every symbol to its reference designator
   - sheet_instances section exists with root page
   - Every symbol UUID is unique
   - Every wire is either horizontal or vertical (no diagonal stubs)
@@ -367,83 +367,76 @@ class TestStructuralSections:
     def test_sheet_instances_present(self, parsed_tree: list[SExpNode]) -> None:
         node = _find_node(parsed_tree, "sheet_instances")
         assert node is not None
-        # Must contain (path "/<root_uuid>" (page "1"))
+        # Root sheet path must be exactly "/" (KiCad 9 canonical format)
         path_node = _find_node(node, "path")
         assert path_node is not None
-        # Path value must start with "/" (either bare "/" or "/<uuid>")
         path_val = str(path_node[1]) if len(path_node) > 1 else ""
-        assert path_val.startswith("/")
+        assert path_val == "/", f"Root sheet_instances path should be '/', got '{path_val}'"
 
-    def test_symbol_instances_present(self, parsed_tree: list[SExpNode]) -> None:
+    def test_no_top_level_symbol_instances(self, parsed_tree: list[SExpNode]) -> None:
+        """KiCad 9 does not use a top-level symbol_instances section."""
         node = _find_node(parsed_tree, "symbol_instances")
-        assert node is not None
-        # Must have at least one (path ...) child for the placed symbols
-        paths = _find_nodes(node, "path")
-        assert len(paths) >= 1
+        assert node is None, "Top-level symbol_instances should not exist in KiCad 9"
 
     def test_at_least_one_symbol(self, parsed_tree: list[SExpNode]) -> None:
         symbols = _find_nodes(parsed_tree, "symbol")
         assert len(symbols) >= 1
 
 
-class TestSymbolInstances:
-    """symbol_instances section maps every placed symbol UUID to its reference."""
+class TestPerSymbolInstances:
+    """Per-symbol (instances ...) blocks resolve ref designators in KiCad 9."""
 
-    def _get_placed_symbol_uuids(self, tree: list[SExpNode]) -> dict[str, str]:
-        """Return {uuid: ref} for every placed (symbol ...) in the schematic."""
-        result: dict[str, str] = {}
+    def _get_symbol_instances_info(
+        self, tree: list[SExpNode],
+    ) -> list[tuple[str, str, str | None]]:
+        """Return [(ref, uuid, instance_ref)] for every placed symbol.
+
+        instance_ref is the reference from the per-symbol (instances ...) block,
+        or None if the block is missing.
+        """
+        results: list[tuple[str, str, str | None]] = []
         for sym in _find_nodes(tree, "symbol"):
             uid = _scalar(sym, "uuid")
-            # Reference is in (property "Reference" "R1" ...)
+            ref = ""
             for prop in _find_nodes(sym, "property"):
                 if len(prop) >= 3 and prop[1] == "Reference":
                     ref = str(prop[2])
-                    if isinstance(uid, str):
-                        result[uid] = ref
                     break
-        return result
+            if not isinstance(uid, str):
+                continue
+            # Find (instances (project "name" (path "..." (reference "R1") ...)))
+            inst_ref: str | None = None
+            instances_node = _find_node(sym, "instances")
+            if instances_node is not None:
+                project_node = _find_node(instances_node, "project")
+                if project_node is not None:
+                    path_node = _find_node(project_node, "path")
+                    if path_node is not None:
+                        ref_node = _find_node(path_node, "reference")
+                        if ref_node and len(ref_node) >= 2:
+                            inst_ref = str(ref_node[1])
+            results.append((ref, uid, inst_ref))
+        return results
 
-    def _get_instance_map(self, tree: list[SExpNode]) -> dict[str, str]:
-        """Return {uuid: ref} from the symbol_instances section."""
-        si = _find_node(tree, "symbol_instances")
-        assert si is not None
-        result: dict[str, str] = {}
-        for path_node in _find_nodes(si, "path"):
-            if len(path_node) >= 2 and isinstance(path_node[1], str):
-                # path is "/{root_uuid}/{symbol_uuid}" (KiCad 9) or "/{symbol_uuid}"
-                path_str = path_node[1].strip("/")
-                # Last segment is the symbol UUID
-                uid = path_str.rsplit("/", 1)[-1]
-                ref_node = _find_node(path_node, "reference")
-                if ref_node and len(ref_node) >= 2:
-                    result[uid] = str(ref_node[1])
-        return result
+    def test_every_symbol_has_instances_block(
+        self, parsed_tree: list[SExpNode],
+    ) -> None:
+        """Every placed symbol must have an (instances ...) block."""
+        for ref, uid, inst_ref in self._get_symbol_instances_info(parsed_tree):
+            assert inst_ref is not None, (
+                f"Symbol {ref} (uuid={uid}) missing (instances ...) block"
+            )
 
-    def test_every_symbol_has_instance_entry(self, parsed_tree: list[SExpNode]) -> None:
-        """Every symbol UUID in the schematic must appear in symbol_instances."""
-        placed = self._get_placed_symbol_uuids(parsed_tree)
-        instances = self._get_instance_map(parsed_tree)
-        for uid, ref in placed.items():
-            assert uid in instances, f"Symbol {ref} (uuid={uid}) missing from symbol_instances"
-
-    def test_instance_refs_match_symbol_refs(self, parsed_tree: list[SExpNode]) -> None:
-        """Reference designators in symbol_instances must match placed symbol refs."""
-        placed = self._get_placed_symbol_uuids(parsed_tree)
-        instances = self._get_instance_map(parsed_tree)
-        for uid, ref in placed.items():
-            if uid in instances:
-                assert instances[uid] == ref, (
+    def test_instance_refs_match_symbol_refs(
+        self, parsed_tree: list[SExpNode],
+    ) -> None:
+        """Ref in per-symbol (instances ...) must match the symbol's ref."""
+        for ref, uid, inst_ref in self._get_symbol_instances_info(parsed_tree):
+            if inst_ref is not None:
+                assert inst_ref == ref, (
                     f"Ref mismatch for uuid={uid}: symbol says {ref}, "
-                    f"symbol_instances says {instances[uid]}"
+                    f"instances block says {inst_ref}"
                 )
-
-    def test_instance_entries_have_unit(self, parsed_tree: list[SExpNode]) -> None:
-        """Every symbol_instances path entry must have a (unit N) child."""
-        si = _find_node(parsed_tree, "symbol_instances")
-        assert si is not None
-        for path_node in _find_nodes(si, "path"):
-            unit_node = _find_node(path_node, "unit")
-            assert unit_node is not None, f"Missing (unit) in symbol_instances: {path_node}"
 
 
 class TestUUIDs:

@@ -1480,11 +1480,12 @@ def schematic_to_sexp(
     for sheet in schematic.sheets:
         root.append(_sheet_sexp(sheet))
 
-    # KiCad 9 canonical sheet_instances section (root sheet + sub-sheets)
-    # Path must include root UUID for KiCad 9 to resolve ref designators.
+    # KiCad 9 canonical sheet_instances section (root sheet + sub-sheets).
+    # Root sheet path is always "/" (verified against real KiCad 9 files).
+    # Sub-sheet paths are "/{root_uuid}/{sheet_uuid}".
     sheet_instances_node: list[SExpNode] = [
         "sheet_instances",
-        ["path", f"/{root_uuid}", ["page", "1"]],
+        ["path", "/", ["page", "1"]],
     ]
     for page_num, sheet in enumerate(schematic.sheets, start=2):
         sheet_instances_node.append(
@@ -1492,22 +1493,9 @@ def schematic_to_sexp(
         )
     root.append(sheet_instances_node)
 
-    # KiCad 9 symbol_instances — maps each symbol UUID to its reference designator.
-    # Path format: "/{root_sheet_uuid}/{symbol_uuid}" for KiCad 9.
-    sym_instances: list[SExpNode] = ["symbol_instances"]
-    for inst in schematic.symbols:
-        sym_instances.append([
-            "path", f"/{root_uuid}/{inst.uuid}",
-            ["reference", inst.ref],
-            ["unit", inst.unit],
-        ])
-    for ps in schematic.power_symbols:
-        sym_instances.append([
-            "path", f"/{root_uuid}/{ps.uuid}",
-            ["reference", ps.ref],
-            ["unit", 1],
-        ])
-    root.append(sym_instances)
+    # NOTE: KiCad 9 does NOT use a top-level (symbol_instances ...) section.
+    # Ref designators are resolved entirely through per-symbol (instances ...)
+    # blocks emitted by _symbol_instance_sexp() and _power_symbol_sexp().
 
     return root
 
