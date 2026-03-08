@@ -344,3 +344,22 @@ VOLTAGE_CLEARANCE_THRESHOLDS: tuple[tuple[float, float], ...] = (
 The first entry whose voltage >= the net voltage determines clearance.
 Based on IPC-2221 simplified external-layer distances.
 """
+
+# ---------------------------------------------------------------------------
+# Multi-agent coordination
+# ---------------------------------------------------------------------------
+
+AGENT_REGISTRY_DIR: str = "~/.claude/kicad-agents"
+"""Default directory for the agent registry and per-agent state files."""
+
+AGENT_STATUS_FILENAME: str = "status.json"
+"""Filename for a board agent's status file within its agent directory."""
+
+AGENT_COMMANDS_FILENAME: str = "commands.json"
+"""Filename for commands issued to a board agent."""
+
+AGENT_REGISTRY_FILENAME: str = "registry.json"
+"""Filename for the global agent registry."""
+
+AGENT_PIPELINE_VERSION_FILENAME: str = "pipeline-version.json"
+"""Filename for the pipeline version marker."""

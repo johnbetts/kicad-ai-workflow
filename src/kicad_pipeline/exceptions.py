@@ -185,3 +185,12 @@ class IPCConnectionError(IPCError):
 
 class IPCSyncError(IPCError):
     """Raised when board state synchronisation fails."""
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent coordination
+# ---------------------------------------------------------------------------
+
+
+class AgentError(OrchestrationError):
+    """Raised when multi-agent coordination operations fail."""

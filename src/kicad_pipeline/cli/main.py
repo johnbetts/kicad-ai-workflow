@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_project_subparser(subparsers)
 
+    # agents subcommand (multi-agent coordination)
+    from kicad_pipeline.cli.agents_cmd import add_agents_subparser
+
+    add_agents_subparser(subparsers)
+
     return parser
 
 
@@ -167,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
         from kicad_pipeline.cli.project_cmd import dispatch_project
 
         return dispatch_project(args)
+    if args.command == "agents":
+        from kicad_pipeline.cli.agents_cmd import dispatch_agents
+
+        return dispatch_agents(args)
 
     parser.print_help()
     return 0
