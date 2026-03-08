@@ -130,6 +130,8 @@ def route_with_freerouting(
 
     cmd: list[str] = [
         "java",
+        "-Djava.awt.headless=true",
+        "-Dapple.awt.UIElement=true",
         "-jar",
         resolved_jar,
         "--gui.enabled=false",
