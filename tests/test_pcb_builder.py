@@ -271,13 +271,17 @@ def test_build_pcb_no_components_raises() -> None:
 
 
 def test_default_board_size() -> None:
-    """Default board is 80 x 40 mm when no mechanical constraints are given."""
+    """Default board is at least 80 x 40 mm when no mechanical constraints.
+
+    Auto-sizing may produce a larger board when component footprints
+    (e.g. ESP32 module) require more area than the 80x40 minimum.
+    """
     req = _make_requirements(with_mechanical=False)
     design = build_pcb(req)
     xs = [p.x for p in design.outline.polygon]
     ys = [p.y for p in design.outline.polygon]
-    assert max(xs) == pytest.approx(80.0)
-    assert max(ys) == pytest.approx(40.0)
+    assert max(xs) >= 80.0
+    assert max(ys) >= 40.0
 
 
 def test_board_dimensions_from_mechanical() -> None:
