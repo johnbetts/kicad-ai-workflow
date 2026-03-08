@@ -5,11 +5,15 @@ from __future__ import annotations
 import pytest
 
 from kicad_pipeline.schematic.subcircuits import (
+    SubcircuitResult,
     decoupling_cap,
+    instantiate_subcircuit,
     ldo_regulator,
     led_drive,
     led_limit_resistor,
+    merge_subcircuit_results,
     npn_buzzer_drive,
+    relay_driver,
     usb_c_input,
     voltage_divider,
     voltage_divider_vout,
@@ -239,6 +243,164 @@ def test_npn_buzzer_refs() -> None:
     assert "Q1" in refs
     assert "R_BASE" in refs
     assert "D_FLY" in refs
+
+
+# ---------------------------------------------------------------------------
+# relay_driver
+# ---------------------------------------------------------------------------
+
+
+def test_relay_driver_five_components_with_terminal() -> None:
+    """relay_driver() with terminal returns R + Q + D + K + J = 5 components."""
+    result = relay_driver("Q1", "R10", "D6", "K1", "J3", "RELAY_1")
+    assert len(result.components) == 5
+
+
+def test_relay_driver_four_components_without_terminal() -> None:
+    """relay_driver() without terminal returns R + Q + D + K = 4 components."""
+    result = relay_driver("Q1", "R10", "D6", "K1", None, "RELAY_1")
+    assert len(result.components) == 4
+
+
+def test_relay_driver_nets() -> None:
+    """GPIO, VCC, GND, base, coil, and contact nets are present."""
+    result = relay_driver("Q1", "R10", "D6", "K1", "J3", "RELAY_1")
+    net_names = {n.name for n in result.nets}
+    assert "RELAY_1" in net_names
+    assert "Q1_BASE" in net_names
+    assert "K1_COIL" in net_names
+    assert "+5V" in net_names
+    assert "GND" in net_names
+    assert "K1_COM" in net_names
+    assert "K1_NO" in net_names
+    assert "K1_NC" in net_names
+
+
+def test_relay_driver_refs() -> None:
+    """All component refs are present in relay_driver output."""
+    result = relay_driver("Q1", "R10", "D6", "K1", "J3", "RELAY_1")
+    refs = {c.ref for c in result.components}
+    assert refs == {"Q1", "R10", "D6", "K1", "J3"}
+
+
+def test_relay_driver_spst() -> None:
+    """SPST relay has no NC net and 4 relay pins."""
+    result = relay_driver("Q2", "R11", "D7", "K2", "J4", "RELAY_2", relay_type="SPST")
+    net_names = {n.name for n in result.nets}
+    assert "K2_COM" in net_names
+    assert "K2_NO" in net_names
+    assert "K2_NC" not in net_names
+    relay = next(c for c in result.components if c.ref == "K2")
+    assert len(relay.pins) == 4
+
+
+def test_relay_driver_custom_vcc() -> None:
+    """Custom vcc_net propagates to diode and relay coil connections."""
+    result = relay_driver("Q1", "R10", "D6", "K1", None, "GPIO1", vcc_net="+12V")
+    net_names = {n.name for n in result.nets}
+    assert "+12V" in net_names
+    diode = next(c for c in result.components if c.ref == "D6")
+    assert diode.get_pin("2") is not None
+    assert diode.get_pin("2").net == "+12V"
+
+
+def test_relay_driver_terminal_connects_contacts() -> None:
+    """Screw terminal pins share nets with relay contact pins."""
+    result = relay_driver("Q1", "R10", "D6", "K1", "J3", "RELAY_1")
+    # J3 pin 1 should connect to K1_NO, pin 2 to K1_COM, pin 3 to K1_NC
+    terminal = next(c for c in result.components if c.ref == "J3")
+    assert terminal.get_pin("1").net == "K1_NO"
+    assert terminal.get_pin("2").net == "K1_COM"
+    assert terminal.get_pin("3").net == "K1_NC"
+
+
+def test_relay_driver_description() -> None:
+    """Description contains key component info."""
+    result = relay_driver("Q1", "R10", "D6", "K1", "J3", "RELAY_1")
+    assert "BC817" in result.description
+    assert "1N4148" in result.description
+    assert "SPDT" in result.description
+
+
+# ---------------------------------------------------------------------------
+# instantiate_subcircuit
+# ---------------------------------------------------------------------------
+
+
+def test_instantiate_relay_driver_x4() -> None:
+    """Instantiate 4 relay drivers with correct ref numbering."""
+    results = instantiate_subcircuit(
+        relay_driver,
+        count=4,
+        ref_start={"Q": 1, "R": 10, "D": 6, "K": 1, "J": 3},
+        net_prefix="RELAY",
+        vcc_net="+5V",
+    )
+    assert len(results) == 4
+
+    # Check refs for each instance
+    for i, r in enumerate(results, 1):
+        refs = {c.ref for c in r.components}
+        assert f"Q{i}" in refs
+        assert f"R{9 + i}" in refs
+        assert f"D{5 + i}" in refs
+        assert f"K{i}" in refs
+        assert f"J{2 + i}" in refs
+
+    # Check net naming
+    net_names = {n.name for n in results[0].nets}
+    assert "RELAY_1" in net_names
+    net_names_4 = {n.name for n in results[3].nets}
+    assert "RELAY_4" in net_names_4
+
+
+def test_instantiate_without_terminal() -> None:
+    """Instantiate relay drivers without screw terminals."""
+    results = instantiate_subcircuit(
+        relay_driver,
+        count=2,
+        ref_start={"Q": 1, "R": 10, "D": 6, "K": 1},
+        net_prefix="RLY",
+        vcc_net="+5V",
+    )
+    # J prefix not in ref_start → ref_j = None → no terminal
+    for r in results:
+        assert len(r.components) == 4
+        assert not any(c.ref.startswith("J") for c in r.components)
+
+
+# ---------------------------------------------------------------------------
+# merge_subcircuit_results
+# ---------------------------------------------------------------------------
+
+
+def test_merge_combines_components() -> None:
+    """merge_subcircuit_results combines components from all inputs."""
+    r1 = relay_driver("Q1", "R10", "D6", "K1", "J3", "RELAY_1")
+    r2 = relay_driver("Q2", "R11", "D7", "K2", "J4", "RELAY_2")
+    merged = merge_subcircuit_results((r1, r2))
+    assert len(merged.components) == len(r1.components) + len(r2.components)
+
+
+def test_merge_deduplicates_shared_nets() -> None:
+    """Shared nets (GND, +5V) are merged into single entries."""
+    r1 = relay_driver("Q1", "R10", "D6", "K1", None, "RELAY_1")
+    r2 = relay_driver("Q2", "R11", "D7", "K2", None, "RELAY_2")
+    merged = merge_subcircuit_results((r1, r2))
+
+    # GND should appear once, with connections from both instances
+    gnd_nets = [n for n in merged.nets if n.name == "GND"]
+    assert len(gnd_nets) == 1
+    assert len(gnd_nets[0].connections) == 2  # Q1.E + Q2.E
+
+
+def test_merge_preserves_descriptions() -> None:
+    """Merged description contains all individual descriptions."""
+    r1 = decoupling_cap("C1", "VCC")
+    r2 = decoupling_cap("C2", "+3V3")
+    merged = merge_subcircuit_results((r1, r2))
+    assert r1.description in merged.description
+    assert r2.description in merged.description
 
 
 # ---------------------------------------------------------------------------

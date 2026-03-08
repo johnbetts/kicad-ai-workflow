@@ -148,6 +148,23 @@ class MechanicalConstraints:
 
 
 @dataclass(frozen=True)
+class BoardContext:
+    """High-level context about what the board connects to.
+
+    Attributes:
+        target_system: Name of the system/harness the board connects to.
+        shared_grounds: Whether sensors share a common ground return.
+        shared_terminals: Mapping from net name to refs sharing that terminal.
+        notes: Freeform design notes or questions about the board context.
+    """
+
+    target_system: str | None = None
+    shared_grounds: bool = False
+    shared_terminals: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class FeatureBlock:
     """A functional feature block (e.g. Ethernet, Power, USB)."""
 
@@ -190,6 +207,7 @@ class ProjectRequirements:
     power_budget: PowerBudget | None = None
     mechanical: MechanicalConstraints | None = None
     recommendations: tuple[Recommendation, ...] = ()
+    board_context: BoardContext | None = None
 
     def get_component(self, ref: str) -> Component | None:
         """Return component by ref, or None if not found."""

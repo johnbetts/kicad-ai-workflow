@@ -79,6 +79,9 @@ class PlacementConstraint:
     group_name: str | None = None
     priority: int = 0
     layer: str | None = None
+    subcircuit_layout: str | None = None
+    """Optional layout hint for subcircuit groups: ``'linear'``, ``'compact'``,
+    or ``'star'``.  Used by :func:`solve_placement` to order GROUP members."""
 
 
 @dataclass(frozen=True)

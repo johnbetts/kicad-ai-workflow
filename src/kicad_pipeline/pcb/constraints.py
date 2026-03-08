@@ -521,6 +521,102 @@ def constraints_from_requirements(
                 priority=25,
             ))
 
+    # 4c. Subcircuit cluster detection from FeatureBlock.subcircuits field
+    # When a feature declares subcircuit types, detect per-instance clusters
+    # from the netlist and create higher-priority GROUP constraints.
+    _subcircuit_grouped: set[str] = set()
+    relay_driver_layout = "linear"
+
+    for fb in requirements.features:
+        if not fb.subcircuits:
+            continue
+        # Detect relay driver clusters: Q + R sharing base net + D + K + J
+        if "relay_driver" in fb.subcircuits:
+            relay_refs_in_fb = [
+                r for r in fb.components if r.startswith("K")
+            ]
+            for relay_ref in relay_refs_in_fb:
+                # Find components sharing nets with this relay
+                relay_nets: set[str] = set()
+                for net in requirements.nets:
+                    for conn in net.connections:
+                        if conn.ref == relay_ref:
+                            relay_nets.add(net.name)
+                cluster: list[str] = [relay_ref]
+                for ref in fb.components:
+                    if ref == relay_ref or ref in cluster:
+                        continue
+                    ref_nets: set[str] = set()
+                    for net in requirements.nets:
+                        for conn in net.connections:
+                            if conn.ref == ref:
+                                ref_nets.add(net.name)
+                    shared = ref_nets & relay_nets
+                    # Exclude power-only sharing (GND, +5V shared by everything)
+                    signal_shared = {
+                        n for n in shared if not _is_power_net(n)
+                    }
+                    if signal_shared:
+                        cluster.append(ref)
+                    elif ref.startswith("J") and shared:
+                        # Screw terminals share contact nets with relay
+                        cluster.append(ref)
+
+                if len(cluster) > 1:
+                    group_name = f"_subcircuit_{relay_ref}"
+                    for ref in cluster:
+                        _subcircuit_grouped.add(ref)
+                        constraints.append(PlacementConstraint(
+                            ref=ref,
+                            constraint_type=PlacementConstraintType.GROUP,
+                            group_name=group_name,
+                            priority=18,
+                            subcircuit_layout=relay_driver_layout,
+                        ))
+
+    # 4d. Infer subcircuit clusters from netlist patterns (no metadata needed)
+    # NPN driver pattern: Q + R sharing base net + D sharing collector net
+    for comp in requirements.components:
+        if not comp.ref.startswith("Q") or comp.ref in _subcircuit_grouped:
+            continue
+        # Find base net (pin B or pin 1)
+        q_nets: dict[str, str] = {}
+        for pin in comp.pins:
+            if pin.net:
+                q_nets[pin.name] = pin.net
+        base_net_name = q_nets.get("B") or q_nets.get("1")
+        collector_net_name = q_nets.get("C") or q_nets.get("2")
+        if not base_net_name or not collector_net_name:
+            continue
+
+        cluster = [comp.ref]
+        # Find R sharing base net
+        for other in requirements.components:
+            if other.ref == comp.ref or other.ref in _subcircuit_grouped:
+                continue
+            for pin in other.pins:
+                if pin.net == base_net_name and other.ref.startswith("R"):
+                    cluster.append(other.ref)
+                    break
+                if pin.net == collector_net_name and other.ref.startswith("D"):
+                    cluster.append(other.ref)
+                    break
+                if pin.net == collector_net_name and other.ref.startswith("K"):
+                    cluster.append(other.ref)
+                    break
+
+        if len(cluster) >= 3:
+            group_name = f"_subcircuit_{comp.ref}"
+            for ref in cluster:
+                _subcircuit_grouped.add(ref)
+                constraints.append(PlacementConstraint(
+                    ref=ref,
+                    constraint_type=PlacementConstraintType.GROUP,
+                    group_name=group_name,
+                    priority=18,
+                    subcircuit_layout=relay_driver_layout,
+                ))
+
     # 5. FeatureBlock -> GROUP
     for fb in requirements.features:
         if len(fb.components) > 1:

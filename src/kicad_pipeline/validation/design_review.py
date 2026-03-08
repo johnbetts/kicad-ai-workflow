@@ -396,6 +396,111 @@ def _check_connectivity(
     return items
 
 
+def _subcircuit_design_notes(
+    requirements: ProjectRequirements,
+) -> list[ReviewItem]:
+    """Generate design notes based on detected subcircuit types.
+
+    Subcircuit types are detected from ``FeatureBlock.subcircuits`` metadata
+    and from component patterns in the netlist.
+
+    Args:
+        requirements: Project requirements to analyze.
+
+    Returns:
+        List of :class:`ReviewItem` design notes for subcircuit-specific concerns.
+    """
+    items: list[ReviewItem] = []
+    detected_types: set[str] = set()
+
+    # Collect declared subcircuit types from feature blocks
+    for fb in requirements.features:
+        detected_types.update(fb.subcircuits)
+
+    # Infer subcircuit types from components
+    relay_refs = _find_relay_refs(requirements)
+    if relay_refs:
+        detected_types.add("relay_driver")
+
+    has_ldo = bool(_find_regulator_refs(requirements))
+    if has_ldo:
+        detected_types.add("ldo_regulator")
+
+    has_adc = _has_adc_component(requirements)
+    if has_adc:
+        detected_types.add("voltage_divider_adc")
+
+    # Check for USB-C connectors
+    usb_c_refs = tuple(
+        c.ref for c in requirements.components
+        if "USB_C" in c.footprint.upper() or "USB-C" in c.value.upper()
+    )
+    if usb_c_refs:
+        detected_types.add("usb_c_input")
+
+    # Generate notes per subcircuit type
+    if "relay_driver" in detected_types:
+        items.append(ReviewItem(
+            category="subcircuit",
+            severity="recommended",
+            title="Relay driver trace width",
+            description=(
+                "Relay coil traces should be >=0.5mm for coil current; "
+                "flyback diode must be adjacent to relay coil pins; "
+                "consider board slots between relay contacts and logic (>=10mm isolation)"
+            ),
+            affected_refs=relay_refs,
+        ))
+
+    if "ldo_regulator" in detected_types:
+        reg_refs = _find_regulator_refs(requirements)
+        items.append(ReviewItem(
+            category="subcircuit",
+            severity="recommended",
+            title="LDO regulator layout",
+            description=(
+                "Add thermal vias under thermal pad; "
+                "input/output caps must be within 5mm; "
+                "verify dropout voltage vs input range"
+            ),
+            affected_refs=reg_refs,
+        ))
+
+    if "voltage_divider_adc" in detected_types:
+        adc_refs = tuple(
+            c.ref for c in requirements.components
+            if any(
+                p.function is not None and p.function.value in ("adc", "analog_in")
+                for p in c.pins
+            ) or "ADC" in c.value.upper() or "ADS1" in c.value.upper()
+        )
+        items.append(ReviewItem(
+            category="subcircuit",
+            severity="optional",
+            title="ADC voltage divider routing",
+            description=(
+                "Keep traces short from divider output to ADC input; "
+                "consider guard ring for high-impedance inputs"
+            ),
+            affected_refs=adc_refs,
+        ))
+
+    if "usb_c_input" in detected_types:
+        items.append(ReviewItem(
+            category="subcircuit",
+            severity="recommended",
+            title="USB-C layout notes",
+            description=(
+                "CC resistor tolerance must be 1%; "
+                "add ESD protection on VBUS/D+/D-; "
+                "maintain impedance control on D+/D- differential pair"
+            ),
+            affected_refs=usb_c_refs,
+        ))
+
+    return items
+
+
 def _build_component_groups(
     requirements: ProjectRequirements,
 ) -> tuple[ComponentGroup, ...]:
@@ -634,6 +739,43 @@ def generate_design_review(
         ),
         affected_refs=(),
     ))
+
+    # --- Subcircuit-specific design notes ---
+    items.extend(_subcircuit_design_notes(requirements))
+
+    # --- Board context notes ---
+    if requirements.board_context is not None:
+        ctx = requirements.board_context
+        if ctx.target_system:
+            items.append(ReviewItem(
+                category="context",
+                severity="required",
+                title="System integration",
+                description=(
+                    f"Board connects to {ctx.target_system} — "
+                    f"verify connector pinout matches harness"
+                ),
+                affected_refs=(),
+            ))
+        if ctx.shared_grounds:
+            items.append(ReviewItem(
+                category="context",
+                severity="recommended",
+                title="Shared ground return",
+                description=(
+                    "Sensors share ground return — consider star-ground "
+                    "topology to minimize noise coupling"
+                ),
+                affected_refs=(),
+            ))
+        for note in ctx.notes:
+            items.append(ReviewItem(
+                category="context",
+                severity="optional",
+                title="Design note",
+                description=note,
+                affected_refs=(),
+            ))
 
     summary = _build_board_summary(requirements, pcb_design)
     component_groups = _build_component_groups(requirements)

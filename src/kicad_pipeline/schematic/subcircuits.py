@@ -11,7 +11,12 @@ passing them to the schematic builder.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from kicad_pipeline.models.requirements import (
     Component,
@@ -44,6 +49,126 @@ class SubcircuitResult:
     components: tuple[Component, ...]
     nets: tuple[Net, ...]
     description: str
+
+
+# ---------------------------------------------------------------------------
+# Multi-instance instantiation
+# ---------------------------------------------------------------------------
+
+
+def _split_ref(ref: str) -> tuple[str, int]:
+    """Split a ref like ``'R10'`` into ``('R', 10)``.
+
+    Raises:
+        ValueError: If *ref* has no trailing digits.
+    """
+    m = re.match(r"^([A-Za-z_]+)(\d+)$", ref)
+    if m is None:
+        raise ValueError(f"Cannot split ref '{ref}' into prefix + number")
+    return m.group(1), int(m.group(2))
+
+
+def instantiate_subcircuit(
+    generator: Callable[..., SubcircuitResult],
+    count: int,
+    ref_start: dict[str, int],
+    net_prefix: str,
+    **kwargs: Any,
+) -> tuple[SubcircuitResult, ...]:
+    """Create *count* copies of a subcircuit with auto-numbered refs and nets.
+
+    For each instance *i* (1-based), the generator is called with ref
+    arguments derived from *ref_start* and a GPIO/signal net derived from
+    *net_prefix*.
+
+    The generator's first positional arguments must be reference designators
+    (string parameters whose names start with ``ref_``).  For each such
+    parameter, the ref is constructed as ``prefix + (start + i - 1)`` using
+    the entries in *ref_start*.  The next positional argument after refs is
+    assumed to be the signal net name (e.g. ``gpio_net``), set to
+    ``'{net_prefix}_{i}'``.
+
+    Args:
+        generator: Subcircuit generator function (e.g. :func:`relay_driver`).
+        count: Number of instances to create.
+        ref_start: Mapping from ref prefix (e.g. ``'Q'``, ``'R'``, ``'K'``)
+            to starting number for that prefix.
+        net_prefix: Base name for the per-instance signal net (e.g.
+            ``'RELAY'`` → ``'RELAY_1'``, ``'RELAY_2'``, ...).
+        **kwargs: Additional keyword arguments forwarded to the generator.
+
+    Returns:
+        Tuple of :class:`SubcircuitResult`, one per instance.
+    """
+    import inspect
+
+    sig = inspect.signature(generator)
+    params = list(sig.parameters.keys())
+
+    # Identify ref parameters (name starts with "ref_")
+    ref_params = [p for p in params if p.startswith("ref_")]
+    # The first non-ref_ parameter after the ref block is the signal net
+    first_non_ref_idx = len(ref_params)
+    signal_param = params[first_non_ref_idx] if first_non_ref_idx < len(params) else None
+
+    results: list[SubcircuitResult] = []
+    for i in range(1, count + 1):
+        call_kwargs: dict[str, str | None] = {}
+        for rp in ref_params:
+            # Extract the prefix from the param name heuristic:
+            # ref_q -> Q, ref_r_base -> R, ref_d -> D, ref_k -> K, ref_j -> J
+            suffix = rp[4:]  # strip "ref_"
+            prefix = suffix.split("_")[0].upper()
+            start = ref_start.get(prefix)
+            if start is not None:
+                call_kwargs[rp] = f"{prefix}{start + i - 1}"
+            else:
+                # Might be None (e.g. ref_j can be None)
+                call_kwargs[rp] = None
+
+        if signal_param is not None and signal_param not in kwargs:
+            call_kwargs[signal_param] = f"{net_prefix}_{i}"
+
+        call_kwargs.update(kwargs)
+        results.append(generator(**call_kwargs))
+
+    return tuple(results)
+
+
+def merge_subcircuit_results(
+    results: tuple[SubcircuitResult, ...] | list[SubcircuitResult],
+) -> SubcircuitResult:
+    """Merge multiple :class:`SubcircuitResult` into a single flat result.
+
+    Components are concatenated. Nets with the same name (e.g. GND, +5V)
+    have their connections merged into one net entry.
+
+    Args:
+        results: Subcircuit results to merge.
+
+    Returns:
+        A single :class:`SubcircuitResult` combining all inputs.
+    """
+    all_components: list[Component] = []
+    net_map: dict[str, list[NetConnection]] = {}
+    descriptions: list[str] = []
+
+    for r in results:
+        all_components.extend(r.components)
+        descriptions.append(r.description)
+        for net in r.nets:
+            net_map.setdefault(net.name, []).extend(net.connections)
+
+    merged_nets = tuple(
+        Net(name=name, connections=tuple(conns))
+        for name, conns in net_map.items()
+    )
+
+    return SubcircuitResult(
+        components=tuple(all_components),
+        nets=merged_nets,
+        description="; ".join(descriptions),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +536,197 @@ def led_drive(
             f"{ref_r} ({_format_resistance(r_actual)}), "
             f"I={target_ma:.1f}mA"
         ),
+    )
+
+
+def relay_driver(
+    ref_q: str,
+    ref_r_base: str,
+    ref_d: str,
+    ref_k: str,
+    ref_j: str | None,
+    gpio_net: str,
+    vcc_net: str = "+5V",
+    gnd_net: str = "GND",
+    relay_type: str = "SPDT",
+    db: ComponentDB | None = None,
+) -> SubcircuitResult:
+    """Generate an NPN relay driver circuit with flyback protection.
+
+    Topology::
+
+        GPIO ─── R_base(1k) ─── Q_base
+        Q_collector ─── K_COIL- ; K_COIL+ ─── VCC
+        Q_emitter ─── GND
+        Flyback diode: anode → Q_collector, cathode → VCC
+        K_COM/NO/NC ─── J screw terminal (optional)
+
+    Args:
+        ref_q: Reference designator for the NPN transistor (e.g. ``'Q1'``).
+        ref_r_base: Reference designator for the base resistor (e.g. ``'R10'``).
+        ref_d: Reference designator for the flyback diode (e.g. ``'D6'``).
+        ref_k: Reference designator for the relay (e.g. ``'K1'``).
+        ref_j: Reference designator for the output screw terminal, or ``None``
+            to omit the terminal.
+        gpio_net: GPIO control signal net name.
+        vcc_net: Supply net for relay coil and diode cathode (default ``'+5V'``).
+        gnd_net: Ground net (default ``'GND'``).
+        relay_type: ``'SPDT'`` (3 contact pins) or ``'SPST'`` (2 contact pins).
+        db: Optional component database for LCSC lookup.
+
+    Returns:
+        :class:`SubcircuitResult` with transistor, base resistor, flyback diode,
+        relay, and optional screw terminal components plus their interconnecting nets.
+    """
+    base_net = f"{ref_q}_BASE"
+    coil_net = f"{ref_k}_COIL"
+
+    r_base_comp = _resistor_component(
+        ref_r_base, 1000.0, "0402", gpio_net, base_net, db,
+    )
+
+    q_comp = Component(
+        ref=ref_q,
+        value="BC817",
+        footprint="SOT-23",
+        description=f"Relay driver NPN transistor for {ref_k}",
+        pins=(
+            Pin(number="1", name="B", pin_type=PinType.INPUT, net=base_net),
+            Pin(number="2", name="C", pin_type=PinType.PASSIVE, net=coil_net),
+            Pin(number="3", name="E", pin_type=PinType.PASSIVE, net=gnd_net),
+        ),
+    )
+
+    diode_comp = Component(
+        ref=ref_d,
+        value="1N4148",
+        footprint="SOD-123",
+        description=f"Flyback diode for {ref_k}",
+        pins=(
+            Pin(number="1", name="A", pin_type=PinType.PASSIVE, net=coil_net),
+            Pin(number="2", name="K", pin_type=PinType.PASSIVE, net=vcc_net),
+        ),
+    )
+
+    is_spdt = relay_type.upper() == "SPDT"
+    com_net = f"{ref_k}_COM"
+    no_net = f"{ref_k}_NO"
+    nc_net = f"{ref_k}_NC" if is_spdt else None
+
+    relay_pins: list[Pin] = [
+        Pin(number="1", name="COIL+", pin_type=PinType.PASSIVE, net=vcc_net),
+        Pin(number="2", name="COIL-", pin_type=PinType.PASSIVE, net=coil_net),
+        Pin(number="3", name="COM", pin_type=PinType.PASSIVE, net=com_net),
+        Pin(number="4", name="NO", pin_type=PinType.PASSIVE, net=no_net),
+    ]
+    if is_spdt:
+        relay_pins.append(
+            Pin(number="5", name="NC", pin_type=PinType.PASSIVE, net=nc_net),
+        )
+
+    relay_footprint = "Relay_SPDT_SANYOU_SRD" if is_spdt else "Relay_SPST"
+    relay_comp = Component(
+        ref=ref_k,
+        value="SRD-05VDC-SL-C" if is_spdt else "SRD-05VDC-SL-A",
+        footprint=relay_footprint,
+        description=f"Relay {relay_type}",
+        pins=tuple(relay_pins),
+    )
+
+    components: list[Component] = [r_base_comp, q_comp, diode_comp, relay_comp]
+    nets: list[Net] = []
+
+    # GPIO net
+    nets.append(Net(
+        name=gpio_net,
+        connections=(NetConnection(ref=ref_r_base, pin="1"),),
+    ))
+
+    # Base net
+    nets.append(Net(
+        name=base_net,
+        connections=(
+            NetConnection(ref=ref_r_base, pin="2"),
+            NetConnection(ref=ref_q, pin="1"),
+        ),
+    ))
+
+    # Coil net
+    coil_conns: list[NetConnection] = [
+        NetConnection(ref=ref_q, pin="2"),
+        NetConnection(ref=ref_d, pin="1"),
+        NetConnection(ref=ref_k, pin="2"),
+    ]
+    nets.append(Net(name=coil_net, connections=tuple(coil_conns)))
+
+    # VCC net
+    nets.append(Net(
+        name=vcc_net,
+        connections=(
+            NetConnection(ref=ref_d, pin="2"),
+            NetConnection(ref=ref_k, pin="1"),
+        ),
+    ))
+
+    # GND net
+    nets.append(Net(
+        name=gnd_net,
+        connections=(NetConnection(ref=ref_q, pin="3"),),
+    ))
+
+    # Contact nets + optional screw terminal
+    terminal_pins: list[Pin] = []
+    com_conns: list[NetConnection] = [NetConnection(ref=ref_k, pin="3")]
+    no_conns: list[NetConnection] = [NetConnection(ref=ref_k, pin="4")]
+    nc_conns: list[NetConnection] = []
+    if is_spdt:
+        nc_conns.append(NetConnection(ref=ref_k, pin="5"))
+
+    if ref_j is not None:
+        terminal_pins.append(
+            Pin(number="1", name="NO", pin_type=PinType.PASSIVE, net=no_net),
+        )
+        terminal_pins.append(
+            Pin(number="2", name="COM", pin_type=PinType.PASSIVE, net=com_net),
+        )
+        no_conns.append(NetConnection(ref=ref_j, pin="1"))
+        com_conns.append(NetConnection(ref=ref_j, pin="2"))
+
+        if is_spdt:
+            terminal_pins.append(
+                Pin(number="3", name="NC", pin_type=PinType.PASSIVE, net=nc_net),
+            )
+            nc_conns.append(NetConnection(ref=ref_j, pin="3"))
+
+        terminal_footprint = (
+            "TerminalBlock_01x03_P5.08mm" if is_spdt
+            else "TerminalBlock_01x02_P5.08mm"
+        )
+        terminal_comp = Component(
+            ref=ref_j,
+            value=f"Screw_Terminal_01x0{'3' if is_spdt else '2'}",
+            footprint=terminal_footprint,
+            description=f"Relay {ref_k} output connector",
+            pins=tuple(terminal_pins),
+        )
+        components.append(terminal_comp)
+
+    nets.append(Net(name=com_net, connections=tuple(com_conns)))
+    nets.append(Net(name=no_net, connections=tuple(no_conns)))
+    if is_spdt and nc_net is not None:
+        nets.append(Net(name=nc_net, connections=tuple(nc_conns)))
+
+    contact_desc = "COM/NO/NC" if is_spdt else "COM/NO"
+    terminal_desc = f" + {ref_j} terminal" if ref_j else ""
+    desc = (
+        f"Relay driver: {ref_q} (BC817) + {ref_r_base} (1k) + "
+        f"{ref_d} (1N4148 flyback) + {ref_k} ({relay_type} {contact_desc})"
+        f"{terminal_desc}"
+    )
+    return SubcircuitResult(
+        components=tuple(components),
+        nets=tuple(nets),
+        description=desc,
     )
 
 

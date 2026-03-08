@@ -452,3 +452,86 @@ def test_connected_components_no_warnings() -> None:
         if i.category == "connectivity" and "unconnected component" in i.title.lower()
     ]
     assert len(unconnected) == 0
+
+
+# ---------------------------------------------------------------------------
+# Subcircuit design notes
+# ---------------------------------------------------------------------------
+
+
+def test_subcircuit_notes_relay_driver() -> None:
+    """Relay components trigger relay driver design notes."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    relay_notes = [
+        i for i in review.items
+        if i.category == "subcircuit" and "relay" in i.title.lower()
+    ]
+    assert len(relay_notes) >= 1
+    assert "flyback" in relay_notes[0].description.lower()
+    assert "K1" in relay_notes[0].affected_refs
+
+
+def test_subcircuit_notes_ldo() -> None:
+    """Regulator components trigger LDO design notes."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    ldo_notes = [
+        i for i in review.items
+        if i.category == "subcircuit" and "ldo" in i.title.lower()
+    ]
+    assert len(ldo_notes) >= 1
+    assert "thermal" in ldo_notes[0].description.lower()
+    assert "U2" in ldo_notes[0].affected_refs
+
+
+def test_subcircuit_notes_adc() -> None:
+    """ADC components trigger voltage divider routing notes."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    adc_notes = [
+        i for i in review.items
+        if i.category == "subcircuit" and "adc" in i.title.lower()
+    ]
+    assert len(adc_notes) >= 1
+    assert "guard ring" in adc_notes[0].description.lower()
+
+
+def test_subcircuit_notes_declared_in_feature() -> None:
+    """Subcircuit types from FeatureBlock.subcircuits are detected."""
+    components = (
+        Component(
+            ref="K1", value="SRD-05VDC-SL-C", footprint="Relay_SPDT",
+            pins=(
+                Pin("1", "COIL+", PinType.PASSIVE, net="+5V"),
+                Pin("2", "COIL-", PinType.PASSIVE, net="RLY1_COIL"),
+            ),
+        ),
+    )
+    nets = (
+        Net(name="+5V", connections=(NetConnection("K1", "1"),)),
+        Net(name="RLY1_COIL", connections=(NetConnection("K1", "2"),)),
+    )
+    features = (
+        FeatureBlock("Relays", "4x relay outputs", ("K1",), (), ("relay_driver",)),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="SubTest"),
+        features=features,
+        components=components,
+        nets=nets,
+    )
+    review = generate_design_review(req)
+    relay_notes = [
+        i for i in review.items
+        if i.category == "subcircuit" and "relay" in i.title.lower()
+    ]
+    assert len(relay_notes) >= 1
+
+
+def test_no_subcircuit_notes_for_minimal() -> None:
+    """Minimal design without subcircuits has no subcircuit notes."""
+    req = _minimal_requirements()
+    review = generate_design_review(req)
+    subcircuit_items = [i for i in review.items if i.category == "subcircuit"]
+    assert len(subcircuit_items) == 0
