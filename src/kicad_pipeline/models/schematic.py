@@ -192,6 +192,43 @@ class PowerSymbol:
 
 
 @dataclass(frozen=True)
+class HierarchicalLabel:
+    """A hierarchical label connecting a sub-sheet net to its parent sheet pin."""
+
+    text: str  # net name, must match sheet pin
+    shape: str  # "input" | "output" | "bidirectional" | "passive"
+    position: Point
+    rotation: float = 0.0
+    effects: FontEffect = field(default_factory=FontEffect)
+    uuid: str = ""
+
+
+@dataclass(frozen=True)
+class SheetPin:
+    """A pin on a sheet symbol in the parent schematic."""
+
+    name: str  # must match hierarchical_label text in sub-sheet
+    pin_type: str  # "input" | "output" | "bidirectional" | "passive"
+    position: Point
+    rotation: float = 0.0
+    effects: FontEffect = field(default_factory=FontEffect)
+    uuid: str = ""
+
+
+@dataclass(frozen=True)
+class Sheet:
+    """A sheet symbol representing a sub-schematic in a hierarchical design."""
+
+    position: Point
+    size_x: float
+    size_y: float
+    sheet_name: str  # "Power"
+    sheet_file: str  # "power.kicad_sch"
+    pins: tuple[SheetPin, ...]
+    uuid: str = ""
+
+
+@dataclass(frozen=True)
 class Schematic:
     """Complete KiCad schematic."""
 
@@ -203,6 +240,8 @@ class Schematic:
     no_connects: tuple[NoConnect, ...]
     labels: tuple[Label, ...]
     global_labels: tuple[GlobalLabel, ...]
+    sheets: tuple[Sheet, ...] = ()
+    hierarchical_labels: tuple[HierarchicalLabel, ...] = ()
     version: int = 20250114
     generator: str = "kicad-ai-pipeline"
     generator_version: str = "9.0"

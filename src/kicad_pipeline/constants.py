@@ -258,6 +258,28 @@ LAYER_DWGS_USER: str = "Dwgs.User"
 """User drawings layer for non-manufacturing annotations."""
 
 # ---------------------------------------------------------------------------
+# Hierarchical schematic defaults
+# ---------------------------------------------------------------------------
+
+HIERARCHICAL_MIN_FEATURES: int = 2
+"""Minimum number of FeatureBlocks to auto-enable hierarchical schematics."""
+
+HIERARCHICAL_MIN_COMPONENTS: int = 4
+"""Minimum total component count to auto-enable hierarchical schematics."""
+
+SHEET_SYMBOL_MIN_WIDTH_MM: float = 25.0
+"""Minimum width of a sheet symbol on the root schematic (mm)."""
+
+SHEET_SYMBOL_MIN_HEIGHT_MM: float = 15.0
+"""Minimum height of a sheet symbol on the root schematic (mm)."""
+
+SHEET_SYMBOL_PIN_SPACING_MM: float = 2.54
+"""Vertical spacing between pins on a sheet symbol (mm)."""
+
+SHEET_SYMBOL_GRID_MARGIN_MM: float = 15.0
+"""Margin between sheet symbols on the root schematic grid (mm)."""
+
+# ---------------------------------------------------------------------------
 # Zone defaults
 # ---------------------------------------------------------------------------
 

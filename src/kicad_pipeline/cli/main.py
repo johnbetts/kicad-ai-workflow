@@ -27,7 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     # schematic subcommand
     sch_p = subparsers.add_parser("schematic", help="Generate KiCad schematic")
     sch_p.add_argument("--requirements", "-r", required=True, help="Requirements JSON")
-    sch_p.add_argument("--output", "-o", required=True, help="Output .kicad_sch file")
+    sch_p.add_argument("--output", "-o", required=True, help="Output .kicad_sch file or directory")
+    sch_p.add_argument(
+        "--flat", action="store_true", default=False,
+        help="Force flat (single-sheet) schematic output",
+    )
 
     # pcb subcommand
     pcb_p = subparsers.add_parser("pcb", help="Generate KiCad PCB")
@@ -194,13 +198,31 @@ def _cmd_schematic(args: argparse.Namespace) -> int:
     from pathlib import Path
 
     from kicad_pipeline.requirements.decomposer import load_requirements
-    from kicad_pipeline.schematic.builder import build_schematic, write_schematic
+    from kicad_pipeline.schematic.builder import (
+        build_project_schematics,
+        write_hierarchical_schematic,
+        write_schematic,
+    )
 
     try:
         req = load_requirements(Path(args.requirements))
-        sch = build_schematic(req)
-        write_schematic(sch, args.output)
-        print(f"Schematic written to {args.output}")
+        hierarchical = False if getattr(args, "flat", False) else None
+        schematics = build_project_schematics(req, hierarchical=hierarchical)
+
+        if len(schematics) == 1:
+            # Single flat schematic
+            sch = next(iter(schematics.values()))
+            write_schematic(sch, args.output)
+            print(f"Schematic written to {args.output}")
+        else:
+            # Hierarchical: write to directory
+            out_dir = Path(args.output)
+            if out_dir.suffix == ".kicad_sch":
+                out_dir = out_dir.parent
+            written = write_hierarchical_schematic(
+                schematics, out_dir, req.project.name,
+            )
+            print(f"Hierarchical schematic written ({len(written)} files) to {out_dir}")
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -385,7 +407,11 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         write_production_package,
     )
     from kicad_pipeline.requirements.decomposer import load_requirements
-    from kicad_pipeline.schematic.builder import build_schematic, write_schematic
+    from kicad_pipeline.schematic.builder import (
+        build_project_schematics,
+        write_hierarchical_schematic,
+        write_schematic,
+    )
 
     try:
         out = Path(args.output)
@@ -395,9 +421,14 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         req = load_requirements(Path(args.requirements))
 
         print("[2/4] Generating schematic...")
-        sch = build_schematic(req)
-        sch_path = out / f"{args.name}.kicad_sch"
-        write_schematic(sch, str(sch_path))
+        schematics = build_project_schematics(req)
+        if len(schematics) == 1:
+            sch = next(iter(schematics.values()))
+            sch_path = out / f"{args.name}.kicad_sch"
+            write_schematic(sch, str(sch_path))
+        else:
+            write_hierarchical_schematic(schematics, out, args.name)
+            print(f"  Hierarchical: {len(schematics)} sheets")
 
         print("[3/4] Generating PCB...")
         design = build_pcb(req)

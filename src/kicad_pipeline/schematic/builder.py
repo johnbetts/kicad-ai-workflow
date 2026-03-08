@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 from kicad_pipeline.models.schematic import (
     FontEffect,
     GlobalLabel,
+    HierarchicalLabel,
     Junction,
     Label,
     LibCircle,
@@ -50,6 +51,8 @@ from kicad_pipeline.models.schematic import (
     Point,
     PowerSymbol,
     Schematic,
+    Sheet,
+    SheetPin,
     Stroke,
     StrokeType,
     SymbolInstance,
@@ -1247,6 +1250,57 @@ def _global_label_sexp(gl: GlobalLabel) -> SExpNode:
     ]
 
 
+def _hierarchical_label_sexp(hl: HierarchicalLabel) -> SExpNode:
+    """Serialise a :class:`HierarchicalLabel` to a KiCad ``(hierarchical_label ...)`` node."""
+    return [
+        "hierarchical_label",
+        hl.text,
+        ["shape", hl.shape],
+        ["at", hl.position.x, hl.position.y, int(hl.rotation)],
+        _effects_sexp(hl.effects),
+        ["uuid", hl.uuid],
+    ]
+
+
+def _sheet_pin_sexp(pin: SheetPin) -> SExpNode:
+    """Serialise a :class:`SheetPin` to a KiCad ``(pin ...)`` node inside a sheet."""
+    return [
+        "pin",
+        pin.name,
+        pin.pin_type,
+        ["at", pin.position.x, pin.position.y, int(pin.rotation)],
+        _effects_sexp(pin.effects),
+        ["uuid", pin.uuid],
+    ]
+
+
+def _sheet_sexp(sheet: Sheet) -> SExpNode:
+    """Serialise a :class:`Sheet` to a KiCad ``(sheet ...)`` node."""
+    node: list[SExpNode] = [
+        "sheet",
+        ["at", sheet.position.x, sheet.position.y],
+        ["size", sheet.size_x, sheet.size_y],
+        ["uuid", sheet.uuid],
+        [
+            "property",
+            "Sheetname",
+            sheet.sheet_name,
+            ["at", sheet.position.x, sheet.position.y - 1.0, 0],
+            _effects_sexp(FontEffect()),
+        ],
+        [
+            "property",
+            "Sheetfile",
+            sheet.sheet_file,
+            ["at", sheet.position.x, sheet.position.y + sheet.size_y + 1.0, 0],
+            _effects_sexp(FontEffect()),
+        ],
+    ]
+    for pin in sheet.pins:
+        node.append(_sheet_pin_sexp(pin))
+    return node
+
+
 def _power_symbol_sexp(
     ps: PowerSymbol,
     project_name: str = "kicad-ai",
@@ -1388,9 +1442,25 @@ def schematic_to_sexp(
     for gl in schematic.global_labels:
         root.append(_global_label_sexp(gl))
 
-    # KiCad 9 canonical sheet_instances section (root sheet)
+    # Hierarchical labels (sub-sheet connections)
+    for hl in schematic.hierarchical_labels:
+        root.append(_hierarchical_label_sexp(hl))
+
+    # Sheet symbols (hierarchical sub-sheets)
+    for sheet in schematic.sheets:
+        root.append(_sheet_sexp(sheet))
+
+    # KiCad 9 canonical sheet_instances section (root sheet + sub-sheets)
     # Path must include root UUID for KiCad 9 to resolve ref designators.
-    root.append(["sheet_instances", ["path", f"/{root_uuid}", ["page", "1"]]])
+    sheet_instances_node: list[SExpNode] = [
+        "sheet_instances",
+        ["path", f"/{root_uuid}", ["page", "1"]],
+    ]
+    for page_num, sheet in enumerate(schematic.sheets, start=2):
+        sheet_instances_node.append(
+            ["path", f"/{root_uuid}/{sheet.uuid}", ["page", str(page_num)]]
+        )
+    root.append(sheet_instances_node)
 
     # KiCad 9 symbol_instances — maps each symbol UUID to its reference designator.
     # Path format: "/{root_sheet_uuid}/{symbol_uuid}" for KiCad 9.
@@ -1452,3 +1522,75 @@ def write_schematic(schematic: Schematic, path: str | Path) -> None:
     except Exception as exc:
         raise SchematicError(f"Failed to write schematic to {dest}: {exc}") from exc
     log.info("write_schematic: wrote %s", dest)
+
+
+def write_hierarchical_schematic(
+    schematics: dict[str, Schematic],
+    output_dir: Path,
+    project_name: str,
+) -> list[Path]:
+    """Write a hierarchical schematic set to multiple ``.kicad_sch`` files.
+
+    Args:
+        schematics: Mapping from filename stem to :class:`Schematic`.
+            The root schematic should have the project name as key.
+        output_dir: Directory to write all schematic files into.
+        project_name: Project name (used for the root schematic filename).
+
+    Returns:
+        List of written file paths.
+    """
+    from kicad_pipeline.schematic.hierarchical import _sanitize_filename
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    sanitized_project = _sanitize_filename(project_name)
+
+    for stem, sch in schematics.items():
+        if stem == sanitized_project:
+            filename = f"{project_name}.kicad_sch"
+        else:
+            filename = f"{stem}.kicad_sch"
+        path = output_dir / filename
+        write_schematic(sch, path)
+        written.append(path)
+
+    log.info("write_hierarchical_schematic: wrote %d files to %s", len(written), output_dir)
+    return written
+
+
+def build_project_schematics(
+    requirements: ProjectRequirements,
+    hierarchical: bool | None = None,
+) -> dict[str, Schematic]:
+    """Build schematic(s) from requirements, auto-detecting hierarchy.
+
+    Args:
+        requirements: Project requirements.
+        hierarchical: Force hierarchical (``True``), flat (``False``), or
+            auto-detect (``None``).
+
+    Returns:
+        Mapping from filename stem to :class:`Schematic`. For flat output,
+        this contains a single entry keyed by the project name.
+    """
+    from kicad_pipeline.schematic.hierarchical import (
+        _sanitize_filename,
+        build_hierarchical_schematic,
+        should_use_hierarchy,
+    )
+
+    use_hierarchy = (
+        hierarchical if hierarchical is not None
+        else should_use_hierarchy(requirements)
+    )
+
+    if use_hierarchy:
+        log.info("build_project_schematics: using hierarchical layout")
+        return build_hierarchical_schematic(requirements)
+
+    log.info("build_project_schematics: using flat layout")
+    sch = build_schematic(requirements)
+    project_stem = _sanitize_filename(requirements.project.name)
+    return {project_stem: sch}

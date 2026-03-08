@@ -253,13 +253,23 @@ class WorkflowEngine:
         """Build and write a schematic from requirements."""
         from kicad_pipeline.project_file import write_project_file
         from kicad_pipeline.requirements.decomposer import load_requirements
-        from kicad_pipeline.schematic.builder import build_schematic, write_schematic
+        from kicad_pipeline.schematic.builder import (
+            build_project_schematics,
+            write_hierarchical_schematic,
+            write_schematic,
+        )
 
         req = load_requirements(vdir / "requirements.json")
-        sch = build_schematic(req)
-        sch_path = vdir / f"{variant_name}.kicad_sch"
-        write_schematic(sch, sch_path)
-        log.info("Schematic written: %s", sch_path)
+        schematics = build_project_schematics(req)
+
+        if len(schematics) == 1:
+            sch = next(iter(schematics.values()))
+            sch_path = vdir / f"{variant_name}.kicad_sch"
+            write_schematic(sch, sch_path)
+            log.info("Schematic written: %s", sch_path)
+        else:
+            written = write_hierarchical_schematic(schematics, vdir, variant_name)
+            log.info("Hierarchical schematic written: %d files", len(written))
 
         # Generate .kicad_pro so KiCad can open the project
         pro_path = vdir / f"{variant_name}.kicad_pro"
