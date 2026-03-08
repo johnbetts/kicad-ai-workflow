@@ -95,6 +95,14 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("SOT-23-5", "Package_TO_SOT_SMD.3dshapes", "SOT-23-5.step"),
     ("SOT-23", "Package_TO_SOT_SMD.3dshapes", "SOT-23.step"),
     ("SOT-223", "Package_TO_SOT_SMD.3dshapes", "SOT-223-3_TabPin2.step"),
+    # Diodes
+    ("SOD-123", "Diode_SMD.3dshapes", "D_SOD-123.step"),
+    # Inductors
+    ("L_1210", "Inductor_SMD.3dshapes", "L_1210_3225Metric.step"),
+    ("L_1206", "Inductor_SMD.3dshapes", "L_1206_3216Metric.step"),
+    ("L_0805", "Inductor_SMD.3dshapes", "L_0805_2012Metric.step"),
+    # Crystals
+    ("Crystal_SMD_3215", "Crystal.3dshapes", "Crystal_SMD_3215-2Pin_3.2x1.5mm.step"),
 )
 
 
@@ -513,6 +521,295 @@ def make_smd_led(
         texts=base.texts,
         attr=base.attr,
         models=models,
+    )
+
+
+def make_sod123(
+    ref: str,
+    value: str,
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """SOD-123 diode footprint (1.65 x 2.68 mm body, 2 pads).
+
+    Pad 1 = cathode (K), Pad 2 = anode (A). Pitch 2.0 mm.
+
+    Args:
+        ref: Reference designator (e.g. "D1").
+        value: Component value string.
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    body_w = 2.68
+    body_h = 1.65
+    pad_w = 0.91
+    pad_h = 1.22
+    pitch = 2.2
+    pads = (
+        _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
+        _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
+    )
+    pad_edge_x = pitch / 2.0 + pad_w / 2.0
+    graphics = (
+        *_courtyard_rect(body_w, body_h),
+        *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
+    )
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+    )
+    lib_id = "Diode_SMD:D_SOD-123"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=pads, graphics=graphics, texts=texts,
+        attr="smd", models=models,
+    )
+
+
+def make_inductor_smd(
+    ref: str,
+    value: str,
+    package: str = "1210",
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """SMD inductor footprint — same geometry as R/C packages.
+
+    Args:
+        ref: Reference designator (e.g. "L1").
+        value: Component value string (e.g. "4.7uH").
+        package: IPC package code (0805, 1206, 1210).
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    pkg = package if package in _SMD_RC_DIMS else "1210"
+    pad_w, pad_h, pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
+    pads = (
+        _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
+        _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
+    )
+    pad_edge_x = pitch / 2.0 + pad_w / 2.0
+    graphics = (
+        *_courtyard_rect(body_w, body_h),
+        *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
+    )
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+    )
+    lib_id = f"Inductor_SMD:L_{pkg}"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=pads, graphics=graphics, texts=texts,
+        attr="smd", models=models,
+    )
+
+
+def make_tact_switch(
+    ref: str,
+    value: str,
+    size_mm: float = 4.5,
+) -> Footprint:
+    """Tactile push-button switch (4-pin through-hole, e.g. 4.5x4.5 mm).
+
+    Standard 2-pin-pair wiring: pins 1+2 are one pole, pins 3+4 are the other.
+    The footprint only exposes 2 logical pins.
+
+    Args:
+        ref: Reference designator (e.g. "SW1").
+        value: Component value string.
+        size_mm: Body size (one side of square body).
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    # Standard 6mm tact switch pad layout (4 pins, 2.5mm x 3.0mm grid)
+    half_x = 3.25
+    half_y = 2.25
+    drill = 1.0
+    pad_diam = 1.8
+    pads = (
+        _thru_pad("1", -half_x, -half_y, pad_diam, drill),
+        _thru_pad("1", half_x, -half_y, pad_diam, drill),
+        _thru_pad("2", -half_x, half_y, pad_diam, drill),
+        _thru_pad("2", half_x, half_y, pad_diam, drill),
+    )
+    body = max(size_mm, 4.5)
+    graphics = _courtyard_rect(body + 2.0, body + 2.0)
+    texts = (
+        _ref_text(ref, -(body / 2.0 + 1.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body / 2.0 + 1.5, LAYER_F_FAB),
+    )
+    lib_id = f"Button_Switch_THT:SW_Push_{size_mm}x{size_mm}mm"
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
+        attr="through_hole",
+    )
+
+
+def make_relay_spdt(
+    ref: str,
+    value: str,
+) -> Footprint:
+    """SPDT relay footprint (e.g. SRD-05VDC-SL-C, Songle SRD series).
+
+    Body ~19x15.5mm, 5 pins: COIL+ (1), COIL- (2), COM (3), NO (4), NC (5).
+    Through-hole, 2.54mm grid, pin rows at 7.62mm spacing.
+
+    Args:
+        ref: Reference designator (e.g. "K1").
+        value: Component value string.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    body_w = 19.0
+    body_h = 15.5
+    drill = 1.2
+    pad_diam = 2.0
+    # Typical SRD relay pin positions (relative to centre)
+    pads = (
+        _thru_pad("1", -7.62, -3.81, pad_diam, drill),   # COIL+
+        _thru_pad("2", -7.62, 3.81, pad_diam, drill),    # COIL-
+        _thru_pad("3", 7.62, 0.0, pad_diam, drill),      # COM
+        _thru_pad("4", 7.62, -3.81, pad_diam, drill),    # NO
+        _thru_pad("5", 7.62, 3.81, pad_diam, drill),     # NC
+    )
+    graphics = _courtyard_rect(body_w, body_h)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
+    )
+    lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
+        attr="through_hole",
+    )
+
+
+def make_esp32_wroom(
+    ref: str,
+    value: str,
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """ESP32-S3-WROOM-1 module footprint (18x25.5mm body, 39 castellated pads).
+
+    Edge-castellated pads along bottom and sides. GND pad underneath.
+
+    Args:
+        ref: Reference designator (e.g. "U3").
+        value: Component value string.
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    body_w = 18.0
+    body_h = 25.5
+    pad_w = 0.9
+    pad_h = 1.2
+    pitch = 1.27
+
+    # 39 pads: arranged around bottom and two sides
+    # Bottom edge: 14 pads, left side: 12 pads, right side: 12 pads, GND: 1
+    pad_list: list[Pad] = []
+
+    # Bottom row (14 pads, centred)
+    bottom_y = body_h / 2.0 - pad_h / 2.0
+    n_bottom = 14
+    start_x = -((n_bottom - 1) * pitch) / 2.0
+    for i in range(n_bottom):
+        pad_list.append(_smd_pad(
+            str(i + 1), start_x + i * pitch, bottom_y, pad_w, pad_h, layer,
+        ))
+
+    # Left column (12 pads, from bottom up)
+    left_x = -(body_w / 2.0 - pad_h / 2.0)
+    n_side = 12
+    side_start_y = body_h / 2.0 - 2.5  # offset from bottom
+    for i in range(n_side):
+        pad_list.append(_smd_pad(
+            str(15 + i), left_x, side_start_y - i * pitch, pad_h, pad_w, layer,
+        ))
+
+    # Right column (12 pads, from bottom up)
+    right_x = body_w / 2.0 - pad_h / 2.0
+    for i in range(n_side):
+        pad_list.append(_smd_pad(
+            str(27 + i), right_x, side_start_y - i * pitch, pad_h, pad_w, layer,
+        ))
+
+    # GND pad (large thermal pad underneath)
+    pad_list.append(Pad(
+        number="39",
+        pad_type="smd",
+        shape="rect",
+        position=Point(0.0, 0.0),
+        size_x=6.7,
+        size_y=6.7,
+        layers=(layer, LAYER_F_PASTE if layer == LAYER_F_CU else LAYER_B_PASTE,
+                LAYER_F_MASK if layer == LAYER_F_CU else LAYER_B_MASK),
+    ))
+
+    graphics = _courtyard_rect(body_w, body_h)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
+    )
+    lib_id = "RF_Module:ESP32-S3-WROOM-1"
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=tuple(pad_list), graphics=graphics, texts=texts,
+        attr="smd",
+    )
+
+
+def make_crystal_smd(
+    ref: str,
+    value: str,
+    size_w: float = 3.2,
+    size_h: float = 1.5,
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """SMD crystal oscillator (2-pin, e.g. 3.2x1.5mm HC49/SD package).
+
+    Args:
+        ref: Reference designator (e.g. "Y1").
+        value: Component value string (e.g. "25MHz").
+        size_w: Crystal body width in mm.
+        size_h: Crystal body height in mm.
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    pad_w = 1.2
+    pad_h = 1.0
+    pitch = size_w - pad_w + 0.4
+    pads = (
+        _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
+        _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
+    )
+    graphics = _courtyard_rect(size_w, size_h)
+    texts = (
+        _ref_text(ref, -(size_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _val_text(value, size_h / 2.0 + 1.0, LAYER_F_FAB),
+    )
+    lib_id = f"Crystal:Crystal_SMD_{size_w:.0f}215-2Pin_{size_w}x{size_h}mm"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=pads, graphics=graphics, texts=texts,
+        attr="smd", models=models,
     )
 
 
@@ -1180,13 +1477,23 @@ def footprint_for_component(
         pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
         fp = make_smd_resistor_capacitor(ref, value, package=pkg_norm)
 
+    # SOD-123 diodes
+    elif upper.startswith("SOD-123"):
+        fp = make_sod123(ref, value)
+
+    # Inductors (L_xxxx)
+    elif upper.startswith("L_"):
+        pkg = fid[2:].upper()
+        fp = make_inductor_smd(ref, value, package=pkg)
+
     # SOT-223 (special case before SOT-23 prefix check)
     elif upper == "SOT-223":
         fp = make_sot23(ref, value, variant="SOT-23")
 
-    # SOT-23 family
-    elif upper.startswith("SOT-23"):
-        variant = fid.upper()
+    # SOT-23 / TSOT-23 family
+    elif upper.startswith(("SOT-23", "TSOT-23")):
+        # Normalize TSOT-23-6 → SOT-23-6
+        variant = fid.upper().replace("TSOT-", "SOT-")
         if variant not in _SOT23_VARIANTS:
             variant = "SOT-23"
         fp = make_sot23(ref, value, variant=variant)
@@ -1224,6 +1531,29 @@ def footprint_for_component(
         if pin_count < 4:
             pin_count = 8  # sensible default
         fp = make_dip_switch(ref, value, pin_count)
+
+    # Relay (SPDT)
+    elif upper.startswith("RELAY"):
+        fp = make_relay_spdt(ref, value)
+
+    # ESP32 modules
+    elif "ESP32" in upper or "WROOM" in upper:
+        fp = make_esp32_wroom(ref, value)
+
+    # Tactile switches (SW_SPST, SW_Push, etc.)
+    elif upper.startswith("SW_"):
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        size_mm = float(size_m.group(1)) if size_m else 4.5
+        fp = make_tact_switch(ref, value, size_mm=size_mm)
+
+    # Crystal oscillators
+    elif upper.startswith("CRYSTAL"):
+        import re as _re
+        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        w = float(dim_m.group(1)) if dim_m else 3.2
+        h = float(dim_m.group(2)) if dim_m else 1.5
+        fp = make_crystal_smd(ref, value, size_w=w, size_h=h)
 
     # Generic SMD IC packages (MSOP, TSSOP, SOIC, QFP, QFN, SOP, DFN, etc.)
     elif any(
@@ -1398,9 +1728,21 @@ def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
                 return (body_w + 0.5, body_h + 0.5)
             return (2.5, 1.75)  # 0805 fallback
 
-    # SOT-23 family
-    if upper.startswith("SOT-23"):
-        variant = fid.upper()
+    # SOD-123 diodes
+    if upper.startswith("SOD-123"):
+        return (3.5, 2.5)
+
+    # Inductors
+    if upper.startswith("L_"):
+        pkg = fid[2:].upper()
+        if pkg in _SMD_RC_DIMS:
+            _, _, pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
+            return (body_w + 0.5, body_h + 0.5)
+        return (4.0, 3.0)
+
+    # SOT-23 / TSOT-23 family
+    if upper.startswith(("SOT-23", "TSOT-23")):
+        variant = fid.upper().replace("TSOT-", "SOT-")
         if variant in _SOT23_VARIANTS:
             _, _, coords = _SOT23_VARIANTS[variant]
             xs = [c[0] for c in coords]
@@ -1444,6 +1786,30 @@ def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
         pin_count = _parse_pin_count(fid)
         half = max(pin_count // 2, 2)
         return (8.5, (half - 1) * 2.54 + 3.0)
+
+    # Relays
+    if upper.startswith("RELAY"):
+        return (20.0, 16.5)
+
+    # ESP32 modules
+    if "ESP32" in upper or "WROOM" in upper:
+        return (18.5, 26.0)
+
+    # Tactile switches
+    if upper.startswith("SW_"):
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        if size_m:
+            return (float(size_m.group(1)) + 2.0, float(size_m.group(2)) + 2.0)
+        return (7.0, 7.0)
+
+    # Crystal oscillators
+    if upper.startswith("CRYSTAL"):
+        import re as _re
+        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        if dim_m:
+            return (float(dim_m.group(1)) + 0.5, float(dim_m.group(2)) + 0.5)
+        return (4.0, 2.0)
 
     # Generic SMD ICs
     ic_prefixes = ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
