@@ -263,3 +263,60 @@ def test_format_review_empty_project_name() -> None:
     review = generate_design_review(req)
     md = format_design_review(review)
     assert md.startswith("# Design Review\n")
+
+
+# ---------------------------------------------------------------------------
+# Component grouping
+# ---------------------------------------------------------------------------
+
+
+def test_component_groups_from_features() -> None:
+    """Each feature block should produce a ComponentGroup."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    assert len(review.component_groups) == 4
+    group_names = {g.name for g in review.component_groups}
+    assert "MCU" in group_names
+    assert "Power" in group_names
+    assert "Relay" in group_names
+    assert "ADC" in group_names
+
+
+def test_component_groups_contain_refs() -> None:
+    """Each group should list the refs from its feature block."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    mcu_group = next(g for g in review.component_groups if g.name == "MCU")
+    assert "U1" in mcu_group.refs
+    assert "C1" in mcu_group.refs
+
+
+def test_component_groups_have_subgroups() -> None:
+    """IC + decoupling cap pairs should appear as subgroups."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    mcu_group = next(g for g in review.component_groups if g.name == "MCU")
+    # U1 (ESP32) + C1 (decoupling) should be a subgroup
+    assert len(mcu_group.subgroups) >= 1
+    u1_sub = next(
+        (s for s in mcu_group.subgroups if "U1" in s.refs), None
+    )
+    assert u1_sub is not None
+    assert "C1" in u1_sub.refs
+
+
+def test_format_review_includes_component_groups() -> None:
+    """Formatted review should include Component Groups section."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    md = format_design_review(review, project_name="TestBoard")
+    assert "## Component Groups" in md
+    assert "### MCU" in md
+    assert "### Power" in md
+
+
+def test_no_groups_when_no_features() -> None:
+    """Requirements without features produce no component groups."""
+    req = _minimal_requirements()
+    review = generate_design_review(req)
+    assert len(review.component_groups) == 0

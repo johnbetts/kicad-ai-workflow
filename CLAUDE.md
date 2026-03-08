@@ -184,6 +184,16 @@ Freely browse: KiCad GitLab (source, libs), JLCPCB specs, FreeRouting GitHub, Ge
 - PCB: origin top-left, X right, Y down, mm
 - Rotation: verify convention empirically (schematic vs PCB may differ)
 
+### KiCad 9 Hierarchical Schematic Rules (CRITICAL)
+- Root `sheet_instances` path: `"/"` (NOT `"/{root_uuid}"`)
+- Sub-sheet `sheet_instances` path: `"/{root_uuid}/{sheet_entry_uuid}"` (NOT `"/"`)
+- Per-symbol `instances` path: matches `sheet_instances` path of the containing sheet
+- Root sheet symbols: `(instances (project "name" (path "/{root_uuid}" (reference "R1") (unit 1))))`
+- Sub-sheet symbols: `(instances (project "name" (path "/{root_uuid}/{sheet_entry_uuid}" (reference "R1") (unit 1))))`
+- KiCad 9 has NO top-level `(symbol_instances ...)` section
+- All sheets in a project MUST use the same `project_name` in instances blocks
+- **If sub-sheet `sheet_instances` uses `"/"` instead of the hierarchical path, KiCad shows `?` for all ref designators**
+
 ### Net Assignment Chain
 ```
 requirements.json → nets[{name, connections}]

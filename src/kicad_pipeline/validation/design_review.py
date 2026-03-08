@@ -31,6 +31,24 @@ class ReviewItem:
 
 
 @dataclass(frozen=True)
+class ComponentGroup:
+    """A logical grouping of components (feature block or subcircuit).
+
+    Attributes:
+        name: Group name (e.g. "Power Supply", "MCU").
+        description: Brief description of the group's function.
+        refs: Component reference designators in this group.
+        subgroups: Named subgroups within this group (e.g. decoupling caps
+            near a specific IC, or a regulator subcircuit).
+    """
+
+    name: str
+    description: str
+    refs: tuple[str, ...]
+    subgroups: tuple[ComponentGroup, ...] = ()
+
+
+@dataclass(frozen=True)
 class BoardSummary:
     """High-level board characteristics extracted from the design."""
 
@@ -50,6 +68,7 @@ class DesignReview:
 
     board_summary: BoardSummary
     items: tuple[ReviewItem, ...]
+    component_groups: tuple[ComponentGroup, ...] = ()
 
 
 def _is_power_net(name: str) -> bool:
@@ -201,6 +220,119 @@ def _has_adc_component(requirements: ProjectRequirements) -> bool:
         if "ADC" in upper_value or "ADS1" in upper_value or "MCP3" in upper_value:
             return True
     return False
+
+
+def _build_component_groups(
+    requirements: ProjectRequirements,
+) -> tuple[ComponentGroup, ...]:
+    """Build component groups from feature blocks and netlist relationships.
+
+    Each feature block becomes a top-level group. Within each group,
+    components are further organized into subgroups:
+    - ICs and their associated decoupling caps
+    - Voltage regulators and their input/output passives
+    - Connectors and their associated protection components
+
+    Args:
+        requirements: Project requirements with features, components, and nets.
+
+    Returns:
+        Tuple of :class:`ComponentGroup` describing the design's logical structure.
+    """
+    comp_map = {c.ref: c for c in requirements.components}
+    groups: list[ComponentGroup] = []
+
+    # Build ref->nets mapping for subgroup detection
+    ref_nets: dict[str, set[str]] = {}
+    for net in requirements.nets:
+        for conn in net.connections:
+            ref_nets.setdefault(conn.ref, set()).add(net.name)
+
+    # Get decoupling pairs for subgroup assignment
+    decoupling_pairs = _find_ic_decoupling_pairs(requirements)
+    ic_to_caps: dict[str, list[str]] = {}
+    cap_assigned: set[str] = set()
+    for ic_ref, cap_ref in decoupling_pairs:
+        ic_to_caps.setdefault(ic_ref, []).append(cap_ref)
+        cap_assigned.add(cap_ref)
+
+    for fb in requirements.features:
+        fb_refs = set(fb.components)
+        subgroups: list[ComponentGroup] = []
+
+        # Find ICs in this feature and their decoupling caps
+        for ref in sorted(fb.components):
+            comp = comp_map.get(ref)
+            if comp is None or not ref.startswith("U"):
+                continue
+            caps = ic_to_caps.get(ref, [])
+            caps_in_feature = [c for c in caps if c in fb_refs]
+            if caps_in_feature:
+                subgroups.append(ComponentGroup(
+                    name=f"{ref} ({comp.value})",
+                    description=f"{comp.value} + decoupling",
+                    refs=(ref, *sorted(caps_in_feature)),
+                ))
+
+        # Find relay groups (relay + flyback diode + driver)
+        relay_refs = [r for r in fb.components if r.startswith("K")]
+        if relay_refs:
+            # Find diodes and transistors sharing nets with relays
+            relay_associated: set[str] = set(relay_refs)
+            for relay_ref in relay_refs:
+                relay_nets = ref_nets.get(relay_ref, set())
+                for ref in fb.components:
+                    if ref in relay_associated:
+                        continue
+                    if ref.startswith(("D", "Q")) and ref_nets.get(ref, set()) & relay_nets:
+                        relay_associated.add(ref)
+            if len(relay_associated) > len(relay_refs):
+                subgroups.append(ComponentGroup(
+                    name="Relay Driver Circuit",
+                    description="Relays with flyback diodes and drivers",
+                    refs=tuple(sorted(relay_associated)),
+                ))
+
+        # Find regulator subgroups (regulator + input/output caps)
+        for ref in sorted(fb.components):
+            comp = comp_map.get(ref)
+            if comp is None or not ref.startswith("U"):
+                continue
+            upper_value = comp.value.upper()
+            upper_desc = (comp.description or "").upper()
+            is_regulator = any(
+                kw in upper_value or kw in upper_desc
+                for kw in _REGULATOR_KEYWORDS
+            )
+            if not is_regulator:
+                continue
+            # Find caps sharing power nets with this regulator
+            reg_nets = ref_nets.get(ref, set())
+            reg_power = {n for n in reg_nets if _is_power_net(n)}
+            associated: list[str] = [ref]
+            for cref in sorted(fb.components):
+                if cref == ref or cref in cap_assigned:
+                    continue
+                if not cref.startswith(("C", "L")):
+                    continue
+                c_nets = ref_nets.get(cref, set())
+                if c_nets & reg_power:
+                    associated.append(cref)
+            if len(associated) > 1:
+                subgroups.append(ComponentGroup(
+                    name=f"{ref} Regulator ({comp.value})",
+                    description=f"{comp.value} with input/output passives",
+                    refs=tuple(associated),
+                ))
+
+        groups.append(ComponentGroup(
+            name=fb.name,
+            description=fb.description,
+            refs=tuple(sorted(fb.components)),
+            subgroups=tuple(subgroups),
+        ))
+
+    return tuple(groups)
 
 
 def _build_board_summary(
@@ -371,10 +503,12 @@ def generate_design_review(
     ))
 
     summary = _build_board_summary(requirements, pcb_design)
+    component_groups = _build_component_groups(requirements)
 
     return DesignReview(
         board_summary=summary,
         items=tuple(items),
+        component_groups=component_groups,
     )
 
 
@@ -415,6 +549,20 @@ def format_design_review(
     if specials:
         lines.append(f"- Special: {', '.join(specials)}")
     lines.append("")
+
+    # --- Component Groups ---
+    if review.component_groups:
+        lines.append("## Component Groups")
+        for group in review.component_groups:
+            lines.append(f"### {group.name}")
+            if group.description:
+                lines.append(f"_{group.description}_")
+            lines.append(f"- Components: {', '.join(group.refs)}")
+            for sub in group.subgroups:
+                lines.append(f"  - **{sub.name}**: {', '.join(sub.refs)}")
+                if sub.description:
+                    lines.append(f"    _{sub.description}_")
+            lines.append("")
 
     # Partition items by severity.
     required = [i for i in review.items if i.severity == "required"]

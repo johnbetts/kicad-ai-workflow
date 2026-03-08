@@ -893,3 +893,138 @@ class TestSanitizeFilename:
 
     def test_strips_leading_trailing(self) -> None:
         assert _sanitize_filename("  test  ") == "test"
+
+
+# ---------------------------------------------------------------------------
+# Ref designator "?" regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestRefDesignatorResolution:
+    """Verify ref designators are never '?' in written hierarchical schematics.
+
+    KiCad 9 resolves ref designators through the combination of:
+    1. Per-symbol ``(instances (project "name" (path "..." (reference "R1"))))``
+    2. ``(sheet_instances (path "/{root_uuid}/{sheet_entry_uuid}" (page "N")))``
+
+    If the sub-sheet's sheet_instances path is "/" instead of the correct
+    hierarchical path, KiCad cannot resolve refs and shows "?".
+    """
+
+    def test_no_question_mark_refs_in_hierarchical_output(self, tmp_path: Path) -> None:
+        """No ref designator in any hierarchical sheet should contain '?'."""
+        from kicad_pipeline.schematic.builder import write_hierarchical_schematic
+        from kicad_pipeline.sexp.parser import parse_file as sexp_parse
+
+        req = _two_feature_requirements()
+        result = build_hierarchical_schematic(req)
+        written = write_hierarchical_schematic(result, tmp_path, "Test Project")
+
+        for path in written:
+            tree = sexp_parse(path)
+            symbol_nodes = [
+                n for n in tree
+                if isinstance(n, list) and n[0] == "symbol"
+                and any(isinstance(c, list) and c[0] == "instances" for c in n)
+            ]
+            for sym_node in symbol_nodes:
+                # Check property Reference
+                for child in sym_node:
+                    if (isinstance(child, list) and len(child) >= 3
+                            and child[0] == "property" and child[1] == "Reference"):
+                        ref_val = child[2]
+                        assert "?" not in str(ref_val), (
+                            f"File {path.name}: ref designator '{ref_val}' "
+                            f"contains '?' — annotation failed"
+                        )
+                # Check instances block reference
+                inst_node = next(
+                    (c for c in sym_node
+                     if isinstance(c, list) and c[0] == "instances"),
+                    None,
+                )
+                if inst_node:
+                    for proj in inst_node:
+                        if isinstance(proj, list) and proj[0] == "project":
+                            for p in proj:
+                                if isinstance(p, list) and p[0] == "path":
+                                    ref_node = next(
+                                        (c for c in p
+                                         if isinstance(c, list) and c[0] == "reference"),
+                                        None,
+                                    )
+                                    if ref_node:
+                                        assert "?" not in str(ref_node[1]), (
+                                            f"File {path.name}: instance ref "
+                                            f"'{ref_node[1]}' contains '?'"
+                                        )
+
+    def test_subsheet_sheet_instances_uses_hierarchical_path(self, tmp_path: Path) -> None:
+        """Sub-sheet sheet_instances must use the hierarchical path, not '/'.
+
+        This is the root cause of the '?' ref designator bug: if a sub-sheet's
+        sheet_instances has path '/' instead of '/{root_uuid}/{sheet_entry_uuid}',
+        KiCad cannot match the sub-sheet to its hierarchy entry and falls back
+        to showing '?' for all ref designators.
+        """
+        from kicad_pipeline.schematic.builder import write_hierarchical_schematic
+        from kicad_pipeline.sexp.parser import parse_file as sexp_parse
+
+        req = _two_feature_requirements()
+        result = build_hierarchical_schematic(req)
+        project_name = "Test Project"
+        written = write_hierarchical_schematic(result, tmp_path, project_name)
+
+        root_path = tmp_path / f"{project_name}.kicad_sch"
+        root_tree = sexp_parse(root_path)
+        root_uuid = next(
+            n[1] for n in root_tree
+            if isinstance(n, list) and n[0] == "uuid"
+        )
+
+        # Build expected paths for each sub-sheet
+        sheet_nodes = [
+            n for n in root_tree
+            if isinstance(n, list) and n[0] == "sheet"
+        ]
+        sheet_file_to_path: dict[str, str] = {}
+        for sn in sheet_nodes:
+            file_prop = next(
+                (c for c in sn if isinstance(c, list) and len(c) >= 3
+                 and c[0] == "property" and c[1] == "Sheetfile"),
+                None,
+            )
+            uuid_node = next(
+                (c for c in sn if isinstance(c, list) and c[0] == "uuid"),
+                None,
+            )
+            if file_prop and uuid_node:
+                sheet_file_to_path[file_prop[2]] = f"/{root_uuid}/{uuid_node[1]}"
+
+        # Verify each sub-sheet's sheet_instances path
+        for path in written:
+            if path == root_path:
+                continue
+            tree = sexp_parse(path)
+            si_nodes = [
+                n for n in tree
+                if isinstance(n, list) and n[0] == "sheet_instances"
+            ]
+            assert len(si_nodes) == 1, (
+                f"File {path.name}: missing sheet_instances"
+            )
+            path_entries = [
+                n for n in si_nodes[0]
+                if isinstance(n, list) and n[0] == "path"
+            ]
+            assert len(path_entries) >= 1
+            actual_path = path_entries[0][1]
+            expected_path = sheet_file_to_path.get(path.name, "")
+            assert actual_path != "/", (
+                f"File {path.name}: sheet_instances path is '/' but should be "
+                f"'{expected_path}' — this causes '?' ref designators in KiCad"
+            )
+            assert actual_path == expected_path, (
+                f"File {path.name}: sheet_instances path '{actual_path}' does "
+                f"not match expected '{expected_path}'"
+            )

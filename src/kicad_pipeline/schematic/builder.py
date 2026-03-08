@@ -1504,10 +1504,12 @@ def schematic_to_sexp(
 
     # KiCad 9 canonical sheet_instances section (root sheet + sub-sheets).
     # Root sheet path is always "/" (verified against real KiCad 9 files).
-    # Sub-sheet paths are "/{root_uuid}/{sheet_uuid}".
+    # Sub-sheet files must use their hierarchical path (instance_path),
+    # NOT "/" — otherwise KiCad can't resolve ref designators and shows "?".
+    self_path = instance_path if instance_path else "/"
     sheet_instances_node: list[SExpNode] = [
         "sheet_instances",
-        ["path", "/", ["page", "1"]],
+        ["path", self_path, ["page", "1"]],
     ]
     for page_num, sheet in enumerate(schematic.sheets, start=2):
         sheet_instances_node.append(
