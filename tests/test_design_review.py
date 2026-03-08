@@ -84,6 +84,9 @@ def _wifi_requirements() -> ProjectRequirements:
             NetConnection("U2", "3"), NetConnection("K1", "1"),
             NetConnection("U3", "1"),
         )),
+        Net(name="RLY1_COIL", connections=(
+            NetConnection("K1", "2"),
+        )),
     )
     features = (
         FeatureBlock("MCU", "ESP32", ("U1", "C1"), ("+3V3", "GND"), ()),
@@ -151,12 +154,13 @@ def test_design_review_is_frozen() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_generate_review_detects_wifi() -> None:
+def test_generate_review_wifi_edge_clearance() -> None:
+    """WiFi → antenna edge clearance reminder (keepout is auto-generated)."""
     req = _wifi_requirements()
     review = generate_design_review(req)
     antenna_items = [i for i in review.items if i.category == "antenna"]
     assert len(antenna_items) >= 1
-    assert any("keepout" in i.title.lower() for i in antenna_items)
+    assert any("edge" in i.title.lower() for i in antenna_items)
     assert "U1" in antenna_items[0].affected_refs
 
 
@@ -174,18 +178,6 @@ def test_generate_review_detects_regulators() -> None:
     thermal_items = [i for i in review.items if i.category == "thermal"]
     assert len(thermal_items) >= 1
     assert "U2" in thermal_items[0].affected_refs
-
-
-def test_generate_review_decoupling_pairs() -> None:
-    req = _wifi_requirements()
-    review = generate_design_review(req)
-    decoupling = [i for i in review.items if "decoupling" in i.title.lower()]
-    assert len(decoupling) >= 1
-    # C1 should be paired with U1 (both on +3V3)
-    paired_refs = set()
-    for item in decoupling:
-        paired_refs.update(item.affected_refs)
-    assert "C1" in paired_refs
 
 
 def test_generate_review_always_has_zone_fill() -> None:
@@ -216,11 +208,23 @@ def test_generate_review_board_summary() -> None:
     assert "+5V" in s.power_nets
 
 
-def test_generate_review_power_nets_detected() -> None:
+def test_no_automated_items_in_review() -> None:
+    """Items handled by the framework should NOT appear as recommendations.
+
+    The PCB builder auto-handles:
+    - Antenna keepout zones (_make_antenna_keepout)
+    - Power trace widths (netclasses classify_nets)
+    - Decoupling cap placement (constraints NEAR)
+    - Relay trace widths (netclasses)
+    """
     req = _wifi_requirements()
     review = generate_design_review(req)
-    power_items = [i for i in review.items if i.category == "power"]
-    assert len(power_items) >= 1
+    titles = [i.title.lower() for i in review.items]
+    # These should NOT appear — they're automated
+    assert not any("high-current trace" in t for t in titles)
+    assert not any("decoupling cap" in t for t in titles)
+    assert not any(t == "antenna keepout zone" for t in titles)
+    assert not any("relay trace width" in t for t in titles)
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +324,131 @@ def test_no_groups_when_no_features() -> None:
     req = _minimal_requirements()
     review = generate_design_review(req)
     assert len(review.component_groups) == 0
+
+
+# ---------------------------------------------------------------------------
+# Connectivity validation
+# ---------------------------------------------------------------------------
+
+
+def _unconnected_component_requirements() -> ProjectRequirements:
+    """Requirements with a fully unconnected component."""
+    components = (
+        Component(
+            ref="R1", value="10k", footprint="R_0805",
+            pins=(
+                Pin("1", "~", PinType.PASSIVE, net="SIG"),
+                Pin("2", "~", PinType.PASSIVE, net="GND"),
+            ),
+        ),
+        Component(
+            ref="R2", value="10k", footprint="R_0805",
+            pins=(
+                Pin("1", "~", PinType.PASSIVE),
+                Pin("2", "~", PinType.PASSIVE),
+            ),
+        ),
+    )
+    nets = (
+        Net(name="GND", connections=(NetConnection("R1", "2"),)),
+        Net(name="SIG", connections=(NetConnection("R1", "1"),)),
+    )
+    return ProjectRequirements(
+        project=ProjectInfo(name="UnconnectedTest"),
+        features=(
+            FeatureBlock("Main", "Test", ("R1",), ("GND", "SIG"), ()),
+        ),
+        components=components,
+        nets=nets,
+    )
+
+
+def test_detects_unconnected_component() -> None:
+    """A component with no net connections should be flagged as required."""
+    req = _unconnected_component_requirements()
+    review = generate_design_review(req)
+    unconnected = [
+        i for i in review.items
+        if i.category == "connectivity" and "unconnected component" in i.title.lower()
+    ]
+    assert len(unconnected) == 1
+    assert "R2" in unconnected[0].affected_refs
+    assert unconnected[0].severity == "required"
+
+
+def test_detects_orphaned_component() -> None:
+    """A component not in any feature block should be flagged."""
+    req = _unconnected_component_requirements()
+    review = generate_design_review(req)
+    orphaned = [
+        i for i in review.items
+        if "orphaned" in i.title.lower()
+    ]
+    # R2 is not in any feature block
+    assert len(orphaned) == 1
+    assert "R2" in orphaned[0].affected_refs
+
+
+def test_detects_dead_end_net() -> None:
+    """A signal net with only one connection should be flagged."""
+    components = (
+        Component(
+            ref="U1", value="MCU", footprint="QFP-48",
+            pins=(
+                Pin("1", "VCC", PinType.POWER_IN, net="+3V3"),
+                Pin("2", "OUT", PinType.OUTPUT, net="ORPHAN_SIG"),
+            ),
+        ),
+    )
+    nets = (
+        Net(name="+3V3", connections=(NetConnection("U1", "1"),)),
+        Net(name="ORPHAN_SIG", connections=(NetConnection("U1", "2"),)),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="DeadEndTest"),
+        features=(),
+        components=components,
+        nets=nets,
+    )
+    review = generate_design_review(req)
+    dead_end = [i for i in review.items if "dead-end" in i.title.lower()]
+    assert len(dead_end) == 1
+    assert "ORPHAN_SIG" in dead_end[0].description
+    assert dead_end[0].severity == "required"
+
+
+def test_no_false_positive_power_dead_end() -> None:
+    """Power nets with one connection should NOT be flagged as dead-end."""
+    components = (
+        Component(
+            ref="U1", value="MCU", footprint="QFP-48",
+            pins=(
+                Pin("1", "VCC", PinType.POWER_IN, net="+3V3"),
+                Pin("2", "GND", PinType.POWER_IN, net="GND"),
+            ),
+        ),
+    )
+    nets = (
+        Net(name="+3V3", connections=(NetConnection("U1", "1"),)),
+        Net(name="GND", connections=(NetConnection("U1", "2"),)),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="PowerTest"),
+        features=(),
+        components=components,
+        nets=nets,
+    )
+    review = generate_design_review(req)
+    dead_end = [i for i in review.items if "dead-end" in i.title.lower()]
+    assert len(dead_end) == 0
+
+
+def test_connected_components_no_warnings() -> None:
+    """Properly connected components should not trigger connectivity warnings."""
+    req = _wifi_requirements()
+    review = generate_design_review(req)
+    unconnected = [
+        i for i in review.items
+        if i.category == "connectivity" and "unconnected component" in i.title.lower()
+    ]
+    assert len(unconnected) == 0

@@ -125,18 +125,31 @@ def _find_regulator_refs(requirements: ProjectRequirements) -> tuple[str, ...]:
     return tuple(refs)
 
 
+_REGULATOR_DESC_KEYWORDS: frozenset[str] = frozenset({
+    "BUCK", "BOOST", "LDO", "REGULATOR", "CONVERTER", "SWITCHING",
+    "LINEAR REG", "VOLTAGE REG", "POWER SUPPLY",
+})
+
+# Maximum number of ICs sharing a power rail before we treat it as a "bus"
+# and refuse to pair caps via rail matching alone.
+_MAX_IC_COUNT_FOR_RAIL_MATCH = 2
+
+
 def _find_ic_decoupling_pairs(
     requirements: ProjectRequirements,
 ) -> list[tuple[str, str]]:
     """Find (IC_ref, cap_ref) pairs for decoupling cap placement checks.
 
-    Only pairs caps that are likely dedicated decoupling for a specific IC:
-    - Cap has exactly 2 pins, both on power nets (VCC+GND pattern)
-    - Cap description mentions the IC (e.g. "ESP32 decoupling")
-    - Or cap shares a non-GND power net with the IC and that net has
-      few IC connections (specific rail, not a bus like GND)
-
-    This avoids the cartesian explosion of pairing every cap with every IC.
+    Pairing strategy (in priority order):
+    1. **Description match**: cap description mentions an IC value name
+       (e.g. "ESP32 decoupling" → U3 whose value is ESP32-S3-WROOM-1).
+    2. **Regulator description**: cap description contains regulator keywords
+       (e.g. "3.3V buck output cap") → paired with the regulator in the same
+       feature block or sharing the cap's power rail.
+    3. **Specific rail match**: cap shares a non-GND power rail with an IC,
+       and that rail has at most 2 IC users (specific rail, not a bus).
+    4. **Skip**: caps on busy shared rails (≥3 ICs) or bulk/section caps
+       are not paired to avoid misleading recommendations.
     """
     comp_map = {c.ref: c for c in requirements.components}
 
@@ -156,6 +169,15 @@ def _find_ic_decoupling_pairs(
     ic_refs = [c.ref for c in requirements.components if c.ref.startswith("U")]
     cap_refs = [c.ref for c in requirements.components if c.ref.startswith("C")]
 
+    # Identify which ICs are regulators
+    regulator_set: set[str] = set(_find_regulator_refs(requirements))
+
+    # Build ref-to-feature mapping for feature-local matching
+    ref_to_feature: dict[str, str] = {}
+    for fb in requirements.features:
+        for ref in fb.components:
+            ref_to_feature[ref] = fb.name
+
     # Filter to caps that look like decoupling (both pins on power nets)
     decoupling_caps: list[str] = []
     for cref in cap_refs:
@@ -172,36 +194,71 @@ def _find_ic_decoupling_pairs(
     for cap in decoupling_caps:
         cap_comp = comp_map.get(cap)
         cap_nets = ref_power_nets.get(cap, set())
-        # Non-GND power nets on this cap (the specific rail it decouples)
         cap_rails = {n for n in cap_nets if n.upper() not in _GND_NET_NAMES}
-
-        # Check if cap description mentions a specific IC
         desc = (cap_comp.description or "").upper() if cap_comp else ""
+        cap_feature = ref_to_feature.get(cap, "")
+
         best_ic = ""
         best_score = 0.0
 
+        # --- Priority 1: Description mentions a specific IC value ---
         for ic in ic_refs:
             ic_comp = comp_map.get(ic)
             if ic_comp is None:
                 continue
-
-            # Description match: "ESP32 decoupling" → matches U3 (ESP32)
             ic_value = ic_comp.value.upper()
             if ic_value and ic_value in desc:
                 best_ic = ic
-                best_score = 100
+                best_score = 1000.0
                 break
 
-            # Rail match: shared non-GND power net with few IC users
-            ic_nets = ref_power_nets.get(ic, set())
-            shared_rails = cap_rails & ic_nets
-            if not shared_rails:
-                continue
-            # Score: prefer rails shared by fewer ICs (more specific)
-            score = sum(1.0 / max(net_ic_count.get(r, 1), 1) for r in shared_rails)
-            if score > best_score:
-                best_score = score
-                best_ic = ic
+        # --- Priority 2: Cap description has regulator keywords ---
+        # Pair with regulator in same feature block or sharing the cap's rail.
+        if best_score < 1000.0 and any(kw in desc for kw in _REGULATOR_DESC_KEYWORDS):
+            for ic in ic_refs:
+                if ic not in regulator_set:
+                    continue
+                ic_nets = ref_power_nets.get(ic, set())
+                shared = cap_rails & ic_nets
+                if not shared:
+                    continue
+                # Prefer same-feature regulator
+                ic_feature = ref_to_feature.get(ic, "")
+                feature_bonus = 10.0 if (cap_feature and cap_feature == ic_feature) else 0.0
+                score = 500.0 + feature_bonus
+                if score > best_score:
+                    best_score = score
+                    best_ic = ic
+
+        # --- Priority 3: Specific rail match (few IC users) ---
+        if best_score < 500.0:
+            for ic in ic_refs:
+                ic_comp = comp_map.get(ic)
+                if ic_comp is None:
+                    continue
+                ic_nets = ref_power_nets.get(ic, set())
+                shared_rails = cap_rails & ic_nets
+                if not shared_rails:
+                    continue
+                # Skip busy rails — too many ICs to determine which one owns the cap
+                specific_rails = {
+                    r for r in shared_rails
+                    if net_ic_count.get(r, 0) <= _MAX_IC_COUNT_FOR_RAIL_MATCH
+                }
+                if not specific_rails:
+                    continue
+                # Score: prefer fewer IC users (more specific)
+                score = sum(
+                    1.0 / max(net_ic_count.get(r, 1), 1)
+                    for r in specific_rails
+                )
+                # Bonus for same feature block
+                ic_feature = ref_to_feature.get(ic, "")
+                if cap_feature and cap_feature == ic_feature:
+                    score += 5.0
+                if score > best_score:
+                    best_score = score
+                    best_ic = ic
 
         if best_ic and cap not in seen_caps:
             pairs.append((best_ic, cap))
@@ -220,6 +277,123 @@ def _has_adc_component(requirements: ProjectRequirements) -> bool:
         if "ADC" in upper_value or "ADS1" in upper_value or "MCP3" in upper_value:
             return True
     return False
+
+
+def _check_connectivity(
+    requirements: ProjectRequirements,
+) -> list[ReviewItem]:
+    """Check for unconnected components and dead-end nets.
+
+    Detects:
+    - Components where ALL non-NC pins lack net connections (fully unconnected).
+    - Components not listed in any feature block (orphaned).
+    - Signal nets with only one connection (dead-end, excluding power nets).
+
+    Args:
+        requirements: Project requirements to validate.
+
+    Returns:
+        List of :class:`ReviewItem` findings.
+    """
+    items: list[ReviewItem] = []
+
+    # Build set of (ref, pin) pairs that appear in any net
+    connected_pins: set[tuple[str, str]] = set()
+    for net in requirements.nets:
+        for conn in net.connections:
+            connected_pins.add((conn.ref, conn.pin))
+
+    # --- Check for fully unconnected components ---
+    for comp in requirements.components:
+        if not comp.pins:
+            continue
+        # Count non-NC pins that have net connections
+        connectable_pins = [
+            p for p in comp.pins
+            if p.pin_type.value != "no_connect"
+        ]
+        if not connectable_pins:
+            continue
+        connected_count = sum(
+            1 for p in connectable_pins
+            if (comp.ref, p.number) in connected_pins
+        )
+        if connected_count == 0:
+            items.append(ReviewItem(
+                category="connectivity",
+                severity="required",
+                title="Unconnected component",
+                description=(
+                    f"{comp.ref} ({comp.value}) has no net connections — "
+                    f"all {len(connectable_pins)} connectable pins are floating"
+                ),
+                affected_refs=(comp.ref,),
+            ))
+        elif connected_count < len(connectable_pins):
+            # Some pins connected, some not — informational
+            unconnected = [
+                p.number for p in connectable_pins
+                if (comp.ref, p.number) not in connected_pins
+            ]
+            # Only flag non-power/non-NC pins that are truly floating
+            # (power pins often get connected via power symbols, not nets)
+            signal_unconnected = [
+                p_num for p_num in unconnected
+                if not any(
+                    p.number == p_num and p.pin_type.value in ("power_in", "power_out")
+                    for p in connectable_pins
+                )
+            ]
+            if signal_unconnected:
+                pin_list = ", ".join(signal_unconnected[:5])
+                extra = len(signal_unconnected) - 5
+                suffix = f" +{extra} more" if extra > 0 else ""
+                items.append(ReviewItem(
+                    category="connectivity",
+                    severity="recommended",
+                    title="Partially unconnected component",
+                    description=(
+                        f"{comp.ref} ({comp.value}) has {len(signal_unconnected)} "
+                        f"unconnected signal pins: {pin_list}{suffix}"
+                    ),
+                    affected_refs=(comp.ref,),
+                ))
+
+    # --- Check for orphaned components (not in any feature) ---
+    if requirements.features:
+        featured_refs: set[str] = set()
+        for fb in requirements.features:
+            featured_refs.update(fb.components)
+        for comp in requirements.components:
+            if comp.ref not in featured_refs:
+                items.append(ReviewItem(
+                    category="connectivity",
+                    severity="recommended",
+                    title="Orphaned component",
+                    description=(
+                        f"{comp.ref} ({comp.value}) is not assigned to any feature block"
+                    ),
+                    affected_refs=(comp.ref,),
+                ))
+
+    # --- Check for dead-end signal nets ---
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue  # Power nets with one connection are normal (power symbols)
+        if len(net.connections) == 1:
+            conn = net.connections[0]
+            items.append(ReviewItem(
+                category="connectivity",
+                severity="required",
+                title="Dead-end net",
+                description=(
+                    f"Net '{net.name}' has only one connection ({conn.ref}.{conn.pin}) "
+                    f"— signal goes nowhere"
+                ),
+                affected_refs=(conn.ref,),
+            ))
+
+    return items
 
 
 def _build_component_groups(
@@ -394,33 +568,26 @@ def generate_design_review(
     """
     items: list[ReviewItem] = []
 
-    # --- Antenna clearance ---
-    has_wifi, wifi_refs = _has_wifi_component(requirements)
-    if has_wifi:
-        items.append(ReviewItem(
-            category="antenna",
-            severity="required",
-            title="Antenna keepout zone",
-            description=(
-                "Create keepout zone around antenna "
-                "(no copper/GND pour within 5mm)"
-            ),
-            affected_refs=wifi_refs,
-        ))
+    # --- Connectivity validation (required — catch design errors early) ---
+    items.extend(_check_connectivity(requirements))
 
-    # --- Edge clearance for WiFi antenna ---
+    # --- Antenna edge clearance (manual verification needed) ---
+    # NOTE: Antenna keepout zone is auto-generated by _make_antenna_keepout()
+    # in pcb/builder.py, so we only remind about edge clearance verification.
+    has_wifi, wifi_refs = _has_wifi_component(requirements)
     if has_wifi:
         items.append(ReviewItem(
             category="antenna",
             severity="required",
             title="Antenna edge clearance",
             description=(
-                "Verify WiFi antenna extends past board edge or has clearance"
+                "Verify WiFi antenna extends past board edge or has clearance "
+                "(keepout zone is auto-generated)"
             ),
             affected_refs=wifi_refs,
         ))
 
-    # --- Relay isolation ---
+    # --- Relay isolation (manual — requires board cutouts) ---
     relay_refs = _find_relay_refs(requirements)
     if relay_refs:
         items.append(ReviewItem(
@@ -432,40 +599,19 @@ def generate_design_review(
             ),
             affected_refs=relay_refs,
         ))
-        items.append(ReviewItem(
-            category="relay",
-            severity="required",
-            title="Relay trace width",
-            description=(
-                "Use wider traces (\u22651mm) for relay contact paths"
-            ),
-            affected_refs=relay_refs,
-        ))
 
-    # --- High-current traces ---
-    power_nets = _find_power_nets(requirements)
-    high_current_nets = tuple(
-        n for n in power_nets if n.upper() not in _GND_NET_NAMES
-    )
-    if high_current_nets:
-        # Find component refs connected to these nets.
-        affected: set[str] = set()
-        for net in requirements.nets:
-            if net.name in high_current_nets:
-                for conn in net.connections:
-                    affected.add(conn.ref)
-        net_list = ", ".join(high_current_nets)
-        items.append(ReviewItem(
-            category="power",
-            severity="recommended",
-            title="High-current trace width",
-            description=(
-                f"Increase trace width for {net_list} to \u22650.5mm"
-            ),
-            affected_refs=tuple(sorted(affected)),
-        ))
+    # NOTE: The following items are handled automatically by the framework:
+    # - High-current trace widths → netclasses.py classify_nets() assigns
+    #   wider traces to power nets automatically.
+    # - Decoupling cap placement → constraints.py creates NEAR constraints
+    #   placing caps within 3mm of their IC's VCC pins.
+    # - Antenna keepout zone → builder.py _make_antenna_keepout() auto-creates.
+    # - Relay trace width → netclasses.py applies wider power traces.
+    # - Thermal relief → zones.py applies thermal relief to all zone connections.
+    #
+    # These are NOT listed as recommendations because they already happen.
 
-    # --- Thermal relief for regulators ---
+    # --- Thermal vias for regulators (manual — add vias under thermal pad) ---
     regulator_refs = _find_regulator_refs(requirements)
     if regulator_refs:
         items.append(ReviewItem(
@@ -478,20 +624,7 @@ def generate_design_review(
             affected_refs=regulator_refs,
         ))
 
-    # --- Decoupling verification ---
-    decoupling_pairs = _find_ic_decoupling_pairs(requirements)
-    for ic_ref, cap_ref in decoupling_pairs:
-        items.append(ReviewItem(
-            category="power",
-            severity="recommended",
-            title="Decoupling cap placement",
-            description=(
-                f"Verify {cap_ref} is within 5mm of {ic_ref} VCC pin"
-            ),
-            affected_refs=(ic_ref, cap_ref),
-        ))
-
-    # --- Zone fill reminder (always) ---
+    # --- Zone fill reminder (always — requires KiCad GUI action) ---
     items.append(ReviewItem(
         category="mechanical",
         severity="required",
