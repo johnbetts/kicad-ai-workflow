@@ -1131,13 +1131,17 @@ def _symbol_instance_sexp(
     inst: SymbolInstance,
     project_name: str = "kicad-ai",
     root_uuid: str = "",
+    sheet_path: str = "",
 ) -> SExpNode:
     """Serialise a :class:`SymbolInstance` to a KiCad ``(symbol ...)`` node.
 
     Args:
         inst: Placed symbol instance.
         project_name: Project name for the ``(instances ...)`` annotation block.
-        root_uuid: Root schematic sheet UUID for the instances path.
+        root_uuid: Deprecated — use *sheet_path* instead.
+        sheet_path: Full hierarchical path for the ``(instances ...)`` block
+            (e.g. ``"/{root_uuid}"`` for root, ``"/{root_uuid}/{sheet_uuid}"``
+            for sub-sheets).
 
     Returns:
         ``SExpNode`` list.
@@ -1189,8 +1193,8 @@ def _symbol_instance_sexp(
             ]
         )
     # KiCad 9 requires (instances ...) inside each placed symbol for annotation.
-    # Path must be "/{root_sheet_uuid}" for KiCad to resolve references.
-    sheet_path = f"/{root_uuid}" if root_uuid else "/"
+    # Path is the full hierarchical sheet path (e.g. "/{root_uuid}/{sheet_uuid}").
+    resolved_path = sheet_path or (f"/{root_uuid}" if root_uuid else "/")
     node.append(
         [
             "instances",
@@ -1199,7 +1203,7 @@ def _symbol_instance_sexp(
                 project_name,
                 [
                     "path",
-                    sheet_path,
+                    resolved_path,
                     ["reference", inst.ref],
                     ["unit", inst.unit],
                 ],
@@ -1335,18 +1339,20 @@ def _power_symbol_sexp(
     ps: PowerSymbol,
     project_name: str = "kicad-ai",
     root_uuid: str = "",
+    sheet_path: str = "",
 ) -> SExpNode:
     """Serialise a :class:`PowerSymbol` to a KiCad ``(symbol ...)`` node.
 
     Args:
         ps: Power symbol instance.
         project_name: Project name for the ``(instances ...)`` annotation block.
-        root_uuid: Root schematic sheet UUID for the instances path.
+        root_uuid: Deprecated — use *sheet_path* instead.
+        sheet_path: Full hierarchical path for the ``(instances ...)`` block.
 
     Returns:
         ``SExpNode`` list.
     """
-    sheet_path = f"/{root_uuid}" if root_uuid else "/"
+    resolved_path = sheet_path or (f"/{root_uuid}" if root_uuid else "/")
     return [
         "symbol",
         ["lib_id", ps.lib_id],
@@ -1377,7 +1383,7 @@ def _power_symbol_sexp(
                 project_name,
                 [
                     "path",
-                    sheet_path,
+                    resolved_path,
                     ["reference", ps.ref],
                     ["unit", 1],
                 ],
@@ -1389,6 +1395,8 @@ def _power_symbol_sexp(
 def schematic_to_sexp(
     schematic: Schematic,
     project_name: str = "kicad-ai",
+    instance_path: str = "",
+    root_uuid: str = "",
 ) -> SExpNode:
     """Serialise a :class:`Schematic` to a KiCad S-expression tree.
 
@@ -1406,12 +1414,23 @@ def schematic_to_sexp(
 
     Args:
         schematic: The schematic to serialise.
+        project_name: Project name for the ``(instances ...)`` annotation block.
+        instance_path: Full hierarchical path for per-symbol ``(instances ...)``
+            blocks.  For the root sheet this is ``"/{root_uuid}"``.  For a
+            sub-sheet this is ``"/{root_uuid}/{sheet_entry_uuid}"`` where
+            ``sheet_entry_uuid`` is the UUID of the ``(sheet ...)`` node in
+            the parent.  When empty, defaults to ``"/{root_uuid}"``.
+        root_uuid: Pre-generated UUID for this schematic sheet.  When empty
+            a fresh UUID is generated.  In hierarchical designs the root
+            sheet's UUID must be shared with sub-sheets so they can build
+            correct ``instance_path`` values.
 
     Returns:
         A nested :data:`~kicad_pipeline.sexp.writer.SExpNode` list representing
         the root ``(kicad_sch ...)`` expression.
     """
-    root_uuid = str(uuid.uuid4())
+    if not root_uuid:
+        root_uuid = str(uuid.uuid4())
     root: list[SExpNode] = [
         "kicad_sch",
         ["version", schematic.version],
@@ -1447,10 +1466,13 @@ def schematic_to_sexp(
     root.append(lib_syms_node)
 
     # Symbol instances (regular + power)
+    # For hierarchical sub-sheets, instance_path is the full path from root
+    # (e.g. "/{root_uuid}/{sheet_entry_uuid}").  For root sheets, it's "/{root_uuid}".
+    sym_path = instance_path if instance_path else f"/{root_uuid}"
     for inst in schematic.symbols:
-        root.append(_symbol_instance_sexp(inst, project_name=project_name, root_uuid=root_uuid))
+        root.append(_symbol_instance_sexp(inst, project_name=project_name, sheet_path=sym_path))
     for ps in schematic.power_symbols:
-        root.append(_power_symbol_sexp(ps, project_name=project_name, root_uuid=root_uuid))
+        root.append(_power_symbol_sexp(ps, project_name=project_name, sheet_path=sym_path))
 
     # Wires
     for wire in schematic.wires:
@@ -1509,6 +1531,8 @@ def write_schematic(
     schematic: Schematic,
     path: str | Path,
     project_name: str | None = None,
+    instance_path: str = "",
+    root_uuid: str = "",
 ) -> None:
     """Serialise *schematic* and write it to a ``.kicad_sch`` file.
 
@@ -1519,6 +1543,9 @@ def write_schematic(
             When ``None``, falls back to the file stem.  In hierarchical
             designs **all** sheets must share the same project name for
             KiCad 9 to resolve ref designators.
+        instance_path: Full hierarchical path for per-symbol ``(instances ...)``
+            blocks.  For sub-sheets this must be
+            ``"/{root_uuid}/{sheet_entry_uuid}"``.
 
     Raises:
         :class:`~kicad_pipeline.exceptions.SchematicError`: If serialisation
@@ -1542,7 +1569,12 @@ def write_schematic(
     # otherwise derive from filename stem.
     proj_name = project_name if project_name is not None else dest.stem
     try:
-        sexp = schematic_to_sexp(schematic, project_name=proj_name)
+        sexp = schematic_to_sexp(
+            schematic,
+            project_name=proj_name,
+            instance_path=instance_path,
+            root_uuid=root_uuid,
+        )
         write_file(sexp, dest)
     except OSError:
         raise
@@ -1557,6 +1589,12 @@ def write_hierarchical_schematic(
     project_name: str,
 ) -> list[Path]:
     """Write a hierarchical schematic set to multiple ``.kicad_sch`` files.
+
+    For KiCad 9 to resolve ref designators correctly in hierarchical designs,
+    each sub-sheet's per-symbol ``(instances ...)`` path must be
+    ``"/{root_uuid}/{sheet_entry_uuid}"`` where *root_uuid* is the root
+    schematic's UUID and *sheet_entry_uuid* is the UUID of the ``(sheet ...)``
+    node in the root that references that sub-sheet.
 
     Args:
         schematics: Mapping from filename stem to :class:`Schematic`.
@@ -1574,17 +1612,47 @@ def write_hierarchical_schematic(
 
     sanitized_project = _sanitize_filename(project_name)
 
+    # Pre-generate root UUID so sub-sheets can reference it in instance paths.
+    pre_root_uuid = str(uuid.uuid4())
+
+    # Find the root schematic and build a mapping from sub-sheet filename
+    # to the Sheet entry UUID (from the root's (sheet ...) nodes).
+    root_sch: Schematic | None = None
+    for stem, sch in schematics.items():
+        if stem == sanitized_project:
+            root_sch = sch
+            break
+
+    # Map sub-sheet filename → sheet entry UUID from root's Sheet objects.
+    sheet_file_to_uuid: dict[str, str] = {}
+    if root_sch is not None:
+        for sheet in root_sch.sheets:
+            sheet_file_to_uuid[sheet.sheet_file] = sheet.uuid
+
     for stem, sch in schematics.items():
         if stem == sanitized_project:
             filename = f"{project_name}.kicad_sch"
+            # Root sheet: instance_path defaults to "/{root_uuid}"
+            write_schematic(
+                sch, output_dir / filename,
+                project_name=project_name,
+                root_uuid=pre_root_uuid,
+            )
         else:
             filename = f"{stem}.kicad_sch"
-        path = output_dir / filename
-        # All sheets in a hierarchical design must share the same project
-        # name in their (instances (project "NAME" ...)) blocks so KiCad 9
-        # can resolve ref designators across sheets.
-        write_schematic(sch, path, project_name=project_name)
-        written.append(path)
+            # Sub-sheet: instance_path = "/{root_uuid}/{sheet_entry_uuid}"
+            sheet_entry_uuid = sheet_file_to_uuid.get(filename, "")
+            instance_path = (
+                f"/{pre_root_uuid}/{sheet_entry_uuid}"
+                if sheet_entry_uuid
+                else ""
+            )
+            write_schematic(
+                sch, output_dir / filename,
+                project_name=project_name,
+                instance_path=instance_path,
+            )
+        written.append(output_dir / filename)
 
     log.info("write_hierarchical_schematic: wrote %d files to %s", len(written), output_dir)
     return written

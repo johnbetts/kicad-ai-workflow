@@ -665,6 +665,79 @@ class TestProjectNameConsistency:
             # Should use "Test Project", NOT "mcu" (file stem)
             assert proj_node[1] == "Test Project"
 
+    def test_subsheet_instance_paths_reference_root_uuid(self, tmp_path: Path) -> None:
+        """Sub-sheet symbol instances must use /{root_uuid}/{sheet_entry_uuid}
+        paths so KiCad 9 resolves ref designators correctly."""
+        from kicad_pipeline.schematic.builder import write_hierarchical_schematic
+        from kicad_pipeline.sexp.parser import parse_file as sexp_parse
+
+        req = _two_feature_requirements()
+        result = build_hierarchical_schematic(req)
+        project_name = "Test Project"
+        written = write_hierarchical_schematic(result, tmp_path, project_name)
+
+        # Parse root schematic to get its UUID and sheet entry UUIDs.
+        root_path = tmp_path / f"{project_name}.kicad_sch"
+        assert root_path.exists()
+        root_tree = sexp_parse(root_path)
+        root_uuid_node = next(
+            n for n in root_tree
+            if isinstance(n, list) and n[0] == "uuid"
+        )
+        root_uuid = root_uuid_node[1]
+
+        # Collect sheet entry UUIDs and their filenames from root.
+        sheet_nodes = [
+            n for n in root_tree
+            if isinstance(n, list) and n[0] == "sheet"
+        ]
+        sheet_file_to_entry_uuid: dict[str, str] = {}
+        for sn in sheet_nodes:
+            file_prop = next(
+                (c for c in sn if isinstance(c, list) and len(c) >= 3
+                 and c[0] == "property" and c[1] == "Sheetfile"),
+                None,
+            )
+            uuid_node = next(
+                (c for c in sn if isinstance(c, list) and c[0] == "uuid"),
+                None,
+            )
+            if file_prop and uuid_node:
+                sheet_file_to_entry_uuid[file_prop[2]] = uuid_node[1]
+
+        # Check each sub-sheet's symbols have correct instance paths.
+        for path in written:
+            if path == root_path:
+                continue
+            tree = sexp_parse(path)
+            symbol_nodes = [
+                n for n in tree
+                if isinstance(n, list) and n[0] == "symbol"
+                and any(isinstance(c, list) and c[0] == "instances" for c in n)
+            ]
+            if not symbol_nodes:
+                continue
+            expected_entry_uuid = sheet_file_to_entry_uuid.get(path.name, "")
+            expected_path = f"/{root_uuid}/{expected_entry_uuid}"
+            for sym_node in symbol_nodes:
+                inst_node = next(
+                    c for c in sym_node
+                    if isinstance(c, list) and c[0] == "instances"
+                )
+                proj_node = next(
+                    c for c in inst_node
+                    if isinstance(c, list) and c[0] == "project"
+                )
+                path_node = next(
+                    c for c in proj_node
+                    if isinstance(c, list) and c[0] == "path"
+                )
+                actual_path = path_node[1]
+                assert actual_path == expected_path, (
+                    f"File {path.name}: expected instance path "
+                    f"'{expected_path}' but got '{actual_path}'"
+                )
+
     def test_write_schematic_falls_back_to_stem(self, tmp_path: Path) -> None:
         """Without explicit project_name, write_schematic uses file stem."""
         from kicad_pipeline.schematic.builder import write_schematic
