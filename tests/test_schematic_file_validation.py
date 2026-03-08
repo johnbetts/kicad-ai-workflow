@@ -367,10 +367,12 @@ class TestStructuralSections:
     def test_sheet_instances_present(self, parsed_tree: list[SExpNode]) -> None:
         node = _find_node(parsed_tree, "sheet_instances")
         assert node is not None
-        # Must contain (path "/" (page "1"))
+        # Must contain (path "/<root_uuid>" (page "1"))
         path_node = _find_node(node, "path")
         assert path_node is not None
-        assert "/" in path_node
+        # Path value must start with "/" (either bare "/" or "/<uuid>")
+        path_val = str(path_node[1]) if len(path_node) > 1 else ""
+        assert path_val.startswith("/")
 
     def test_symbol_instances_present(self, parsed_tree: list[SExpNode]) -> None:
         node = _find_node(parsed_tree, "symbol_instances")

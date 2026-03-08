@@ -1041,6 +1041,7 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
         ("Value", short_name, False),
         ("Footprint", "", True),
         ("Datasheet", "", True),
+        ("Description", "", True),
     ):
         prop_node: list[SExpNode] = [
             "property", prop_name, prop_value,
@@ -1388,7 +1389,8 @@ def schematic_to_sexp(
         root.append(_global_label_sexp(gl))
 
     # KiCad 9 canonical sheet_instances section (root sheet)
-    root.append(["sheet_instances", ["path", "/", ["page", "1"]]])
+    # Path must include root UUID for KiCad 9 to resolve ref designators.
+    root.append(["sheet_instances", ["path", f"/{root_uuid}", ["page", "1"]]])
 
     # KiCad 9 symbol_instances — maps each symbol UUID to its reference designator.
     # Path format: "/{root_sheet_uuid}/{symbol_uuid}" for KiCad 9.
