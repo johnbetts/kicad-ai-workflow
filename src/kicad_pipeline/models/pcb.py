@@ -263,6 +263,8 @@ class Keepout:
     no_vias: bool = False
     no_tracks: bool = False
     uuid: str = ""
+    tag: str = ""
+    """Optional tag to classify keepout type (e.g. ``'mounting_hole'``, ``'antenna'``)."""
 
 
 @dataclass(frozen=True)

@@ -91,7 +91,8 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("LED_0603", "LED_SMD.3dshapes", "LED_0603_1608Metric.step"),
     ("LED_0805", "LED_SMD.3dshapes", "LED_0805_2012Metric.step"),
     ("LED_1206", "LED_SMD.3dshapes", "LED_1206_3216Metric.step"),
-    # Transistors
+    # Transistors / small ICs
+    ("SOT-23-6", "Package_TO_SOT_SMD.3dshapes", "SOT-23-6.step"),
     ("SOT-23-5", "Package_TO_SOT_SMD.3dshapes", "SOT-23-5.step"),
     ("SOT-23", "Package_TO_SOT_SMD.3dshapes", "SOT-23.step"),
     ("SOT-223", "Package_TO_SOT_SMD.3dshapes", "SOT-223-3_TabPin2.step"),
@@ -1331,8 +1332,11 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
+    lib_id = "Connector_USB:USB_C_Receptacle_GCT_USB4105"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
-        lib_id="Connector_USB:USB_C_Receptacle_GCT_USB4105",
+        lib_id=lib_id,
         ref=ref,
         value=value,
         position=Point(0.0, 0.0),
@@ -1341,6 +1345,7 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
         graphics=graphics,
         texts=texts,
         attr="smd",
+        models=models,
     )
 
 
@@ -1396,8 +1401,11 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
+    lib_id = "Connector_RJ:RJ45_Amphenol_54602-x08_Horizontal"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
-        lib_id="Connector_RJ:RJ45_Amphenol_54602-x08_Horizontal",
+        lib_id=lib_id,
         ref=ref,
         value=value,
         position=Point(0.0, 0.0),
@@ -1406,6 +1414,7 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
         graphics=graphics,
         texts=texts,
         attr="through_hole",
+        models=models,
     )
 
 

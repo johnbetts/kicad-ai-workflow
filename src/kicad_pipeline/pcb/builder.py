@@ -609,6 +609,7 @@ def _make_mounting_hole_keepouts(
                 no_vias=True,
                 no_tracks=True,
                 uuid=_new_uuid(),
+                tag="mounting_hole",
             )
         )
     return tuple(keepouts)
@@ -856,6 +857,9 @@ def _make_rf_via_fence(
 
     for ko in keepouts:
         if not ko.no_copper or not ko.polygon:
+            continue
+        # Skip non-RF keepouts (mounting holes, etc.)
+        if ko.tag == "mounting_hole":
             continue
         # Check if this is an RF-related keepout (on F.Cu)
         if ko.layers and "F.Cu" not in ko.layers:

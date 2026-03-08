@@ -109,31 +109,85 @@ def _find_regulator_refs(requirements: ProjectRequirements) -> tuple[str, ...]:
 def _find_ic_decoupling_pairs(
     requirements: ProjectRequirements,
 ) -> list[tuple[str, str]]:
-    """Find (IC_ref, cap_ref) pairs that share a power net.
+    """Find (IC_ref, cap_ref) pairs for decoupling cap placement checks.
 
-    For each IC (ref starting with U), find capacitors (ref starting with C)
-    that share at least one power net connection.
+    Only pairs caps that are likely dedicated decoupling for a specific IC:
+    - Cap has exactly 2 pins, both on power nets (VCC+GND pattern)
+    - Cap description mentions the IC (e.g. "ESP32 decoupling")
+    - Or cap shares a non-GND power net with the IC and that net has
+      few IC connections (specific rail, not a bus like GND)
+
+    This avoids the cartesian explosion of pairing every cap with every IC.
     """
-    # Build ref -> set of power nets mapping.
+    comp_map = {c.ref: c for c in requirements.components}
+
+    # Build ref -> set of power nets, and net -> set of IC refs
     ref_power_nets: dict[str, set[str]] = {}
+    net_ic_count: dict[str, int] = {}
     for net in requirements.nets:
         if not _is_power_net(net.name):
             continue
+        ic_count = 0
         for conn in net.connections:
             ref_power_nets.setdefault(conn.ref, set()).add(net.name)
+            if conn.ref.startswith("U"):
+                ic_count += 1
+        net_ic_count[net.name] = ic_count
 
-    ic_refs = [comp.ref for comp in requirements.components if comp.ref.startswith("U")]
-    cap_refs = [comp.ref for comp in requirements.components if comp.ref.startswith("C")]
+    ic_refs = [c.ref for c in requirements.components if c.ref.startswith("U")]
+    cap_refs = [c.ref for c in requirements.components if c.ref.startswith("C")]
+
+    # Filter to caps that look like decoupling (both pins on power nets)
+    decoupling_caps: list[str] = []
+    for cref in cap_refs:
+        comp = comp_map.get(cref)
+        if comp is None or len(comp.pins) != 2:
+            continue
+        pin_nets = [p.net for p in comp.pins if p.net]
+        if len(pin_nets) == 2 and all(_is_power_net(n) for n in pin_nets):
+            decoupling_caps.append(cref)
 
     pairs: list[tuple[str, str]] = []
-    for ic in ic_refs:
-        ic_nets = ref_power_nets.get(ic, set())
-        if not ic_nets:
-            continue
-        for cap in cap_refs:
-            cap_nets = ref_power_nets.get(cap, set())
-            if ic_nets & cap_nets:
-                pairs.append((ic, cap))
+    seen_caps: set[str] = set()
+
+    for cap in decoupling_caps:
+        cap_comp = comp_map.get(cap)
+        cap_nets = ref_power_nets.get(cap, set())
+        # Non-GND power nets on this cap (the specific rail it decouples)
+        cap_rails = {n for n in cap_nets if n.upper() not in _GND_NET_NAMES}
+
+        # Check if cap description mentions a specific IC
+        desc = (cap_comp.description or "").upper() if cap_comp else ""
+        best_ic = ""
+        best_score = 0.0
+
+        for ic in ic_refs:
+            ic_comp = comp_map.get(ic)
+            if ic_comp is None:
+                continue
+
+            # Description match: "ESP32 decoupling" → matches U3 (ESP32)
+            ic_value = ic_comp.value.upper()
+            if ic_value and ic_value in desc:
+                best_ic = ic
+                best_score = 100
+                break
+
+            # Rail match: shared non-GND power net with few IC users
+            ic_nets = ref_power_nets.get(ic, set())
+            shared_rails = cap_rails & ic_nets
+            if not shared_rails:
+                continue
+            # Score: prefer rails shared by fewer ICs (more specific)
+            score = sum(1.0 / max(net_ic_count.get(r, 1), 1) for r in shared_rails)
+            if score > best_score:
+                best_score = score
+                best_ic = ic
+
+        if best_ic and cap not in seen_caps:
+            pairs.append((best_ic, cap))
+            seen_caps.add(cap)
+
     return pairs
 
 
