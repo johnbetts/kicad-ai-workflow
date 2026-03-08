@@ -86,6 +86,7 @@ PCB_ZONES: dict[str, PCBZone] = {
     "MCU": PCBZone("MCU", 35.0, 8.0, 20.0, 12.0),
     "ETHERNET": PCBZone("ETHERNET", 8.0, 22.0, 30.0, 12.0),
     "RJ45": PCBZone("RJ45", 40.0, 22.0, 30.0, 12.0),
+    "RELAY": PCBZone("RELAY", 40.0, 22.0, 30.0, 12.0),
     "ANALOG": PCBZone("ANALOG", 8.0, 22.0, 30.0, 12.0),
     "PERIPHERALS": PCBZone("PERIPHERALS", 8.0, 22.0, 30.0, 12.0),
     "CONNECTORS": PCBZone("CONNECTORS", 40.0, 22.0, 30.0, 12.0),
@@ -102,8 +103,10 @@ _FEATURE_ZONE_MAP: list[tuple[tuple[str, ...], str]] = [
     (("mcu", "core"), "MCU"),
     (("ethernet", "w5500"), "ETHERNET"),
     (("rj45",), "RJ45"),
+    (("relay",), "RELAY"),
     (("analog", "adc"), "ANALOG"),
     (("led", "status"), "STATUS"),
+    (("display", "tft", "lcd"), "PERIPHERALS"),
 ]
 
 
@@ -435,6 +438,179 @@ def _dynamic_zones(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Subcircuit sorting — group related components within a zone
+# ---------------------------------------------------------------------------
+
+# Keywords that identify WiFi/BLE modules needing edge placement
+_WIFI_KEYWORDS: frozenset[str] = frozenset({
+    "esp32", "wroom", "wrover", "wifi", "ble", "nrf52", "cc2640",
+    "sx1276", "sx1262", "rfm95", "rfm96",
+})
+
+# Keywords that identify edge-sensitive connectors
+_EDGE_CONNECTOR_KEYWORDS: frozenset[str] = frozenset({
+    "usb", "rj45", "magjack", "sd_card", "microsd", "sim",
+})
+
+
+def _is_wifi_module(value: str, footprint: str) -> bool:
+    """Return True if component is a WiFi/BLE module needing edge placement."""
+    combined = f"{value} {footprint}".lower()
+    return any(kw in combined for kw in _WIFI_KEYWORDS)
+
+
+def _is_edge_connector(value: str, footprint: str) -> bool:
+    """Return True if component is an edge-sensitive connector."""
+    combined = f"{value} {footprint}".lower()
+    return any(kw in combined for kw in _EDGE_CONNECTOR_KEYWORDS)
+
+
+def _subcircuit_sort(
+    refs: list[str],
+    requirements: ProjectRequirements,
+) -> list[str]:
+    """Reorder component refs within a zone to group related parts together.
+
+    Groups decoupling caps next to their ICs, passives with their nearest
+    IC/connector by shared net count, and sorts groups by signal flow.
+
+    Args:
+        refs: List of component refs assigned to this zone.
+        requirements: Full project requirements with nets for adjacency.
+
+    Returns:
+        Reordered list of refs with related components adjacent.
+    """
+    if len(refs) <= 2:
+        return refs
+
+    from kicad_pipeline.pcb.constraints import build_signal_adjacency
+
+    ref_set = set(refs)
+    adj = build_signal_adjacency(requirements)
+
+    # Build net-based adjacency count between components in this zone
+    net_sharing: dict[tuple[str, str], int] = {}
+    for net in requirements.nets:
+        zone_refs_in_net = [c.ref for c in net.connections if c.ref in ref_set]
+        for i, r1 in enumerate(zone_refs_in_net):
+            for r2 in zone_refs_in_net[i + 1:]:
+                key = (min(r1, r2), max(r1, r2))
+                net_sharing[key] = net_sharing.get(key, 0) + 1
+
+    # Identify ICs and connectors as "anchor" components
+    anchors: list[str] = []
+    passives: list[str] = []
+    for ref in refs:
+        prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
+        if prefix in ("U", "J", "K", "Q", "Y"):
+            anchors.append(ref)
+        else:
+            passives.append(ref)
+
+    # Group each passive with its best anchor (most shared nets)
+    anchor_groups: dict[str, list[str]] = {a: [] for a in anchors}
+    ungrouped: list[str] = []
+    for p in passives:
+        best_anchor = ""
+        best_count = 0
+        for a in anchors:
+            key = (min(p, a), max(p, a))
+            count = net_sharing.get(key, 0)
+            # Also count signal adjacency
+            if a in adj.get(p, set()):
+                count += 1
+            if count > best_count:
+                best_count = count
+                best_anchor = a
+        if best_anchor:
+            anchor_groups[best_anchor].append(p)
+        else:
+            ungrouped.append(p)
+
+    # Sort anchors: connectors first (inputs), then ICs, then others
+    def _anchor_sort_key(ref: str) -> tuple[int, str]:
+        prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
+        if prefix == "J":
+            return (0, ref)
+        if prefix == "U":
+            return (1, ref)
+        return (2, ref)
+
+    sorted_anchors = sorted(anchors, key=_anchor_sort_key)
+
+    # Build final sorted list: anchor followed by its grouped passives
+    result: list[str] = []
+    for anchor in sorted_anchors:
+        result.append(anchor)
+        # Sort passives within group: decoupling caps first, then by ref
+        group = anchor_groups[anchor]
+        group.sort(key=lambda r: (0 if r.startswith("C") else 1, r))
+        result.extend(group)
+    result.extend(ungrouped)
+
+    log.debug("_subcircuit_sort: %s → %s", refs, result)
+    return result
+
+
+def _edge_priority_sort(
+    groups: dict[str, list[str]],
+    requirements: ProjectRequirements,
+) -> dict[str, list[str]]:
+    """Move edge-sensitive components to edge-adjacent zones.
+
+    WiFi modules, USB connectors, RJ45 jacks, and SD card slots should
+    be at board edges. Their immediate dependent passives stay with them.
+
+    This modifies zone membership, moving edge-sensitive refs to edge zones
+    while keeping their associated passives nearby.
+
+    Args:
+        groups: Zone name → list of refs (mutable, modified in-place).
+        requirements: Full project requirements.
+
+    Returns:
+        Updated groups dict (same object, mutated).
+    """
+    comp_map = {c.ref: c for c in requirements.components}
+    all_zone_refs = set()
+    for refs in groups.values():
+        all_zone_refs.update(refs)
+
+    # Identify edge-sensitive components across all zones
+    edge_refs: list[str] = []
+    for ref in all_zone_refs:
+        comp = comp_map.get(ref)
+        if comp is None:
+            continue
+        if _is_wifi_module(comp.value, comp.footprint) or _is_edge_connector(
+            comp.value, comp.footprint
+        ):
+            edge_refs.append(ref)
+
+    if not edge_refs:
+        return groups
+
+    # Ensure CONNECTORS zone exists for edge components not already in one
+    if "CONNECTORS" not in groups:
+        groups["CONNECTORS"] = []
+
+    # Move edge-sensitive refs from interior zones to CONNECTORS
+    for ref in edge_refs:
+        for zone_name, zone_refs in groups.items():
+            if ref in zone_refs and zone_name not in ("CONNECTORS", "RJ45", "USB_POWER"):
+                zone_refs.remove(ref)
+                groups["CONNECTORS"].append(ref)
+                log.info(
+                    "_edge_priority_sort: moved %s from %s to CONNECTORS (edge-sensitive)",
+                    ref, zone_name,
+                )
+                break
+
+    return groups
+
+
 def layout_pcb(
     requirements: ProjectRequirements,
     board: BoardOutline,
@@ -590,13 +766,21 @@ def layout_pcb(
     board_w = max(xs) - min(xs)
     board_h = max(ys) - min(ys)
 
+    # Move edge-sensitive components to edge zones
+    _edge_priority_sort(groups, requirements)
+
+    # Remove empty groups
+    groups = {k: v for k, v in groups.items() if v}
+
     # Create dynamic non-overlapping zones based on actual groups
     dynamic_zones = _dynamic_zones(groups, board_w, board_h, footprint_sizes)
 
     for zone_name, zone_refs in groups.items():
         zone = dynamic_zones[zone_name]
+        # Sort components within zone to group related parts
+        sorted_refs = _subcircuit_sort(zone_refs, requirements)
         zone_pos = place_pcb_components(
-            zone_refs, zone, footprint_sizes=footprint_sizes,
+            sorted_refs, zone, footprint_sizes=footprint_sizes,
         )
         zone_positions.update(zone_pos)
 

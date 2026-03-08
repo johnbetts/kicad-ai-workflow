@@ -287,3 +287,129 @@ def test_layout_pcb_returns_layout_result() -> None:
     assert isinstance(result, LayoutResult)
     assert isinstance(result.positions, dict)
     assert isinstance(result.rotations, dict)
+
+
+# ---------------------------------------------------------------------------
+# _subcircuit_sort
+# ---------------------------------------------------------------------------
+
+
+def test_subcircuit_sort_groups_caps_near_ics() -> None:
+    """Decoupling caps should be placed adjacent to their IC."""
+    from kicad_pipeline.pcb.placement import _subcircuit_sort
+
+    ic = Component(
+        ref="U1", value="MCU", footprint="QFP-48",
+        pins=(
+            Pin("1", "VCC", PinType.POWER_IN, net="+3V3"),
+            Pin("2", "GND", PinType.POWER_IN, net="GND"),
+            Pin("3", "IO1", PinType.BIDIRECTIONAL, net="SIG1"),
+        ),
+    )
+    cap = Component(
+        ref="C1", value="100nF", footprint="C_0402",
+        pins=(
+            Pin("1", "~", PinType.PASSIVE, net="+3V3"),
+            Pin("2", "~", PinType.PASSIVE, net="GND"),
+        ),
+    )
+    res = Component(
+        ref="R1", value="10k", footprint="R_0402",
+        pins=(
+            Pin("1", "~", PinType.PASSIVE, net="SIG1"),
+            Pin("2", "~", PinType.PASSIVE, net="SIG2"),
+        ),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="SortTest"),
+        features=(),
+        components=(ic, cap, res),
+        nets=(
+            Net("+3V3", (NetConnection("U1", "1"), NetConnection("C1", "1"))),
+            Net("GND", (NetConnection("U1", "2"), NetConnection("C1", "2"))),
+            Net("SIG1", (NetConnection("U1", "3"), NetConnection("R1", "1"))),
+            Net("SIG2", (NetConnection("R1", "2"),)),
+        ),
+    )
+    sorted_refs = _subcircuit_sort(["R1", "C1", "U1"], req)
+    # U1 should appear before C1, and C1 should be right after U1
+    u1_idx = sorted_refs.index("U1")
+    c1_idx = sorted_refs.index("C1")
+    assert c1_idx == u1_idx + 1, f"C1 at {c1_idx} should follow U1 at {u1_idx}"
+
+
+def test_subcircuit_sort_preserves_all_refs() -> None:
+    """All refs must appear in output."""
+    from kicad_pipeline.pcb.placement import _subcircuit_sort
+
+    req = _minimal_requirements()
+    refs = [c.ref for c in req.components]
+    sorted_refs = _subcircuit_sort(refs, req)
+    assert set(sorted_refs) == set(refs)
+
+
+def test_subcircuit_sort_short_list_unchanged() -> None:
+    """Lists of 1-2 refs returned unchanged."""
+    from kicad_pipeline.pcb.placement import _subcircuit_sort
+
+    req = _minimal_requirements()
+    assert _subcircuit_sort(["U1"], req) == ["U1"]
+    assert _subcircuit_sort(["U1", "R1"], req) == ["U1", "R1"]
+
+
+# ---------------------------------------------------------------------------
+# _edge_priority_sort
+# ---------------------------------------------------------------------------
+
+
+def test_edge_priority_sort_moves_wifi_to_edge() -> None:
+    """WiFi modules should be moved to CONNECTORS zone."""
+    from kicad_pipeline.pcb.placement import _edge_priority_sort
+
+    esp = Component(
+        ref="U1", value="ESP32-S3-WROOM-1", footprint="ESP32-S3-WROOM-1",
+        pins=(Pin("1", "GND", PinType.POWER_IN, net="GND"),),
+    )
+    cap = Component(ref="C1", value="100nF", footprint="C_0402",
+                    pins=(Pin("1", "~", PinType.PASSIVE, net="GND"),))
+    req = ProjectRequirements(
+        project=ProjectInfo(name="EdgeTest"),
+        features=(),
+        components=(esp, cap),
+        nets=(Net("GND", (NetConnection("U1", "1"), NetConnection("C1", "1"))),),
+    )
+    groups: dict[str, list[str]] = {"MCU": ["U1", "C1"]}
+    result = _edge_priority_sort(groups, req)
+    assert "U1" in result.get("CONNECTORS", [])
+    assert "U1" not in result["MCU"]
+
+
+def test_edge_priority_sort_no_wifi_noop() -> None:
+    """Without WiFi/edge components, groups remain unchanged."""
+    from kicad_pipeline.pcb.placement import _edge_priority_sort
+
+    # Use non-WiFi components so nothing triggers edge movement
+    stm = Component(ref="U1", value="STM32F103", footprint="LQFP-48",
+                    pins=(Pin("1", "GND", PinType.POWER_IN, net="GND"),))
+    res = Component(ref="R1", value="10k", footprint="R_0805",
+                    pins=(Pin("1", "~", PinType.PASSIVE, net="GND"),))
+    req = ProjectRequirements(
+        project=ProjectInfo(name="NoWifi"),
+        features=(),
+        components=(stm, res),
+        nets=(Net("GND", (NetConnection("U1", "1"), NetConnection("R1", "1"))),),
+    )
+    groups: dict[str, list[str]] = {"MCU": ["U1", "R1"]}
+    result = _edge_priority_sort(groups, req)
+    assert result["MCU"] == ["U1", "R1"]
+
+
+# ---------------------------------------------------------------------------
+# RELAY zone mapping
+# ---------------------------------------------------------------------------
+
+
+def test_assign_pcb_zones_relay() -> None:
+    """Relay feature name maps to RELAY zone."""
+    result = assign_pcb_zones([("K1", "Relay Outputs")])
+    assert result["K1"].name == "RELAY"
