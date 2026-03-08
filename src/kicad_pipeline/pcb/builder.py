@@ -196,6 +196,8 @@ def _resolve_silk_collisions(
                 position=fp.position, rotation=fp.rotation, layer=fp.layer,
                 pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+                models=fp.models, datasheet=fp.datasheet,
+                description=fp.description,
             )
             # Recompute label position after flip
             new_ly = ref_text.position.x * sin_r + new_y * cos_r
@@ -266,6 +268,8 @@ def _clamp_silk_to_board(
         position=fp.position, rotation=fp.rotation, layer=fp.layer,
         pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
         lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+        models=fp.models, datasheet=fp.datasheet,
+        description=fp.description,
     )
 
 
@@ -494,6 +498,7 @@ def _apply_nets_to_footprint(
         lcsc=fp.lcsc or component.lcsc,
         uuid=fp.uuid or _new_uuid(),
         attr=fp.attr,
+        models=fp.models, datasheet=fp.datasheet, description=fp.description,
     )
 
 
@@ -1098,6 +1103,15 @@ def build_pcb(
             comp.ref, comp.value, comp.footprint, comp.lcsc, layer=comp_layer,
         )
         fp = _apply_nets_to_footprint(fp, comp, net_lookup)
+        # Copy datasheet and description from component to footprint
+        if comp.datasheet or comp.description:
+            fp = Footprint(
+                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+                datasheet=comp.datasheet, description=comp.description,
+            )
         pre_footprints.append(fp)
 
     # ------------------------------------------------------------------
@@ -1215,7 +1229,7 @@ def build_pcb(
             lcsc=fp.lcsc,
             uuid=fp.uuid,
             attr=fp.attr,
-            models=fp.models,
+            models=fp.models, datasheet=fp.datasheet, description=fp.description,
         )
         footprints_with_pos.append(fp_placed)
 
@@ -1694,6 +1708,39 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
             "Value",
             fp.value,
             ["at", val_x, val_y, 0],
+            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ]
+    )
+    # Footprint property (lib_id)
+    node.append(
+        [
+            "property",
+            "Footprint",
+            fp.lib_id,
+            ["at", 0, 0, 0],
+            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ]
+    )
+    # Datasheet property
+    node.append(
+        [
+            "property",
+            "Datasheet",
+            fp.datasheet or "",
+            ["at", 0, 0, 0],
+            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ]
+    )
+    # Description property
+    node.append(
+        [
+            "property",
+            "Description",
+            fp.description or "",
+            ["at", 0, 0, 0],
             ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
             ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
         ]

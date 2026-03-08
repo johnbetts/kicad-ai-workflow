@@ -207,6 +207,8 @@ class Footprint:
     uuid: str = ""
     attr: str = "smd"  # "smd", "through_hole"
     models: tuple[Footprint3DModel, ...] = ()
+    datasheet: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)

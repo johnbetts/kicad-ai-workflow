@@ -143,7 +143,40 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         path = f"{KICAD_3DMODEL_VAR}/Connector_TerminalBlock.3dshapes/{name}.step"
         return Footprint3DModel(path=path)
 
-    # Static pattern map for passives/transistors
+    # ESP32 / RF modules
+    if "ESP32" in upper or "WROOM" in upper:
+        # Extract the module name for the 3D model
+        model_name = name.split(":")[-1] if ":" in name else name
+        path = f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/{model_name}.step"
+        return Footprint3DModel(path=path)
+
+    # Relays
+    if "RELAY" in upper and "SANYOU" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
+            "Relay_SPDT_SANYOU_SRD_Series_Form_C.step"
+        )
+        return Footprint3DModel(path=path)
+
+    # Tactile switches
+    if upper.startswith("SW_PUSH") or (upper.startswith("SW_") and "SPST" in upper):
+        path = f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
+        return Footprint3DModel(path=path)
+
+    # RJ45
+    if "RJ45" in upper:
+        path = f"{KICAD_3DMODEL_VAR}/Connector_RJ.3dshapes/RJ45_Amphenol_ARJM11D7.step"
+        return Footprint3DModel(path=path)
+
+    # USB-C
+    if upper.startswith(("USB-C", "USB_C")):
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Connector_USB.3dshapes/"
+            "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step"
+        )
+        return Footprint3DModel(path=path)
+
+    # Static pattern map for passives/transistors/diodes/inductors/crystals
     for pattern, directory, model_file in _3D_MODEL_MAP:
         if upper.startswith(pattern.upper()):
             path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
@@ -647,10 +680,12 @@ def make_tact_switch(
         _val_text(value, body / 2.0 + 1.5, LAYER_F_FAB),
     )
     lib_id = f"Button_Switch_THT:SW_Push_{size_mm}x{size_mm}mm"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
-        attr="through_hole",
+        attr="through_hole", models=models,
     )
 
 
@@ -688,10 +723,12 @@ def make_relay_spdt(
         _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
     )
     lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
-        attr="through_hole",
+        attr="through_hole", models=models,
     )
 
 
@@ -765,10 +802,12 @@ def make_esp32_wroom(
         _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
     )
     lib_id = "RF_Module:ESP32-S3-WROOM-1"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=layer, pads=tuple(pad_list), graphics=graphics, texts=texts,
-        attr="smd",
+        attr="smd", models=models,
     )
 
 
