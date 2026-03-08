@@ -157,6 +157,15 @@ SCHEMATIC_WIRE_GRID_MM: float = 1.27
 SCHEMATIC_TEXT_SIZE_MM: float = 1.27
 """Default text size for annotations in the schematic (mm)."""
 
+SCHEMATIC_SYMBOL_GAP_MM: float = 5.08
+"""Minimum gap between adjacent symbol extents on the schematic (mm)."""
+
+SCHEMATIC_LABEL_CHAR_WIDTH_MM: float = 1.0
+"""Approximate character width for ref/value label text at default size (mm)."""
+
+SCHEMATIC_MAX_LABEL_CHARS: int = 10
+"""Minimum label width estimate (characters) for spacing calculations."""
+
 SCHEMATIC_LABEL_SIZE_MM: float = 1.27
 """Default net-label text size in the schematic (mm)."""
 

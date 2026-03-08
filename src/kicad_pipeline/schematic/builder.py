@@ -59,7 +59,12 @@ from kicad_pipeline.models.schematic import (
     TextProperty,
     Wire,
 )
-from kicad_pipeline.schematic.placement import layout_compact, layout_schematic
+from kicad_pipeline.schematic.placement import (
+    SymbolExtent,
+    compute_symbol_extent,
+    layout_compact,
+    layout_schematic,
+)
 from kicad_pipeline.schematic.wiring import route_net
 from kicad_pipeline.sexp.parser import parse_file
 from kicad_pipeline.sexp.writer import SExpNode, write_file
@@ -745,12 +750,15 @@ def build_schematic(
 
     Steps:
 
-    1. Generate a :class:`LibSymbol` definition for every component.
-    2. Compute component positions using :func:`~.placement.layout_schematic`.
-    3. Create :class:`SymbolInstance` objects for each placed component.
-    4. Route wires for all nets using :func:`~.wiring.route_net`.
-    5. Add :class:`PowerSymbol` instances for recognised power nets.
-    6. Assemble and return the complete :class:`Schematic`.
+    1. Derive feature map from FeatureBlocks.
+    2. Generate :class:`LibSymbol` definitions for every component.
+    3. Compute :class:`SymbolExtent` for each component (for overlap-free spacing).
+    4. Compute component positions using :func:`~.placement.layout_schematic`.
+    5. Create :class:`SymbolInstance` objects for each placed component.
+    6. Build pin-position map for wire routing.
+    7. Route wires for all nets using :func:`~.wiring.route_net`.
+    8. Add :class:`PowerSymbol` instances for recognised power nets.
+    9. Assemble and return the complete :class:`Schematic`.
 
     Args:
         requirements: Fully-populated project requirements document.
@@ -792,14 +800,36 @@ def build_schematic(
     feature_map = _refine_feature_map_by_connectivity(feature_map, requirements)
 
     # ------------------------------------------------------------------
-    # Step 2: Compute positions (with pin-count-aware spacing)
+    # Step 2: Build lib_symbols (needed for extent computation before placement)
+    # ------------------------------------------------------------------
+    lib_symbols_list: list[LibSymbol] = []
+    seen_lib_ids: set[str] = set()
+    lib_cache: dict[str, LibSymbol] = {}
+    comp_lib_sym: dict[str, LibSymbol] = {}
+
+    for comp in requirements.components:
+        lib_sym = get_or_make_symbol(comp, lib_cache)
+        lib_id = lib_sym.lib_id
+        comp_lib_sym[comp.ref] = lib_sym
+        if lib_id not in seen_lib_ids:
+            lib_symbols_list.append(lib_sym)
+            seen_lib_ids.add(lib_id)
+
+    # ------------------------------------------------------------------
+    # Step 3: Compute symbol extents for overlap-free placement
+    # ------------------------------------------------------------------
+    symbol_extents: dict[str, SymbolExtent] = {}
+    for comp in requirements.components:
+        sym = comp_lib_sym[comp.ref]
+        symbol_extents[comp.ref] = compute_symbol_extent(sym, comp.ref, comp.value)
+
+    # ------------------------------------------------------------------
+    # Step 4: Compute positions (extent-aware spacing)
     # ------------------------------------------------------------------
     all_refs = [c.ref for c in requirements.components]
     pin_count_map = {c.ref: len(c.pins) for c in requirements.components}
 
     # Auto-select page size: A3 only for very large designs
-    # Count "active" pins (those on a net) rather than total pins to avoid
-    # triggering on large connectors with many unused pass-through pins.
     active_pins = sum(
         1 for c in requirements.components for p in c.pins
         if p.net is not None
@@ -827,31 +857,21 @@ def build_schematic(
     if compact:
         positions = layout_compact(
             all_refs, pin_count_map=pin_count_map, adjacency=adjacency,
+            symbol_extents=symbol_extents,
         )
     else:
         positions = layout_schematic(
             all_refs, feature_map, pin_count_map=pin_count_map, paper=paper,
-            adjacency=adjacency,
+            adjacency=adjacency, symbol_extents=symbol_extents,
         )
 
     # ------------------------------------------------------------------
-    # Step 3: Build lib_symbols + symbol instances
+    # Step 5: Create symbol instances at computed positions
     # ------------------------------------------------------------------
-    lib_symbols_list: list[LibSymbol] = []
     symbols_list: list[SymbolInstance] = []
-    seen_lib_ids: set[str] = set()
-    lib_cache: dict[str, LibSymbol] = {}
-    # Map from component ref to its LibSymbol for pin position lookup
-    comp_lib_sym: dict[str, LibSymbol] = {}
-
     for comp in requirements.components:
-        lib_sym = get_or_make_symbol(comp, lib_cache)
+        lib_sym = comp_lib_sym[comp.ref]
         lib_id = lib_sym.lib_id
-        comp_lib_sym[comp.ref] = lib_sym
-        if lib_id not in seen_lib_ids:
-            lib_symbols_list.append(lib_sym)
-            seen_lib_ids.add(lib_id)
-
         pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
         # Resolve PCB footprint lib_id for the Footprint property
         try:
@@ -863,7 +883,7 @@ def build_schematic(
         symbols_list.append(inst)
 
     # ------------------------------------------------------------------
-    # Step 4: Build pin-position map for wire routing
+    # Step 6: Build pin-position map for wire routing
     # ------------------------------------------------------------------
     # Use actual LibSymbol pin positions (multi-sided layout from symbols.py)
     pin_positions: dict[tuple[str, str], Point] = {}
@@ -898,7 +918,7 @@ def build_schematic(
                 pin_sides[(comp.ref, lib_pin.number)] = side
 
     # ------------------------------------------------------------------
-    # Step 5: Route nets (skip power nets — handled by power symbols)
+    # Step 7: Route nets (skip power nets — handled by power symbols)
     # ------------------------------------------------------------------
     all_wires: list[Wire] = []
     all_junctions: list[Junction] = []
@@ -918,7 +938,7 @@ def build_schematic(
         all_local_labels.extend(ls)
 
     # ------------------------------------------------------------------
-    # Step 6: Power symbols at pin locations
+    # Step 8: Power symbols at pin locations
     # ------------------------------------------------------------------
     power_net_names = _collect_power_nets(requirements)
     power_syms, power_wires, power_labels, power_junctions = _make_power_symbols_at_pins(
@@ -929,7 +949,7 @@ def build_schematic(
     all_junctions.extend(power_junctions)
 
     # ------------------------------------------------------------------
-    # Step 7: No-connect markers for pins with no net assignment
+    # Step 9: No-connect markers for pins with no net assignment
     # ------------------------------------------------------------------
     connected_pins: set[tuple[str, str]] = set()
     for net in requirements.nets:
