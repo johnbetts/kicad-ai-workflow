@@ -236,7 +236,7 @@ class WorkflowEngine:
         elif stage_id == StageId.PCB:
             self._generate_pcb(variant_name, vdir)
         elif stage_id == StageId.VALIDATION:
-            warnings.append("Validation not yet wired")
+            self._generate_validation(variant_name, vdir, warnings)
         elif stage_id == StageId.PRODUCTION:
             self._generate_production(variant_name, vdir)
 
@@ -249,6 +249,19 @@ class WorkflowEngine:
             )
         log.info("Requirements file validated: %s", req_path)
 
+    @staticmethod
+    def _enrich_requirements(req: object) -> object:
+        """Try to enrich requirements with JLCPCB parts. Returns req as-is on failure."""
+        try:
+            from kicad_pipeline.parts.jlcpcb_db import JLCPCBPartsDB
+            from kicad_pipeline.parts.selector import enrich_requirements_with_parts
+
+            with JLCPCBPartsDB() as db:
+                req, _ = enrich_requirements_with_parts(req, db=db)  # type: ignore[arg-type]
+        except Exception:
+            log.info("JLCPCB parts DB unavailable, using requirements as-is")
+        return req
+
     def _generate_schematic(self, variant_name: str, vdir: Path) -> None:
         """Build and write a schematic from requirements."""
         from kicad_pipeline.project_file import write_project_file
@@ -260,6 +273,7 @@ class WorkflowEngine:
         )
 
         req = load_requirements(vdir / "requirements.json")
+        req = self._enrich_requirements(req)  # type: ignore[assignment]
         schematics = build_project_schematics(req)
 
         if len(schematics) == 1:
@@ -285,6 +299,7 @@ class WorkflowEngine:
         from kicad_pipeline.requirements.decomposer import load_requirements
 
         req = load_requirements(vdir / "requirements.json")
+        req = self._enrich_requirements(req)  # type: ignore[assignment]
         # Auto-detect board template from mechanical constraints
         tmpl = detect_template(req.mechanical)
         board_template = tmpl.name if tmpl is not None else None
@@ -300,6 +315,62 @@ class WorkflowEngine:
             drc_exclusions=pcb.drc_exclusions or None,
         )
         log.info("Project file updated with netclasses: %s", vdir)
+
+    def _generate_validation(
+        self, variant_name: str, vdir: Path, warnings: list[str]
+    ) -> None:
+        """Run pre-production parts validation as a hard gate."""
+        from kicad_pipeline.pcb.board_templates import detect_template
+        from kicad_pipeline.pcb.builder import build_pcb
+        from kicad_pipeline.production.bom import generate_bom
+        from kicad_pipeline.production.parts_validator import (
+            report_to_json,
+            report_to_text,
+            validate_bom_parts,
+        )
+        from kicad_pipeline.requirements.component_db import ComponentDB
+        from kicad_pipeline.requirements.decomposer import load_requirements
+
+        req = load_requirements(vdir / "requirements.json")
+        req = self._enrich_requirements(req)  # type: ignore[assignment]
+        tmpl = detect_template(req.mechanical)
+        board_template = tmpl.name if tmpl is not None else None
+        pcb = build_pcb(req, board_template=board_template)
+        bom_rows = generate_bom(pcb, req)
+
+        db = ComponentDB()
+        report = validate_bom_parts(
+            bom_rows, db=db, check_web_stock=False, project_name=variant_name,
+        )
+
+        # Write reports
+        val_dir = vdir / "validation"
+        val_dir.mkdir(parents=True, exist_ok=True)
+        (val_dir / "parts_validation_report.txt").write_text(
+            report_to_text(report), encoding="utf-8"
+        )
+        (val_dir / "parts_validation_report.json").write_text(
+            report_to_json(report), encoding="utf-8"
+        )
+        log.info("Validation reports written to %s", val_dir)
+
+        # Warn about extended parts ($3 setup fee each)
+        for ps in report.parts:
+            if ps.status == "ok" and ps.tier == 1:
+                # Check if it's an extended part by looking up in DB
+                part = db.find_by_lcsc(ps.lcsc)
+                if part is not None and not getattr(part, "basic", True):
+                    warnings.append(
+                        f"{ps.lcsc} ({', '.join(ps.ref_designators)}) is extended "
+                        f"— adds $3 JLCPCB setup fee"
+                    )
+
+        # Hard gate: block if parts are unavailable
+        if not report.all_parts_available:
+            raise OrchestrationError(
+                f"Parts validation failed: {report.unresolved_count} part(s) "
+                f"need manual resolution. See {val_dir / 'parts_validation_report.txt'}"
+            )
 
     def _generate_production(self, variant_name: str, vdir: Path) -> None:
         """Build and write production artifacts."""
@@ -343,7 +414,7 @@ class WorkflowEngine:
         if stage_id == StageId.PCB:
             return self._review_pcb(variant_name, vdir)
         if stage_id == StageId.VALIDATION:
-            return {"stage": "validation", "status": "not yet wired"}
+            return self._review_validation(vdir)
         if stage_id == StageId.PRODUCTION:
             return self._review_production(variant_name, vdir)
         return {}  # pragma: no cover
@@ -397,6 +468,22 @@ class WorkflowEngine:
             "stage": "pcb",
             "file_size_bytes": stat.st_size,
             "footprint_count": footprint_count,
+        }
+
+    def _review_validation(self, vdir: Path) -> dict[str, object]:
+        """Summarize parts validation report."""
+        import json as _json
+
+        report_path = vdir / "validation" / "parts_validation_report.json"
+        if not report_path.exists():
+            return {"stage": "validation", "error": "validation report not found"}
+        data = _json.loads(report_path.read_text(encoding="utf-8"))
+        return {
+            "stage": "validation",
+            "all_parts_available": data.get("all_parts_available", False),
+            "unresolved_count": data.get("unresolved_count", 0),
+            "total_bom_cost_usd": data.get("total_bom_cost_usd"),
+            "summary": data.get("summary_text", ""),
         }
 
     def _review_production(

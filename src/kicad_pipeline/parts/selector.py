@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import Component, ProjectRequirements
     from kicad_pipeline.parts.jlcpcb_db import JLCPCBPart, JLCPCBPartsDB
+    from kicad_pipeline.requirements.component_db import ComponentDB
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,129 @@ def suggest_parts(
             component, db, prefer_basic=prefer_basic
         )
     return suggestions
+
+
+def _try_fallback_lcsc(
+    component: Component,
+    fallback_db: ComponentDB,
+) -> str | None:
+    """Try to find an LCSC number from the bundled ComponentDB for passives.
+
+    Args:
+        component: The component to look up.
+        fallback_db: Bundled JLCPCB basic-parts database.
+
+    Returns:
+        LCSC number string if found, else ``None``.
+    """
+    from kicad_pipeline.requirements.component_db import (
+        _parse_capacitance_uf,
+        _parse_resistance_ohms,
+    )
+
+    package = _extract_package(component.footprint)
+
+    if component.ref.startswith("R"):
+        ohms = _parse_resistance_ohms(component.value)
+        if ohms is not None:
+            part = fallback_db.find_resistor(ohms, package)
+            if part is not None:
+                return part.lcsc
+    elif component.ref.startswith("C"):
+        uf = _parse_capacitance_uf(component.value)
+        if uf is not None:
+            part = fallback_db.find_capacitor(uf, package)
+            if part is not None:
+                return part.lcsc
+    return None
+
+
+def enrich_requirements_with_parts(
+    requirements: ProjectRequirements,
+    db: JLCPCBPartsDB | None = None,
+    fallback_db: ComponentDB | None = None,
+    prefer_basic: bool = True,
+) -> tuple[ProjectRequirements, list[PartSuggestion]]:
+    """Populate ``Component.lcsc`` for components missing LCSC numbers.
+
+    Tries the full FTS5 JLCPCB database first, then falls back to the
+    bundled ComponentDB for passive parts (resistors/capacitors).
+
+    Args:
+        requirements: Project requirements to enrich.
+        db: Optional FTS5 JLCPCB parts database for full search.
+        fallback_db: Optional bundled ComponentDB for passive lookups.
+        prefer_basic: Prefer JLCPCB basic parts when using FTS5 db.
+
+    Returns:
+        Tuple of (enriched requirements, list of suggestions for reporting).
+    """
+    suggestions: list[PartSuggestion] = []
+    updated_components: list[Component] = []
+    basic_count = 0
+    extended_count = 0
+    unresolved_count = 0
+
+    for comp in requirements.components:
+        if comp.lcsc is not None:
+            # Already has LCSC — keep as-is
+            updated_components.append(comp)
+            continue
+
+        # Try FTS5 database first
+        if db is not None:
+            suggestion = suggest_parts_for_component(comp, db, prefer_basic=prefer_basic)
+            suggestions.append(suggestion)
+            if suggestion.preferred is not None:
+                enriched = replace(comp, lcsc=suggestion.preferred.lcsc)
+                updated_components.append(enriched)
+                if suggestion.preferred.basic:
+                    basic_count += 1
+                else:
+                    extended_count += 1
+                continue
+
+        # Fallback to bundled ComponentDB for passives
+        if fallback_db is not None:
+            lcsc = _try_fallback_lcsc(comp, fallback_db)
+            if lcsc is not None:
+                enriched = replace(comp, lcsc=lcsc)
+                updated_components.append(enriched)
+                basic_count += 1  # bundled DB is all basic parts
+                suggestions.append(PartSuggestion(
+                    component_ref=comp.ref,
+                    component_value=comp.value,
+                    candidates=(),
+                    preferred=None,
+                    match_quality="close",
+                    notes=f"Matched via bundled ComponentDB: {lcsc}",
+                ))
+                continue
+
+        # Unresolved
+        unresolved_count += 1
+        updated_components.append(comp)
+        if db is None:
+            suggestions.append(PartSuggestion(
+                component_ref=comp.ref,
+                component_value=comp.value,
+                candidates=(),
+                preferred=None,
+                match_quality="none",
+                notes="No parts database available",
+            ))
+
+    enriched_count = basic_count + extended_count
+    logger.info(
+        "Parts enrichment: %d enriched (%d basic, %d extended), %d unresolved",
+        enriched_count,
+        basic_count,
+        extended_count,
+        unresolved_count,
+    )
+
+    enriched_req = replace(requirements, components=tuple(updated_components))
+    return enriched_req, suggestions
 
 
 def validate_parts_selection(

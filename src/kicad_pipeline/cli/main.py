@@ -128,6 +128,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _try_enrich_parts(req: object) -> object:
+    """Try to enrich requirements with JLCPCB parts. Returns req as-is on failure."""
+    try:
+        from kicad_pipeline.parts.jlcpcb_db import JLCPCBPartsDB
+        from kicad_pipeline.parts.selector import enrich_requirements_with_parts
+
+        with JLCPCBPartsDB() as db:
+            req, suggestions = enrich_requirements_with_parts(req, db=db)  # type: ignore[arg-type]
+            enriched = sum(1 for s in suggestions if s.preferred is not None)
+            if enriched > 0:
+                print(f"  Parts enrichment: {enriched} component(s) matched to JLCPCB parts")
+    except Exception:
+        pass  # Silently fall back — DB may not be installed
+    return req
+
+
 def _try_ipc_connect(args: argparse.Namespace) -> object | None:
     """Try to connect to KiCad via IPC.  Warns and returns None on failure."""
     try:
@@ -215,6 +231,7 @@ def _cmd_schematic(args: argparse.Namespace) -> int:
 
     try:
         req = load_requirements(Path(args.requirements))
+        req = _try_enrich_parts(req)  # type: ignore[assignment]
         hierarchical = False if getattr(args, "flat", False) else None
         schematics = build_project_schematics(req, hierarchical=hierarchical)
 
@@ -247,6 +264,7 @@ def _cmd_pcb(args: argparse.Namespace) -> int:
 
     try:
         req = load_requirements(Path(args.requirements))
+        req = _try_enrich_parts(req)  # type: ignore[assignment]
         design = build_pcb(req)
 
         ipc_conn = _try_ipc_connect(args) if getattr(args, "live", False) else None
@@ -295,6 +313,7 @@ def _cmd_produce(args: argparse.Namespace) -> int:
             from kicad_pipeline.requirements.decomposer import load_requirements
 
             requirements = load_requirements(Path(args.requirements))
+            requirements = _try_enrich_parts(requirements)  # type: ignore[assignment]
 
         # Build PCB from requirements (produce command needs the PCBDesign object)
         from kicad_pipeline.pcb.builder import build_pcb
@@ -428,6 +447,7 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
 
         print(f"[1/4] Loading requirements from {args.requirements}...")
         req = load_requirements(Path(args.requirements))
+        req = _try_enrich_parts(req)  # type: ignore[assignment]
 
         print("[2/4] Generating schematic...")
         schematics = build_project_schematics(req)

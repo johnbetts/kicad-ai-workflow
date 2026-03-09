@@ -271,12 +271,10 @@ def test_full_workflow_requirements_through_production(
     result = engine.approve_stage("test-0805")
     assert result.success is True
 
-    # Validation (placeholder)
+    # Validation (parts validation gate)
     assert engine.get_current_stage("test-0805") == StageId.VALIDATION
     result = engine.generate_stage("test-0805")
     assert result.success is True
-    assert len(result.warnings) > 0
-    assert "not yet wired" in result.warnings[0].lower()
     result = engine.approve_stage("test-0805")
     assert result.success is True
 

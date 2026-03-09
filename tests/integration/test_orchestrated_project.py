@@ -178,10 +178,9 @@ class TestOrchestratedProjectE2E:
         result = engine.approve_stage("standard-0805")
         assert result.success
 
-        # Validation (placeholder)
+        # Validation (parts validation gate)
         result = engine.generate_stage("standard-0805")
         assert result.success
-        assert len(result.warnings) > 0  # "Validation not yet wired"
         result = engine.approve_stage("standard-0805")
         assert result.success
 

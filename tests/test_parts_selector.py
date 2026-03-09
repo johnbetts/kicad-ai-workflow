@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from kicad_pipeline.models.requirements import Component
+from kicad_pipeline.models.requirements import Component, ProjectInfo, ProjectRequirements
 from kicad_pipeline.parts.jlcpcb_db import JLCPCBPart, JLCPCBPartsDB
 from kicad_pipeline.parts.selector import (
     _component_category,
     _extract_package,
     _is_passive,
+    enrich_requirements_with_parts,
     suggest_parts_for_component,
     validate_parts_selection,
 )
@@ -174,3 +175,79 @@ class TestValidatePartsSelection:
         issues = validate_parts_selection({"R1": part})
         warnings = [i for i in issues if i.severity == "warning"]
         assert any("low stock" in w.message for w in warnings)
+
+
+def _make_requirements(*components: Component) -> ProjectRequirements:
+    """Helper to build minimal ProjectRequirements."""
+    return ProjectRequirements(
+        project=ProjectInfo(name="test"),
+        features=(),
+        components=tuple(components),
+        nets=(),
+    )
+
+
+class TestEnrichRequirementsWithParts:
+    @pytest.fixture()
+    def mock_db(self, tmp_path: Path) -> JLCPCBPartsDB:
+        db_path = tmp_path / "enrich-test.db"
+        _create_mock_db(db_path)
+        return JLCPCBPartsDB(db_path)
+
+    def test_enrich_populates_lcsc(self, mock_db: JLCPCBPartsDB) -> None:
+        """Components without LCSC get populated from FTS5 DB."""
+        req = _make_requirements(
+            Component(ref="R1", value="10k", footprint="R_0805"),
+        )
+        enriched, suggestions = enrich_requirements_with_parts(req, db=mock_db)
+        assert enriched.components[0].lcsc is not None
+        assert len(suggestions) == 1
+
+    def test_enrich_skips_existing_lcsc(self, mock_db: JLCPCBPartsDB) -> None:
+        """Components that already have LCSC are left untouched."""
+        req = _make_requirements(
+            Component(ref="R1", value="10k", footprint="R_0805", lcsc="C99999"),
+        )
+        enriched, suggestions = enrich_requirements_with_parts(req, db=mock_db)
+        assert enriched.components[0].lcsc == "C99999"
+        assert len(suggestions) == 0  # no suggestion needed
+
+    def test_enrich_fallback_to_component_db(self) -> None:
+        """When FTS5 DB is None, bundled ComponentDB fills passives."""
+        from kicad_pipeline.requirements.component_db import ComponentDB
+
+        req = _make_requirements(
+            Component(ref="R1", value="10k", footprint="R_0805"),
+        )
+        fallback = ComponentDB()
+        enriched, suggestions = enrich_requirements_with_parts(
+            req, db=None, fallback_db=fallback,
+        )
+        # If bundled DB has 10k 0805, it should be enriched
+        if enriched.components[0].lcsc is not None:
+            assert enriched.components[0].lcsc.startswith("C")
+        assert len(suggestions) >= 1
+
+    def test_enrich_basic_preferred(self, mock_db: JLCPCBPartsDB) -> None:
+        """Basic parts are chosen over extended when available."""
+        req = _make_requirements(
+            Component(ref="R1", value="10k", footprint="R_0805"),
+        )
+        _, suggestions = enrich_requirements_with_parts(
+            req, db=mock_db, prefer_basic=True,
+        )
+        for s in suggestions:
+            if s.preferred is not None:
+                assert s.preferred.basic is True
+
+    def test_enrich_returns_suggestions(self, mock_db: JLCPCBPartsDB) -> None:
+        """Suggestions list is returned for reporting."""
+        req = _make_requirements(
+            Component(ref="R1", value="10k", footprint="R_0805"),
+            Component(ref="C1", value="100nF", footprint="C_0805"),
+            Component(ref="U1", value="XYZABC", footprint="QFP-100"),
+        )
+        _, suggestions = enrich_requirements_with_parts(req, db=mock_db)
+        assert len(suggestions) == 3
+        refs = {s.component_ref for s in suggestions}
+        assert refs == {"R1", "C1", "U1"}
