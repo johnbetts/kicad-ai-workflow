@@ -1339,3 +1339,60 @@ def test_gnd_stitching_vias_avoid_existing_vias() -> None:
     for v in vias:
         dist = abs(v.position.x - 15.0) + abs(v.position.y - 15.0)
         assert dist >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Layout preservation (preserve_from)
+# ---------------------------------------------------------------------------
+
+
+def test_build_pcb_preserve_from_file(tmp_path: Path) -> None:
+    """Rebuilding with preserve_from keeps footprint positions from first build."""
+    reqs = _make_requirements()
+    # First build
+    pcb1 = build_pcb(reqs, auto_route=False)
+    pcb_path = tmp_path / "test.kicad_pcb"
+    write_pcb(pcb1, pcb_path)
+
+    # Second build with preserve_from
+    pcb2 = build_pcb(reqs, auto_route=False, preserve_from=pcb_path)
+
+    # Positions should match
+    for fp1 in pcb1.footprints:
+        fp2_match = [f for f in pcb2.footprints if f.ref == fp1.ref]
+        assert fp2_match, f"Missing footprint {fp1.ref}"
+        fp2 = fp2_match[0]
+        assert abs(fp2.position.x - fp1.position.x) < 0.01, f"{fp1.ref} x mismatch"
+        assert abs(fp2.position.y - fp1.position.y) < 0.01, f"{fp1.ref} y mismatch"
+
+
+def test_build_pcb_preserve_with_new_component(tmp_path: Path) -> None:
+    """New components get placed by solver; existing positions preserved."""
+    reqs_base = _make_requirements()
+    pcb1 = build_pcb(reqs_base, auto_route=False)
+    pcb_path = tmp_path / "test.kicad_pcb"
+    write_pcb(pcb1, pcb_path)
+
+    # Add a new component
+    new_comp = Component(
+        ref="R1",
+        value="10k",
+        footprint="R_0402",
+        pins=(
+            Pin(number="1", name="1", pin_type=PinType.PASSIVE, net="+3V3"),
+            Pin(number="2", name="2", pin_type=PinType.PASSIVE, net="GND"),
+        ),
+    )
+    reqs_expanded = _make_requirements(extra_components=(new_comp,))
+    pcb2 = build_pcb(reqs_expanded, auto_route=False, preserve_from=pcb_path)
+
+    # Original positions preserved
+    for fp1 in pcb1.footprints:
+        fp2_match = [f for f in pcb2.footprints if f.ref == fp1.ref]
+        assert fp2_match, f"Missing footprint {fp1.ref}"
+        fp2 = fp2_match[0]
+        assert abs(fp2.position.x - fp1.position.x) < 0.01, f"{fp1.ref} x mismatch"
+
+    # New component exists somewhere
+    r1_fps = [f for f in pcb2.footprints if f.ref == "R1"]
+    assert r1_fps, "New component R1 not placed"

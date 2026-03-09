@@ -951,6 +951,7 @@ def build_pcb(
     origin_y: float = 0.0,
     board_template: str | None = None,
     auto_route: bool = True,
+    preserve_from: str | Path | object | None = None,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1063,6 +1064,24 @@ def build_pcb(
                         "build_pcb: template fixed %s at (%.1f, %.1f) layer=%s",
                         matched_ref, fc.x_mm, fc.y_mm, fc.layer,
                     )
+
+    # ------------------------------------------------------------------
+    # Step 0b: Preserve layout from existing PCB / IPC connection
+    # ------------------------------------------------------------------
+    if preserve_from is not None:
+        from kicad_pipeline.pcb.position_extractor import positions_from_source
+
+        existing = positions_from_source(preserve_from)
+        current_refs = {c.ref for c in requirements.components}
+        if fixed_positions is None:
+            fixed_positions = {}
+        for ref, pos in existing.items():
+            if ref in current_refs:
+                fixed_positions[ref] = pos
+        log.info(
+            "build_pcb: preserved %d/%d positions from existing layout",
+            len(fixed_positions), len(existing),
+        )
 
     # ------------------------------------------------------------------
     # Step 1: Board dimensions
