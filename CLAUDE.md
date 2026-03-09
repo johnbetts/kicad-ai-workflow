@@ -203,6 +203,23 @@ requirements.json → nets[{name, connections}]
 ```
 This chain must be rock-solid. Mistakes = wrong connections on manufactured boards.
 
+### JLCPCB Component Requirements
+
+**All components MUST be available on JLCPCB for SMT/THT assembly.**
+
+- Every `Component` in requirements MUST have a valid `lcsc` part number before production
+- Prefer **basic parts** (no setup fee) over extended parts ($3/unique part setup fee)
+- The pipeline enriches components automatically via `enrich_requirements_with_parts()`:
+  1. FTS5 JLCPCBPartsDB (7M parts) — primary lookup
+  2. Bundled ComponentDB (39 basic parts) — fallback for common passives
+- The VALIDATION stage is a **hard gate**: blocks production if any parts are unresolved
+- When selecting components during requirements decomposition:
+  - Use JLCPCB basic parts catalog as the primary source
+  - Verify footprint availability (JLCPCB supports specific packages)
+  - Include `lcsc` field in requirements.json for all components where known
+  - For ICs/modules: verify JLCPCB stocks the exact part before specifying it
+- BOM validation checks: stock availability, pricing, and replacement suggestions
+
 ## Quality Gates
 
 Before marking any module complete:
