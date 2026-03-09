@@ -1468,6 +1468,228 @@ def make_mounting_hole(
     )
 
 
+def make_sod323(
+    ref: str,
+    value: str,
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """SOD-323 diode footprint (1.25 x 1.7 mm body, 2 pads).
+
+    Pad 1 = cathode (K), Pad 2 = anode (A).
+
+    Args:
+        ref: Reference designator (e.g. "D1").
+        value: Component value string.
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    body_w = 1.7
+    body_h = 1.25
+    pad_w = 0.6
+    pad_h = 0.55
+    pitch = 2.1
+    pads = (
+        _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
+        _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
+    )
+    pad_edge_x = pitch / 2.0 + pad_w / 2.0
+    graphics = (
+        *_courtyard_rect(body_w, body_h),
+        *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
+    )
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+    )
+    lib_id = "Diode_SMD:D_SOD-323"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=pads, graphics=graphics, texts=texts,
+        attr="smd", models=models,
+    )
+
+
+def make_dip_package(
+    ref: str,
+    value: str,
+    pin_count: int = 4,
+    pitch_mm: float = 2.54,
+    row_spacing_mm: float = 7.62,
+    lib_id: str = "",
+) -> Footprint:
+    """Generic through-hole DIP package (optocoupler, timer, etc.).
+
+    Args:
+        ref: Reference designator (e.g. "U7").
+        value: Component value string.
+        pin_count: Total number of pins (must be even).
+        pitch_mm: Pin pitch in mm (default 2.54).
+        row_spacing_mm: Row-to-row distance in mm (default 7.62).
+        lib_id: KiCad library footprint ID override.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    _log.debug("make_dip_package ref=%s pins=%d", ref, pin_count)
+    drill_mm = 0.8
+    pad_diam = 1.6
+    half = pin_count // 2
+
+    pads: list[Pad] = []
+    # Left column: pins 1..half top-to-bottom
+    for i in range(half):
+        y = i * pitch_mm - (half - 1) * pitch_mm / 2.0
+        pads.append(_thru_pad(str(i + 1), -row_spacing_mm / 2.0, y, pad_diam, drill_mm))
+    # Right column: pins half+1..pin_count bottom-to-top
+    for i in range(half):
+        y = (half - 1 - i) * pitch_mm - (half - 1) * pitch_mm / 2.0
+        pads.append(_thru_pad(str(half + i + 1), row_spacing_mm / 2.0, y, pad_diam, drill_mm))
+
+    body_w = row_spacing_mm + pad_diam + 0.5
+    body_h = max((half - 1) * pitch_mm + pad_diam + 0.5, 3.0)
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+    )
+    if not lib_id:
+        lib_id = f"Package_DIP:DIP-{pin_count}_W{row_spacing_mm:.2f}mm"
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=tuple(pads), graphics=graphics, texts=texts,
+        attr="through_hole",
+    )
+
+
+def make_test_point(
+    ref: str,
+    value: str = "TestPoint",
+    pad_size: float = 1.5,
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """SMD test point footprint (single pad).
+
+    Args:
+        ref: Reference designator (e.g. "TP1").
+        value: Component value string.
+        pad_size: Pad width/height in mm (default 1.5).
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    pads = (_smd_pad("1", 0.0, 0.0, pad_size, pad_size, layer),)
+    crtyd_size = pad_size + 2 * PCB_COURTYARD_CLEARANCE_MM
+    graphics = _courtyard_rect(crtyd_size, crtyd_size)
+    texts = (
+        _ref_text(ref, -(crtyd_size / 2.0 + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, crtyd_size / 2.0 + 0.5, LAYER_F_FAB),
+    )
+    lib_id = f"TestPoint:TestPoint_Pad_{pad_size:.1f}x{pad_size:.1f}mm"
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=pads, graphics=graphics, texts=texts,
+        attr="smd",
+    )
+
+
+def make_ws2812b(
+    ref: str,
+    value: str = "WS2812B",
+    layer: str = LAYER_F_CU,
+) -> Footprint:
+    """WS2812B addressable RGB LED footprint (5050 / PLCC-4, 4 pads).
+
+    Pin 1 = VDD, Pin 2 = DOUT, Pin 3 = GND, Pin 4 = DIN.
+
+    Args:
+        ref: Reference designator (e.g. "LED1").
+        value: Component value string.
+        layer: Primary copper layer.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    # 5.0x5.0mm body, 4 pads at 3.2mm pitch on two sides
+    pad_w = 1.5
+    pad_h = 1.0
+    x_pitch = 2.45  # centre to pad centre (half body + recess)
+    y_pitch = 1.6   # vertical offset between pad pair
+    pads = (
+        _smd_pad("1", -x_pitch, -y_pitch, pad_w, pad_h, layer),  # VDD
+        _smd_pad("2", x_pitch, -y_pitch, pad_w, pad_h, layer),   # DOUT
+        _smd_pad("3", x_pitch, y_pitch, pad_w, pad_h, layer),    # GND
+        _smd_pad("4", -x_pitch, y_pitch, pad_w, pad_h, layer),   # DIN
+    )
+    body_w = 5.4
+    body_h = 5.4
+    graphics = (*_courtyard_rect(body_w, body_h),)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+    )
+    lib_id = "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=layer, pads=pads, graphics=graphics, texts=texts,
+        attr="smd", models=models,
+    )
+
+
+def make_microsd_slot(
+    ref: str,
+    value: str = "MicroSD",
+) -> Footprint:
+    """Micro SD card push-push slot footprint.
+
+    Generates a simplified footprint with 8 signal pads + 2 shield/detect pads.
+    Compatible with Hirose DM3AT and similar push-push slots.
+
+    Args:
+        ref: Reference designator (e.g. "J16").
+        value: Component value string.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    # 8 signal pads (1.1mm pitch) + 2 shield pads
+    signal_pitch = 1.1
+    pad_w = 0.7
+    pad_h = 1.8
+    signal_y = -5.5  # signal pads at front edge
+    pads: list[Pad] = []
+    for i in range(8):
+        x = (i - 3.5) * signal_pitch
+        pads.append(_smd_pad(str(i + 1), x, signal_y, pad_w, pad_h, LAYER_F_CU))
+    # Shield / card detect pads (larger, on sides)
+    shield_pad_w = 1.2
+    shield_pad_h = 2.0
+    pads.append(_smd_pad("9", -7.0, -1.5, shield_pad_w, shield_pad_h, LAYER_F_CU))
+    pads.append(_smd_pad("10", 7.0, -1.5, shield_pad_w, shield_pad_h, LAYER_F_CU))
+
+    body_w = 15.0
+    body_h = 14.5
+    graphics = (*_courtyard_rect(body_w, body_h),)
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+    )
+    lib_id = "Connector_Card:microSD_HC_Hirose_DM3AT-SF-PEJM5"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=tuple(pads), graphics=graphics, texts=texts,
+        attr="smd", models=models,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routing helper
 # ---------------------------------------------------------------------------
@@ -1513,8 +1735,12 @@ def footprint_for_component(
 
     fp: Footprint
 
+    # WS2812B / addressable LED (before generic LED_ check)
+    if "WS2812" in upper:
+        fp = make_ws2812b(ref, value, layer=layer)
+
     # LED packages
-    if upper.startswith("LED_"):
+    elif upper.startswith("LED_"):
         pkg = fid[4:].upper()
         pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
         fp = make_smd_led(ref, value, package=pkg_norm)
@@ -1524,6 +1750,10 @@ def footprint_for_component(
         pkg = fid[2:].upper()
         pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
         fp = make_smd_resistor_capacitor(ref, value, package=pkg_norm)
+
+    # SOD-323 diodes
+    elif upper.startswith("SOD-323"):
+        fp = make_sod323(ref, value, layer=layer)
 
     # SOD-123 diodes
     elif upper.startswith("SOD-123"):
@@ -1602,6 +1832,24 @@ def footprint_for_component(
         w = float(dim_m.group(1)) if dim_m else 3.2
         h = float(dim_m.group(2)) if dim_m else 1.5
         fp = make_crystal_smd(ref, value, size_w=w, size_h=h)
+
+    # Test points (TP_*, TestPoint_*)
+    elif upper.startswith(("TP_", "TESTPOINT")):
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        pad_size = float(size_m.group(1)) if size_m else 1.5
+        fp = make_test_point(ref, value, pad_size=pad_size, layer=layer)
+
+    # Micro SD card slot
+    elif upper.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")):
+        fp = make_microsd_slot(ref, value)
+
+    # Through-hole DIP packages (DIP-N, but not DIP_SWITCH)
+    elif upper.startswith("DIP-") or (upper.startswith("DIP_") and "SWITCH" not in upper):
+        pin_count = _parse_pin_count(fid)
+        if pin_count < 2:
+            pin_count = 4
+        fp = make_dip_package(ref, value, pin_count)
 
     # Generic SMD IC packages (MSOP, TSSOP, SOIC, QFP, QFN, SOP, DFN, etc.)
     elif any(
