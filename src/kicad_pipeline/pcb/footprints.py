@@ -108,6 +108,50 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Standard IC package dimensions for model filename resolution.
+# Key = uppercase prefix + pin count (e.g. "MSOP-10"), value = dimension suffix.
+_IC_DIMENSION_SUFFIXES: dict[str, str] = {
+    "MSOP-8": "_3x3mm_P0.65mm",
+    "MSOP-10": "_3x3mm_P0.5mm",
+    "MSOP-16": "_4.9x3mm_P0.5mm",
+    "TSSOP-8": "_3x3mm_P0.65mm",
+    "TSSOP-14": "_5x4.4mm_P0.65mm",
+    "TSSOP-16": "_4.4x5mm_P0.65mm",
+    "TSSOP-20": "_6.5x4.4mm_P0.65mm",
+    "TSSOP-24": "_7.8x4.4mm_P0.65mm",
+    "TSSOP-28": "_9.7x4.4mm_P0.65mm",
+    "SOIC-8": "_3.9x4.9mm_P1.27mm",
+    "SOIC-14": "_3.9x8.7mm_P1.27mm",
+    "SOIC-16": "_3.9x9.9mm_P1.27mm",
+    "LQFP-32": "_7x7mm_P0.8mm",
+    "LQFP-44": "_10x10mm_P0.8mm",
+    "LQFP-48": "_7x7mm_P0.5mm",
+    "LQFP-64": "_10x10mm_P0.5mm",
+    "LQFP-100": "_14x14mm_P0.5mm",
+    "QFN-16": "_3x3mm_P0.5mm",
+    "QFN-20": "_4x4mm_P0.5mm",
+    "QFN-24": "_4x4mm_P0.5mm",
+    "QFN-32": "_5x5mm_P0.5mm",
+    "QFN-48": "_7x7mm_P0.5mm",
+    "SOP-4": "_4.4x3.6mm_P2.54mm",
+}
+
+
+def _ic_model_name(name: str, prefix: str) -> str:
+    """Return the full model filename (without .step) for an IC package.
+
+    If *name* already contains dimension info (e.g. ``MSOP-10_3x3mm_P0.5mm``)
+    it is returned as-is.  Otherwise a standard dimension suffix is appended
+    from :data:`_IC_DIMENSION_SUFFIXES`.
+    """
+    # Already has dimensions (contains 'mm')
+    if "mm" in name:
+        return name
+    # Look up by uppercase name (e.g. "MSOP-10")
+    suffix = _IC_DIMENSION_SUFFIXES.get(name.upper(), "")
+    return f"{name}{suffix}"
+
+
 def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel | None:
     """Determine the 3D model path for a given KiCad lib_id.
 
@@ -122,27 +166,46 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
     name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
     upper = name.upper()
 
-    # Pin headers / sockets
+    # Pin headers / sockets — append _Vertical if no orientation suffix
     if "PINHEADER" in upper or "PINSOCKET" in upper:
-        # Determine directory based on actual layer
         if layer == LAYER_B_CU or "PINSOCKET" in upper:
             dir_name = "Connector_PinSocket_2.54mm.3dshapes"
             model_name = name.replace("PinHeader", "PinSocket")
         else:
             dir_name = "Connector_PinHeader_2.54mm.3dshapes"
             model_name = name
+        # KiCad model files require orientation suffix (e.g. _Vertical)
+        if not any(s in model_name for s in ("_Vertical", "_Horizontal", "_SMD")):
+            model_name += "_Vertical"
         path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
         return Footprint3DModel(path=path)
 
-    # IC packages (SOIC, MSOP, TSSOP, QFP, QFN, etc.)
-    for prefix in ("SOIC", "MSOP", "TSSOP", "SSOP", "QFP", "QFN", "LQFP", "DFN", "SOP"):
+    # IC packages — route to correct 3D library directory
+    # LQFP/QFP → Package_QFP; MSOP/SOIC/etc. → Package_SO
+    for prefix in ("LQFP", "QFP"):
         if upper.startswith(prefix):
-            path = f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/{name}.step"
+            model_name = _ic_model_name(name, prefix)
+            path = f"{KICAD_3DMODEL_VAR}/Package_QFP.3dshapes/{model_name}.step"
+            return Footprint3DModel(path=path)
+    for prefix in ("SOIC", "MSOP", "TSSOP", "SSOP", "QFN", "DFN", "SOP"):
+        if upper.startswith(prefix):
+            model_name = _ic_model_name(name, prefix)
+            path = f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/{model_name}.step"
             return Footprint3DModel(path=path)
 
-    # Terminal blocks
+    # Terminal blocks — KiCad uses vendor-specific dirs (Phoenix MKDS series)
     if "TERMINALBLOCK" in upper:
-        path = f"{KICAD_3DMODEL_VAR}/Connector_TerminalBlock.3dshapes/{name}.step"
+        import re as _re
+        pin_match = _re.search(r"(\d+)P", name)
+        pin_count = int(pin_match.group(1)) if pin_match else 2
+        model_name = (
+            f"TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-5.08"
+            f"_1x{pin_count:02d}_P5.08mm_Horizontal"
+        )
+        path = (
+            f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
+            f"{model_name}.step"
+        )
         return Footprint3DModel(path=path)
 
     # ESP32 / RF modules
@@ -165,9 +228,12 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         path = f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
         return Footprint3DModel(path=path)
 
-    # RJ45
+    # RJ45 — use best-match Amphenol model (KiCad ships RJHSE538X)
     if "RJ45" in upper:
-        path = f"{KICAD_3DMODEL_VAR}/Connector_RJ.3dshapes/RJ45_Amphenol_ARJM11D7.step"
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Connector_RJ.3dshapes/"
+            "RJ45_Amphenol_RJHSE538X.step"
+        )
         return Footprint3DModel(path=path)
 
     # USB-C
@@ -194,9 +260,10 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
     # WS2812B addressable LEDs (size-aware)
     if "WS2812" in upper:
         if "2.0X2.0" in upper or "2020" in upper:
-            step = "LED_WS2812B_PLCC4_2.0x2.0mm.step"
+            # No 2.0x2.0 .step in KiCad library; use Mini 3.5x3.5 as closest
+            step = "LED_WS2812B-Mini_PLCC4_3.5x3.5mm.step"
         elif "3.5X3.5" in upper or "3535" in upper or "P2.45" in upper:
-            step = "LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm.step"
+            step = "LED_WS2812B-Mini_PLCC4_3.5x3.5mm.step"
         elif "PLCC6" in upper:
             step = "LED_WS2812_PLCC6_5.0x5.0mm_P1.6mm.step"
         else:
