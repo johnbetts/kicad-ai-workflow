@@ -14,10 +14,10 @@ corner, X increases to the right, Y increases downward.
 # ---------------------------------------------------------------------------
 
 KICAD_SCH_VERSION: int = 20250114
-"""KiCad schematic file format version integer (KiCad 9)."""
+"""KiCad schematic file format version integer (KiCad 10 uses same as KiCad 9)."""
 
-KICAD_PCB_VERSION: int = 20241229
-"""KiCad PCB file format version integer (KiCad 9)."""
+KICAD_PCB_VERSION: int = 20260206
+"""KiCad PCB file format version integer (KiCad 10)."""
 
 KICAD_GENERATOR: str = "kicad-ai-pipeline"
 """String written into the ``generator`` field of generated KiCad files."""

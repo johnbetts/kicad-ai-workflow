@@ -64,6 +64,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Module-level storage for preserved edge cuts (board slots/cutouts)
+# populated by build_pcb() and consumed by pcb_to_sexp().
+_preserved_edge_cuts: list[tuple[Point, Point, float]] = []
+
 # ---------------------------------------------------------------------------
 # Board defaults
 # ---------------------------------------------------------------------------
@@ -871,6 +875,8 @@ def _make_rf_via_fence(
     gnd_net_num: int,
     spacing_mm: float,
     footprints: tuple[Footprint, ...] = (),
+    board_width: float = 0.0,
+    board_height: float = 0.0,
 ) -> tuple[Via, ...]:
     """Place GND stitching vias around RF keepout perimeters.
 
@@ -955,6 +961,13 @@ def _make_rf_via_fence(
                 vx = round(p1.x + t * dx + nx * fence_margin, 3)
                 vy = round(p1.y + t * dy + ny * fence_margin, 3)
 
+                # Skip if outside board edge (0.4mm margin for edge clearance)
+                edge_margin = 0.4
+                if board_width > 0 and board_height > 0:
+                    if (vx < edge_margin or vx > board_width - edge_margin
+                            or vy < edge_margin or vy > board_height - edge_margin):
+                        continue
+
                 # Skip if inside any footprint
                 blocked = False
                 for bx0, by0, bx1, by1 in fp_boxes:
@@ -993,6 +1006,8 @@ def build_pcb(
     placement_mode: str = "solver",
     layer_count: int = 2,
     preserve_ref_text: bool = True,
+    preserve_routing: bool = True,
+    pcb_file_path: str | Path | None = None,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1036,6 +1051,9 @@ def build_pcb(
     """
     if not requirements.components:
         raise PCBError("Cannot build PCB: requirements has no components")
+
+    # Clear stale preserved edge cuts from any previous build
+    _preserved_edge_cuts.clear()
 
     log.info(
         "build_pcb: %d components, %d nets",
@@ -1590,6 +1608,7 @@ def build_pcb(
         rf_fence_vias = _make_rf_via_fence(
             tuple(keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
             footprints=tuple(final_footprints),
+            board_width=board_width_mm, board_height=board_height_mm,
         )
         if rf_fence_vias:
             all_vias = all_vias + rf_fence_vias
@@ -1607,6 +1626,50 @@ def build_pcb(
         if stitch_vias:
             all_vias = all_vias + stitch_vias
             log.info("build_pcb: added %d GND stitching vias", len(stitch_vias))
+
+    # ------------------------------------------------------------------
+    # Step 10d: Preserve user routing from existing PCB
+    # ------------------------------------------------------------------
+    if preserve_routing and preserve_from is not None:
+        from kicad_pipeline.pcb.position_extractor import (
+            routing_from_source,
+            remap_routing,
+        )
+
+        # Determine on-disk file path for IPC connections
+        _pcb_path = pcb_file_path
+        if _pcb_path is None and isinstance(preserve_from, str | Path):
+            _pcb_path = preserve_from
+
+        preserved = routing_from_source(preserve_from, pcb_file_path=_pcb_path)
+        if preserved is not None and (
+            preserved.tracks or preserved.vias or preserved.zones
+            or preserved.edge_cuts
+        ):
+            # Build net name → new number map
+            new_net_map: dict[str, int] = {}
+            for net_entry in nets:
+                new_net_map[net_entry.name] = net_entry.number
+
+            remapped_tracks, remapped_vias, remapped_zones = remap_routing(
+                preserved, new_net_map,
+            )
+            # Merge with any autorouter results
+            all_tracks = all_tracks + remapped_tracks
+            all_vias = all_vias + remapped_vias
+            # User zones go after auto-generated zones
+            zones.extend(remapped_zones)
+
+            # Preserve edge cuts (board slots/cutouts)
+            # These are stored separately and emitted in the outline section
+            if preserved.edge_cuts:
+                log.info(
+                    "build_pcb: preserving %d user edge cut segments",
+                    len(preserved.edge_cuts),
+                )
+                # Store on a module-level for the serialiser to pick up
+                _preserved_edge_cuts.clear()
+                _preserved_edge_cuts.extend(preserved.edge_cuts)
 
     # ------------------------------------------------------------------
     # Step 11: Assign net numbers to footprint pads
@@ -2173,6 +2236,16 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     # Board outline
     for line in _outline_sexp(design.outline):
         root.append(line)
+
+    # Preserved edge cuts (board slots, cutouts from previous builds)
+    for start, end, width in _preserved_edge_cuts:
+        root.append([
+            "gr_line",
+            ["start", start.x, start.y],
+            ["end", end.x, end.y],
+            ["layer", LAYER_EDGE_CUTS],
+            ["width", width],
+        ])
 
     # Copper zones
     for zone in design.zones:

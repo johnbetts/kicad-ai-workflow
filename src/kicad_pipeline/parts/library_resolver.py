@@ -21,6 +21,13 @@ _CDFER_SYMBOL_DIRS: tuple[Path, ...] = (
     Path.home()
     / "Documents"
     / "KiCad"
+    / "10.0"
+    / "3rdparty"
+    / "symbols"
+    / "com_github_CDFER_JLCPCB-Kicad-Library",
+    Path.home()
+    / "Documents"
+    / "KiCad"
     / "9.0"
     / "3rdparty"
     / "symbols"
@@ -28,6 +35,14 @@ _CDFER_SYMBOL_DIRS: tuple[Path, ...] = (
 )
 
 _CDFER_FOOTPRINT_DIRS: tuple[Path, ...] = (
+    Path.home()
+    / "Documents"
+    / "KiCad"
+    / "10.0"
+    / "3rdparty"
+    / "footprints"
+    / "com_github_CDFER_JLCPCB-Kicad-Library"
+    / "JLCPCB.pretty",
     Path.home()
     / "Documents"
     / "KiCad"

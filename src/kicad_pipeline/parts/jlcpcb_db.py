@@ -23,6 +23,15 @@ _DB_SEARCH_PATHS: tuple[Path, ...] = (
     Path.home()
     / "Documents"
     / "KiCad"
+    / "10.0"
+    / "3rdparty"
+    / "plugins"
+    / "com_github_bouni_kicad-jlcpcb-tools"
+    / "jlcpcb"
+    / "parts-fts5.db",
+    Path.home()
+    / "Documents"
+    / "KiCad"
     / "9.0"
     / "3rdparty"
     / "plugins"
@@ -31,7 +40,25 @@ _DB_SEARCH_PATHS: tuple[Path, ...] = (
     / "parts-fts5.db",
     Path.home()
     / ".kicad"
+    / "10.0"
+    / "3rdparty"
+    / "plugins"
+    / "com_github_bouni_kicad-jlcpcb-tools"
+    / "jlcpcb"
+    / "parts-fts5.db",
+    Path.home()
+    / ".kicad"
     / "9.0"
+    / "3rdparty"
+    / "plugins"
+    / "com_github_bouni_kicad-jlcpcb-tools"
+    / "jlcpcb"
+    / "parts-fts5.db",
+    Path.home()
+    / ".local"
+    / "share"
+    / "kicad"
+    / "10.0"
     / "3rdparty"
     / "plugins"
     / "com_github_bouni_kicad-jlcpcb-tools"

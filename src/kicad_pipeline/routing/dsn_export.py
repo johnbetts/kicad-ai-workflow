@@ -59,7 +59,7 @@ def _parser_section() -> list[str]:
         '  (string_quote ")',
         "  (space_in_quoted_tokens on)",
         '  (host_cad "kicad-ai-pipeline")',
-        '  (host_version "9.0")',
+        '  (host_version "10.0")',
         ")",
     ]
 

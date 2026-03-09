@@ -27,11 +27,19 @@ _DEFAULT_SEARCH_DIRS: tuple[str, ...] = (
     "/opt/freerouting/",
     # KiCad plugin locations (macOS / Linux / Windows)
     os.path.expanduser(
+        "~/Documents/KiCad/10.0/3rdparty/plugins/"
+        "app_freerouting_kicad-plugin/jar/"
+    ),
+    os.path.expanduser(
         "~/Documents/KiCad/9.0/3rdparty/plugins/"
         "app_freerouting_kicad-plugin/jar/"
     ),
     os.path.expanduser(
         "~/Documents/KiCad/8.0/3rdparty/plugins/"
+        "app_freerouting_kicad-plugin/jar/"
+    ),
+    os.path.expanduser(
+        "~/.local/share/kicad/10.0/3rdparty/plugins/"
         "app_freerouting_kicad-plugin/jar/"
     ),
     os.path.expanduser(

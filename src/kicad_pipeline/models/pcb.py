@@ -326,7 +326,7 @@ class PCBDesign:
     keepouts: tuple[Keepout, ...]
     version: int = 20241229
     generator: str = "kicad-ai-pipeline"
-    generator_version: str = "9.0"
+    generator_version: str = "10.0"
     netclasses: tuple[NetClass, ...] = ()
     drc_exclusions: tuple[str, ...] = ()
     title: str = ""

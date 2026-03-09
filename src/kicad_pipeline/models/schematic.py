@@ -244,7 +244,7 @@ class Schematic:
     hierarchical_labels: tuple[HierarchicalLabel, ...] = ()
     version: int = 20250114
     generator: str = "kicad-ai-pipeline"
-    generator_version: str = "9.0"
+    generator_version: str = "10.0"
     paper: str = "A4"
     title: str = ""
     date: str = ""
