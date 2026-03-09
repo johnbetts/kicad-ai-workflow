@@ -24,7 +24,10 @@ _log = logging.getLogger(__name__)
 _NET_UNCONNECTED: int = 0
 # GND net is always assigned net number 1 by convention
 _NET_GND_NUMBER: int = 1
-_GND_NAMES: frozenset[str] = frozenset({"GND", "AGND", "DGND", "PGND", "GND_A", "GND_D"})
+# Only canonical "GND" gets net 1.  Separate ground domains (AGND,
+# RELAY_GND, DGND, …) are distinct nets and must keep their own numbers
+# so the PCB header and pad assignments agree.
+_GND_NAMES: frozenset[str] = frozenset({"GND"})
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +104,8 @@ def build_netlist(requirements: ProjectRequirements) -> Netlist:
     Net numbering rules:
 
     - Net 0 is reserved for unconnected pads (never assigned here).
-    - GND (and common GND aliases) is always net 1.
+    - GND is always net 1.  Separate ground domains (AGND, DGND, etc.)
+      are treated as distinct nets with their own numbers.
     - All other nets are numbered from 2 upward in the order they appear in
       ``requirements.nets``.
 

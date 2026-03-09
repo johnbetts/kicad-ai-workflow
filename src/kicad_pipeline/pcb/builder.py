@@ -620,29 +620,66 @@ def _make_antenna_keepout(
     board_width: float,
     width: float,
     height: float,
+    rf_position: tuple[float, float, float] | None = None,
+    layer_count: int = 2,
+    board_height: float = 80.0,
 ) -> Keepout:
-    """Create a no-copper keepout zone for an RF antenna in the top-right corner.
+    """Create a no-copper keepout zone for an RF antenna.
+
+    When *rf_position* is given ``(x, y, rotation_deg)`` the keepout is
+    placed at the antenna end of the module, accounting for rotation.
+    Otherwise falls back to the top-right corner of the board.
 
     Args:
-        board_width: Total board width in mm (used to position the keepout).
+        board_width: Total board width in mm (fallback positioning).
         width: Width of the antenna keepout zone in mm.
         height: Height of the antenna keepout zone in mm.
+        rf_position: Optional ``(x, y, rotation_deg)`` of the RF module.
+        layer_count: Number of copper layers (keepout spans all layers).
+        board_height: Total board height in mm (for clamping).
 
     Returns:
-        A :class:`Keepout` covering the top-right area of the board.
+        A :class:`Keepout` covering the antenna area.
     """
-    x0 = board_width - width
-    y0 = 0.0
+    if rf_position is not None:
+        cx, cy, rot = rf_position
+        # ESP32-S3-WROOM-1: antenna extends from one end of the module.
+        # Module half-length ~12.75mm.  Place keepout at antenna end.
+        import math as _m
+        antenna_offset = 8.0  # mm from module centre toward antenna end
+        # Antenna is at the "top" of the module (negative Y in local coords).
+        # Rotation rotates the antenna direction.
+        angle_rad = _m.radians(rot)
+        # In unrotated position, antenna points in -Y direction.
+        # At 180°, antenna points in +Y direction.
+        dx = -antenna_offset * _m.sin(angle_rad)
+        dy = -antenna_offset * _m.cos(angle_rad)
+        ax = cx + dx
+        ay = cy + dy
+        x0 = ax - width / 2.0
+        y0 = ay - height / 2.0
+        # Clamp to board bounds
+        x0 = max(0.0, min(x0, board_width - width))
+        y0 = max(0.0, min(y0, board_height - height))
+    else:
+        # Fallback: top-right corner
+        x0 = board_width - width
+        y0 = 0.0
+
     # Do NOT explicitly close — KiCad auto-closes polygons for keepouts.
     polygon = (
         Point(x=x0, y=y0),
-        Point(x=board_width, y=y0),
-        Point(x=board_width, y=height),
-        Point(x=x0, y=height),
+        Point(x=x0 + width, y=y0),
+        Point(x=x0 + width, y=y0 + height),
+        Point(x=x0, y=y0 + height),
     )
+    # Keepout on all copper layers for proper isolation
+    layers: list[str] = [LAYER_F_CU, LAYER_B_CU]
+    if layer_count >= 4:
+        layers.extend(["In1.Cu", "In2.Cu"])
     return Keepout(
-        polygon=polygon,
-        layers=(LAYER_F_CU, LAYER_B_CU),
+        polygon=tuple(polygon),
+        layers=tuple(layers),
         no_copper=True,
         no_vias=False,
         no_tracks=True,
@@ -955,6 +992,7 @@ def build_pcb(
     preserve_from: str | Path | object | None = None,
     placement_mode: str = "solver",
     layer_count: int = 2,
+    preserve_ref_text: bool = True,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1071,8 +1109,12 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 0b: Preserve layout from existing PCB / IPC connection
     # ------------------------------------------------------------------
+    preserved_ref_text_positions: dict[str, tuple[float, float, float]] = {}
     if preserve_from is not None:
-        from kicad_pipeline.pcb.position_extractor import positions_from_source
+        from kicad_pipeline.pcb.position_extractor import (
+            positions_from_source,
+            ref_text_positions_from_source,
+        )
 
         existing = positions_from_source(preserve_from)
         current_refs = {c.ref for c in requirements.components}
@@ -1081,9 +1123,12 @@ def build_pcb(
         for ref, pos in existing.items():
             if ref in current_refs:
                 fixed_positions[ref] = pos
+        # Also preserve reference text positions (unless caller wants fresh placement)
+        if preserve_ref_text:
+            preserved_ref_text_positions = ref_text_positions_from_source(preserve_from)
         log.info(
-            "build_pcb: preserved %d/%d positions from existing layout",
-            len(fixed_positions), len(existing),
+            "build_pcb: preserved %d/%d positions, %d ref text positions",
+            len(fixed_positions), len(existing), len(preserved_ref_text_positions),
         )
 
     # ------------------------------------------------------------------
@@ -1193,10 +1238,27 @@ def build_pcb(
     keepouts: list[Keepout] = []
     if _has_rf_module(requirements):
         log.info("build_pcb: RF module detected — adding antenna keepout")
+        # Find RF module position + rotation from preserved layout
+        rf_pos: tuple[float, float, float] | None = None
+        if fixed_positions:
+            for comp in requirements.components:
+                val_lower = comp.value.lower()
+                if any(kw in val_lower for kw in _RF_KEYWORDS):
+                    if comp.ref in fixed_positions:
+                        px, py, pr = fixed_positions[comp.ref]
+                        rf_pos = (px, py, pr)
+                        log.info(
+                            "build_pcb: anchoring antenna keepout to %s at (%.1f, %.1f, rot=%.0f)",
+                            comp.ref, px, py, pr,
+                        )
+                    break
         antenna_ko = _make_antenna_keepout(
             board_width_mm,
             _ANTENNA_KEEPOUT_WIDTH_MM,
             _ANTENNA_KEEPOUT_HEIGHT_MM,
+            rf_position=rf_pos,
+            layer_count=layer_count,
+            board_height=board_height_mm,
         )
         keepouts.append(antenna_ko)
 
@@ -1297,7 +1359,7 @@ def build_pcb(
     design_rules = DesignRules(layer_count=layer_count)
 
     if layer_count >= 4:
-        from kicad_pipeline.pcb.zones import make_gnd_pour
+        from kicad_pipeline.pcb.zones import make_gnd_pour, make_power_pour
 
         in1_gnd = make_gnd_pour(
             outline, net_number=gnd_net_num, net_name="GND",
@@ -1305,6 +1367,16 @@ def build_pcb(
         )
         zones.append(in1_gnd)
         log.info("build_pcb: added In1.Cu GND plane zone")
+
+        # In2.Cu: +5V power plane (if net exists)
+        power5v_num = net_lookup.get("+5V")
+        if power5v_num is not None:
+            in2_5v = make_power_pour(
+                outline, net_number=power5v_num, net_name="+5V",
+                layer="In2.Cu",
+            )
+            zones.append(in2_5v)
+            log.info("build_pcb: added In2.Cu +5V power plane zone")
 
     # ------------------------------------------------------------------
     # Step 7-8: Keepouts already created in step 4c (before placement)
@@ -1333,6 +1405,43 @@ def build_pcb(
     # pad on a neighbouring footprint; if so, shift it to the opposite
     # side (below pads instead of above, or vice-versa).
     final_footprints = _resolve_silk_collisions(final_footprints)
+
+    # Apply preserved reference text positions (from preserve_from)
+    if preserved_ref_text_positions:
+        restored: list[Footprint] = []
+        for fp in final_footprints:
+            if fp.ref in preserved_ref_text_positions:
+                tx, ty, trot = preserved_ref_text_positions[fp.ref]
+                new_texts: list[FootprintText] = []
+                for t in fp.texts:
+                    if t.text_type == "reference":
+                        new_texts.append(FootprintText(
+                            text_type=t.text_type,
+                            text=t.text,
+                            position=Point(x=tx, y=ty),
+                            layer=t.layer,
+                            rotation=trot,
+                            effects_size=t.effects_size,
+                            hidden=t.hidden,
+                            uuid=t.uuid,
+                        ))
+                    else:
+                        new_texts.append(t)
+                restored.append(Footprint(
+                    lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                    position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                    pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
+                    lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+                    models=fp.models, datasheet=fp.datasheet,
+                    description=fp.description,
+                ))
+            else:
+                restored.append(fp)
+        final_footprints = restored
+        log.info(
+            "build_pcb: restored %d ref text positions from preserved layout",
+            len(preserved_ref_text_positions),
+        )
 
     # ------------------------------------------------------------------
     # Step 9b: Mounting hole footprints (NPTH, no net)
@@ -1729,6 +1838,7 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
     ref_layer = ref_text.layer if ref_text else _default_silk
     ref_size = ref_text.effects_size if ref_text else 1.0
     ref_hidden = ref_text.hidden if ref_text else False
+    ref_rotation = ref_text.rotation if ref_text else 0.0
     val_text = next((t for t in fp.texts if t.text_type == "value"), None)
     val_x = val_text.position.x if val_text else 0.0
     val_y = val_text.position.y if val_text else 2.5
@@ -1742,7 +1852,7 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
             "property",
             "Reference",
             fp.ref,
-            ["at", ref_x, ref_y, 0],
+            ["at", ref_x, ref_y, ref_rotation],
             ["layer", ref_layer],
             ref_effects,
         ]

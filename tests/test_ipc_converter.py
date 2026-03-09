@@ -54,11 +54,10 @@ class TestFootprintPositions:
         self, ref: str, x_nm: int, y_nm: int, rot: float = 0.0,
     ) -> MagicMock:
         fp = MagicMock()
-        fp.reference.value = ref
+        fp.reference_field.text.value = ref
         fp.position.x = x_nm
         fp.position.y = y_nm
-        fp.position.HasField.return_value = True
-        fp.position.rotation.value = rot
+        fp.orientation.degrees = rot
         return fp
 
     @patch("kicad_pipeline.ipc._HAS_KIPY", True)

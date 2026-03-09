@@ -92,6 +92,23 @@ def pull_footprint_positions(
     return footprint_positions_from_board(conn)
 
 
+def pull_ref_text_positions(
+    conn: KiCadConnection,
+) -> dict[str, tuple[float, float, float]]:
+    """Read reference text positions from the live KiCad board.
+
+    Returns:
+        Mapping of ref to ``(text_x_mm, text_y_mm, text_rotation_deg)``
+        relative to footprint origin.
+
+    Raises:
+        IPCSyncError: If reading fails.
+    """
+    from kicad_pipeline.ipc.converter import ref_text_positions_from_board
+
+    return ref_text_positions_from_board(conn)
+
+
 def pull_board_snapshot(
     conn: KiCadConnection,
     design: PCBDesign,

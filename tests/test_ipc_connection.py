@@ -124,7 +124,7 @@ class TestConnect:
             conn = connect()
             assert isinstance(conn, KiCadConnection)
             assert conn.info.kicad_version == "9.0.2"
-            mock_kipy.KiCad.assert_called_once_with(timeout=2000)
+            mock_kipy.KiCad.assert_called_once_with(timeout_ms=10000)
 
     def test_connect_custom_socket(self) -> None:
         mock_kipy = MagicMock()
@@ -136,7 +136,7 @@ class TestConnect:
              patch.dict(sys.modules, {"kipy": mock_kipy}):
             conn = connect(socket_path="/tmp/custom.sock", timeout_ms=5000)
             mock_kipy.KiCad.assert_called_once_with(
-                address="/tmp/custom.sock", timeout=5000,
+                socket_path="ipc:///tmp/custom.sock", timeout_ms=5000,
             )
             conn.close()
 

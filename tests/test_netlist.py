@@ -251,8 +251,12 @@ def test_assign_net_numbers_preserves_footprint_count() -> None:
     assert len(updated) == len(footprints)
 
 
-def test_gnd_aliases_all_get_number_1() -> None:
-    """AGND, DGND, PGND all receive net number 1."""
+def test_gnd_aliases_get_distinct_numbers() -> None:
+    """AGND, DGND, PGND are separate ground domains with distinct net numbers.
+
+    Only canonical ``"GND"`` receives net number 1.  Separate ground domains
+    must keep their own numbers for correct PCB pad assignments.
+    """
     comps = [_simple_component("R1", ["1", "2", "3"])]
     nets = [
         Net(name="AGND", connections=(NetConnection(ref="R1", pin="1"),)),
@@ -261,8 +265,10 @@ def test_gnd_aliases_all_get_number_1() -> None:
     ]
     req = _make_requirements(comps, nets)
     nl = build_netlist(req)
-    for entry in nl.entries:
-        assert entry.net.number == 1, f"{entry.net.name} should have number 1"
+    numbers = {entry.net.name: entry.net.number for entry in nl.entries}
+    # Each alias gets a unique number (none should be 1 since "GND" isn't present)
+    assert len(set(numbers.values())) == 3, f"Expected 3 distinct net numbers, got {numbers}"
+    assert all(n >= 2 for n in numbers.values()), f"Only canonical GND gets net 1: {numbers}"
 
 
 def test_assign_net_numbers_immutable() -> None:

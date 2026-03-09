@@ -42,15 +42,50 @@ def footprint_positions_from_board(
         board = conn.client.get_board()
         positions: dict[str, tuple[float, float, float]] = {}
         for fp in board.get_footprints():
-            ref = fp.reference.value
+            ref = fp.reference_field.text.value
             pos = fp.position
             x_mm = _nm_to_mm(pos.x)
             y_mm = _nm_to_mm(pos.y)
-            rot = pos.rotation.value if pos.HasField("rotation") else 0.0
+            rot = fp.orientation.degrees
             positions[ref] = (x_mm, y_mm, rot)
         return positions
     except Exception as exc:
         raise IPCSyncError(f"Failed to read footprint positions: {exc}") from exc
+
+
+def ref_text_positions_from_board(
+    conn: KiCadConnection,
+) -> dict[str, tuple[float, float, float]]:
+    """Extract reference designator text positions from the live board.
+
+    Returns:
+        Mapping of ref to ``(text_x_mm, text_y_mm, text_rotation_deg)``
+        relative to footprint origin.
+
+    Raises:
+        IPCSyncError: If reading the board fails.
+    """
+    _require_kipy()
+
+    try:
+        board = conn.client.get_board()
+        result: dict[str, tuple[float, float, float]] = {}
+        for fp in board.get_footprints():
+            ref = fp.reference_field.text.value
+            ref_text = fp.reference_field.text
+            # Text position is absolute in kipy — convert to relative
+            # by subtracting footprint origin
+            fp_x = _nm_to_mm(fp.position.x)
+            fp_y = _nm_to_mm(fp.position.y)
+            tx = _nm_to_mm(ref_text.position.x) - fp_x
+            ty = _nm_to_mm(ref_text.position.y) - fp_y
+            trot = 0.0  # text rotation not reliably exposed
+            result[ref] = (tx, ty, trot)
+        return result
+    except Exception as exc:
+        raise IPCSyncError(
+            f"Failed to read ref text positions: {exc}"
+        ) from exc
 
 
 def tracks_from_board(

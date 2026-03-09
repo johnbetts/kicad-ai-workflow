@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_MS: int = 2000
+_DEFAULT_TIMEOUT_MS: int = 10000
 
 
 def _require_kipy() -> None:
@@ -134,9 +134,11 @@ def connect(
 
     try:
         if socket_path is not None:
-            client = kipy.KiCad(address=socket_path, timeout=timeout_ms)
+            # kipy expects ipc:// URI prefix for Unix sockets
+            uri = socket_path if "://" in socket_path else f"ipc://{socket_path}"
+            client = kipy.KiCad(socket_path=uri, timeout_ms=timeout_ms)
         else:
-            client = kipy.KiCad(timeout=timeout_ms)
+            client = kipy.KiCad(timeout_ms=timeout_ms)
 
         # Ping to verify the connection is alive.
         client.get_version()

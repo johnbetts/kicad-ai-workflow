@@ -97,6 +97,7 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("SOT-23", "Package_TO_SOT_SMD.3dshapes", "SOT-23.step"),
     ("SOT-223", "Package_TO_SOT_SMD.3dshapes", "SOT-223-3_TabPin2.step"),
     # Diodes
+    ("SOD-323", "Diode_SMD.3dshapes", "D_SOD-323.step"),
     ("SOD-123", "Diode_SMD.3dshapes", "D_SOD-123.step"),
     # Inductors
     ("L_1210", "Inductor_SMD.3dshapes", "L_1210_3225Metric.step"),
@@ -174,6 +175,57 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         path = (
             f"{KICAD_3DMODEL_VAR}/Connector_USB.3dshapes/"
             "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.step"
+        )
+        return Footprint3DModel(path=path)
+
+    # DIP packages (optocouplers, etc.)
+    if upper.startswith("DIP-"):
+        path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
+        return Footprint3DModel(path=path)
+
+    # WS2812B addressable LEDs
+    if "WS2812B" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/"
+            "LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm.step"
+        )
+        return Footprint3DModel(path=path)
+    if "WS2812" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/"
+            "LED_WS2812_PLCC6_5.0x5.0mm_P1.6mm.step"
+        )
+        return Footprint3DModel(path=path)
+
+    # Micro SD card slot
+    if upper.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")):
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Connector_Card.3dshapes/"
+            "microSD_HC_Hirose_DM3AT-SF-PEJM5.step"
+        )
+        return Footprint3DModel(path=path)
+
+    # Generic single-row connectors (Conn_01xNN) → PinHeader_1xNN
+    if upper.startswith("CONN_01X"):
+        # Extract pin count: Conn_01x14_P2.54mm → 14
+        import re
+        m = re.match(r"CONN_01X(\d+)", upper)
+        if m:
+            pin_count = m.group(1)
+            model_name = f"PinHeader_1x{pin_count}_P2.54mm_Vertical"
+            if layer == LAYER_B_CU:
+                dir_name = "Connector_PinSocket_2.54mm.3dshapes"
+                model_name = f"PinSocket_1x{pin_count}_P2.54mm_Vertical"
+            else:
+                dir_name = "Connector_PinHeader_2.54mm.3dshapes"
+            path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
+            return Footprint3DModel(path=path)
+
+    # Generic relay SPDT (non-Sanyou)
+    if "RELAY" in upper and "SPDT" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
+            "Relay_SPDT_Omron_G5V-1.step"
         )
         return Footprint3DModel(path=path)
 
@@ -650,8 +702,9 @@ def make_tact_switch(
     value: str,
     size_mm: float = 4.5,
 ) -> Footprint:
-    """Tactile push-button switch (4-pin through-hole, e.g. 4.5x4.5 mm).
+    """Tactile push-button switch (4-pin through-hole).
 
+    Supports common sizes: 3.0mm, 4.5mm, 6.0mm.
     Standard 2-pin-pair wiring: pins 1+2 are one pole, pins 3+4 are the other.
     The footprint only exposes 2 logical pins.
 
@@ -663,19 +716,34 @@ def make_tact_switch(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    # Standard 6mm tact switch pad layout (4 pins, 2.5mm x 3.0mm grid)
-    half_x = 3.25
-    half_y = 2.25
-    drill = 1.0
-    pad_diam = 1.8
+    # Scale pad layout to match body size
+    if size_mm <= 3.5:
+        # Small tact switch (e.g. 3.0x3.0mm)
+        half_x = 2.0
+        half_y = 1.5
+        drill = 0.8
+        pad_diam = 1.4
+    elif size_mm <= 5.0:
+        # Medium tact switch (e.g. 4.5x4.5mm)
+        half_x = 2.75
+        half_y = 2.0
+        drill = 0.9
+        pad_diam = 1.6
+    else:
+        # Standard 6mm tact switch
+        half_x = 3.25
+        half_y = 2.25
+        drill = 1.0
+        pad_diam = 1.8
+
     pads = (
         _thru_pad("1", -half_x, -half_y, pad_diam, drill),
         _thru_pad("1", half_x, -half_y, pad_diam, drill),
         _thru_pad("2", -half_x, half_y, pad_diam, drill),
         _thru_pad("2", half_x, half_y, pad_diam, drill),
     )
-    body = max(size_mm, 4.5)
-    graphics = _courtyard_rect(body + 2.0, body + 2.0)
+    body = size_mm
+    graphics = _courtyard_rect(body + 1.5, body + 1.5)
     texts = (
         _ref_text(ref, -(body / 2.0 + 1.5), LAYER_F_SILKSCREEN),
         _val_text(value, body / 2.0 + 1.5, LAYER_F_FAB),
@@ -687,6 +755,52 @@ def make_tact_switch(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
         attr="through_hole", models=models,
+    )
+
+
+def make_smd_tact_switch(
+    ref: str,
+    value: str,
+    width_mm: float = 3.0,
+    height_mm: float = 2.5,
+) -> Footprint:
+    """SMD tactile push-button switch (2-pad).
+
+    Common sizes: 3.0x2.5mm, 3.0x3.5mm, 4.0x2.8mm.
+    Two SMD pads, one on each side of the body.
+
+    Args:
+        ref: Reference designator (e.g. "SW1").
+        value: Component value string.
+        width_mm: Body width in mm.
+        height_mm: Body height in mm.
+
+    Returns:
+        Fully constructed :class:`Footprint`.
+    """
+    # Pads centred on each side, slightly outside body edge
+    pad_w = 1.0
+    pad_h = height_mm * 0.6
+    half_x = width_mm / 2.0 + pad_w * 0.1
+
+    pads = (
+        _smd_pad("1", -half_x, 0.0, pad_w, pad_h, LAYER_F_CU),
+        _smd_pad("2", half_x, 0.0, pad_w, pad_h, LAYER_F_CU),
+    )
+    court_w = width_mm + pad_w + 1.0
+    court_h = height_mm + 1.0
+    graphics = _courtyard_rect(court_w, court_h)
+    texts = (
+        _ref_text(ref, -(court_h / 2.0 + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, court_h / 2.0 + 0.5, LAYER_F_FAB),
+    )
+    lib_id = f"Button_Switch_SMD:SW_Push_{width_mm}x{height_mm}mm"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
+        attr="smd", models=models,
     )
 
 
@@ -1805,9 +1919,15 @@ def footprint_for_component(
 
     # DIP switches (SW_DIP* or DIP_Switch*)
     elif upper.startswith(("SW_DIP", "DIP_SWITCH")):
-        pin_count = _parse_pin_count(fid)
-        if pin_count < 4:
-            pin_count = 8  # sensible default
+        import re as _re
+        # Extract position count from "SW_DIP_x01" style names
+        pos_m = _re.search(r"x(\d+)", fid)
+        if pos_m:
+            pin_count = int(pos_m.group(1)) * 2  # 2 pins per position
+        else:
+            pin_count = _parse_pin_count(fid)
+            if pin_count < 2:
+                pin_count = 8
         fp = make_dip_switch(ref, value, pin_count)
 
     # Relay (SPDT)
@@ -1818,7 +1938,15 @@ def footprint_for_component(
     elif "ESP32" in upper or "WROOM" in upper:
         fp = make_esp32_wroom(ref, value)
 
-    # Tactile switches (SW_SPST, SW_Push, etc.)
+    # SMD tactile switches (SW_SPST_SMD_*, SW_Push_SMD_*)
+    elif upper.startswith("SW_") and "SMD" in upper:
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        w = float(size_m.group(1)) if size_m else 3.0
+        h = float(size_m.group(2)) if size_m else 2.5
+        fp = make_smd_tact_switch(ref, value, width_mm=w, height_mm=h)
+
+    # Through-hole tactile switches (SW_SPST, SW_Push, etc.)
     elif upper.startswith("SW_"):
         import re as _re
         size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
