@@ -183,18 +183,25 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
         return Footprint3DModel(path=path)
 
-    # WS2812B addressable LEDs
-    if "WS2812B" in upper:
+    # DIP switches
+    if upper.startswith("SW_DIP"):
         path = (
-            f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/"
-            "LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm.step"
+            f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/"
+            f"SW_DIP_SPSTx{name.split('x')[-1]}_Slide_9.78x4.72mm_W7.62mm_P2.54mm.step"
         )
         return Footprint3DModel(path=path)
+
+    # WS2812B addressable LEDs (size-aware)
     if "WS2812" in upper:
-        path = (
-            f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/"
-            "LED_WS2812_PLCC6_5.0x5.0mm_P1.6mm.step"
-        )
+        if "2.0X2.0" in upper or "2020" in upper:
+            step = "LED_WS2812B_PLCC4_2.0x2.0mm.step"
+        elif "3.5X3.5" in upper or "3535" in upper or "P2.45" in upper:
+            step = "LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm.step"
+        elif "PLCC6" in upper:
+            step = "LED_WS2812_PLCC6_5.0x5.0mm_P1.6mm.step"
+        else:
+            step = "LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm.step"
+        path = f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/{step}"
         return Footprint3DModel(path=path)
 
     # Micro SD card slot
@@ -230,8 +237,10 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         return Footprint3DModel(path=path)
 
     # Static pattern map for passives/transistors/diodes/inductors/crystals
+    # Use `in` instead of `startswith` so patterns like "SOD-323" match
+    # footprint names like "D_SOD-323" which have a prefix.
     for pattern, directory, model_file in _3D_MODEL_MAP:
-        if upper.startswith(pattern.upper()):
+        if pattern.upper() in upper:
             path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
             return Footprint3DModel(path=path)
 
@@ -810,8 +819,9 @@ def make_relay_spdt(
 ) -> Footprint:
     """SPDT relay footprint (e.g. SRD-05VDC-SL-C, Songle SRD series).
 
-    Body ~19x15.5mm, 5 pins: COIL+ (1), COIL- (2), COM (3), NO (4), NC (5).
-    Through-hole, 2.54mm grid, pin rows at 7.62mm spacing.
+    Pad positions match KiCad's official ``Relay_SPDT_SANYOU_SRD_Series_Form_C``
+    footprint with origin at pin 1.  5 pins: COIL+ (1), COIL- (2), COM (3),
+    NO (4), NC (5).
 
     Args:
         ref: Reference designator (e.g. "K1").
@@ -820,22 +830,44 @@ def make_relay_spdt(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    body_w = 19.0
-    body_h = 15.5
-    drill = 1.2
-    pad_diam = 2.0
-    # Typical SRD relay pin positions (relative to centre)
+    # Pad positions from KiCad's official footprint (origin at pin 1)
+    # Pins 1,3,4 = 3mm pad / 1.3mm drill; Pins 2,5 = 2.5mm pad / 1.0mm drill
     pads = (
-        _thru_pad("1", -7.62, -3.81, pad_diam, drill),   # COIL+
-        _thru_pad("2", -7.62, 3.81, pad_diam, drill),    # COIL-
-        _thru_pad("3", 7.62, 0.0, pad_diam, drill),      # COM
-        _thru_pad("4", 7.62, -3.81, pad_diam, drill),    # NO
-        _thru_pad("5", 7.62, 3.81, pad_diam, drill),     # NC
+        _thru_pad("1", 0.0, 0.0, 3.0, 1.3),         # COIL+
+        _thru_pad("2", 1.95, 6.05, 2.5, 1.0),        # COIL-
+        _thru_pad("3", 14.15, 6.05, 3.0, 1.3),       # COM
+        _thru_pad("4", 14.2, -6.0, 3.0, 1.3),        # NO
+        _thru_pad("5", 1.95, -5.95, 2.5, 1.0),       # NC
     )
-    graphics = _courtyard_rect(body_w, body_h)
+    # Body outline: -1.4 to 18.4 in X, -7.8 to 7.8 in Y
+    body_w = 19.8  # 18.4 - (-1.4)
+    body_h = 15.6  # 7.8 - (-7.8)
+    # Courtyard centred on body centre (8.5, 0)
+    cx = (-1.4 + 18.4) / 2.0
+    cy = (-7.8 + 7.8) / 2.0
+    hw = body_w / 2.0 + PCB_COURTYARD_CLEARANCE_MM
+    hh = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM
+    graphics = (
+        FootprintLine(
+            start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh),
+            layer=LAYER_F_COURTYARD, width=0.05,
+        ),
+        FootprintLine(
+            start=Point(cx + hw, cy - hh), end=Point(cx + hw, cy + hh),
+            layer=LAYER_F_COURTYARD, width=0.05,
+        ),
+        FootprintLine(
+            start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh),
+            layer=LAYER_F_COURTYARD, width=0.05,
+        ),
+        FootprintLine(
+            start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh),
+            layer=LAYER_F_COURTYARD, width=0.05,
+        ),
+    )
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
+        _ref_text(ref, cy - (body_h / 2.0 + 1.5), LAYER_F_SILKSCREEN),
+        _val_text(value, cy + body_h / 2.0 + 1.5, LAYER_F_FAB),
     )
     lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
     model = _model_for_package(lib_id)
@@ -1406,6 +1438,8 @@ def make_dip_switch(
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
     )
     lib_id = f"Button_Switch_DIP:SW_DIP_x{half:02d}"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
 
     return Footprint(
         lib_id=lib_id,
@@ -1417,6 +1451,7 @@ def make_dip_switch(
         graphics=graphics,
         texts=texts,
         attr="through_hole",
+        models=models,
     )
 
 
@@ -1672,10 +1707,12 @@ def make_dip_package(
     )
     if not lib_id:
         lib_id = f"Package_DIP:DIP-{pin_count}_W{row_spacing_mm:.2f}mm"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=LAYER_F_CU, pads=tuple(pads), graphics=graphics, texts=texts,
-        attr="through_hole",
+        attr="through_hole", models=models,
     )
 
 
@@ -1715,38 +1752,65 @@ def make_ws2812b(
     ref: str,
     value: str = "WS2812B",
     layer: str = LAYER_F_CU,
+    size: str = "5050",
 ) -> Footprint:
-    """WS2812B addressable RGB LED footprint (5050 / PLCC-4, 4 pads).
+    """WS2812B addressable RGB LED footprint (PLCC-4, 4 pads).
 
     Pin 1 = VDD, Pin 2 = DOUT, Pin 3 = GND, Pin 4 = DIN.
+
+    Supported sizes:
+        - ``"5050"``: 5.0×5.0 mm body (WS2812B standard)
+        - ``"3535"``: 3.5×3.5 mm body (WS2812B-Mini)
+        - ``"2020"``: 2.0×2.0 mm body (WS2812C-2020)
 
     Args:
         ref: Reference designator (e.g. "LED1").
         value: Component value string.
         layer: Primary copper layer.
+        size: Package size code.
 
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    # 5.0x5.0mm body, 4 pads at 3.2mm pitch on two sides
-    pad_w = 1.5
-    pad_h = 1.0
-    x_pitch = 2.45  # centre to pad centre (half body + recess)
-    y_pitch = 1.6   # vertical offset between pad pair
+    if size == "2020":
+        # WS2812C-2020: 2.0×2.0 mm body, 4 bottom pads
+        pad_w = 0.7
+        pad_h = 0.5
+        x_pitch = 0.75
+        y_pitch = 0.55
+        body_w = 2.6
+        body_h = 2.6
+        lib_id = "LED_SMD:LED_WS2812B_PLCC4_2.0x2.0mm"
+    elif size == "3535":
+        # WS2812B-Mini: 3.5×3.5 mm body
+        pad_w = 1.0
+        pad_h = 0.8
+        x_pitch = 1.65
+        y_pitch = 1.05
+        body_w = 4.0
+        body_h = 4.0
+        lib_id = "LED_SMD:LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm"
+    else:
+        # WS2812B standard 5050: 5.0×5.0 mm body
+        pad_w = 1.5
+        pad_h = 1.0
+        x_pitch = 2.45
+        y_pitch = 1.6
+        body_w = 5.4
+        body_h = 5.4
+        lib_id = "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm"
+
     pads = (
         _smd_pad("1", -x_pitch, -y_pitch, pad_w, pad_h, layer),  # VDD
         _smd_pad("2", x_pitch, -y_pitch, pad_w, pad_h, layer),   # DOUT
         _smd_pad("3", x_pitch, y_pitch, pad_w, pad_h, layer),    # GND
         _smd_pad("4", -x_pitch, y_pitch, pad_w, pad_h, layer),   # DIN
     )
-    body_w = 5.4
-    body_h = 5.4
     graphics = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
     )
-    lib_id = "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm"
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
     return Footprint(
@@ -1851,7 +1915,12 @@ def footprint_for_component(
 
     # WS2812B / addressable LED (before generic LED_ check)
     if "WS2812" in upper:
-        fp = make_ws2812b(ref, value, layer=layer)
+        ws_size = "5050"
+        if "2020" in fid:
+            ws_size = "2020"
+        elif "3535" in fid:
+            ws_size = "3535"
+        fp = make_ws2812b(ref, value, layer=layer, size=ws_size)
 
     # LED packages
     elif upper.startswith("LED_"):
