@@ -954,6 +954,7 @@ def build_pcb(
     auto_route: bool = True,
     preserve_from: str | Path | object | None = None,
     placement_mode: str = "solver",
+    layer_count: int = 2,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1088,6 +1089,7 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 1: Board dimensions
     # ------------------------------------------------------------------
+    _explicit_dimensions = board_width_mm is not None and board_height_mm is not None
     if board_width_mm is None:
         if requirements.mechanical is not None:
             board_width_mm = requirements.mechanical.board_width_mm
@@ -1149,8 +1151,9 @@ def build_pcb(
         fp_sizes[comp.ref] = sz
         total_area += sz[0] * sz[1]
 
-    # Only auto-size when no template constrains dimensions
-    if tmpl_obj is None:
+    # Only auto-size when no template constrains dimensions and
+    # dimensions were not explicitly passed by the caller.
+    if tmpl_obj is None and not _explicit_dimensions:
         import math as _math
 
         # Estimate minimum board area as 3x total footprint area
@@ -1291,8 +1294,7 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 6b: Inner-layer zones (4-layer stackup)
     # ------------------------------------------------------------------
-    design_rules = DesignRules()
-    layer_count = design_rules.layer_count
+    design_rules = DesignRules(layer_count=layer_count)
 
     if layer_count >= 4:
         from kicad_pipeline.pcb.zones import make_gnd_pour
@@ -1311,13 +1313,20 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 9: Silkscreen
     # ------------------------------------------------------------------
-    final_footprints = [
-        _clamp_silk_to_board(
-            add_silkscreen_to_footprint(fp),
-            origin_x, origin_y, board_width_mm, board_height_mm,
-        )
-        for fp in footprints_with_pos
-    ]
+    final_footprints = []
+    for fp in footprints_with_pos:
+        fp_with_silk = add_silkscreen_to_footprint(fp)
+        # Only clamp silk to board for on-board footprints; off-board
+        # footprints (grouped placement) keep labels at their local position.
+        if (fp.position.x >= origin_x
+                and fp.position.x <= origin_x + board_width_mm
+                and fp.position.y >= origin_y
+                and fp.position.y <= origin_y + board_height_mm):
+            fp_with_silk = _clamp_silk_to_board(
+                fp_with_silk,
+                origin_x, origin_y, board_width_mm, board_height_mm,
+            )
+        final_footprints.append(fp_with_silk)
 
     # Post-pass: push silk labels that overlap other components' pads.
     # For each ref label, check if its board-space bbox overlaps any
@@ -1379,7 +1388,7 @@ def build_pcb(
             )
             pre_route_design = PCBDesign(
                 outline=outline,
-                design_rules=DesignRules(),
+                design_rules=design_rules,
                 nets=nets,
                 footprints=tuple(pre_route_fps),
                 tracks=(),
@@ -1522,7 +1531,7 @@ def build_pcb(
 
     return PCBDesign(
         outline=outline,
-        design_rules=DesignRules(),
+        design_rules=design_rules,
         nets=nets,
         footprints=tuple(final_footprints),
         tracks=all_tracks,
