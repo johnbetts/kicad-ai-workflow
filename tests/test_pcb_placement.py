@@ -413,3 +413,112 @@ def test_assign_pcb_zones_relay() -> None:
     """Relay feature name maps to RELAY zone."""
     result = assign_pcb_zones([("K1", "Relay Outputs")])
     assert result["K1"].name == "RELAY"
+
+
+# ---------------------------------------------------------------------------
+# place_groups_off_board
+# ---------------------------------------------------------------------------
+
+
+def test_place_groups_off_board_positions_below_board() -> None:
+    """All footprints placed by place_groups_off_board have y > board_height."""
+    from kicad_pipeline.pcb.placement import place_groups_off_board
+
+    req = _minimal_requirements()
+    board_h = 40.0
+    fp_sizes = {c.ref: (5.0, 5.0) for c in req.components}
+    result = place_groups_off_board(
+        footprints=(),
+        features=req.features,
+        requirements=req,
+        board_height_mm=board_h,
+        footprint_sizes=fp_sizes,
+    )
+    for ref, pt in result.positions.items():
+        assert pt.y > board_h, f"{ref} at y={pt.y} is not below board (h={board_h})"
+
+
+def test_place_groups_off_board_groups_separated() -> None:
+    """Different FeatureBlock refs have significant X or Y separation."""
+    from kicad_pipeline.pcb.placement import place_groups_off_board
+
+    req = _minimal_requirements()
+    board_h = 40.0
+    fp_sizes = {c.ref: (5.0, 5.0) for c in req.components}
+    result = place_groups_off_board(
+        footprints=(),
+        features=req.features,
+        requirements=req,
+        board_height_mm=board_h,
+        footprint_sizes=fp_sizes,
+    )
+    # U1 is in MCU, R1 in Power, D1 in Status — all different groups
+    u1_pos = result.positions["U1"]
+    d1_pos = result.positions["D1"]
+    dist = ((u1_pos.x - d1_pos.x) ** 2 + (u1_pos.y - d1_pos.y) ** 2) ** 0.5
+    assert dist > 5.0, f"Groups not separated: U1={u1_pos}, D1={d1_pos}"
+
+
+def test_place_groups_off_board_preserves_fixed() -> None:
+    """Refs in fixed_positions keep their positions."""
+    from kicad_pipeline.pcb.placement import place_groups_off_board
+
+    req = _minimal_requirements()
+    board_h = 40.0
+    fp_sizes = {c.ref: (5.0, 5.0) for c in req.components}
+    fixed = {"U1": (10.0, 20.0, 90.0)}
+    result = place_groups_off_board(
+        footprints=(),
+        features=req.features,
+        requirements=req,
+        board_height_mm=board_h,
+        footprint_sizes=fp_sizes,
+        fixed_positions=fixed,
+    )
+    assert abs(result.positions["U1"].x - 10.0) < 0.01
+    assert abs(result.positions["U1"].y - 20.0) < 0.01
+    assert abs(result.rotations["U1"] - 90.0) < 0.01
+
+
+def test_place_groups_off_board_ungrouped_refs_placed() -> None:
+    """Refs not in any FeatureBlock still get placed."""
+    from kicad_pipeline.pcb.placement import place_groups_off_board
+
+    extra = Component(
+        ref="C99",
+        value="100nF",
+        footprint="C_0402",
+        pins=(
+            Pin(number="1", name="~", pin_type=PinType.PASSIVE, net="+3V3"),
+            Pin(number="2", name="~", pin_type=PinType.PASSIVE, net="GND"),
+        ),
+    )
+    req = _minimal_requirements(extra_components=(extra,))
+    board_h = 40.0
+    fp_sizes = {c.ref: (5.0, 5.0) for c in req.components}
+    result = place_groups_off_board(
+        footprints=(),
+        features=req.features,
+        requirements=req,
+        board_height_mm=board_h,
+        footprint_sizes=fp_sizes,
+    )
+    assert "C99" in result.positions, "Ungrouped ref C99 not placed"
+
+
+def test_place_groups_off_board_all_refs_placed() -> None:
+    """Every component ref gets a position."""
+    from kicad_pipeline.pcb.placement import place_groups_off_board
+
+    req = _minimal_requirements()
+    board_h = 40.0
+    fp_sizes = {c.ref: (5.0, 5.0) for c in req.components}
+    result = place_groups_off_board(
+        footprints=(),
+        features=req.features,
+        requirements=req,
+        board_height_mm=board_h,
+        footprint_sizes=fp_sizes,
+    )
+    all_refs = {c.ref for c in req.components}
+    assert all_refs <= set(result.positions.keys())

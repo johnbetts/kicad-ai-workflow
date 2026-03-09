@@ -22,7 +22,7 @@ KICAD_PCB_VERSION: int = 20241229
 KICAD_GENERATOR: str = "kicad-ai-pipeline"
 """String written into the ``generator`` field of generated KiCad files."""
 
-KICAD_GENERATOR_VERSION: str = "9.0"
+KICAD_GENERATOR_VERSION: str = "10.0"
 """Generator version string written into generated KiCad files."""
 
 # ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ GND_STITCH_FP_CLEARANCE_MM: float = 2.0
 # 3D model paths
 # ---------------------------------------------------------------------------
 
-KICAD_3DMODEL_VAR: str = "${KICAD9_3DMODEL_DIR}"
+KICAD_3DMODEL_VAR: str = "${KICAD10_3DMODEL_DIR}"
 """KiCad environment variable prefix for 3D model file paths."""
 
 # ---------------------------------------------------------------------------

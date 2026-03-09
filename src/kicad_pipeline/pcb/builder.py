@@ -54,12 +54,13 @@ from kicad_pipeline.pcb.footprints import (
     make_mounting_hole,
 )
 from kicad_pipeline.pcb.netclasses import classify_nets
-from kicad_pipeline.pcb.placement import LayoutResult, layout_pcb
+from kicad_pipeline.pcb.placement import layout_pcb, place_groups_off_board
 from kicad_pipeline.pcb.silkscreen import add_silkscreen_to_footprint
 from kicad_pipeline.sexp.writer import SExpNode, write_file
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import Component, ProjectRequirements
+    from kicad_pipeline.pcb.placement import LayoutResult
 
 log = logging.getLogger(__name__)
 
@@ -952,6 +953,7 @@ def build_pcb(
     board_template: str | None = None,
     auto_route: bool = True,
     preserve_from: str | Path | object | None = None,
+    placement_mode: str = "solver",
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1221,12 +1223,23 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 5: Layout placement (with keepouts available to solver)
     # ------------------------------------------------------------------
-    layout_result: LayoutResult = layout_pcb(
-        requirements, outline, footprint_sizes=fp_sizes,
-        fixed_positions=fixed_positions,
-        board_template=tmpl_obj,
-        keepouts=tuple(keepouts),
-    )
+    layout_result: LayoutResult
+    if placement_mode == "grouped":
+        layout_result = place_groups_off_board(
+            footprints=tuple(pre_footprints),
+            features=requirements.features,
+            requirements=requirements,
+            board_height_mm=board_height_mm,
+            footprint_sizes=fp_sizes,
+            fixed_positions=fixed_positions,
+        )
+    else:
+        layout_result = layout_pcb(
+            requirements, outline, footprint_sizes=fp_sizes,
+            fixed_positions=fixed_positions,
+            board_template=tmpl_obj,
+            keepouts=tuple(keepouts),
+        )
 
     # Merge layer overrides from layout result (constraint solver)
     if layout_result.layers:

@@ -802,3 +802,229 @@ def layout_pcb(
 
     log.info("layout_pcb: placed %d components", len(zone_positions))
     return LayoutResult(positions=zone_positions, rotations=zone_rotations)
+
+
+# ---------------------------------------------------------------------------
+# Off-board grouped placement
+# ---------------------------------------------------------------------------
+
+# Gap between groups (mm)
+_GROUP_GAP_MM: float = 20.0
+_GROUP_START_OFFSET_MM: float = 25.0
+_GROUP_ROW_MAX_WIDTH_MM: float = 300.0
+_GROUP_PACKING_FACTOR: float = 2.5
+_GROUP_MARGIN_MM: float = 2.0
+
+
+def place_groups_off_board(
+    footprints: tuple[object, ...],
+    features: tuple[object, ...],
+    requirements: ProjectRequirements,
+    board_height_mm: float,
+    footprint_sizes: dict[str, tuple[float, float]],
+    fixed_positions: dict[str, tuple[float, float, float]] | None = None,
+) -> LayoutResult:
+    """Place component groups off-board with topology-aware internal layout.
+
+    Each FeatureBlock becomes a group placed below the board outline.
+    Within each group, the constraint solver arranges components optimally:
+    decoupling caps next to IC power pins, protection components next to
+    what they protect, etc.
+
+    Args:
+        footprints: All footprints in the design.
+        features: FeatureBlock objects from requirements.
+        requirements: Full project requirements.
+        board_height_mm: Height of the real board in mm.
+        footprint_sizes: Mapping from ref to ``(width, height)`` in mm.
+        fixed_positions: Optional mapping from ref to ``(x, y, rotation)``
+            for preserved positions.
+
+    Returns:
+        :class:`LayoutResult` with all components placed below the board.
+    """
+    from kicad_pipeline.models.pcb import PlacementConstraint, PlacementConstraintType
+    from kicad_pipeline.models.requirements import FeatureBlock
+    from kicad_pipeline.pcb.constraints import (
+        constraints_from_requirements,
+        solve_placement,
+    )
+
+    typed_features = tuple(f for f in features if isinstance(f, FeatureBlock))
+
+    # 1. Build group membership: ref → group name
+    feature_map: dict[str, str] = {}
+    for fb in typed_features:
+        for ref in fb.components:
+            feature_map[ref] = fb.name
+
+    all_refs = {c.ref for c in requirements.components}
+
+    # 2. Handle fixed positions (preserve_from support)
+    positions: dict[str, Point] = {}
+    rotations: dict[str, float] = {}
+    fixed_refs: set[str] = set()
+    if fixed_positions:
+        for ref, (fx, fy, frot) in fixed_positions.items():
+            if ref in all_refs:
+                positions[ref] = Point(x=fx, y=fy)
+                rotations[ref] = frot
+                fixed_refs.add(ref)
+
+    # 3. Generate full constraints for topology analysis
+    # Use a None template since we're placing off-board
+    full_constraints = constraints_from_requirements(
+        requirements, None, footprint_sizes,
+    )
+
+    # 4. Group remaining refs by FeatureBlock
+    groups: dict[str, list[str]] = {}
+    for ref in all_refs:
+        if ref in fixed_refs:
+            continue
+        group_name = feature_map.get(ref, "Ungrouped")
+        groups.setdefault(group_name, []).append(ref)
+
+    # Sort refs within each group for determinism
+    for refs in groups.values():
+        refs.sort()
+
+    # 5. For each group, run the constraint solver on a virtual mini-board
+    group_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
+    group_dimensions: dict[str, tuple[float, float]] = {}
+
+    for group_name, group_refs in groups.items():
+        if not group_refs:
+            continue
+
+        group_ref_set = frozenset(group_refs)
+
+        # Filter and adapt constraints for this group
+        filtered: list[PlacementConstraint] = []
+        for c in full_constraints:
+            if c.ref not in group_ref_set:
+                continue
+
+            if c.constraint_type == PlacementConstraintType.FIXED:
+                # Skip FIXED — we're off-board
+                continue
+            elif c.constraint_type == PlacementConstraintType.EDGE:
+                # Convert EDGE to GROUP (no board edge off-board)
+                filtered.append(PlacementConstraint(
+                    ref=c.ref,
+                    constraint_type=PlacementConstraintType.GROUP,
+                    group_name=group_name,
+                    priority=c.priority,
+                ))
+            elif c.constraint_type == PlacementConstraintType.NEAR:
+                if c.target_ref is not None and c.target_ref in group_ref_set:
+                    # Target is in same group — keep (topology magic)
+                    filtered.append(c)
+                else:
+                    # Target outside group — demote to GROUP
+                    filtered.append(PlacementConstraint(
+                        ref=c.ref,
+                        constraint_type=PlacementConstraintType.GROUP,
+                        group_name=group_name,
+                        priority=c.priority,
+                    ))
+            else:
+                # GROUP and AWAY_FROM — keep as-is
+                filtered.append(c)
+
+        # Estimate group area and create a mini-board
+        total_area = sum(
+            footprint_sizes.get(r, (5.0, 5.0))[0]
+            * footprint_sizes.get(r, (5.0, 5.0))[1]
+            for r in group_refs
+        )
+        area = total_area * _GROUP_PACKING_FACTOR
+        side = max(math.sqrt(area), 15.0)
+        mini_w = side * 1.4  # slightly wider than tall
+        mini_h = side
+
+        # Create mini board outline
+        mini_board = BoardOutline(polygon=(
+            Point(x=0.0, y=0.0),
+            Point(x=mini_w, y=0.0),
+            Point(x=mini_w, y=mini_h),
+            Point(x=0.0, y=mini_h),
+            Point(x=0.0, y=0.0),
+        ))
+
+        # Filter footprint_sizes to this group
+        group_sizes = {r: footprint_sizes[r] for r in group_refs if r in footprint_sizes}
+        # Add defaults for any missing
+        for r in group_refs:
+            if r not in group_sizes:
+                group_sizes[r] = (5.0, 5.0)
+
+        # Run the constraint solver on the mini-board
+        result = solve_placement(
+            tuple(filtered), mini_board, group_sizes,
+            grid_mm=0.5, requirements=requirements,
+        )
+
+        # Store relative positions
+        layout: dict[str, tuple[float, float, float]] = {}
+        for ref in group_refs:
+            if ref in result.positions:
+                p = result.positions[ref]
+                rot = result.rotations.get(ref, 0.0)
+                layout[ref] = (p.x, p.y, rot)
+            else:
+                # Fallback: place sequentially
+                idx = group_refs.index(ref)
+                layout[ref] = (
+                    _GROUP_MARGIN_MM + (idx % 5) * 8.0,
+                    _GROUP_MARGIN_MM + (idx // 5) * 8.0,
+                    0.0,
+                )
+
+        group_layouts[group_name] = layout
+
+        # Compute actual bounding box of placed components
+        if layout:
+            min_x = min(pos[0] for pos in layout.values())
+            max_x = max(
+                pos[0] + group_sizes.get(ref, (5.0, 5.0))[0]
+                for ref, pos in layout.items()
+            )
+            min_y = min(pos[1] for pos in layout.values())
+            max_y = max(
+                pos[1] + group_sizes.get(ref, (5.0, 5.0))[1]
+                for ref, pos in layout.items()
+            )
+            group_dimensions[group_name] = (max_x - min_x + 4.0, max_y - min_y + 4.0)
+        else:
+            group_dimensions[group_name] = (20.0, 20.0)
+
+    # 6. Arrange groups below the real board
+    start_y = board_height_mm + _GROUP_START_OFFSET_MM
+    cursor_x = 0.0
+    cursor_y = start_y
+    row_max_h = 0.0
+
+    for group_name in sorted(group_layouts.keys()):
+        layout = group_layouts[group_name]
+        gw, gh = group_dimensions[group_name]
+
+        # Wrap to next row if needed
+        if cursor_x + gw > _GROUP_ROW_MAX_WIDTH_MM and cursor_x > 0.0:
+            cursor_y += row_max_h + _GROUP_GAP_MM
+            cursor_x = 0.0
+            row_max_h = 0.0
+
+        # Translate group positions to final off-board coordinates
+        for ref, (rx, ry, rrot) in layout.items():
+            positions[ref] = Point(x=cursor_x + rx, y=cursor_y + ry)
+            rotations[ref] = rrot
+
+        cursor_x += gw + _GROUP_GAP_MM
+        row_max_h = max(row_max_h, gh)
+
+    log.info(
+        "place_groups_off_board: placed %d components in %d groups below board",
+        len(positions), len(group_layouts),
+    )
+    return LayoutResult(positions=positions, rotations=rotations, layers=None)

@@ -111,8 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip 3D model injection",
     )
     enrich_p.add_argument(
-        "--model-var", default="${KICAD9_3DMODEL_DIR}",
-        help="3D model env var (default: ${KICAD9_3DMODEL_DIR})",
+        "--model-var", default="${KICAD10_3DMODEL_DIR}",
+        help="3D model env var (default: ${KICAD10_3DMODEL_DIR})",
     )
 
     # project subcommand (orchestrated workflow)

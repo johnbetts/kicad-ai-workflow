@@ -1396,3 +1396,17 @@ def test_build_pcb_preserve_with_new_component(tmp_path: Path) -> None:
     # New component exists somewhere
     r1_fps = [f for f in pcb2.footprints if f.ref == "R1"]
     assert r1_fps, "New component R1 not placed"
+
+
+def test_build_pcb_grouped_mode() -> None:
+    """Build with placement_mode='grouped' places all footprints and keeps board outline."""
+    reqs = _make_requirements()
+    pcb = build_pcb(reqs, auto_route=False, placement_mode="grouped")
+    # All components have positions
+    assert len(pcb.footprints) >= len(reqs.components)
+    for fp in pcb.footprints:
+        # Every footprint should have a non-zero position (placed off-board)
+        assert fp.position is not None, f"{fp.ref} has no position"
+    # Board outline still exists
+    assert pcb.outline is not None
+    assert len(pcb.outline.polygon) >= 4
