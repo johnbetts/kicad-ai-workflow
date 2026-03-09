@@ -522,3 +522,168 @@ def test_place_groups_off_board_all_refs_placed() -> None:
     )
     all_refs = {c.ref for c in req.components}
     assert all_refs <= set(result.positions.keys())
+
+
+def test_place_groups_off_board_subcircuit_clustering() -> None:
+    """Relay subcircuit components (K1, Q1, R10, D6) cluster tightly."""
+    from kicad_pipeline.pcb.placement import place_groups_off_board
+
+    # Build a relay-driver-like subcircuit: K1, Q1, R10, D6 sharing signal nets
+    k1 = Component(
+        ref="K1", value="G5V-1-5V", footprint="Relay_SPDT",
+        pins=(
+            Pin("1", "COIL+", PinType.PASSIVE, net="RELAY_COIL1"),
+            Pin("2", "COIL-", PinType.PASSIVE, net="GND"),
+            Pin("3", "COM", PinType.PASSIVE, net="RELAY_COM1"),
+            Pin("4", "NO", PinType.PASSIVE, net="RELAY_NO1"),
+        ),
+    )
+    q1 = Component(
+        ref="Q1", value="2N2222", footprint="SOT-23",
+        pins=(
+            Pin("B", "B", PinType.INPUT, net="RELAY_DRIVE1"),
+            Pin("C", "C", PinType.OUTPUT, net="RELAY_COIL1"),
+            Pin("E", "E", PinType.PASSIVE, net="GND"),
+        ),
+    )
+    r10 = Component(
+        ref="R10", value="1k", footprint="R_0603",
+        pins=(
+            Pin("1", "~", PinType.PASSIVE, net="GPIO_RELAY1"),
+            Pin("2", "~", PinType.PASSIVE, net="RELAY_DRIVE1"),
+        ),
+    )
+    d6 = Component(
+        ref="D6", value="1N4148", footprint="SOD-323",
+        pins=(
+            Pin("1", "K", PinType.PASSIVE, net="RELAY_COIL1"),
+            Pin("2", "A", PinType.PASSIVE, net="+5V"),
+        ),
+    )
+    # Unrelated component in the same feature group
+    c5 = Component(
+        ref="C5", value="100nF", footprint="C_0603",
+        pins=(
+            Pin("1", "~", PinType.PASSIVE, net="+5V"),
+            Pin("2", "~", PinType.PASSIVE, net="GND"),
+        ),
+    )
+    fb = FeatureBlock(
+        name="Relay Outputs",
+        description="Relay driver",
+        components=("K1", "Q1", "R10", "D6", "C5"),
+        nets=("RELAY_COIL1", "RELAY_DRIVE1", "GPIO_RELAY1"),
+        subcircuits=("relay_driver",),
+    )
+    nets = (
+        Net("RELAY_COIL1", (
+            NetConnection("K1", "1"),
+            NetConnection("Q1", "C"),
+            NetConnection("D6", "1"),
+        )),
+        Net("RELAY_DRIVE1", (
+            NetConnection("Q1", "B"),
+            NetConnection("R10", "2"),
+        )),
+        Net("GPIO_RELAY1", (NetConnection("R10", "1"),)),
+        Net("GND", (
+            NetConnection("K1", "2"),
+            NetConnection("Q1", "E"),
+            NetConnection("C5", "2"),
+        )),
+        Net("+5V", (
+            NetConnection("D6", "2"),
+            NetConnection("C5", "1"),
+        )),
+        Net("RELAY_COM1", (NetConnection("K1", "3"),)),
+        Net("RELAY_NO1", (NetConnection("K1", "4"),)),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="RelayTest"),
+        features=(fb,),
+        components=(k1, q1, r10, d6, c5),
+        nets=nets,
+    )
+    fp_sizes = {
+        "K1": (15.0, 10.0),
+        "Q1": (3.0, 3.0),
+        "R10": (1.6, 0.8),
+        "D6": (2.5, 1.2),
+        "C5": (1.6, 0.8),
+    }
+    result = place_groups_off_board(
+        footprints=(),
+        features=req.features,
+        requirements=req,
+        board_height_mm=56.0,
+        footprint_sizes=fp_sizes,
+    )
+    # All refs placed
+    assert {c.ref for c in req.components} <= set(result.positions.keys())
+
+    # Subcircuit cluster: K1, Q1, R10, D6 should be within 25mm of each other
+    cluster_refs = ["K1", "Q1", "R10", "D6"]
+    for i, r1 in enumerate(cluster_refs):
+        for r2 in cluster_refs[i + 1:]:
+            p1 = result.positions[r1]
+            p2 = result.positions[r2]
+            dist = ((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2) ** 0.5
+            assert dist < 25.0, (
+                f"{r1} and {r2} too far apart: {dist:.1f}mm "
+                f"(expected subcircuit clustering)"
+            )
+
+    # Pin-adjacent verification: D6 and Q1 both connect to K1 via RELAY_COIL1,
+    # so they should all be near K1 (within relay + standoff distance)
+    d6_pos = result.positions["D6"]
+    k1_pos = result.positions["K1"]
+    q1_pos = result.positions["Q1"]
+    dist_d6_k1 = ((d6_pos.x - k1_pos.x) ** 2 + (d6_pos.y - k1_pos.y) ** 2) ** 0.5
+    assert dist_d6_k1 < 20.0, (
+        f"D6 should be near K1 (within 20mm) but is {dist_d6_k1:.1f}mm away"
+    )
+    dist_q1_k1 = ((q1_pos.x - k1_pos.x) ** 2 + (q1_pos.y - k1_pos.y) ** 2) ** 0.5
+    assert dist_q1_k1 < 15.0, (
+        f"Q1 should be near K1 (within 15mm) but is {dist_q1_k1:.1f}mm away"
+    )
+
+    # R10 connects to Q1 via RELAY_DRIVE1 — should be closer to Q1 than to K1
+    r10_pos = result.positions["R10"]
+    dist_r10_q1 = ((r10_pos.x - q1_pos.x) ** 2 + (r10_pos.y - q1_pos.y) ** 2) ** 0.5
+    dist_r10_k1 = ((r10_pos.x - k1_pos.x) ** 2 + (r10_pos.y - k1_pos.y) ** 2) ** 0.5
+    assert dist_r10_q1 < dist_r10_k1, (
+        f"R10 should be closer to Q1 ({dist_r10_q1:.1f}mm) than K1 ({dist_r10_k1:.1f}mm) "
+        f"because R10 connects to Q1 via RELAY_DRIVE1"
+    )
+
+    # Rotation verification: at least some passives should have non-zero
+    # rotation (connected pad facing anchor)
+    passive_rotations = [result.rotations.get(r, 0.0) for r in ["R10", "D6"]]
+    assert any(rot != 0.0 for rot in passive_rotations), (
+        f"Expected non-zero rotation for pin-facing passives, got {passive_rotations}"
+    )
+
+    # No overlapping components (check centre-to-centre > min size)
+    all_refs_list = list(result.positions.keys())
+    for i, r1 in enumerate(all_refs_list):
+        for r2 in all_refs_list[i + 1:]:
+            p1 = result.positions[r1]
+            p2 = result.positions[r2]
+            w1, h1 = fp_sizes.get(r1, (5.0, 5.0))
+            w2, h2 = fp_sizes.get(r2, (5.0, 5.0))
+            # Account for rotation
+            rot1 = result.rotations.get(r1, 0.0)
+            rot2 = result.rotations.get(r2, 0.0)
+            if rot1 in (90.0, 270.0):
+                w1, h1 = h1, w1
+            if rot2 in (90.0, 270.0):
+                w2, h2 = h2, w2
+            dx = abs(p1.x - p2.x)
+            dy = abs(p1.y - p2.y)
+            min_dx = (w1 + w2) / 2.0 - 0.1  # small tolerance
+            min_dy = (h1 + h2) / 2.0 - 0.1
+            overlaps = dx < min_dx and dy < min_dy
+            assert not overlaps, (
+                f"{r1} and {r2} overlap: dx={dx:.1f} dy={dy:.1f} "
+                f"min_dx={min_dx:.1f} min_dy={min_dy:.1f}"
+            )

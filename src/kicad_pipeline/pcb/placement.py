@@ -816,6 +816,464 @@ _GROUP_PACKING_FACTOR: float = 2.5
 _GROUP_MARGIN_MM: float = 2.0
 
 
+_CLUSTER_GAP_MM: float = 1.5
+"""Horizontal gap between components within a subcircuit cluster."""
+
+_CLUSTER_ROW_GAP_MM: float = 4.0
+"""Vertical gap between subcircuit cluster rows within a group."""
+
+# Anchor priority by ref prefix — lower number = higher priority anchor
+_ANCHOR_PRIORITY: dict[str, int] = {
+    "K": 0,  # Relay
+    "U": 1,  # IC
+    "Q": 2,  # Transistor
+    "J": 3,  # Connector
+    "Y": 4,  # Crystal
+}
+
+_PASSIVE_STANDOFF_MM: float = 1.0
+"""Gap between anchor pad edge and passive pad edge."""
+
+_PASSIVE_STACK_GAP_MM: float = 0.5
+"""Gap between stacked passives assigned to the same anchor pin."""
+
+_ANCHOR_GAP_MM: float = 8.0
+"""Horizontal gap between anchor components in the group layout."""
+
+_OVERLAP_MAX_PASSES: int = 10
+"""Maximum nudge passes for overlap resolution."""
+
+
+def _ref_prefix(ref: str) -> str:
+    """Extract alphabetic prefix from a reference designator."""
+    return "".join(ch for ch in ref if ch.isalpha()).upper()
+
+
+def _is_anchor_ref(ref: str) -> bool:
+    """Return True if *ref* is an anchor component (K, U, Q, J, Y)."""
+    return _ref_prefix(ref) in _ANCHOR_PRIORITY
+
+
+def _anchor_priority(ref: str) -> int:
+    """Return anchor priority for *ref* (lower = higher priority)."""
+    return _ANCHOR_PRIORITY.get(_ref_prefix(ref), 99)
+
+
+def _classify_pin_side(
+    dx: float, dy: float, half_w: float, half_h: float,
+) -> str:
+    """Classify which side of a footprint a pad is on.
+
+    Uses normalized distance from center to determine left/right/top/bottom.
+
+    Args:
+        dx: Pad X offset from footprint center.
+        dy: Pad Y offset from footprint center.
+        half_w: Half the footprint width.
+        half_h: Half the footprint height.
+
+    Returns:
+        One of ``"left"``, ``"right"``, ``"top"``, ``"bottom"``.
+    """
+    # Avoid division by zero for point-like footprints
+    norm_x = abs(dx) / max(half_w, 0.01)
+    norm_y = abs(dy) / max(half_h, 0.01)
+
+    if norm_x >= norm_y:
+        return "right" if dx >= 0 else "left"
+    return "bottom" if dy >= 0 else "top"
+
+
+def _passive_rotation_for_side(
+    side: str, connected_pin: str,
+) -> float:
+    """Compute rotation for a 2-pin passive so connected pad faces anchor.
+
+    At rot=0 a 2-pin passive has pin 1 at (-w/2, 0) and pin 2 at (+w/2, 0).
+    We want the connected pin to face *toward* the anchor (inward).
+
+    Args:
+        side: Which side of the anchor the passive is placed on.
+        connected_pin: Which passive pin connects to the anchor (``"1"`` or ``"2"``).
+
+    Returns:
+        Rotation in degrees.
+    """
+    # Map: side → {pin: rotation} so connected pin faces inward.
+    # At rot=0: pin 1 at (-w/2, 0) faces left, pin 2 at (+w/2, 0) faces right.
+    # At rot=180: pin 1 at (+w/2, 0) faces right, pin 2 at (-w/2, 0) faces left.
+    # At rot=90: pin 1 at (0, -w/2) faces up, pin 2 at (0, +w/2) faces down.
+    # At rot=270: pin 1 at (0, +w/2) faces down, pin 2 at (0, -w/2) faces up.
+    rotation_table: dict[str, dict[str, float]] = {
+        "right": {"1": 0.0,   "2": 180.0},  # connected pin faces left (toward anchor)
+        "left":  {"1": 180.0, "2": 0.0},    # connected pin faces right (toward anchor)
+        "bottom": {"1": 90.0, "2": 270.0},  # connected pin faces up (toward anchor)
+        "top":    {"1": 270.0, "2": 90.0},   # connected pin faces down (toward anchor)
+    }
+    return rotation_table.get(side, {}).get(connected_pin, 0.0)
+
+
+def _resolve_overlaps(
+    layout: dict[str, tuple[float, float, float]],
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> None:
+    """Nudge overlapping components apart (AABB check, in-place).
+
+    Performs up to ``_OVERLAP_MAX_PASSES`` passes, nudging along the
+    smaller overlap axis each time.
+    """
+    refs = list(layout.keys())
+    for _ in range(_OVERLAP_MAX_PASSES):
+        moved = False
+        for i, r1 in enumerate(refs):
+            x1, y1, rot1 = layout[r1]
+            w1, h1 = footprint_sizes.get(r1, (5.0, 5.0))
+            if rot1 in (90.0, 270.0):
+                w1, h1 = h1, w1
+            for r2 in refs[i + 1:]:
+                x2, y2, rot2 = layout[r2]
+                w2, h2 = footprint_sizes.get(r2, (5.0, 5.0))
+                if rot2 in (90.0, 270.0):
+                    w2, h2 = h2, w2
+                min_dx = (w1 + w2) / 2.0 + 0.1
+                min_dy = (h1 + h2) / 2.0 + 0.1
+                dx = abs(x1 - x2)
+                dy = abs(y1 - y2)
+                if dx < min_dx and dy < min_dy:
+                    # Overlap — nudge along smaller overlap axis
+                    overlap_x = min_dx - dx
+                    overlap_y = min_dy - dy
+                    if overlap_x <= overlap_y:
+                        shift = overlap_x / 2.0 + 0.1
+                        if x1 <= x2:
+                            layout[r1] = (x1 - shift, y1, rot1)
+                            layout[r2] = (x2 + shift, y2, rot2)
+                        else:
+                            layout[r1] = (x1 + shift, y1, rot1)
+                            layout[r2] = (x2 - shift, y2, rot2)
+                    else:
+                        shift = overlap_y / 2.0 + 0.1
+                        if y1 <= y2:
+                            layout[r1] = (x1, y1 - shift, rot1)
+                            layout[r2] = (x2, y2 + shift, rot2)
+                        else:
+                            layout[r1] = (x1, y1 + shift, rot1)
+                            layout[r2] = (x2, y2 - shift, rot2)
+                    moved = True
+        if not moved:
+            break
+
+
+def _layout_group(
+    group_refs: list[str],
+    all_constraints: tuple[object, ...],
+    footprint_sizes: dict[str, tuple[float, float]],
+    requirements: ProjectRequirements,
+) -> dict[str, tuple[float, float, float]]:
+    """Lay out a feature group using pin-aware spatial placement.
+
+    Places each passive adjacent to the specific anchor pin it connects to,
+    rotated so connected pads face each other. Anchors are spaced apart with
+    secondary anchors (Q) placed pin-adjacent to the primaries they connect to.
+
+    Args:
+        group_refs: Component refs belonging to this group.
+        all_constraints: Full constraint list (used for subcircuit cluster
+            detection — ``_subcircuit_`` prefix GROUP constraints).
+        footprint_sizes: Mapping from ref to ``(width, height)`` in mm.
+        requirements: Full project requirements for net/pin connectivity.
+
+    Returns:
+        Mapping from ref to ``(relative_x, relative_y, rotation)``.
+    """
+    from kicad_pipeline.pcb.constraints import (
+        _build_pad_connectivity,
+        _get_component_pad_offsets,
+        _rotated_pad_offset,
+    )
+
+    group_ref_set = frozenset(group_refs)
+
+    # ------------------------------------------------------------------
+    # Step 1: Classify anchors vs passives
+    # ------------------------------------------------------------------
+    anchors: list[str] = []
+    passives: list[str] = []
+    for ref in group_refs:
+        if _is_anchor_ref(ref):
+            anchors.append(ref)
+        else:
+            passives.append(ref)
+
+    # Sort anchors by priority then ref for determinism
+    anchors.sort(key=lambda r: (_anchor_priority(r), r))
+
+    # ------------------------------------------------------------------
+    # Step 2: Build pin-level connectivity + cache pad offsets
+    # ------------------------------------------------------------------
+    pad_conn = _build_pad_connectivity(requirements)
+
+    pad_offsets_cache: dict[str, dict[str, tuple[float, float]] | None] = {}
+
+    def _cached_offsets(ref: str) -> dict[str, tuple[float, float]] | None:
+        if ref not in pad_offsets_cache:
+            pad_offsets_cache[ref] = _get_component_pad_offsets(ref, requirements)
+        return pad_offsets_cache[ref]
+
+    # ------------------------------------------------------------------
+    # Step 3: Assign each passive to an anchor + specific pin
+    # ------------------------------------------------------------------
+    @dataclass
+    class _PassiveAssignment:
+        passive_ref: str
+        passive_pin: str
+        anchor_ref: str
+        anchor_pin: str
+
+    assignments: list[_PassiveAssignment] = []
+    overflow: list[str] = []
+
+    for pref in passives:
+        best_anchor: str = ""
+        best_anchor_pin: str = ""
+        best_passive_pin: str = ""
+        best_priority: int = 999
+
+        # Check all pins of this passive for signal-net connections to anchors
+        comp = next((c for c in requirements.components if c.ref == pref), None)
+        if comp is None:
+            overflow.append(pref)
+            continue
+
+        for pin in comp.pins:
+            neighbours = pad_conn.get((pref, pin.number), [])
+            for nb_ref, nb_pin in neighbours:
+                if nb_ref not in group_ref_set or not _is_anchor_ref(nb_ref):
+                    continue
+                pri = _anchor_priority(nb_ref)
+                if pri < best_priority:
+                    best_priority = pri
+                    best_anchor = nb_ref
+                    best_anchor_pin = nb_pin
+                    best_passive_pin = pin.number
+
+        if best_anchor:
+            assignments.append(_PassiveAssignment(
+                passive_ref=pref,
+                passive_pin=best_passive_pin,
+                anchor_ref=best_anchor,
+                anchor_pin=best_anchor_pin,
+            ))
+        else:
+            # Check for indirect connection through other passives to anchors
+            found = False
+            for pin in comp.pins:
+                neighbours = pad_conn.get((pref, pin.number), [])
+                for nb_ref, _nb_pin in neighbours:
+                    if nb_ref in group_ref_set and not _is_anchor_ref(nb_ref):
+                        # This passive connects to another passive —
+                        # find which anchor the intermediary connects to
+                        nb_comp = next(
+                            (c for c in requirements.components if c.ref == nb_ref),
+                            None,
+                        )
+                        if nb_comp is None:
+                            continue
+                        for nb_p in nb_comp.pins:
+                            for nn_ref, nn_pin in pad_conn.get((nb_ref, nb_p.number), []):
+                                if nn_ref in group_ref_set and _is_anchor_ref(nn_ref):
+                                    pri = _anchor_priority(nn_ref)
+                                    if pri < best_priority:
+                                        best_priority = pri
+                                        best_anchor = nn_ref
+                                        best_anchor_pin = nn_pin
+                                        best_passive_pin = pin.number
+                                        found = True
+                    if found:
+                        break
+                if found:
+                    break
+            if best_anchor:
+                assignments.append(_PassiveAssignment(
+                    passive_ref=pref,
+                    passive_pin=best_passive_pin,
+                    anchor_ref=best_anchor,
+                    anchor_pin=best_anchor_pin,
+                ))
+            else:
+                overflow.append(pref)
+
+    # ------------------------------------------------------------------
+    # Step 4: Classify anchor pins into sides using pad geometry
+    # ------------------------------------------------------------------
+    anchor_pin_sides: dict[str, dict[str, str]] = {}  # anchor_ref → {pin: side}
+    for aref in anchors:
+        offsets = _cached_offsets(aref)
+        if offsets is None:
+            anchor_pin_sides[aref] = {}
+            continue
+        w, h = footprint_sizes.get(aref, (5.0, 5.0))
+        half_w, half_h = w / 2.0, h / 2.0
+        sides: dict[str, str] = {}
+        for pin_num, (dx, dy) in offsets.items():
+            sides[pin_num] = _classify_pin_side(dx, dy, half_w, half_h)
+        anchor_pin_sides[aref] = sides
+
+    # ------------------------------------------------------------------
+    # Step 5: Place anchors
+    # ------------------------------------------------------------------
+    layout: dict[str, tuple[float, float, float]] = {}
+
+    # Separate primary anchors (K, U, J) from secondary (Q)
+    primary_anchors = [a for a in anchors if _ref_prefix(a) in ("K", "U", "J", "Y")]
+    secondary_anchors = [a for a in anchors if _ref_prefix(a) not in ("K", "U", "J", "Y")]
+
+    # Place primaries in horizontal row
+    cursor_x = _GROUP_MARGIN_MM
+    anchor_y = _GROUP_MARGIN_MM
+    max_anchor_h = 0.0
+
+    for aref in primary_anchors:
+        w, h = footprint_sizes.get(aref, (5.0, 5.0))
+        layout[aref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
+        cursor_x += w + _ANCHOR_GAP_MM
+        max_anchor_h = max(max_anchor_h, h)
+
+    # Place secondary anchors (Q) near the primary they connect to
+    for sref in secondary_anchors:
+        connected_primary: str = ""
+        connected_primary_pin: str = ""
+        s_comp = next((c for c in requirements.components if c.ref == sref), None)
+        if s_comp is not None:
+            for pin in s_comp.pins:
+                for nb_ref, nb_pin in pad_conn.get((sref, pin.number), []):
+                    if nb_ref in primary_anchors:
+                        connected_primary = nb_ref
+                        connected_primary_pin = nb_pin
+                        break
+                if connected_primary:
+                    break
+
+        if connected_primary and connected_primary in layout:
+            # Place Q near the connected pin of the primary
+            prim_x, prim_y, _ = layout[connected_primary]
+            offsets = _cached_offsets(connected_primary)
+            sw, sh = footprint_sizes.get(sref, (3.0, 3.0))
+            pw, ph = footprint_sizes.get(connected_primary, (5.0, 5.0))
+
+            if offsets and connected_primary_pin in offsets:
+                pdx, pdy = offsets[connected_primary_pin]
+                side = _classify_pin_side(pdx, pdy, pw / 2.0, ph / 2.0)
+                if side == "right":
+                    sx = prim_x + pw / 2.0 + sw / 2.0 + _PASSIVE_STANDOFF_MM
+                    sy = prim_y + pdy
+                elif side == "left":
+                    sx = prim_x - pw / 2.0 - sw / 2.0 - _PASSIVE_STANDOFF_MM
+                    sy = prim_y + pdy
+                elif side == "bottom":
+                    sx = prim_x + pdx
+                    sy = prim_y + ph / 2.0 + sh / 2.0 + _PASSIVE_STANDOFF_MM
+                else:  # top
+                    sx = prim_x + pdx
+                    sy = prim_y - ph / 2.0 - sh / 2.0 - _PASSIVE_STANDOFF_MM
+                layout[sref] = (sx, sy, 0.0)
+            else:
+                # Fallback: place below primary
+                layout[sref] = (
+                    prim_x,
+                    prim_y + ph / 2.0 + sh / 2.0 + _PASSIVE_STANDOFF_MM,
+                    0.0,
+                )
+        else:
+            # Unconnected secondary — place at end of primary row
+            w, h = footprint_sizes.get(sref, (3.0, 3.0))
+            layout[sref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
+            cursor_x += w + _ANCHOR_GAP_MM
+
+    # ------------------------------------------------------------------
+    # Step 6: Place passives at anchor pins
+    # ------------------------------------------------------------------
+    # Group assignments by (anchor_ref, anchor_pin)
+    pin_assignments: dict[tuple[str, str], list[_PassiveAssignment]] = {}
+    for asn in assignments:
+        key = (asn.anchor_ref, asn.anchor_pin)
+        pin_assignments.setdefault(key, []).append(asn)
+
+    for (anchor_ref, anchor_pin), asn_list in pin_assignments.items():
+        if anchor_ref not in layout:
+            # Anchor not placed (shouldn't happen, but guard)
+            continue
+
+        anchor_x, anchor_y_pos, anchor_rot = layout[anchor_ref]
+        offsets = _cached_offsets(anchor_ref)
+        aw, ah = footprint_sizes.get(anchor_ref, (5.0, 5.0))
+
+        if offsets and anchor_pin in offsets:
+            pdx, pdy = offsets[anchor_pin]
+            rot_dx, rot_dy = _rotated_pad_offset(pdx, pdy, anchor_rot)
+            pad_abs_x = anchor_x + rot_dx
+            pad_abs_y = anchor_y_pos + rot_dy
+            side = anchor_pin_sides.get(anchor_ref, {}).get(anchor_pin, "right")
+        else:
+            # Fallback: place to the right
+            pad_abs_x = anchor_x + aw / 2.0
+            pad_abs_y = anchor_y_pos
+            side = "right"
+
+        # Place each passive outward from the pin, stacking if multiple
+        for stack_idx, asn in enumerate(asn_list):
+            pw, ph = footprint_sizes.get(asn.passive_ref, (1.6, 0.8))
+            rot = _passive_rotation_for_side(side, asn.passive_pin)
+
+            # Effective passive size after rotation
+            eff_w, eff_h = pw, ph
+            if rot in (90.0, 270.0):
+                eff_w, eff_h = ph, pw
+
+            stack_offset = stack_idx * (eff_w + _PASSIVE_STACK_GAP_MM)
+
+            if side == "right":
+                px = pad_abs_x + _PASSIVE_STANDOFF_MM + eff_w / 2.0 + stack_offset
+                py = pad_abs_y
+            elif side == "left":
+                px = pad_abs_x - _PASSIVE_STANDOFF_MM - eff_w / 2.0 - stack_offset
+                py = pad_abs_y
+            elif side == "bottom":
+                px = pad_abs_x
+                py = pad_abs_y + _PASSIVE_STANDOFF_MM + eff_h / 2.0 + stack_offset
+            else:  # top
+                px = pad_abs_x
+                py = pad_abs_y - _PASSIVE_STANDOFF_MM - eff_h / 2.0 - stack_offset
+
+            layout[asn.passive_ref] = (px, py, rot)
+
+    # ------------------------------------------------------------------
+    # Step 7: Resolve overlaps
+    # ------------------------------------------------------------------
+    _resolve_overlaps(layout, footprint_sizes)
+
+    # ------------------------------------------------------------------
+    # Step 8: Overflow row for unassigned passives
+    # ------------------------------------------------------------------
+    if overflow:
+        # Place below all existing layout
+        if layout:
+            max_y = max(
+                pos[1] + footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
+                for ref, pos in layout.items()
+            )
+        else:
+            max_y = _GROUP_MARGIN_MM
+        overflow_y = max_y + _CLUSTER_ROW_GAP_MM
+        overflow_x = _GROUP_MARGIN_MM
+        for ref in sorted(overflow):
+            w, h = footprint_sizes.get(ref, (5.0, 5.0))
+            layout[ref] = (overflow_x + w / 2.0, overflow_y + h / 2.0, 0.0)
+            overflow_x += w + _CLUSTER_GAP_MM
+
+    return layout
+
+
 def place_groups_off_board(
     footprints: tuple[object, ...],
     features: tuple[object, ...],
@@ -824,12 +1282,11 @@ def place_groups_off_board(
     footprint_sizes: dict[str, tuple[float, float]],
     fixed_positions: dict[str, tuple[float, float, float]] | None = None,
 ) -> LayoutResult:
-    """Place component groups off-board with topology-aware internal layout.
+    """Place component groups off-board with subcircuit-aware internal layout.
 
     Each FeatureBlock becomes a group placed below the board outline.
-    Within each group, the constraint solver arranges components optimally:
-    decoupling caps next to IC power pins, protection components next to
-    what they protect, etc.
+    Within each group, subcircuit clusters (relay drivers, NPN drivers, etc.)
+    are detected from constraints and laid out as tight horizontal rows.
 
     Args:
         footprints: All footprints in the design.
@@ -843,12 +1300,8 @@ def place_groups_off_board(
     Returns:
         :class:`LayoutResult` with all components placed below the board.
     """
-    from kicad_pipeline.models.pcb import PlacementConstraint, PlacementConstraintType
     from kicad_pipeline.models.requirements import FeatureBlock
-    from kicad_pipeline.pcb.constraints import (
-        constraints_from_requirements,
-        solve_placement,
-    )
+    from kicad_pipeline.pcb.constraints import constraints_from_requirements
 
     typed_features = tuple(f for f in features if isinstance(f, FeatureBlock))
 
@@ -871,8 +1324,7 @@ def place_groups_off_board(
                 rotations[ref] = frot
                 fixed_refs.add(ref)
 
-    # 3. Generate full constraints for topology analysis
-    # Use a None template since we're placing off-board
+    # 3. Generate full constraints for subcircuit cluster detection
     full_constraints = constraints_from_requirements(
         requirements, None, footprint_sizes,
     )
@@ -889,7 +1341,7 @@ def place_groups_off_board(
     for refs in groups.values():
         refs.sort()
 
-    # 5. For each group, run the constraint solver on a virtual mini-board
+    # 5. For each group, use subcircuit-aware layout
     group_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
     group_dimensions: dict[str, tuple[float, float]] = {}
 
@@ -897,104 +1349,21 @@ def place_groups_off_board(
         if not group_refs:
             continue
 
-        group_ref_set = frozenset(group_refs)
-
-        # Filter and adapt constraints for this group
-        filtered: list[PlacementConstraint] = []
-        for c in full_constraints:
-            if c.ref not in group_ref_set:
-                continue
-
-            if c.constraint_type == PlacementConstraintType.FIXED:
-                # Skip FIXED — we're off-board
-                continue
-            elif c.constraint_type == PlacementConstraintType.EDGE:
-                # Convert EDGE to GROUP (no board edge off-board)
-                filtered.append(PlacementConstraint(
-                    ref=c.ref,
-                    constraint_type=PlacementConstraintType.GROUP,
-                    group_name=group_name,
-                    priority=c.priority,
-                ))
-            elif c.constraint_type == PlacementConstraintType.NEAR:
-                if c.target_ref is not None and c.target_ref in group_ref_set:
-                    # Target is in same group — keep (topology magic)
-                    filtered.append(c)
-                else:
-                    # Target outside group — demote to GROUP
-                    filtered.append(PlacementConstraint(
-                        ref=c.ref,
-                        constraint_type=PlacementConstraintType.GROUP,
-                        group_name=group_name,
-                        priority=c.priority,
-                    ))
-            else:
-                # GROUP and AWAY_FROM — keep as-is
-                filtered.append(c)
-
-        # Estimate group area and create a mini-board
-        total_area = sum(
-            footprint_sizes.get(r, (5.0, 5.0))[0]
-            * footprint_sizes.get(r, (5.0, 5.0))[1]
-            for r in group_refs
+        layout = _layout_group(
+            group_refs, full_constraints, footprint_sizes, requirements,
         )
-        area = total_area * _GROUP_PACKING_FACTOR
-        side = max(math.sqrt(area), 15.0)
-        mini_w = side * 1.4  # slightly wider than tall
-        mini_h = side
-
-        # Create mini board outline
-        mini_board = BoardOutline(polygon=(
-            Point(x=0.0, y=0.0),
-            Point(x=mini_w, y=0.0),
-            Point(x=mini_w, y=mini_h),
-            Point(x=0.0, y=mini_h),
-            Point(x=0.0, y=0.0),
-        ))
-
-        # Filter footprint_sizes to this group
-        group_sizes = {r: footprint_sizes[r] for r in group_refs if r in footprint_sizes}
-        # Add defaults for any missing
-        for r in group_refs:
-            if r not in group_sizes:
-                group_sizes[r] = (5.0, 5.0)
-
-        # Run the constraint solver on the mini-board
-        result = solve_placement(
-            tuple(filtered), mini_board, group_sizes,
-            grid_mm=0.5, requirements=requirements,
-        )
-
-        # Store relative positions
-        layout: dict[str, tuple[float, float, float]] = {}
-        for ref in group_refs:
-            if ref in result.positions:
-                p = result.positions[ref]
-                rot = result.rotations.get(ref, 0.0)
-                layout[ref] = (p.x, p.y, rot)
-            else:
-                # Fallback: place sequentially
-                idx = group_refs.index(ref)
-                layout[ref] = (
-                    _GROUP_MARGIN_MM + (idx % 5) * 8.0,
-                    _GROUP_MARGIN_MM + (idx // 5) * 8.0,
-                    0.0,
-                )
-
         group_layouts[group_name] = layout
 
-        # Compute actual bounding box of placed components
+        # Compute bounding box
         if layout:
-            min_x = min(pos[0] for pos in layout.values())
-            max_x = max(
-                pos[0] + group_sizes.get(ref, (5.0, 5.0))[0]
-                for ref, pos in layout.items()
-            )
-            min_y = min(pos[1] for pos in layout.values())
-            max_y = max(
-                pos[1] + group_sizes.get(ref, (5.0, 5.0))[1]
-                for ref, pos in layout.items()
-            )
+            min_x = min(pos[0] - footprint_sizes.get(ref, (5.0, 5.0))[0] / 2.0
+                        for ref, pos in layout.items())
+            max_x = max(pos[0] + footprint_sizes.get(ref, (5.0, 5.0))[0] / 2.0
+                        for ref, pos in layout.items())
+            min_y = min(pos[1] - footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
+                        for ref, pos in layout.items())
+            max_y = max(pos[1] + footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
+                        for ref, pos in layout.items())
             group_dimensions[group_name] = (max_x - min_x + 4.0, max_y - min_y + 4.0)
         else:
             group_dimensions[group_name] = (20.0, 20.0)
