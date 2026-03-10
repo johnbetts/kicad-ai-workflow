@@ -249,18 +249,18 @@ def test_usbc_connector_attr_smd() -> None:
 
 
 def test_rj45() -> None:
-    """RJ45 produces 10 signal/LED pads + 4 mounting holes = 14 total pads."""
+    """RJ45 produces 8 signal + 4 LED + 2 shield + 2 NPTH = 16 total pads."""
     fp = make_rj45("J2")
-    assert len(fp.pads) == 14
+    assert len(fp.pads) == 16
 
 
 def test_rj45_mounting_pads_np_thru() -> None:
-    """RJ45 mounting holes are np_thru_hole type."""
+    """RJ45 NPTH mounting holes are np_thru_hole type."""
     fp = make_rj45("J2")
-    mp_pads = [p for p in fp.pads if p.number.startswith("MP")]
-    assert len(mp_pads) == 4
-    for pad in mp_pads:
-        assert pad.pad_type == "np_thru_hole"
+    np_pads = [p for p in fp.pads if p.pad_type == "np_thru_hole"]
+    assert len(np_pads) == 2
+    for pad in np_pads:
+        assert pad.number == ""
 
 
 # ---------------------------------------------------------------------------
@@ -305,9 +305,9 @@ def test_footprint_for_component_fallback() -> None:
 
 
 def test_footprint_for_component_rj45() -> None:
-    """'RJ45' footprint_id → RJ45 with 14 total pads."""
+    """'RJ45' footprint_id → RJ45 with 16 total pads (8 signal + 4 LED + 2 shield + 2 NPTH)."""
     fp = footprint_for_component("J2", "RJ45", "RJ45")
-    assert len(fp.pads) == 14
+    assert len(fp.pads) == 16
 
 
 def test_footprint_for_component_no_lcsc() -> None:

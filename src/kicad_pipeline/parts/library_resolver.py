@@ -55,9 +55,11 @@ _CDFER_FOOTPRINT_DIRS: tuple[Path, ...] = (
 
 # KiCad built-in library paths (macOS).
 _KICAD_BUILTIN_SYMBOLS: tuple[Path, ...] = (
+    Path("/Applications/KiCad 10/KiCad.app/Contents/SharedSupport/symbols"),
     Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"),
 )
 _KICAD_BUILTIN_FOOTPRINTS: tuple[Path, ...] = (
+    Path("/Applications/KiCad 10/KiCad.app/Contents/SharedSupport/footprints"),
     Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints"),
 )
 

@@ -691,6 +691,75 @@ def _make_antenna_keepout(
     )
 
 
+_RF_MODULE_BODY_WIDTH_MM: float = 18.0
+"""Width of the ESP32-S3-WROOM-1 module body in mm."""
+
+_RF_MODULE_BODY_HEIGHT_MM: float = 25.5
+"""Height of the ESP32-S3-WROOM-1 module body in mm."""
+
+
+def _make_rf_module_body_keepout(
+    rf_position: tuple[float, float, float],
+    layer_count: int = 2,
+    board_width: float = 150.0,
+    board_height: float = 80.0,
+) -> Keepout | None:
+    """Create an inner-layer keepout covering the RF module body.
+
+    Prevents ground/power pours on inner copper layers from degrading
+    WiFi/BT antenna performance. Only applies to In1.Cu and In2.Cu —
+    F.Cu and B.Cu are left alone because the module's castellated pads
+    need copper on the outer layers.
+
+    Args:
+        rf_position: ``(x, y, rotation_deg)`` of the RF module.
+        layer_count: Number of copper layers (needs ≥4 for inner layers).
+        board_width: Total board width in mm (for clamping).
+        board_height: Total board height in mm (for clamping).
+
+    Returns:
+        A :class:`Keepout` on inner layers, or ``None`` if < 4 layers.
+    """
+    if layer_count < 4:
+        return None
+
+    import math as _m
+
+    cx, cy, rot = rf_position
+    angle_rad = _m.radians(rot)
+    hw = _RF_MODULE_BODY_WIDTH_MM / 2.0
+    hh = _RF_MODULE_BODY_HEIGHT_MM / 2.0
+
+    # Module body corners in local coordinates (centered on module)
+    local_corners = [
+        (-hw, -hh),
+        ( hw, -hh),
+        ( hw,  hh),
+        (-hw,  hh),
+    ]
+
+    # Rotate and translate to board coordinates
+    cos_a = _m.cos(angle_rad)
+    sin_a = _m.sin(angle_rad)
+    polygon: list[Point] = []
+    for lx, ly in local_corners:
+        bx = cx + lx * cos_a - ly * sin_a
+        by = cy + lx * sin_a + ly * cos_a
+        # Clamp to board bounds
+        bx = max(0.0, min(bx, board_width))
+        by = max(0.0, min(by, board_height))
+        polygon.append(Point(x=bx, y=by))
+
+    return Keepout(
+        polygon=tuple(polygon),
+        layers=("In1.Cu", "In2.Cu"),
+        no_copper=True,
+        no_vias=False,
+        no_tracks=False,
+        uuid=_new_uuid(),
+    )
+
+
 def _has_rf_module(requirements: ProjectRequirements) -> bool:
     """Return True if any component value suggests an RF / WiFi module.
 
@@ -1008,6 +1077,7 @@ def build_pcb(
     preserve_ref_text: bool = True,
     preserve_routing: bool = True,
     pcb_file_path: str | Path | None = None,
+    skip_inner_zones: bool = False,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1280,6 +1350,18 @@ def build_pcb(
         )
         keepouts.append(antenna_ko)
 
+        # Inner-layer keepout under the full module body
+        if rf_pos is not None:
+            body_ko = _make_rf_module_body_keepout(
+                rf_pos,
+                layer_count=layer_count,
+                board_width=board_width_mm,
+                board_height=board_height_mm,
+            )
+            if body_ko is not None:
+                log.info("build_pcb: adding RF module body keepout on inner layers")
+                keepouts.append(body_ko)
+
     # Mounting-hole keepouts
     mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
     mount_radius = _KEEPOUT_MARGIN_MM
@@ -1376,7 +1458,7 @@ def build_pcb(
     # ------------------------------------------------------------------
     design_rules = DesignRules(layer_count=layer_count)
 
-    if layer_count >= 4:
+    if layer_count >= 4 and not skip_inner_zones:
         from kicad_pipeline.pcb.zones import make_gnd_pour, make_power_pour
 
         in1_gnd = make_gnd_pour(
@@ -1395,6 +1477,8 @@ def build_pcb(
             )
             zones.append(in2_5v)
             log.info("build_pcb: added In2.Cu +5V power plane zone")
+    elif skip_inner_zones:
+        log.info("build_pcb: skipping inner-layer zone generation (user-managed)")
 
     # ------------------------------------------------------------------
     # Step 7-8: Keepouts already created in step 4c (before placement)
@@ -1659,6 +1743,14 @@ def build_pcb(
             all_vias = all_vias + remapped_vias
             # User zones go after auto-generated zones
             zones.extend(remapped_zones)
+
+            # Preserve user keepout zones (exclusion zones, no-fill areas)
+            if preserved.keepouts:
+                log.info(
+                    "build_pcb: preserving %d user keepout zones",
+                    len(preserved.keepouts),
+                )
+                keepouts.extend(preserved.keepouts)
 
             # Preserve edge cuts (board slots/cutouts)
             # These are stored separately and emitted in the outline section
@@ -2083,6 +2175,8 @@ def _zone_sexp(zone: ZonePolygon) -> SExpNode:
     ]
     if zone.uuid:
         node.append(["uuid", zone.uuid])
+    if zone.priority > 0:
+        node.append(["priority", zone.priority])
     # KiCad 9: fill node needs "yes" marker when zone has fill data
     fill_node: list[SExpNode] = ["fill"]
     if zone.filled_polygons:

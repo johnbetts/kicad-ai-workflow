@@ -95,7 +95,8 @@ _GND_NETS: frozenset[str] = frozenset({"GND", "GNDD"})
 # ---------------------------------------------------------------------------
 
 _KICAD_POWER_LIB_PATHS: tuple[str, ...] = (
-    # macOS
+    # macOS (KiCad 10, 9, and legacy)
+    "/Applications/KiCad 10/KiCad.app/Contents/SharedSupport/symbols/power.kicad_sym",
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/power.kicad_sym",
     # Linux common locations
     "/usr/share/kicad/symbols/power.kicad_sym",

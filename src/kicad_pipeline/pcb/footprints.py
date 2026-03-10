@@ -133,7 +133,7 @@ _IC_DIMENSION_SUFFIXES: dict[str, str] = {
     "QFN-24": "_4x4mm_P0.5mm",
     "QFN-32": "_5x5mm_P0.5mm",
     "QFN-48": "_7x7mm_P0.5mm",
-    "SOP-4": "_4.4x3.6mm_P2.54mm",
+    "SOP-4": "_3.8x4.1mm_P2.54mm",
 }
 
 
@@ -167,6 +167,7 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
     upper = name.upper()
 
     # Pin headers / sockets — append _Vertical if no orientation suffix
+    # Pads are along Y-axis matching KiCad convention — no model rotation needed.
     if "PINHEADER" in upper or "PINSOCKET" in upper:
         if layer == LAYER_B_CU or "PINSOCKET" in upper:
             dir_name = "Connector_PinSocket_2.54mm.3dshapes"
@@ -194,19 +195,34 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
             return Footprint3DModel(path=path)
 
     # Terminal blocks — KiCad uses vendor-specific dirs (Phoenix MKDS series)
-    if "TERMINALBLOCK" in upper:
+    # Both our pads and the .step model use X-axis layout, pin 1 at origin.
+    if "TERMINALBLOCK" in upper or "MKDS" in upper:
         import re as _re
-        pin_match = _re.search(r"(\d+)P", name)
-        pin_count = int(pin_match.group(1)) if pin_match else 2
+        # Extract pin count from "1x06" or "1x02" pattern in lib_id
+        pin_count = 2  # default
+        nx_match = _re.search(r"1x(\d+)", lib_id)
+        if nx_match:
+            pin_count = int(nx_match.group(1))
+        # Extract pitch from "P5.08mm" pattern
+        pitch_match = _re.search(r"P([\d.]+)mm", lib_id)
+        pitch = float(pitch_match.group(1)) if pitch_match else 5.08
         model_name = (
-            f"TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-5.08"
-            f"_1x{pin_count:02d}_P5.08mm_Horizontal"
+            f"TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-{pitch:.2f}"
+            f"_1x{pin_count:02d}_P{pitch:.2f}mm_Horizontal"
         )
         path = (
             f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
             f"{model_name}.step"
         )
-        return Footprint3DModel(path=path)
+        # Rotate 180° so terminal openings face the board edge.
+        # The model origin is at pin 1, so 180° rotation around (0,0) moves
+        # the model off the pads. Offset by (N-1)*pitch in X to re-center.
+        offset_x = (pin_count - 1) * pitch
+        return Footprint3DModel(
+            path=path,
+            offset=(offset_x, 0.0, 0.0),
+            rotate=(0.0, 0.0, 180.0),
+        )
 
     # ESP32 / RF modules
     if "ESP32" in upper or "WROOM" in upper:
@@ -223,9 +239,29 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         )
         return Footprint3DModel(path=path)
 
-    # Tactile switches
+    # DIP switches — must check BEFORE generic SW_ match (SW_DIP contains "SPST")
+    # KiCad convention uses 90° Z rotation for DIP switch models
+    if upper.startswith("SW_DIP"):
+        import re as _re_dip
+        sw_count_m = _re_dip.search(r"SPSTx(\d+)", name, _re_dip.IGNORECASE)
+        sw_count = sw_count_m.group(1) if sw_count_m else "01"
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/"
+            f"SW_DIP_SPSTx{sw_count}_Slide_9.78x4.72mm_W7.62mm_P2.54mm.step"
+        )
+        return Footprint3DModel(path=path, rotate=(0.0, 0.0, 90.0))
+
+    # Tactile switches — SMD vs THT
+    # Check full lib_id (not just name) for SMD indicator
+    lib_upper = lib_id.upper()
     if upper.startswith("SW_PUSH") or (upper.startswith("SW_") and "SPST" in upper):
-        path = f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
+        if "SMD" in lib_upper or "SMD" in upper:
+            path = (
+                f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/"
+                "SW_SPST_EVQPE1.step"
+            )
+        else:
+            path = f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
         return Footprint3DModel(path=path)
 
     # RJ45 — use best-match Amphenol model (KiCad ships RJHSE538X)
@@ -247,14 +283,6 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
     # DIP packages (optocouplers, etc.)
     if upper.startswith("DIP-"):
         path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
-        return Footprint3DModel(path=path)
-
-    # DIP switches
-    if upper.startswith("SW_DIP"):
-        path = (
-            f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/"
-            f"SW_DIP_SPSTx{name.split('x')[-1]}_Slide_9.78x4.72mm_W7.62mm_P2.54mm.step"
-        )
         return Footprint3DModel(path=path)
 
     # WS2812B addressable LEDs (size-aware)
@@ -362,35 +390,36 @@ _SMD_RC_DIMS: dict[str, tuple[float, float, float, float, float]] = {
     "1210": (1.5, 2.5, 3.2, 3.2, 2.5),
 }
 
-# SOT-23 variants: (pad_w, pad_h, row_pitch, col_pitch, pin_count, pin_coords)
+# SOT-23 variants: (pad_w, pad_h, pin_coords)
+# Dimensions from KiCad official footprints (IPC-compliant).
 # pin_coords: list of (x, y) relative to footprint origin
 _SOT23_VARIANTS: dict[str, tuple[float, float, list[tuple[float, float]]]] = {
     "SOT-23": (
-        0.9,
-        1.3,
-        [(-0.95, 1.0), (0.95, 1.0), (0.0, -1.0)],
+        1.475,
+        0.6,
+        [(-0.9375, -0.95), (-0.9375, 0.95), (0.9375, 0.0)],
     ),
     "SOT-23-5": (
+        1.325,
         0.6,
-        1.0,
         [
-            (-1.5, -0.95),
-            (-1.5, 0.0),
-            (-1.5, 0.95),
-            (1.5, 0.475),
-            (1.5, -0.475),
+            (-1.1375, -0.95),
+            (-1.1375, 0.0),
+            (-1.1375, 0.95),
+            (1.1375, 0.95),
+            (1.1375, -0.95),
         ],
     ),
     "SOT-23-6": (
+        1.325,
         0.6,
-        1.0,
         [
-            (-1.5, -0.95),
-            (-1.5, 0.0),
-            (-1.5, 0.95),
-            (1.5, 0.95),
-            (1.5, 0.0),
-            (1.5, -0.95),
+            (-1.1375, -0.95),
+            (-1.1375, 0.0),
+            (-1.1375, 0.95),
+            (1.1375, 0.95),
+            (1.1375, 0.0),
+            (1.1375, -0.95),
         ],
     ),
 }
@@ -407,11 +436,44 @@ _USBC_PADS: list[tuple[float, float, float, float, str]] = [
     (1.0, 2.5, 0.6, 1.6, "D+"),      # D+
 ]
 
-# RJ45 pin row Y positions (signal pins)
-_RJ45_SIGNAL_PITCH_MM: float = 1.27
+# RJ45 HR911105A pin geometry (from KiCad official footprint)
+# Signal pins are staggered: odd pins (1,3,5,7) at y=0, even pins (2,4,6,8) at y=-2.54
 _RJ45_SIGNAL_COUNT: int = 8
-_RJ45_DRILL_MM: float = 1.2
-_RJ45_PAD_DIAM_MM: float = 2.0
+_RJ45_SIGNAL_DRILL_MM: float = 0.89
+_RJ45_SIGNAL_PAD_MM: float = 1.5
+# Positions from official KiCad RJHSE538X footprint — 1.016mm pitch zigzag
+_RJ45_SIGNAL_POSITIONS: tuple[tuple[float, float], ...] = (
+    (0.0, 0.0),        # pin 1 (front row)
+    (1.016, 1.78),     # pin 2 (back row)
+    (2.032, 0.0),      # pin 3 (front row)
+    (3.048, 1.78),     # pin 4 (back row)
+    (4.064, 0.0),      # pin 5 (front row)
+    (5.08, 1.78),      # pin 6 (back row)
+    (6.096, 0.0),      # pin 7 (front row)
+    (7.112, 1.78),     # pin 8 (back row)
+)
+# LED pins 9-12 (from official KiCad RJHSE538X footprint)
+_RJ45_LED_DRILL_MM: float = 0.89
+_RJ45_LED_PAD_MM: float = 1.5
+_RJ45_LED_POSITIONS: tuple[tuple[float, float], ...] = (
+    (-3.3, 6.6),       # pin 9
+    (-1.01, 6.6),      # pin 10
+    (8.13, 6.6),       # pin 11
+    (10.42, 6.6),      # pin 12
+)
+# Shield pads (from official KiCad RJHSE538X footprint)
+_RJ45_SHIELD_DRILL_MM: float = 1.57
+_RJ45_SHIELD_PAD_MM: float = 2.3
+_RJ45_SHIELD_POSITIONS: tuple[tuple[float, float], ...] = (
+    (-4.57, 0.89),
+    (11.69, 0.89),
+)
+# NPTH mounting holes (from official KiCad RJHSE538X footprint)
+_RJ45_NPTH_DIAM_MM: float = 3.25
+_RJ45_NPTH_POSITIONS: tuple[tuple[float, float], ...] = (
+    (-2.79, -2.54),
+    (9.91, -2.54),
+)
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -490,16 +552,23 @@ def _courtyard_rect(
     body_h: float,
     clearance: float = PCB_COURTYARD_CLEARANCE_MM,
     layer: str = LAYER_F_COURTYARD,
+    cx: float = 0.0,
+    cy: float = 0.0,
 ) -> tuple[FootprintLine, ...]:
-    """Build a rectangular courtyard from body dimensions + clearance."""
+    """Build a rectangular courtyard from body dimensions + clearance.
+
+    Args:
+        cx: X center offset (default 0.0).
+        cy: Y center offset (default 0.0).
+    """
     hw = body_w / 2.0 + clearance
     hh = body_h / 2.0 + clearance
     w = PCB_SILKSCREEN_LINE_WIDTH_MM
     return (
-        FootprintLine(start=Point(-hw, -hh), end=Point(hw, -hh), layer=layer, width=w),
-        FootprintLine(start=Point(hw, -hh), end=Point(hw, hh), layer=layer, width=w),
-        FootprintLine(start=Point(hw, hh), end=Point(-hw, hh), layer=layer, width=w),
-        FootprintLine(start=Point(-hw, hh), end=Point(-hw, -hh), layer=layer, width=w),
+        FootprintLine(start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh), layer=layer, width=w),
+        FootprintLine(start=Point(cx + hw, cy - hh), end=Point(cx + hw, cy + hh), layer=layer, width=w),
+        FootprintLine(start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh), layer=layer, width=w),
+        FootprintLine(start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh), layer=layer, width=w),
     )
 
 
@@ -837,46 +906,55 @@ def make_tact_switch(
 def make_smd_tact_switch(
     ref: str,
     value: str,
-    width_mm: float = 3.0,
-    height_mm: float = 2.5,
+    width_mm: float = 5.1,
+    height_mm: float = 5.1,
 ) -> Footprint:
-    """SMD tactile push-button switch (2-pad).
+    """SMD tactile push-button switch (XKB TS-1187A style, 4-pad).
 
-    Common sizes: 3.0x2.5mm, 3.0x3.5mm, 4.0x2.8mm.
-    Two SMD pads, one on each side of the body.
+    Matches XKB TS-1187A-B-A-B (LCSC C318884) footprint layout:
+    4 pads (two per terminal), body 5.1×5.1mm.
+    Pin 1 pads at left-top and right-top, pin 2 pads at left-bottom
+    and right-bottom (internally shorted per side).
 
     Args:
         ref: Reference designator (e.g. "SW1").
         value: Component value string.
-        width_mm: Body width in mm.
-        height_mm: Body height in mm.
+        width_mm: Body width in mm (default 5.1).
+        height_mm: Body height in mm (default 5.1).
 
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    # Pads centred on each side, slightly outside body edge
-    pad_w = 1.0
-    pad_h = height_mm * 0.6
-    half_x = width_mm / 2.0 + pad_w * 0.1
+    # XKB TS-1187A dimensions from datasheet:
+    # Body: 5.1×5.1mm, pad size: 1.5×3.0mm
+    # Pad centers: horizontal span 7.0mm (±3.5), vertical span 5.0mm (±2.5)
+    pad_size_x = 1.5
+    pad_size_y = 3.0
+    pad_x = 3.5   # horizontal center-to-center / 2
+    pad_y = 2.5   # vertical center-to-center / 2
 
+    # 4 pads: two "1" pads (left+right, top row), two "2" pads (left+right, bottom)
     pads = (
-        _smd_pad("1", -half_x, 0.0, pad_w, pad_h, LAYER_F_CU),
-        _smd_pad("2", half_x, 0.0, pad_w, pad_h, LAYER_F_CU),
+        _smd_pad("1", -pad_x, -pad_y, pad_size_x, pad_size_y, LAYER_F_CU),
+        _smd_pad("1", pad_x, -pad_y, pad_size_x, pad_size_y, LAYER_F_CU),
+        _smd_pad("2", -pad_x, pad_y, pad_size_x, pad_size_y, LAYER_F_CU),
+        _smd_pad("2", pad_x, pad_y, pad_size_x, pad_size_y, LAYER_F_CU),
     )
-    court_w = width_mm + pad_w + 1.0
-    court_h = height_mm + 1.0
+    court_w = pad_x * 2 + pad_size_x + 0.5
+    court_h = pad_y * 2 + pad_size_y + 0.5
     graphics = _courtyard_rect(court_w, court_h)
     texts = (
         _ref_text(ref, -(court_h / 2.0 + 0.5), LAYER_F_SILKSCREEN),
         _val_text(value, court_h / 2.0 + 0.5, LAYER_F_FAB),
     )
-    lib_id = f"Button_Switch_SMD:SW_Push_{width_mm}x{height_mm}mm"
-    model = _model_for_package(lib_id)
-    models = (model,) if model is not None else ()
+    lib_id = "Button_Switch_SMD:SW_SPST_TL3305A"
+    model = Footprint3DModel(
+        path=f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step",
+    )
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
-        attr="smd", models=models,
+        attr="smd", models=(model,),
     )
 
 
@@ -887,8 +965,8 @@ def make_relay_spdt(
     """SPDT relay footprint (e.g. SRD-05VDC-SL-C, Songle SRD series).
 
     Pad positions match KiCad's official ``Relay_SPDT_SANYOU_SRD_Series_Form_C``
-    footprint with origin at pin 1.  5 pins: COIL+ (1), COIL- (2), COM (3),
-    NO (4), NC (5).
+    footprint with origin at pin 1.  5 pins: COM (1), Coil- (2), NO (3),
+    NC (4), Coil+ (5).  Pins 1/3/4 = 3mm pads (contacts), pins 2/5 = 2.5mm (coil).
 
     Args:
         ref: Reference designator (e.g. "K1").
@@ -898,13 +976,13 @@ def make_relay_spdt(
         Fully constructed :class:`Footprint`.
     """
     # Pad positions from KiCad's official footprint (origin at pin 1)
-    # Pins 1,3,4 = 3mm pad / 1.3mm drill; Pins 2,5 = 2.5mm pad / 1.0mm drill
+    # Pins 1,3,4 = 3mm pad / 1.3mm drill (contacts); Pins 2,5 = 2.5mm pad / 1.0mm drill (coil)
     pads = (
-        _thru_pad("1", 0.0, 0.0, 3.0, 1.3),         # COIL+
-        _thru_pad("2", 1.95, 6.05, 2.5, 1.0),        # COIL-
-        _thru_pad("3", 14.15, 6.05, 3.0, 1.3),       # COM
-        _thru_pad("4", 14.2, -6.0, 3.0, 1.3),        # NO
-        _thru_pad("5", 1.95, -5.95, 2.5, 1.0),       # NC
+        _thru_pad("1", 0.0, 0.0, 3.0, 1.3),         # COM (switching arm)
+        _thru_pad("2", 1.95, 6.05, 2.5, 1.0),        # Coil-
+        _thru_pad("3", 14.15, 6.05, 3.0, 1.3),       # NO (normally open)
+        _thru_pad("4", 14.2, -6.0, 3.0, 1.3),        # NC (normally closed)
+        _thru_pad("5", 1.95, -5.95, 2.5, 1.0),       # Coil+
     )
     # Body outline: -1.4 to 18.4 in X, -7.8 to 7.8 in Y
     body_w = 19.8  # 18.4 - (-1.4)
@@ -1343,14 +1421,15 @@ def make_pin_header_socket(
     cols = pin_count // max(rows, 1)
     row_pitch = pitch_mm if rows > 1 else 0.0
 
+    # KiCad convention: pin 1 at origin (0,0), rows along X-axis, cols along Y-axis
     pads: list[Pad] = []
     pin_num = 1
     for col in range(cols):
         for row in range(rows):
-            x = col * pitch_mm - (cols - 1) * pitch_mm / 2.0
-            y = row * row_pitch - (rows - 1) * row_pitch / 2.0
+            x = row * row_pitch
+            y = col * pitch_mm
             if row_swap:
-                y = -y  # swap row direction
+                x = -x
             pads.append(_thru_pad(str(pin_num), x, y, pad_diam, drill_mm))
             pin_num += 1
 
@@ -1359,12 +1438,20 @@ def make_pin_header_socket(
     fab_layer = LAYER_B_FAB if is_back else LAYER_F_FAB
     crtyd_layer = LAYER_B_COURTYARD if is_back else LAYER_F_COURTYARD
 
-    body_w = (cols - 1) * pitch_mm + pad_diam + 1.5
-    body_h = (rows - 1) * row_pitch + pad_diam + 1.5
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, layer=crtyd_layer),)
+    span_x = (rows - 1) * row_pitch
+    span_y = (cols - 1) * pitch_mm
+    cx = span_x / 2.0  # center of pad span in X
+    cy = span_y / 2.0  # center of pad span in Y
+    body_w = span_x + pad_diam + 1.5
+    body_h = span_y + pad_diam + 1.5
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy),)
+    ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)
+    val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), silk_layer),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, fab_layer),
+        FootprintText(text_type="reference", text=ref,
+                      position=Point(cx, ref_y), layer=silk_layer, effects_size=1.0),
+        FootprintText(text_type="value", text=value,
+                      position=Point(cx, val_y), layer=fab_layer, effects_size=1.0),
     )
     if not lib_id:
         if is_back:
@@ -1426,24 +1513,35 @@ def make_terminal_block(
     drill_mm = 1.3
     pad_diam = 2.5
 
+    # Pin 1 at origin, extending right — matches KiCad MKDS convention
     pads = tuple(
         _thru_pad(
             str(i + 1),
-            i * pitch_mm - (pin_count - 1) * pitch_mm / 2.0,
+            i * pitch_mm,
             0.0,
             pad_diam,
             drill_mm,
         )
         for i in range(pin_count)
     )
-    body_w = (pin_count - 1) * pitch_mm + pad_diam + 4.0
+    span = (pin_count - 1) * pitch_mm
+    body_w = span + pad_diam + 4.0
     body_h = pad_diam + 6.0
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    # Center courtyard on the pad span
+    cx = span / 2.0
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx),)
+    ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)
+    val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        FootprintText(text_type="reference", text=ref,
+                      position=Point(cx, ref_y), layer=LAYER_F_SILKSCREEN, effects_size=1.0),
+        FootprintText(text_type="value", text=value,
+                      position=Point(cx, val_y), layer=LAYER_F_FAB, effects_size=1.0),
     )
-    lib_id = f"Connector_TerminalBlock:TerminalBlock_{pin_count}P_P{pitch_mm:.2f}mm"
+    lib_id = (
+        f"TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-"
+        f"{pitch_mm:.2f}_1x{pin_count:02d}_P{pitch_mm:.2f}mm_Horizontal"
+    )
 
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
@@ -1487,24 +1585,34 @@ def make_dip_switch(
     half = pin_count // 2
     row_pitch = 7.62  # standard DIP row spacing
 
+    # KiCad convention: pin 1 at origin, pin N+1 at (row_pitch, 0) for x01
+    # Multi-position: left column pins 1..half going down, right column bottom-to-top
     pads: list[Pad] = []
-    # Left column pins 1..half top-to-bottom
     for i in range(half):
-        y = i * pitch_mm - (half - 1) * pitch_mm / 2.0
-        pads.append(_thru_pad(str(i + 1), -row_pitch / 2.0, y, pad_diam, drill_mm))
-    # Right column pins half+1..pin_count bottom-to-top
+        y = i * pitch_mm
+        pads.append(_thru_pad(str(i + 1), 0.0, y, pad_diam, drill_mm))
     for i in range(half):
-        y = (half - 1 - i) * pitch_mm - (half - 1) * pitch_mm / 2.0
-        pads.append(_thru_pad(str(half + i + 1), row_pitch / 2.0, y, pad_diam, drill_mm))
+        y = (half - 1 - i) * pitch_mm
+        pads.append(_thru_pad(str(half + i + 1), row_pitch, y, pad_diam, drill_mm))
 
+    span_y = (half - 1) * pitch_mm
+    cx = row_pitch / 2.0
+    cy = span_y / 2.0
     body_w = row_pitch + pad_diam + 0.5
-    body_h = (half - 1) * pitch_mm + pad_diam + 0.5
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    body_h = span_y + pad_diam + 0.5
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        FootprintText(text_type="reference", text=ref,
+                      position=Point(cx, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)),
+                      layer=LAYER_F_SILKSCREEN, effects_size=1.0),
+        FootprintText(text_type="value", text=value,
+                      position=Point(cx, cy + body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5),
+                      layer=LAYER_F_FAB, effects_size=1.0),
     )
-    lib_id = f"Button_Switch_DIP:SW_DIP_x{half:02d}"
+    lib_id = (
+        f"Button_Switch_THT:SW_DIP_SPSTx{half:02d}_Slide_"
+        f"9.78x4.72mm_W{row_pitch:.2f}mm_P{pitch_mm:.2f}mm"
+    )
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
 
@@ -1566,10 +1674,11 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
 
 
 def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
-    """RJ45 with integrated magnetics footprint (through-hole).
+    """RJ45 with integrated magnetics footprint (Hanrun HR911105A, through-hole).
 
-    8 signal pins in a row + 2 LED indicator pins + 4 mounting holes.
-    Signal pin pitch is 1.27 mm.
+    8 signal pins in staggered zigzag (odd at y=0, even at y=-2.54),
+    4 LED pins, 2 shield pads, and 2 NPTH mounting holes.
+    Pad/drill sizes match the official KiCad HR911105A footprint.
 
     Args:
         ref: Reference designator (e.g. "J2").
@@ -1580,44 +1689,48 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     """
     _log.debug("make_rj45 ref=%s", ref)
     pads: list[Pad] = []
-    start_x = -(_RJ45_SIGNAL_COUNT - 1) * _RJ45_SIGNAL_PITCH_MM / 2.0
 
-    # 8 signal pins
-    for i in range(_RJ45_SIGNAL_COUNT):
-        x = start_x + i * _RJ45_SIGNAL_PITCH_MM
-        pads.append(_thru_pad(str(i + 1), x, 0.0, _RJ45_PAD_DIAM_MM, _RJ45_DRILL_MM))
+    # 8 signal pins — staggered zigzag layout
+    for i, (x, y) in enumerate(_RJ45_SIGNAL_POSITIONS):
+        shape = "roundrect" if i == 0 else "circle"
+        pads.append(
+            _thru_pad(str(i + 1), x, y, _RJ45_SIGNAL_PAD_MM, _RJ45_SIGNAL_DRILL_MM, shape=shape)
+        )
 
-    # 2 LED pins offset to the right
-    led_x_base = start_x + (_RJ45_SIGNAL_COUNT) * _RJ45_SIGNAL_PITCH_MM + 1.0
-    pads.append(_thru_pad("9", led_x_base, 0.0, _RJ45_PAD_DIAM_MM, _RJ45_DRILL_MM))
-    pads.append(
-        _thru_pad("10", led_x_base + _RJ45_SIGNAL_PITCH_MM, 0.0, _RJ45_PAD_DIAM_MM, _RJ45_DRILL_MM)
-    )
+    # 4 LED pins
+    for i, (x, y) in enumerate(_RJ45_LED_POSITIONS):
+        pads.append(_thru_pad(str(9 + i), x, y, _RJ45_LED_PAD_MM, _RJ45_LED_DRILL_MM))
 
-    # 4 mounting holes (np_thru_hole, no copper)
-    mh_positions = [(-7.0, -4.5), (7.0, -4.5), (-7.0, 4.5), (7.0, 4.5)]
-    for j, (mx, my) in enumerate(mh_positions):
+    # 2 shield pads
+    for x, y in _RJ45_SHIELD_POSITIONS:
+        pads.append(_thru_pad("SH", x, y, _RJ45_SHIELD_PAD_MM, _RJ45_SHIELD_DRILL_MM))
+
+    # 2 NPTH mounting holes (no copper)
+    for mx, my in _RJ45_NPTH_POSITIONS:
         pads.append(
             Pad(
-                number=f"MP{j + 1}",
+                number="",
                 pad_type="np_thru_hole",
                 shape="circle",
                 position=Point(mx, my),
-                size_x=3.2,
-                size_y=3.2,
+                size_x=_RJ45_NPTH_DIAM_MM,
+                size_y=_RJ45_NPTH_DIAM_MM,
                 layers=(LAYER_F_CU, LAYER_B_CU),
-                drill_diameter=3.2,
+                drill_diameter=_RJ45_NPTH_DIAM_MM,
             )
         )
 
-    body_w = 16.0
-    body_h = 13.5
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    # Courtyard matches official KiCad RJHSE538X: (-6.22, -8.5) to (13.34, 8.25)
+    cx = 3.56   # (13.34 + -6.22) / 2
+    cy = -0.125  # (8.25 + -8.5) / 2
+    body_w = 19.56  # 13.34 - -6.22
+    body_h = 16.75  # 8.25 - -8.5
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
+        _val_text(value, cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_FAB),
     )
-    lib_id = "Connector_RJ:RJ45_Amphenol_54602-x08_Horizontal"
+    lib_id = "Connector_RJ:RJ45_Amphenol_RJHSE538X"
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
     return Footprint(
@@ -2125,7 +2238,11 @@ def footprint_for_component(
             pin_count = 8
         pitch = _parse_pitch(fid)
         if pitch > 2.0:
-            pitch = 0.5  # IC packages have fine pitch
+            # Default pitch by package family: SOP/SOIC = 1.27mm, others = 0.5mm
+            if upper.startswith(("SOP", "SOIC")):
+                pitch = 1.27
+            else:
+                pitch = 0.5
         fp = make_generic_smd_ic(ref, value, pin_count, pitch, lib_id=fid)
 
     # Fallback
@@ -2317,9 +2434,9 @@ def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
     if upper.startswith(("USB-C", "USB_C")):
         return (9.5, 8.0)
 
-    # RJ45
+    # RJ45 (HR911105A: ~16.5mm wide, ~22mm deep)
     if upper.startswith("RJ45"):
-        return (16.5, 14.0)
+        return (17.0, 23.0)
 
     # Pin headers/sockets/connectors (Conn_01x02, Conn_02x20_Stacking, etc.)
     if upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):

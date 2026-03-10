@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kicad_pipeline.models.pcb import Point, Track, Via, ZonePolygon, ZoneFill
+from kicad_pipeline.models.pcb import Keepout, Point, Track, Via, ZonePolygon, ZoneFill
 from kicad_pipeline.sexp.parser import parse_file
 
 if TYPE_CHECKING:
@@ -28,8 +28,9 @@ class PreservedRouting:
     tracks: tuple[Track, ...]
     vias: tuple[Via, ...]
     zones: tuple[ZonePolygon, ...]
-    edge_cuts: tuple[tuple[Point, Point, float], ...]  # (start, end, width) segments
-    net_map: dict[int, str]  # old_net_number → net_name (for remapping)
+    keepouts: tuple["Keepout", ...] = ()
+    edge_cuts: tuple[tuple[Point, Point, float], ...] = ()  # (start, end, width) segments
+    net_map: dict[int, str] | None = None  # old_net_number → net_name (for remapping)
 
 
 def _extract_ref(fp_node: SExpNode) -> str | None:
@@ -419,16 +420,16 @@ def _is_auto_generated_zone(node: SExpNode) -> bool:
 
     Detection methods:
     1. ``(name "...")`` matching known pipeline patterns (if present)
-    2. ``(keepout ...)`` marker — keepouts are always regenerated
-    3. Full-board GND pours and power planes identified by net+layer combo
+    2. Full-board GND pours and power planes identified by net+layer combo
        (KiCad may strip the name tag on save)
+
+    Note: keepout zones are NOT filtered — user-created keepouts (exclusion
+    zones, no-fill areas) must be preserved.  Only pipeline-generated keepouts
+    (mounting holes, antenna) are identified by their ``tag`` attribute during
+    generation, not here.
     """
     if not isinstance(node, list):
         return False
-    # Check for keepout marker — keepouts are always regenerated
-    for child in node:
-        if isinstance(child, list) and child and child[0] == "keepout":
-            return True
     # Check zone name against known auto-generated patterns
     name = _str_val(node, "name")
     auto_names = {
@@ -474,6 +475,12 @@ def _extract_user_zones(
             continue
         if _is_auto_generated_zone(node):
             continue
+        # Skip keepout zones — they're extracted separately with multi-layer support
+        is_keepout = any(
+            isinstance(c, list) and c and c[0] == "keepout" for c in node
+        )
+        if is_keepout:
+            continue
         net_num, net_name = _net_info(node, name_to_num)
         layer = _str_val(node, "layer")
         name = _str_val(node, "name")
@@ -501,6 +508,7 @@ def _extract_user_zones(
         if connect_pads:
             clearance = _float_val(connect_pads, "clearance")
         min_thickness = _float_val(node, "min_thickness") or 0.25
+        priority = int(_float_val(node, "priority") or 0)
         # Extract filled_polygon data
         filled_polys: list[tuple[Point, ...]] = []
         for child in node:
@@ -523,10 +531,71 @@ def _extract_user_zones(
                 thermal_relief_gap=thermal_gap,
                 thermal_relief_bridge=thermal_bridge,
                 clearance_mm=clearance,
+                priority=priority,
                 filled_polygons=tuple(filled_polys),
                 uuid=uuid,
             ))
     return zones
+
+
+def _extract_user_keepouts(tree: SExpNode) -> list[Keepout]:
+    """Extract user-created keepout zones with full multi-layer support."""
+    keepouts: list[Keepout] = []
+    if not isinstance(tree, list):
+        return keepouts
+    for node in tree:
+        if not isinstance(node, list) or not node or node[0] != "zone":
+            continue
+        # Only process keepout zones
+        keepout_node = None
+        for child in node:
+            if isinstance(child, list) and child and child[0] == "keepout":
+                keepout_node = child
+                break
+        if keepout_node is None:
+            continue
+        # Extract layers (multi-layer keepouts use "layers" not "layer")
+        layers: list[str] = []
+        for child in node:
+            if isinstance(child, list) and child:
+                if child[0] == "layers":
+                    layers.extend(str(v) for v in child[1:] if isinstance(v, str))
+                elif child[0] == "layer":
+                    layers.append(str(child[1]))
+        uuid = _str_val(node, "uuid")
+        # Extract polygon
+        polygon_node = _find_child(node, "polygon")
+        points: list[Point] = []
+        if polygon_node:
+            pts_node = _find_child(polygon_node, "pts")
+            if pts_node and isinstance(pts_node, list):
+                for child in pts_node[1:]:
+                    if isinstance(child, list) and child and child[0] == "xy":
+                        points.append(Point(
+                            float(str(child[1])), float(str(child[2])),
+                        ))
+        # Extract keepout rules
+        no_copper = False
+        no_tracks = False
+        no_vias = False
+        for child in keepout_node:
+            if isinstance(child, list) and len(child) == 2:
+                if child[0] == "copperpour" and child[1] == "not_allowed":
+                    no_copper = True
+                elif child[0] == "tracks" and child[1] == "not_allowed":
+                    no_tracks = True
+                elif child[0] == "vias" and child[1] == "not_allowed":
+                    no_vias = True
+        if points:
+            keepouts.append(Keepout(
+                polygon=tuple(points),
+                layers=tuple(layers),
+                no_copper=no_copper,
+                no_tracks=no_tracks,
+                no_vias=no_vias,
+                uuid=uuid,
+            ))
+    return keepouts
 
 
 def _extract_edge_cuts(tree: SExpNode) -> list[tuple[Point, Point, float]]:
@@ -578,6 +647,27 @@ def _is_outline_segment(
     return s_match and e_match
 
 
+def _touches_outline_edge(
+    seg: tuple[Point, Point, float],
+    min_x: float, max_x: float,
+    min_y: float, max_y: float,
+    tolerance: float = 0.1,
+) -> bool:
+    """Check if at least one endpoint of *seg* lies on the board outline edge.
+
+    A segment that touches the outline indicates a notch or cutout.
+    Isolated interior fragments (artefacts) return False.
+    """
+    for pt in (seg[0], seg[1]):
+        on_left = abs(pt.x - min_x) < tolerance
+        on_right = abs(pt.x - max_x) < tolerance
+        on_top = abs(pt.y - min_y) < tolerance
+        on_bottom = abs(pt.y - max_y) < tolerance
+        if on_left or on_right or on_top or on_bottom:
+            return True
+    return False
+
+
 def routing_from_pcb_file(path: str | Path) -> PreservedRouting:
     """Parse a ``.kicad_pcb`` file and extract all user routing and board features.
 
@@ -603,6 +693,7 @@ def routing_from_pcb_file(path: str | Path) -> PreservedRouting:
     for name, num in name_to_num.items():
         if num not in net_map:
             net_map[num] = name
+    user_keepouts = _extract_user_keepouts(tree)
     all_edge_cuts = _extract_edge_cuts(tree)
 
     # Filter out board outline segments — keep only slots/cutouts
@@ -618,18 +709,37 @@ def routing_from_pcb_file(path: str | Path) -> PreservedRouting:
                 (min_x, min_y), (max_x, min_y),
                 (max_x, max_y), (min_x, max_y),
             }
-            user_edge_cuts = [
+            non_outline = [
                 seg for seg in all_edge_cuts
                 if not _is_outline_segment(seg, outline_pts)
             ]
+            # Keep all non-outline edge cuts (slots, isolation cuts, etc.).
+            # Only discard isolated micro-fragments (< 0.5mm) that are
+            # routing artefacts — not real board features.
+            import math as _math
+            user_edge_cuts = []
+            filtered_count = 0
+            for seg in non_outline:
+                s, e, w = seg
+                length = _math.hypot(e.x - s.x, e.y - s.y)
+                if length < 0.5:
+                    filtered_count += 1
+                else:
+                    user_edge_cuts.append(seg)
+            if filtered_count:
+                log.info(
+                    "Filtered %d micro Edge.Cuts fragments (< 0.5mm)",
+                    filtered_count,
+                )
         else:
             user_edge_cuts = all_edge_cuts
     else:
         user_edge_cuts = []
 
     log.info(
-        "Preserved routing: %d tracks, %d vias, %d user zones, %d edge cuts",
-        len(tracks), len(vias), len(user_zones), len(user_edge_cuts),
+        "Preserved routing: %d tracks, %d vias, %d user zones, %d keepouts, %d edge cuts",
+        len(tracks), len(vias), len(user_zones), len(user_keepouts),
+        len(user_edge_cuts),
     )
     return PreservedRouting(
         tracks=tuple(tracks),
@@ -637,6 +747,7 @@ def routing_from_pcb_file(path: str | Path) -> PreservedRouting:
         zones=tuple(user_zones),
         edge_cuts=tuple(user_edge_cuts),
         net_map=net_map,
+        keepouts=tuple(user_keepouts),
     )
 
 
@@ -749,6 +860,7 @@ def remap_routing(
                 thermal_relief_gap=z.thermal_relief_gap,
                 thermal_relief_bridge=z.thermal_relief_bridge,
                 clearance_mm=z.clearance_mm,
+                priority=z.priority,
                 filled_polygons=z.filled_polygons,
                 uuid=z.uuid,
             ))
