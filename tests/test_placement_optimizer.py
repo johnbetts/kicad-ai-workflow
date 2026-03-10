@@ -13,6 +13,7 @@ from kicad_pipeline.models.pcb import (
     DesignRules,
     Footprint,
     NetEntry,
+    Pad,
     PCBDesign,
     Point,
 )
@@ -20,6 +21,10 @@ from kicad_pipeline.models.requirements import (
     Component,
     FeatureBlock,
     MechanicalConstraints,
+    Net,
+    NetConnection,
+    Pin,
+    PinType,
     ProjectInfo,
     ProjectRequirements,
 )
@@ -34,6 +39,8 @@ from kicad_pipeline.optimization.placement_optimizer import (
     _perturbation_rotate,
     _perturbation_swap,
     optimize_placement,
+    optimize_placement_ee,
+    optimize_placement_sa,
 )
 
 # ---------------------------------------------------------------------------
@@ -316,18 +323,18 @@ def _mock_score(overall: float = 0.5) -> _FakeQualityScore:
 
 
 @patch("kicad_pipeline.optimization.scoring.compute_quality_score")
-def test_optimize_placement_returns_history(mock_score_fn: MagicMock) -> None:
+def test_optimize_placement_sa_returns_history(mock_score_fn: MagicMock) -> None:
     mock_score_fn.return_value = _mock_score(0.6)
     pcb = _make_pcb()
     reqs = _make_requirements()
     cfg = OptimizationConfig(max_iterations=5, seed=42)
-    result_pcb, history = optimize_placement(reqs, pcb, cfg)
+    result_pcb, history = optimize_placement_sa(reqs, pcb, cfg)
     assert len(history) >= 1  # At least the initial candidate
     assert history[0].iteration == 0
 
 
 @patch("kicad_pipeline.optimization.scoring.compute_quality_score")
-def test_optimize_placement_deterministic_with_seed(mock_score_fn: MagicMock) -> None:
+def test_optimize_placement_sa_deterministic_with_seed(mock_score_fn: MagicMock) -> None:
     call_count = 0
 
     def _varying_score(*args: object, **kwargs: object) -> _FakeQualityScore:
@@ -341,9 +348,9 @@ def test_optimize_placement_deterministic_with_seed(mock_score_fn: MagicMock) ->
     cfg = OptimizationConfig(max_iterations=10, seed=123)
 
     call_count = 0
-    _, history1 = optimize_placement(reqs, pcb, cfg)
+    _, history1 = optimize_placement_sa(reqs, pcb, cfg)
     call_count = 0
-    _, history2 = optimize_placement(reqs, pcb, cfg)
+    _, history2 = optimize_placement_sa(reqs, pcb, cfg)
 
     assert len(history1) == len(history2)
     for h1, h2 in zip(history1, history2, strict=False):
@@ -351,7 +358,7 @@ def test_optimize_placement_deterministic_with_seed(mock_score_fn: MagicMock) ->
 
 
 @patch("kicad_pipeline.optimization.scoring.compute_quality_score")
-def test_optimize_placement_respects_fixed(mock_score_fn: MagicMock) -> None:
+def test_optimize_placement_sa_respects_fixed(mock_score_fn: MagicMock) -> None:
     mock_score_fn.return_value = _mock_score(0.6)
     fps = (
         Footprint(lib_id="MH:MH", ref="H1", value="MH",
@@ -367,7 +374,7 @@ def test_optimize_placement_respects_fixed(mock_score_fn: MagicMock) -> None:
         ),
     )
     cfg = OptimizationConfig(max_iterations=5, seed=42)
-    result_pcb, _ = optimize_placement(reqs, pcb, cfg)
+    result_pcb, _ = optimize_placement_sa(reqs, pcb, cfg)
     # H1 should remain at original position (it's fixed via _is_fixed)
     h1 = result_pcb.get_footprint("H1")
     assert h1 is not None
@@ -376,7 +383,7 @@ def test_optimize_placement_respects_fixed(mock_score_fn: MagicMock) -> None:
 
 
 @patch("kicad_pipeline.optimization.scoring.compute_quality_score")
-def test_optimize_placement_best_score_improves_or_equals(
+def test_optimize_placement_sa_best_score_improves_or_equals(
     mock_score_fn: MagicMock,
 ) -> None:
     scores = iter([0.5, 0.6, 0.55, 0.7, 0.65, 0.8])
@@ -391,7 +398,7 @@ def test_optimize_placement_best_score_improves_or_equals(
     pcb = _make_pcb()
     reqs = _make_requirements()
     cfg = OptimizationConfig(max_iterations=5, seed=42)
-    _, history = optimize_placement(reqs, pcb, cfg)
+    _, history = optimize_placement_sa(reqs, pcb, cfg)
     # Best score in history should be monotonically non-decreasing
     best_so_far = history[0].quality_score.overall_score
     for cand in history:
@@ -402,18 +409,18 @@ def test_optimize_placement_best_score_improves_or_equals(
 
 
 @patch("kicad_pipeline.optimization.scoring.compute_quality_score")
-def test_optimize_placement_empty_pcb(mock_score_fn: MagicMock) -> None:
+def test_optimize_placement_sa_empty_pcb(mock_score_fn: MagicMock) -> None:
     mock_score_fn.return_value = _mock_score(0.5)
     pcb = _make_pcb(footprints=())
     reqs = _make_requirements(components=())
     cfg = OptimizationConfig(max_iterations=3, seed=42)
-    result_pcb, history = optimize_placement(reqs, pcb, cfg)
+    result_pcb, history = optimize_placement_sa(reqs, pcb, cfg)
     assert len(result_pcb.footprints) == 0
     assert len(history) >= 1
 
 
 @patch("kicad_pipeline.optimization.scoring.compute_quality_score")
-def test_optimize_placement_single_component(mock_score_fn: MagicMock) -> None:
+def test_optimize_placement_sa_single_component(mock_score_fn: MagicMock) -> None:
     mock_score_fn.return_value = _mock_score(0.6)
     fps = (
         Footprint(lib_id="R:R_0805", ref="R1", value="10k",
@@ -424,7 +431,7 @@ def test_optimize_placement_single_component(mock_score_fn: MagicMock) -> None:
         components=(Component(ref="R1", value="10k", footprint="R_0805"),),
     )
     cfg = OptimizationConfig(max_iterations=5, seed=42)
-    result_pcb, history = optimize_placement(reqs, pcb, cfg)
+    result_pcb, history = optimize_placement_sa(reqs, pcb, cfg)
     assert len(result_pcb.footprints) == 1
     assert len(history) >= 1
 
@@ -476,3 +483,165 @@ def test_sa_acceptance_probabilistic_at_high_temp() -> None:
     assert prob_high > prob_low
     # At very high temp, probability should be close to 1
     assert prob_high > 0.9
+
+
+# ---------------------------------------------------------------------------
+# EE placement optimizer tests
+# ---------------------------------------------------------------------------
+
+def _make_pad(num: str, x: float = 0, y: float = 0) -> Pad:
+    return Pad(number=num, pad_type="smd", shape="roundrect",
+               position=Point(x, y), size_x=1.0, size_y=0.6,
+               layers=("F.Cu", "F.Paste", "F.Mask"),
+               net_number=0, net_name="")
+
+
+def _make_ee_pcb(refs_positions: list[tuple[str, float, float]]) -> PCBDesign:
+    """Create a PCB with footprints at specified positions."""
+    fps = tuple(
+        Footprint(
+            lib_id=f"test:{ref}", ref=ref, value=ref,
+            position=Point(x, y), rotation=0.0,
+            pads=(_make_pad("1", -0.5, 0), _make_pad("2", 0.5, 0)),
+        )
+        for ref, x, y in refs_positions
+    )
+    return _make_pcb(footprints=fps)
+
+
+def _pin(num: str, name: str, net: str | None = None) -> Pin:
+    return Pin(number=num, name=name, pin_type=PinType.PASSIVE,
+               function=None, net=net)
+
+
+def _make_ee_requirements(
+    components: tuple[Component, ...],
+    nets: tuple[Net, ...] = (),
+) -> ProjectRequirements:
+    return ProjectRequirements(
+        project=ProjectInfo(name="test"),
+        features=(
+            FeatureBlock(
+                name="Main", description="Test",
+                components=tuple(c.ref for c in components),
+                nets=(), subcircuits=(),
+            ),
+        ),
+        components=components,
+        nets=nets,
+        mechanical=MechanicalConstraints(board_width_mm=100.0, board_height_mm=80.0),
+    )
+
+
+def test_optimize_placement_ee_returns_pcb_and_review() -> None:
+    """EE optimizer returns a PCBDesign and PlacementReview."""
+    pcb = _make_ee_pcb([("R1", 10, 10), ("R2", 50, 50)])
+    reqs = _make_ee_requirements(
+        components=(
+            Component(ref="R1", value="10k", footprint="R_0805"),
+            Component(ref="R2", value="4.7k", footprint="R_0805"),
+        ),
+    )
+    result_pcb, review = optimize_placement_ee(reqs, pcb, max_review_passes=2)
+    assert len(result_pcb.footprints) == 2
+    assert review.grade in ("A", "B", "C", "D", "F")
+    assert "Grade" in review.summary
+
+
+def test_optimize_placement_ee_respects_fixed_components() -> None:
+    """Fixed components (H*, MH*) should not be moved."""
+    fps = (
+        Footprint(lib_id="MH:MH", ref="H1", value="MH",
+                   position=Point(x=5.0, y=5.0),
+                   pads=(_make_pad("1"),)),
+        Footprint(lib_id="R:R_0805", ref="R1", value="10k",
+                   position=Point(x=50.0, y=25.0),
+                   pads=(_make_pad("1", -0.5, 0), _make_pad("2", 0.5, 0))),
+    )
+    pcb = _make_pcb(footprints=fps)
+    reqs = _make_ee_requirements(
+        components=(
+            Component(ref="H1", value="MH", footprint="MountingHole"),
+            Component(ref="R1", value="10k", footprint="R_0805"),
+        ),
+    )
+    result_pcb, _ = optimize_placement_ee(reqs, pcb, max_review_passes=1)
+    h1 = result_pcb.get_footprint("H1")
+    assert h1 is not None
+    assert h1.position.x == 5.0
+    assert h1.position.y == 5.0
+
+
+def test_optimize_placement_ee_groups_relay_driver() -> None:
+    """Relay driver components should be placed near each other."""
+    pcb = _make_ee_pcb([
+        ("K1", 10, 10), ("Q1", 80, 70), ("D1", 5, 70), ("R1", 90, 5),
+    ])
+    reqs = _make_ee_requirements(
+        components=(
+            Component(ref="K1", value="RELAY", footprint="Relay_SPDT",
+                      pins=(_pin("1", "COIL+", "+24V"), _pin("2", "COIL-", "RELAY1_DRIVE"))),
+            Component(ref="Q1", value="2N7002", footprint="SOT-23",
+                      pins=(_pin("1", "G", "MCU_RELAY"), _pin("2", "D", "RELAY1_DRIVE"),
+                            _pin("3", "S", "GND"))),
+            Component(ref="D1", value="1N4148", footprint="SOD-123",
+                      pins=(_pin("1", "A", "RELAY1_DRIVE"), _pin("2", "K", "+24V"))),
+            Component(ref="R1", value="10k", footprint="R_0402",
+                      pins=(_pin("1", "1", "MCU_RELAY"), _pin("2", "2", "MCU_GPIO"))),
+        ),
+        nets=(
+            Net("+24V", (NetConnection("K1", "1"), NetConnection("D1", "2"))),
+            Net("RELAY1_DRIVE", (NetConnection("K1", "2"), NetConnection("Q1", "2"),
+                                  NetConnection("D1", "1"))),
+            Net("MCU_RELAY", (NetConnection("Q1", "1"), NetConnection("R1", "1"))),
+            Net("GND", (NetConnection("Q1", "3"),)),
+            Net("MCU_GPIO", (NetConnection("R1", "2"),)),
+        ),
+    )
+    result_pcb, review = optimize_placement_ee(reqs, pcb, max_review_passes=3)
+
+    # All 4 components should be closer together than initial scatter
+    positions = {fp.ref: (fp.position.x, fp.position.y) for fp in result_pcb.footprints}
+    # Check: max spread should be less than initial ~100mm diagonal
+    xs = [p[0] for p in positions.values()]
+    ys = [p[1] for p in positions.values()]
+    spread = math.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
+    assert spread < 80.0  # originally ~100mm
+
+
+def test_optimize_placement_ee_empty_pcb() -> None:
+    """EE optimizer handles empty PCB gracefully."""
+    pcb = _make_pcb(footprints=())
+    reqs = _make_ee_requirements(components=())
+    result_pcb, review = optimize_placement_ee(reqs, pcb, max_review_passes=1)
+    assert len(result_pcb.footprints) == 0
+    assert review.grade == "A"
+
+
+def test_optimize_placement_ee_connectors_near_edge() -> None:
+    """Connectors should be placed near board edges."""
+    pcb = _make_ee_pcb([("J1", 50, 40)])  # center of board
+    reqs = _make_ee_requirements(
+        components=(
+            Component(ref="J1", value="RJ45", footprint="RJ45",
+                      pins=(_pin("1", "1", "ETH_TX+"),)),
+        ),
+    )
+    result_pcb, review = optimize_placement_ee(reqs, pcb, max_review_passes=3)
+    j1 = result_pcb.get_footprint("J1")
+    assert j1 is not None
+    # Should be closer to an edge than original (50, 40) center position
+    # On a 100x80 board, center is 40mm from edges
+    min_edge_dist = min(
+        j1.position.x,
+        100.0 - j1.position.x,
+        j1.position.y,
+        80.0 - j1.position.y,
+    )
+    # Review loop should push it toward edge
+    assert min_edge_dist < 40.0  # better than center
+
+
+def test_optimize_placement_is_alias_for_ee() -> None:
+    """optimize_placement should be optimize_placement_ee."""
+    assert optimize_placement is optimize_placement_ee

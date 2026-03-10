@@ -91,6 +91,14 @@ LCSC_STOCK_TIMEOUT_SECONDS: float = 10.0
 JLCPCB_PARTS_SEARCH_URL: str = "https://jlcpcb.com/parts/componentSearch?searchTxt="
 """JLCPCB parts search URL prefix for manual part lookup."""
 
+JLCPCB_MIN_STOCK_QTY: int = 1000
+"""Minimum LCSC stock quantity to accept a part without approval.
+
+Parts with fewer than this many units in stock are flagged as low-stock
+and treated as unavailable, since JLCPCB assembly may deplete stock
+mid-order or the part may be nearing end-of-life.
+"""
+
 # ---------------------------------------------------------------------------
 # Net-class trace widths
 # ---------------------------------------------------------------------------
@@ -190,6 +198,24 @@ PCB_EDGE_CUTS_WIDTH_MM: float = 0.05
 
 DECOUPLING_CAP_MAX_DISTANCE_MM: float = 3.0
 """Maximum allowed distance from a decoupling capacitor to its IC supply pin (mm)."""
+
+DECOUPLING_CAP_MIN_DISTANCE_MM: float = 1.0
+"""Minimum distance from a decoupling capacitor to its IC (mm)."""
+
+PASSIVE_NEAR_IC_MAX_DISTANCE_MM: float = 5.0
+"""Maximum placement distance from a passive to its associated IC (mm)."""
+
+SUBCIRCUIT_MAX_SPREAD_MM: float = 15.0
+"""Maximum spread of sub-circuit components from anchor (mm)."""
+
+VOLTAGE_DOMAIN_MIN_GAP_MM: float = 2.0
+"""Minimum gap between components in different voltage domains (mm)."""
+
+CONNECTOR_EDGE_MAX_MM: float = 5.0
+"""Maximum distance from a connector to the nearest board edge (mm)."""
+
+CRYSTAL_MAX_DISTANCE_MM: float = 5.0
+"""Maximum distance from a crystal to its MCU clock pins (mm)."""
 
 # ---------------------------------------------------------------------------
 # Power budget

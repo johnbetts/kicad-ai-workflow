@@ -28,12 +28,18 @@ _WEIGHT_PLACEMENT: float = 0.20
 _WEIGHT_SIGNAL_INTEGRITY: float = 0.15
 _WEIGHT_THERMAL: float = 0.10
 
-# Fast-path sub-dimension weights (within placement score)
-_FAST_WEIGHT_COLLISION: float = 0.30
-_FAST_WEIGHT_NET_PROXIMITY: float = 0.30
-_FAST_WEIGHT_PASSIVE_PROXIMITY: float = 0.20
-_FAST_WEIGHT_BLOCK_COHESION: float = 0.15
-_FAST_WEIGHT_BOUNDARY: float = 0.05
+# Fast-path sub-dimension weights (EE-aligned)
+_FAST_WEIGHT_COLLISION: float = 0.25
+_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.25
+_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.20
+_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.15
+_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.15
+
+# Legacy weight names for backward compatibility
+_FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
+_FAST_WEIGHT_PASSIVE_PROXIMITY: float = _FAST_WEIGHT_DECOUPLING_PROXIMITY
+_FAST_WEIGHT_BLOCK_COHESION: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
+_FAST_WEIGHT_BOUNDARY: float = 0.05  # used in breakdown display
 
 # Grade thresholds
 _GRADE_A: float = 0.9
@@ -380,20 +386,200 @@ def _score_boundary(pcb: PCBDesign) -> tuple[float, list[str]]:
     return score, issues
 
 
+def _score_subcircuit_cohesion(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score based on sub-circuit component clustering.
+
+    Uses the functional grouper to detect sub-circuits and measure how
+    tightly each group's components are clustered around their anchor.
+    """
+    from kicad_pipeline.optimization.functional_grouper import detect_subcircuits
+    from kicad_pipeline.optimization.review_agent import SUBCIRCUIT_MAX_SPREAD_MM
+
+    subcircuits = detect_subcircuits(requirements)
+    if not subcircuits:
+        # Fall back to block cohesion
+        return _score_block_cohesion(pcb, requirements)
+
+    pos = _fp_position_dict(pcb)
+    scores: list[float] = []
+    issues: list[str] = []
+
+    for sc in subcircuits:
+        anchor_pos = pos.get(sc.anchor_ref)
+        if anchor_pos is None:
+            continue
+        max_dist = 0.0
+        for ref in sc.refs:
+            if ref == sc.anchor_ref or ref not in pos:
+                continue
+            d = math.sqrt(
+                (pos[ref][0] - anchor_pos[0]) ** 2 +
+                (pos[ref][1] - anchor_pos[1]) ** 2
+            )
+            max_dist = max(max_dist, d)
+        ratio = max_dist / SUBCIRCUIT_MAX_SPREAD_MM if SUBCIRCUIT_MAX_SPREAD_MM > 0 else 0.0
+        s = _clamp01(1.0 - max(0.0, ratio - 1.0))
+        scores.append(s)
+        if s < 0.7:
+            issues.append(
+                f"{sc.circuit_type.value} ({sc.anchor_ref}) spread {max_dist:.1f}mm"
+            )
+
+    score = sum(scores) / len(scores) if scores else 1.0
+    return score, issues
+
+
+def _score_voltage_isolation(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score based on voltage domain separation.
+
+    Components in different voltage domains should maintain minimum distance.
+    """
+    from kicad_pipeline.optimization.functional_grouper import (
+        VoltageDomain,
+        classify_voltage_domains,
+    )
+    from kicad_pipeline.optimization.review_agent import VOLTAGE_DOMAIN_MIN_GAP_MM
+
+    domain_map = classify_voltage_domains(requirements)
+    pos = _fp_position_dict(pcb)
+
+    # Group refs by domain (skip MIXED)
+    domain_refs: dict[VoltageDomain, list[str]] = {}
+    for ref, domain in domain_map.items():
+        if domain == VoltageDomain.MIXED:
+            continue
+        if ref in pos:
+            domain_refs.setdefault(domain, []).append(ref)
+
+    violations = 0
+    total_checks = 0
+    issues: list[str] = []
+    domains = list(domain_refs.keys())
+
+    for i, d1 in enumerate(domains):
+        for d2 in domains[i + 1:]:
+            # Sample: check closest pair per domain pair
+            min_dist = float("inf")
+            for r1 in domain_refs[d1][:10]:  # cap for performance
+                for r2 in domain_refs[d2][:10]:
+                    d = math.sqrt(
+                        (pos[r1][0] - pos[r2][0]) ** 2 +
+                        (pos[r1][1] - pos[r2][1]) ** 2
+                    )
+                    min_dist = min(min_dist, d)
+            total_checks += 1
+            if min_dist < VOLTAGE_DOMAIN_MIN_GAP_MM:
+                violations += 1
+                issues.append(
+                    f"{d1.value} vs {d2.value}: {min_dist:.1f}mm "
+                    f"(min {VOLTAGE_DOMAIN_MIN_GAP_MM}mm)"
+                )
+
+    score = _clamp01(1.0 - violations * 0.2) if total_checks > 0 else 1.0
+    return score, issues
+
+
+def _score_connector_edge(
+    pcb: PCBDesign,
+) -> tuple[float, list[str]]:
+    """Score based on connector proximity to board edges."""
+    from kicad_pipeline.optimization.review_agent import CONNECTOR_EDGE_MAX_MM
+
+    connectors = [fp for fp in pcb.footprints if fp.ref.startswith("J")]
+    if not connectors:
+        return 1.0, []
+
+    if not pcb.outline or not pcb.outline.polygon:
+        return 1.0, []
+
+    bxs = [p.x for p in pcb.outline.polygon]
+    bys = [p.y for p in pcb.outline.polygon]
+    min_x, max_x = min(bxs), max(bxs)
+    min_y, max_y = min(bys), max(bys)
+
+    scores: list[float] = []
+    issues: list[str] = []
+
+    for fp in connectors:
+        edge_dist = min(
+            fp.position.x - min_x,
+            max_x - fp.position.x,
+            fp.position.y - min_y,
+            max_y - fp.position.y,
+        )
+        if edge_dist <= CONNECTOR_EDGE_MAX_MM:
+            scores.append(1.0)
+        else:
+            ratio = edge_dist / CONNECTOR_EDGE_MAX_MM
+            s = _clamp01(1.0 - (ratio - 1.0) * 0.3)
+            scores.append(s)
+            issues.append(f"{fp.ref} is {edge_dist:.1f}mm from edge")
+
+    score = sum(scores) / len(scores) if scores else 1.0
+    return score, issues
+
+
+def _score_decoupling_proximity(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score decoupling cap proximity to ICs."""
+    from kicad_pipeline.optimization.functional_grouper import (
+        SubCircuitType,
+        detect_subcircuits,
+    )
+
+    subcircuits = detect_subcircuits(requirements)
+    decoupling = [s for s in subcircuits if s.circuit_type == SubCircuitType.DECOUPLING]
+    if not decoupling:
+        return 1.0, []
+
+    pos = _fp_position_dict(pcb)
+    scores: list[float] = []
+    issues: list[str] = []
+    threshold = 3.0  # mm
+
+    for sc in decoupling:
+        ic_pos = pos.get(sc.anchor_ref)
+        if ic_pos is None:
+            continue
+        for ref in sc.refs:
+            if ref == sc.anchor_ref or ref not in pos:
+                continue
+            d = math.sqrt(
+                (pos[ref][0] - ic_pos[0]) ** 2 +
+                (pos[ref][1] - ic_pos[1]) ** 2
+            )
+            if d <= threshold:
+                scores.append(1.0)
+            else:
+                s = _clamp01(1.0 - (d - threshold) / threshold)
+                scores.append(s)
+                issues.append(f"{ref} is {d:.1f}mm from {sc.anchor_ref}")
+
+    score = sum(scores) / len(scores) if scores else 1.0
+    return score, issues
+
+
 def compute_fast_placement_score(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
 ) -> QualityScore:
     """Compute a placement-focused quality score without full validation.
 
-    Designed for the SA optimizer inner loop where speed matters more than
-    full accuracy. Evaluates 5 placement sub-dimensions:
+    Evaluates 5 EE-aligned placement sub-dimensions:
 
-    - **Collisions** (30%): courtyard overlap detection
-    - **Net proximity** (30%): signal-connected components should be close
-    - **Passive proximity** (20%): passives near their associated ICs
-    - **Block cohesion** (15%): feature-block components should cluster
-    - **Boundary** (5%): components within board outline
+    - **Collisions** (25%): courtyard overlap detection
+    - **Sub-circuit cohesion** (25%): sub-circuit components clustered
+    - **Voltage isolation** (20%): domain separation maintained
+    - **Connector edge** (15%): connectors near board edges
+    - **Decoupling proximity** (15%): caps near their ICs
 
     Args:
         pcb: The PCB design to evaluate.
@@ -404,27 +590,27 @@ def compute_fast_placement_score(
     """
     # Sub-dimension scores
     collision_score, collision_issues = _score_collisions(pcb)
-    net_score, net_issues = _score_net_proximity(pcb, requirements)
-    passive_score, passive_issues = _compute_placement_score_from_pcb(pcb)
-    block_score, block_issues = _score_block_cohesion(pcb, requirements)
-    boundary_score, boundary_issues = _score_boundary(pcb)
+    cohesion_score, cohesion_issues = _score_subcircuit_cohesion(pcb, requirements)
+    isolation_score, isolation_issues = _score_voltage_isolation(pcb, requirements)
+    connector_score, connector_issues = _score_connector_edge(pcb)
+    decoupling_score, decoupling_issues = _score_decoupling_proximity(pcb, requirements)
+    boundary_score, _boundary_issues = _score_boundary(pcb)
 
     # Weighted placement composite
     placement_score = (
         _FAST_WEIGHT_COLLISION * collision_score
-        + _FAST_WEIGHT_NET_PROXIMITY * net_score
-        + _FAST_WEIGHT_PASSIVE_PROXIMITY * passive_score
-        + _FAST_WEIGHT_BLOCK_COHESION * block_score
-        + _FAST_WEIGHT_BOUNDARY * boundary_score
+        + _FAST_WEIGHT_SUBCIRCUIT_COHESION * cohesion_score
+        + _FAST_WEIGHT_VOLTAGE_ISOLATION * isolation_score
+        + _FAST_WEIGHT_CONNECTOR_EDGE * connector_score
+        + _FAST_WEIGHT_DECOUPLING_PROXIMITY * decoupling_score
     )
 
     # For fast path, other dimensions are derived from placement sub-scores
-    # Collisions affect manufacturing, boundary affects electrical
     manufacturing_score = _clamp01(
-        0.5 + 0.5 * collision_score  # collisions drag down manufacturing
+        0.5 + 0.5 * collision_score
     )
     electrical_score = _clamp01(
-        0.5 + 0.5 * boundary_score  # off-board = electrical issues
+        0.5 + 0.25 * isolation_score + 0.25 * boundary_score
     )
 
     # Overall: use full weight system but with placement-derived estimates
@@ -432,8 +618,8 @@ def compute_fast_placement_score(
         (electrical_score, _WEIGHT_ELECTRICAL),
         (manufacturing_score, _WEIGHT_MANUFACTURING),
         (placement_score, _WEIGHT_PLACEMENT),
-        (net_score, _WEIGHT_SIGNAL_INTEGRITY),  # net proximity ≈ SI proxy
-        (1.0, _WEIGHT_THERMAL),  # thermal neutral without power analysis
+        (cohesion_score, _WEIGHT_SIGNAL_INTEGRITY),
+        (1.0, _WEIGHT_THERMAL),
     )
     overall = _weighted_geometric_mean(scores)
     grade = score_to_grade(overall)
@@ -446,28 +632,28 @@ def compute_fast_placement_score(
             issues=tuple(collision_issues[:5]),
         ),
         ScoreDetail(
-            category="Net Proximity",
-            score=net_score,
-            weight=_FAST_WEIGHT_NET_PROXIMITY,
-            issues=tuple(net_issues[:5]),
+            category="Sub-circuit Cohesion",
+            score=cohesion_score,
+            weight=_FAST_WEIGHT_SUBCIRCUIT_COHESION,
+            issues=tuple(cohesion_issues[:5]),
         ),
         ScoreDetail(
-            category="Passive Proximity",
-            score=passive_score,
-            weight=_FAST_WEIGHT_PASSIVE_PROXIMITY,
-            issues=tuple(passive_issues[:5]),
+            category="Voltage Isolation",
+            score=isolation_score,
+            weight=_FAST_WEIGHT_VOLTAGE_ISOLATION,
+            issues=tuple(isolation_issues[:5]),
         ),
         ScoreDetail(
-            category="Block Cohesion",
-            score=block_score,
-            weight=_FAST_WEIGHT_BLOCK_COHESION,
-            issues=tuple(block_issues[:5]),
+            category="Connector Edge",
+            score=connector_score,
+            weight=_FAST_WEIGHT_CONNECTOR_EDGE,
+            issues=tuple(connector_issues[:5]),
         ),
         ScoreDetail(
-            category="Boundary",
-            score=boundary_score,
-            weight=_FAST_WEIGHT_BOUNDARY,
-            issues=tuple(boundary_issues[:5]),
+            category="Decoupling Proximity",
+            score=decoupling_score,
+            weight=_FAST_WEIGHT_DECOUPLING_PROXIMITY,
+            issues=tuple(decoupling_issues[:5]),
         ),
     )
 
@@ -476,7 +662,7 @@ def compute_fast_placement_score(
         electrical_score=round(electrical_score, 4),
         manufacturing_score=round(manufacturing_score, 4),
         thermal_score=1.0,
-        signal_integrity_score=round(net_score, 4),
+        signal_integrity_score=round(cohesion_score, 4),
         placement_score=round(placement_score, 4),
         overall_score=round(overall, 4),
         grade=grade,

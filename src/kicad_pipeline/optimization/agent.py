@@ -95,9 +95,8 @@ class OptimizerAgent:
             7. Return result (never overwrite PCB).
         """
         from kicad_pipeline.optimization.placement_optimizer import (
-            OptimizationConfig,
             _extract_positions,
-            optimize_placement,
+            optimize_placement_ee,
         )
         from kicad_pipeline.optimization.scoring import compute_fast_placement_score
         from kicad_pipeline.optimization.zone_optimizer import recommend_zone_strategy
@@ -116,19 +115,17 @@ class OptimizerAgent:
         initial_quality = compute_fast_placement_score(pcb, req)
         initial_score = initial_quality.overall_score
 
-        # Placement optimization
-        config = OptimizationConfig(
-            max_iterations=max_iterations,
-            seed=42,
+        # Placement optimization — use EE-grade deterministic placement
+        best_pcb, ee_review = optimize_placement_ee(
+            req, pcb, max_review_passes=5,
         )
-        best_pcb, history = optimize_placement(req, pcb, config)
         best_quality = compute_fast_placement_score(best_pcb, req)
         best_score = best_quality.overall_score
 
         # Zone analysis
         zone_strategy = recommend_zone_strategy(best_pcb, req)
 
-        # Generate suggestions
+        # Generate suggestions — combine agent suggestions + EE review violations
         suggestions = self._generate_suggestions(
             initial_quality,
             best_quality,
@@ -136,6 +133,21 @@ class OptimizerAgent:
             pcb,
             req,
         )
+
+        # Add EE review violations as suggestions
+        ee_suggestions: list[OptimizationSuggestion] = []
+        for violation in ee_review.violations:
+            if violation.severity == "minor":
+                continue
+            ee_suggestions.append(
+                OptimizationSuggestion(
+                    category="placement",
+                    priority="critical" if violation.severity == "critical" else "high",
+                    title=f"{violation.rule.value}: {', '.join(violation.refs)}",
+                    description=violation.message,
+                )
+            )
+        suggestions = suggestions + tuple(ee_suggestions)
 
         improvement = (
             ((best_score - initial_score) / initial_score * 100)
@@ -160,13 +172,13 @@ class OptimizerAgent:
 
         progress = OptimizationProgress(
             status="completed",
-            iterations_completed=len(history),
+            iterations_completed=1,  # EE optimizer is single-pass with review loop
             best_score=round(best_score, 4),
             initial_score=round(initial_score, 4),
             improvement_pct=round(improvement, 1),
-            history=tuple(
-                {"iteration": c.iteration, "score": round(c.quality_score.overall_score, 4)}
-                for c in history
+            history=(
+                {"iteration": 0, "score": round(initial_score, 4)},
+                {"iteration": 1, "score": round(best_score, 4)},
             ),
         )
 
