@@ -545,23 +545,34 @@ def _score_decoupling_proximity(
     issues: list[str] = []
     threshold = 3.0  # mm
 
+    sizes = _fp_size_dict(pcb)
+
     for sc in decoupling:
         ic_pos = pos.get(sc.anchor_ref)
         if ic_pos is None:
             continue
+        ic_size = sizes.get(sc.anchor_ref, (3.0, 3.0))
         for ref in sc.refs:
             if ref == sc.anchor_ref or ref not in pos:
                 continue
-            d = math.sqrt(
-                (pos[ref][0] - ic_pos[0]) ** 2 +
-                (pos[ref][1] - ic_pos[1]) ** 2
-            )
+            cap_size = sizes.get(ref, (2.0, 1.0))
+            # Edge-to-edge distance (gap between bounding boxes)
+            dx = abs(pos[ref][0] - ic_pos[0]) - (ic_size[0] + cap_size[0]) / 2.0
+            dy = abs(pos[ref][1] - ic_pos[1]) - (ic_size[1] + cap_size[1]) / 2.0
+            if dx <= 0 and dy <= 0:
+                d = 0.0
+            elif dx <= 0:
+                d = dy
+            elif dy <= 0:
+                d = dx
+            else:
+                d = math.sqrt(dx * dx + dy * dy)
             if d <= threshold:
                 scores.append(1.0)
             else:
                 s = _clamp01(1.0 - (d - threshold) / threshold)
                 scores.append(s)
-                issues.append(f"{ref} is {d:.1f}mm from {sc.anchor_ref}")
+                issues.append(f"{ref} is {d:.1f}mm from {sc.anchor_ref} edge")
 
     score = sum(scores) / len(scores) if scores else 1.0
     return score, issues

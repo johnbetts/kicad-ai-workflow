@@ -98,6 +98,29 @@ def _dist(p1: tuple[float, float], p2: tuple[float, float]) -> float:
     return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
 
+def _edge_dist(
+    p1: tuple[float, float], s1: tuple[float, float],
+    p2: tuple[float, float], s2: tuple[float, float],
+) -> float:
+    """Edge-to-edge distance between two rectangular footprints.
+
+    Args:
+        p1, p2: Center positions (x, y).
+        s1, s2: Sizes (width, height).
+    Returns:
+        Minimum gap between bounding boxes (0.0 if overlapping).
+    """
+    dx = abs(p1[0] - p2[0]) - (s1[0] + s2[0]) / 2.0
+    dy = abs(p1[1] - p2[1]) - (s1[1] + s2[1]) / 2.0
+    if dx <= 0 and dy <= 0:
+        return 0.0  # overlapping
+    if dx <= 0:
+        return dy
+    if dy <= 0:
+        return dx
+    return math.sqrt(dx * dx + dy * dy)
+
+
 def _fp_positions(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
     """Extract footprint ref → (x, y) position map."""
     return {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
@@ -161,9 +184,15 @@ def _check_decoupling_distance(
     requirements: ProjectRequirements,
     subcircuits: tuple[DetectedSubCircuit, ...],
 ) -> list[PlacementViolation]:
-    """Check that decoupling caps are within threshold of their IC."""
+    """Check that decoupling caps are within threshold of their IC.
+
+    Uses edge-to-edge distance (gap between bounding boxes), not
+    center-to-center, so large ICs (e.g. ESP32 26x16mm) aren't
+    penalized when caps are right at their body edge.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
+    sizes = _fp_size_dict(pcb)
     threshold = DECOUPLING_CAP_MAX_DISTANCE_MM
 
     # Use decoupling subcircuits for IC-cap pairs
@@ -175,20 +204,22 @@ def _check_decoupling_distance(
         if ic_ref not in positions:
             continue
         ic_pos = positions[ic_ref]
+        ic_size = sizes.get(ic_ref, (3.0, 3.0))
 
         for cap_ref in cap_refs:
             if cap_ref not in positions:
                 continue
             cap_pos = positions[cap_ref]
-            d = _dist(ic_pos, cap_pos)
+            cap_size = sizes.get(cap_ref, (2.0, 1.0))
+            d = _edge_dist(ic_pos, ic_size, cap_pos, cap_size)
             if d > threshold:
-                # Suggest moving cap close to IC
+                # Suggest moving cap close to IC edge
                 suggested = _point_toward(ic_pos, cap_pos, threshold * 0.8)
                 violations.append(PlacementViolation(
                     rule=PlacementRule.DECOUPLING_DISTANCE,
                     severity="critical" if d > threshold * 3 else "major",
                     refs=(cap_ref, ic_ref),
-                    message=f"{cap_ref} is {d:.1f}mm from {ic_ref} "
+                    message=f"{cap_ref} is {d:.1f}mm from {ic_ref} edge "
                             f"(max {threshold}mm for decoupling)",
                     current_value=d,
                     threshold=threshold,
