@@ -693,14 +693,16 @@ def _apply_review_fixes(
     review: PlacementReview,
     fixed_refs: set[str],
     fp_sizes: dict[str, tuple[float, float]],
+    board_bounds: tuple[float, float, float, float] | None = None,
 ) -> dict[str, tuple[float, float, float]]:
     """Apply suggested position fixes from review violations.
 
     Only applies fixes for critical and major violations that have
-    a suggested_position, affect movable components, and do NOT create
-    a new collision with already-placed components.
+    a suggested_position, affect movable components, and result in
+    the component being closer to its target than before.
     """
     result = dict(positions)
+    bounds = board_bounds or (0.0, 0.0, 200.0, 200.0)
 
     for violation in review.violations:
         if violation.severity == "minor":
@@ -711,26 +713,26 @@ def _apply_review_fixes(
         for ref in violation.refs:
             if ref in fixed_refs or ref not in result:
                 continue
-            _x, _y, rot = result[ref]
+            old_x, old_y, rot = result[ref]
             sx, sy = violation.suggested_position
             w, h = fp_sizes.get(ref, (2.0, 2.0))
-            hw = w / 2.0 + 0.5
-            hh = h / 2.0 + 0.5
 
-            # Check if new position would collide with any other component
-            collides = False
+            # Build grid excluding this component
+            fix_grid = _PlacementGrid(bounds)
             for other_ref, (ox, oy, _orot) in result.items():
                 if other_ref == ref:
                     continue
                 ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
-                ohw = ow / 2.0 + 0.5
-                ohh = oh / 2.0 + 0.5
-                if abs(sx - ox) < hw + ohw and abs(sy - oy) < hh + ohh:
-                    collides = True
-                    break
+                fix_grid.place(ox, oy, ow, oh)
 
-            if not collides:
-                result[ref] = (sx, sy, rot)
+            # Find nearest free position to suggested target
+            fx, fy = fix_grid.find_free_pos(sx, sy, w, h)
+
+            # Only accept if it moves closer to the suggested position
+            old_dist = math.sqrt((old_x - sx) ** 2 + (old_y - sy) ** 2)
+            new_dist = math.sqrt((fx - sx) ** 2 + (fy - sy) ** 2)
+            if new_dist < old_dist:
+                result[ref] = (fx, fy, rot)
             break  # one fix attempt per violation
 
     return result
@@ -741,14 +743,19 @@ def optimize_placement_ee(
     initial_pcb: PCBDesign,
     max_review_passes: int = 5,
 ) -> tuple[PCBDesign, PlacementReview]:
-    """Run deterministic EE-grade placement optimization.
+    """Run deterministic EE-grade placement refinement.
 
-    5-phase algorithm:
-    1. Functional grouping — detect sub-circuits and voltage domains.
-    2. Zone assignment — divide board by voltage domain.
-    3. Inter-group MST placement — minimize wire length between groups.
-    4. Intra-group refinement — tight internal arrangement per sub-circuit.
-    5. EE review loop — fix violations iteratively.
+    Preserves the initial placement from ``build_pcb`` and makes targeted
+    refinements:
+
+    1. Detect sub-circuits from netlist topology.
+    2. Pull sub-circuit members closer to their anchors (collision-aware).
+    3. Pin connectors to nearest board edge (collision-aware).
+    4. Run EE review loop — fix violations iteratively.
+
+    The key principle: **never destroy good initial placement**. Only move
+    components that have violations, and only if the move doesn't create
+    new collisions.
 
     Args:
         requirements: Project requirements with components and nets.
@@ -759,7 +766,6 @@ def optimize_placement_ee(
         Tuple of (optimized PCBDesign, final PlacementReview).
     """
     from kicad_pipeline.optimization.functional_grouper import (
-        assign_zones,
         classify_voltage_domains,
         detect_subcircuits,
     )
@@ -769,8 +775,6 @@ def optimize_placement_ee(
     fp_sizes = _fp_size_dict(initial_pcb)
     bounds = _board_bounds(initial_pcb)
     min_x, min_y, max_x, max_y = bounds
-    board_w = max_x - min_x
-    board_h = max_y - min_y
 
     # Build fixed refs set
     fixed_refs: set[str] = {
@@ -779,136 +783,126 @@ def optimize_placement_ee(
     }
 
     # -----------------------------------------------------------------------
-    # Phase 1: Functional Grouping
+    # Phase 1: Functional Grouping (analysis only — no position changes)
     # -----------------------------------------------------------------------
     _log.info("Phase 1: Detecting sub-circuits and voltage domains")
     subcircuits = detect_subcircuits(requirements)
     domain_map = classify_voltage_domains(requirements)
 
     # -----------------------------------------------------------------------
-    # Phase 2: Zone Assignment
+    # Phase 2: Start from initial placement
     # -----------------------------------------------------------------------
-    _log.info("Phase 2: Assigning zones by voltage domain")
-    all_refs = tuple(fp.ref for fp in initial_pcb.footprints)
-    zone_assignments = assign_zones(
-        subcircuits=subcircuits,
-        domain_map=domain_map,
-        board_width=board_w,
-        board_height=board_h,
-        all_refs=all_refs,
-    )
-
-    # -----------------------------------------------------------------------
-    # Phase 3: Inter-Group MST Placement (collision-aware)
-    # -----------------------------------------------------------------------
-    _log.info("Phase 3: Inter-group placement via MST")
-
-    # Build rotation lookup for preserving original orientations
-    rotation_lookup: dict[str, float] = {
-        fp.ref: fp.rotation for fp in initial_pcb.footprints
+    _log.info("Phase 2: Starting from initial placement (preserving layout)")
+    positions: dict[str, tuple[float, float, float]] = {
+        fp.ref: (fp.position.x, fp.position.y, fp.rotation)
+        for fp in initial_pcb.footprints
     }
 
-    # Initialise occupancy grid
+    # Build occupancy grid from current placement
     grid = _PlacementGrid(bounds)
-
-    # Start with existing positions for fixed refs (register them on grid)
-    new_positions: dict[str, tuple[float, float, float]] = {}
     for fp in initial_pcb.footprints:
-        if fp.ref in fixed_refs:
-            new_positions[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
-            w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
-            grid.place(fp.position.x, fp.position.y, w, h)
+        w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
+        grid.place(fp.position.x, fp.position.y, w, h)
 
-    # Place sub-circuit groups within their assigned zones
-    placed_refs: set[str] = set(fixed_refs)
+    # -----------------------------------------------------------------------
+    # Phase 3: Pull sub-circuit members toward anchors (using occupancy grid)
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3: Pulling sub-circuit members toward anchors")
 
-    for zone_assignment in zone_assignments:
-        zone_rect = zone_assignment.zone_rect
-        # Offset zone_rect by board origin
-        adjusted_rect = (
-            zone_rect[0] + min_x,
-            zone_rect[1] + min_y,
-            zone_rect[2] + min_x,
-            zone_rect[3] + min_y,
+    # Sort subcircuits: process largest groups first (relay drivers, buck
+    # converters) so they get priority in occupancy grid
+    sorted_scs = sorted(subcircuits, key=lambda sc: len(sc.refs), reverse=True)
+
+    for sc in sorted_scs:
+        anchor = sc.anchor_ref
+        if anchor not in positions or anchor in fixed_refs:
+            continue
+        ax, ay, _arot = positions[anchor]
+
+        # Sort members by distance from anchor (farthest first) so they
+        # get pulled in from the outside
+        members = [
+            r for r in sc.refs
+            if r != anchor and r not in fixed_refs and r in positions
+        ]
+        members.sort(
+            key=lambda r: math.sqrt(
+                (positions[r][0] - ax) ** 2 + (positions[r][1] - ay) ** 2,
+            ),
+            reverse=True,
         )
 
-        # Place each sub-circuit group
-        sc_list = list(zone_assignment.subcircuits)
-        total_in_zone = len(sc_list) + len(zone_assignment.loose_refs)
-        for sc_idx, sc in enumerate(sc_list):
-            anchor_pos = _assign_zone_position(
-                adjusted_rect, sc_idx, total_in_zone,
-            )
-            group_positions = _place_subcircuit_group(
-                anchor_pos=anchor_pos,
-                refs=sc.refs,
-                anchor_ref=sc.anchor_ref,
-                fp_sizes=fp_sizes,
-                board_bounds=bounds,
-                grid=grid,
-            )
-            for ref, (x, y) in group_positions.items():
-                if ref in fixed_refs:
-                    continue
-                rot = rotation_lookup.get(ref, 0.0)
-                new_positions[ref] = (x, y, rot)
-                placed_refs.add(ref)
-
-        # Place loose refs — also collision-aware
-        loose_offset = len(sc_list)
-        for lr_idx, ref in enumerate(zone_assignment.loose_refs):
-            if ref in placed_refs:
-                continue
-            target_x, target_y = _assign_zone_position(
-                adjusted_rect, loose_offset + lr_idx, total_in_zone,
-            )
+        for ref in members:
+            rx, ry, rrot = positions[ref]
             w, h = fp_sizes.get(ref, (2.0, 2.0))
-            fx, fy = grid.find_free_pos(target_x, target_y, w, h)
-            grid.place(fx, fy, w, h)
-            rot = rotation_lookup.get(ref, 0.0)
-            new_positions[ref] = (fx, fy, rot)
-            placed_refs.add(ref)
+            aw, ah = fp_sizes.get(anchor, (2.0, 2.0))
 
-    # Handle any refs not yet placed (shouldn't happen, but safety net)
-    for fp in initial_pcb.footprints:
-        if fp.ref not in placed_refs:
-            new_positions[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
+            # Compute ideal distance: just outside anchor body
+            ideal_dist = (w + aw) / 2.0 + 1.0
+            current_dist = math.sqrt((rx - ax) ** 2 + (ry - ay) ** 2)
+
+            if current_dist <= ideal_dist + 1.0:
+                # Already close enough
+                continue
+
+            # Rebuild grid WITHOUT this component (so it can find a free
+            # spot near the anchor)
+            move_grid = _PlacementGrid(bounds)
+            for other_ref, (ox, oy, _orot) in positions.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                move_grid.place(ox, oy, ow, oh)
+
+            # Target: as close to anchor as possible
+            if current_dist < 0.01:
+                continue
+            dx = (ax - rx) / current_dist
+            dy = (ay - ry) / current_dist
+            target_x = ax - dx * ideal_dist
+            target_y = ay - dy * ideal_dist
+
+            # Clamp to board
+            target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
+            target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+
+            # Find nearest free position to target (may not be exact target)
+            fx, fy = move_grid.find_free_pos(target_x, target_y, w, h)
+
+            # Only accept if it's actually closer to anchor
+            new_dist = math.sqrt((fx - ax) ** 2 + (fy - ay) ** 2)
+            if new_dist < current_dist:
+                positions[ref] = (fx, fy, rrot)
 
     # -----------------------------------------------------------------------
     # Phase 3.5: Connector Edge Pinning (collision-aware)
     # -----------------------------------------------------------------------
-    # Build a fresh grid for connector placement (re-register all placed)
-    conn_grid = _PlacementGrid(bounds)
-    connector_refs: list[str] = []
+    _log.info("Phase 3.5: Pinning connectors to nearest board edge")
+    edge_margin = 3.0  # mm from board edge
+
     for fp in initial_pcb.footprints:
         ref = fp.ref
-        if ref not in new_positions:
+        if ref in fixed_refs or not ref.startswith("J"):
             continue
-        if ref.startswith("J") and ref not in fixed_refs:
-            connector_refs.append(ref)
+        if ref not in positions:
             continue
-        # Register non-connector positions on grid
-        cx, cy, _rot = new_positions[ref]
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
-        conn_grid.place(cx, cy, w, h)
-
-    edge_margin = 3.0  # mm from board edge
-    for ref in connector_refs:
-        cx, cy, rot = new_positions[ref]
+        cx, cy, rot = positions[ref]
         w, h = fp_sizes.get(ref, (2.0, 2.0))
 
-        # Find nearest edge and compute target position on that edge
+        # Find nearest edge
         dist_left = cx - min_x
         dist_right = max_x - cx
         dist_top = cy - min_y
         dist_bottom = max_y - cy
         min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
-        target_x, target_y = cx, cy
         if min_edge_dist <= 5.0:
-            # Already near edge — keep position but use grid for collision check
-            pass
-        elif dist_left == min_edge_dist:
+            # Already near edge — don't move
+            continue
+
+        # Compute target on nearest edge
+        target_x, target_y = cx, cy
+        if dist_left == min_edge_dist:
             target_x = min_x + edge_margin + w / 2.0
         elif dist_right == min_edge_dist:
             target_x = max_x - edge_margin - w / 2.0
@@ -917,25 +911,32 @@ def optimize_placement_ee(
         else:
             target_y = max_y - edge_margin - h / 2.0
 
-        fx, fy = conn_grid.find_free_pos(target_x, target_y, w, h)
-        conn_grid.place(fx, fy, w, h)
-        new_positions[ref] = (fx, fy, rot)
+        # Check collision at new position
+        hw = w / 2.0 + 0.5
+        hh = h / 2.0 + 0.5
+        can_move = True
+        for other_ref, (ox, oy, _orot) in positions.items():
+            if other_ref == ref:
+                continue
+            ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+            if (abs(target_x - ox) < hw + ow / 2.0 + 0.5
+                    and abs(target_y - oy) < hh + oh / 2.0 + 0.5):
+                can_move = False
+                break
+
+        if can_move:
+            positions[ref] = (target_x, target_y, rot)
 
     # -----------------------------------------------------------------------
-    # Phase 4: Intra-Group Refinement (skip — grid already handles tight placement)
+    # Phase 4: EE Review Loop
     # -----------------------------------------------------------------------
-    _log.info("Phase 4: Intra-group refinement (via occupancy grid)")
-
-    # -----------------------------------------------------------------------
-    # Phase 5: EE Review Loop
-    # -----------------------------------------------------------------------
-    _log.info("Phase 5: Running EE review loop (max %d passes)", max_review_passes)
-    best_positions = dict(new_positions)
+    _log.info("Phase 4: Running EE review loop (max %d passes)", max_review_passes)
+    best_positions = dict(positions)
     best_violation_count = float("inf")
     best_review: PlacementReview | None = None
 
     for pass_num in range(max_review_passes):
-        positions_tuple = _dict_to_positions(new_positions)
+        positions_tuple = _dict_to_positions(positions)
         current_pcb = _apply_positions(initial_pcb, positions_tuple)
         review = review_placement(
             current_pcb, requirements,
@@ -954,16 +955,16 @@ def optimize_placement_ee(
 
         if critical_major < best_violation_count:
             best_violation_count = critical_major
-            best_positions = dict(new_positions)
+            best_positions = dict(positions)
             best_review = review
 
         if critical_major == 0:
             _log.info("  No critical/major violations — stopping")
             break
 
-        # Apply suggested fixes
-        new_positions = _apply_review_fixes(
-            new_positions, review, fixed_refs, fp_sizes,
+        # Apply suggested fixes (collision-checked)
+        positions = _apply_review_fixes(
+            positions, review, fixed_refs, fp_sizes, bounds,
         )
 
     # Build final PCB

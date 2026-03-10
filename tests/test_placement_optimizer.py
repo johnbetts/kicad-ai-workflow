@@ -620,7 +620,8 @@ def test_optimize_placement_ee_empty_pcb() -> None:
 
 def test_optimize_placement_ee_connectors_near_edge() -> None:
     """Connectors should be placed near board edges."""
-    pcb = _make_ee_pcb([("J1", 50, 40)])  # center of board
+    # Board outline is 80x40; place connector at center (40, 20)
+    pcb = _make_ee_pcb([("J1", 40, 20)])
     reqs = _make_ee_requirements(
         components=(
             Component(ref="J1", value="RJ45", footprint="RJ45",
@@ -630,16 +631,16 @@ def test_optimize_placement_ee_connectors_near_edge() -> None:
     result_pcb, review = optimize_placement_ee(reqs, pcb, max_review_passes=3)
     j1 = result_pcb.get_footprint("J1")
     assert j1 is not None
-    # Should be closer to an edge than original (50, 40) center position
-    # On a 100x80 board, center is 40mm from edges
+    # Should be closer to an edge than original center position
+    # Board is 80x40, center is 20mm from edges
     min_edge_dist = min(
         j1.position.x,
-        100.0 - j1.position.x,
+        80.0 - j1.position.x,
         j1.position.y,
-        80.0 - j1.position.y,
+        40.0 - j1.position.y,
     )
-    # Review loop should push it toward edge
-    assert min_edge_dist < 40.0  # better than center
+    # Optimizer should push it toward edge
+    assert min_edge_dist < 20.0  # better than center
 
 
 def test_optimize_placement_is_alias_for_ee() -> None:
