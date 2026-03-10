@@ -99,7 +99,7 @@ class OptimizerAgent:
             _extract_positions,
             optimize_placement,
         )
-        from kicad_pipeline.optimization.scoring import compute_quality_score
+        from kicad_pipeline.optimization.scoring import compute_fast_placement_score
         from kicad_pipeline.optimization.zone_optimizer import recommend_zone_strategy
         from kicad_pipeline.pcb.board_templates import detect_template
         from kicad_pipeline.pcb.builder import build_pcb
@@ -110,10 +110,10 @@ class OptimizerAgent:
 
         tmpl = detect_template(req.mechanical)
         board_template = tmpl.name if tmpl is not None else None
-        pcb = build_pcb(req, board_template=board_template)
+        pcb = build_pcb(req, board_template=board_template, auto_route=False)
 
-        # Initial score
-        initial_quality = compute_quality_score(pcb, req)
+        # Initial score — use fast-path scoring for placement optimization
+        initial_quality = compute_fast_placement_score(pcb, req)
         initial_score = initial_quality.overall_score
 
         # Placement optimization
@@ -122,7 +122,7 @@ class OptimizerAgent:
             seed=42,
         )
         best_pcb, history = optimize_placement(req, pcb, config)
-        best_quality = compute_quality_score(best_pcb, req)
+        best_quality = compute_fast_placement_score(best_pcb, req)
         best_score = best_quality.overall_score
 
         # Zone analysis

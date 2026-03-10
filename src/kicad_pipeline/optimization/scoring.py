@@ -28,6 +28,13 @@ _WEIGHT_PLACEMENT: float = 0.20
 _WEIGHT_SIGNAL_INTEGRITY: float = 0.15
 _WEIGHT_THERMAL: float = 0.10
 
+# Fast-path sub-dimension weights (within placement score)
+_FAST_WEIGHT_COLLISION: float = 0.30
+_FAST_WEIGHT_NET_PROXIMITY: float = 0.30
+_FAST_WEIGHT_PASSIVE_PROXIMITY: float = 0.20
+_FAST_WEIGHT_BLOCK_COHESION: float = 0.15
+_FAST_WEIGHT_BOUNDARY: float = 0.05
+
 # Grade thresholds
 _GRADE_A: float = 0.9
 _GRADE_B: float = 0.75
@@ -39,6 +46,12 @@ _SCORE_FLOOR: float = 0.01
 
 # Placement: reference distance for normalisation (mm)
 _PLACEMENT_IDEAL_DISTANCE_MM: float = 15.0
+
+# Net proximity: maximum useful distance (mm) for normalisation
+_NET_PROXIMITY_MAX_MM: float = 50.0
+
+# Collision: per-collision penalty — gradual so each fix is visible
+_COLLISION_PENALTY: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +183,305 @@ def _compute_placement_score_from_pcb(pcb: PCBDesign) -> tuple[float, tuple[str,
             f"(ideal < {_PLACEMENT_IDEAL_DISTANCE_MM:.0f} mm)"
         )
     return score, tuple(issues)
+
+
+# ---------------------------------------------------------------------------
+# Fast-path placement scoring (for SA optimizer loop)
+# ---------------------------------------------------------------------------
+
+
+def _fp_position_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
+    """Build ref → (x, y) lookup from PCB footprints."""
+    return {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+
+
+def _fp_size_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
+    """Build ref → (width, height) lookup from PCB footprints.
+
+    Uses pad extents + courtyard margins as a size proxy.
+    """
+    sizes: dict[str, tuple[float, float]] = {}
+    for fp in pcb.footprints:
+        if fp.pads:
+            xs = [p.position.x for p in fp.pads]
+            ys = [p.position.y for p in fp.pads]
+            w = max(xs) - min(xs) + 1.0  # pad span + margin
+            h = max(ys) - min(ys) + 1.0
+            sizes[fp.ref] = (max(w, 1.0), max(h, 1.0))
+        else:
+            sizes[fp.ref] = (2.0, 2.0)  # default for padless fps
+    return sizes
+
+
+def _score_collisions(
+    pcb: PCBDesign,
+) -> tuple[float, list[str]]:
+    """Score based on courtyard collision count.
+
+    Returns (score, issues) where score = 1.0 - penalty_per_collision * count.
+    """
+    positions = {fp.ref: fp.position for fp in pcb.footprints}
+    sizes = _fp_size_dict(pcb)
+    rotations = {fp.ref: fp.rotation for fp in pcb.footprints}
+
+    collisions: list[str] = []
+    refs = list(positions.keys())
+    for i, ref_a in enumerate(refs):
+        xa, ya = positions[ref_a].x, positions[ref_a].y
+        wa, ha = sizes.get(ref_a, (2.0, 2.0))
+        rot_a = rotations.get(ref_a, 0.0)
+        if rot_a % 180 in (90.0, 270.0):
+            wa, ha = ha, wa
+
+        for ref_b in refs[i + 1:]:
+            xb, yb = positions[ref_b].x, positions[ref_b].y
+            wb, hb = sizes.get(ref_b, (2.0, 2.0))
+            rot_b = rotations.get(ref_b, 0.0)
+            if rot_b % 180 in (90.0, 270.0):
+                wb, hb = hb, wb
+
+            # AABB overlap check (center-based)
+            dx = abs(xa - xb)
+            dy = abs(ya - yb)
+            gap_x = (wa + wb) / 2.0
+            gap_y = (ha + hb) / 2.0
+            if dx < gap_x and dy < gap_y:
+                collisions.append(f"Collision: {ref_a} overlaps {ref_b}")
+
+    score = _clamp01(1.0 - len(collisions) * _COLLISION_PENALTY)
+    return score, collisions
+
+
+def _score_net_proximity(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score based on distances between signal-connected components.
+
+    Components sharing signal nets should be close together.
+    """
+    from kicad_pipeline.pcb.constraints import build_signal_adjacency
+
+    adj = build_signal_adjacency(requirements)
+    pos = _fp_position_dict(pcb)
+
+    total_dist = 0.0
+    pair_count = 0
+    issues: list[str] = []
+
+    seen: set[tuple[str, str]] = set()
+    for ref_a, neighbours in adj.items():
+        if ref_a not in pos:
+            continue
+        xa, ya = pos[ref_a]
+        for ref_b in neighbours:
+            pair = (min(ref_a, ref_b), max(ref_a, ref_b))
+            if pair in seen or ref_b not in pos:
+                continue
+            seen.add(pair)
+            xb, yb = pos[ref_b]
+            dist = math.sqrt((xa - xb) ** 2 + (ya - yb) ** 2)
+            total_dist += dist
+            pair_count += 1
+            if dist > _NET_PROXIMITY_MAX_MM:
+                issues.append(
+                    f"{ref_a}-{ref_b} signal distance {dist:.1f}mm "
+                    f"(max {_NET_PROXIMITY_MAX_MM:.0f}mm)"
+                )
+
+    if pair_count == 0:
+        return 1.0, []
+
+    avg_dist = total_dist / pair_count
+    score = _clamp01(1.0 - avg_dist / _NET_PROXIMITY_MAX_MM)
+    return score, issues
+
+
+def _score_block_cohesion(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score based on how tightly feature-block components cluster.
+
+    For each feature block, compute the bounding box of its components
+    and normalise against the board area.
+    """
+    if not requirements.features:
+        return 1.0, []
+
+    pos = _fp_position_dict(pcb)
+
+    # Board area for normalisation
+    if pcb.outline.polygon:
+        bxs = [p.x for p in pcb.outline.polygon]
+        bys = [p.y for p in pcb.outline.polygon]
+        board_diag = math.sqrt(
+            (max(bxs) - min(bxs)) ** 2 + (max(bys) - min(bys)) ** 2
+        )
+    else:
+        board_diag = 100.0
+
+    block_scores: list[float] = []
+    issues: list[str] = []
+
+    for block in requirements.features:
+        block_positions = [
+            pos[ref] for ref in block.components if ref in pos
+        ]
+        if len(block_positions) < 2:
+            block_scores.append(1.0)
+            continue
+
+        xs = [p[0] for p in block_positions]
+        ys = [p[1] for p in block_positions]
+        spread = math.sqrt((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2)
+
+        # Score: compact cluster relative to board diagonal
+        # Ideal: spread <= 25% of board diagonal
+        ratio = spread / board_diag if board_diag > 0 else 0.0
+        s = _clamp01(1.0 - max(0.0, ratio - 0.25) / 0.75)
+        block_scores.append(s)
+
+        if s < 0.6:
+            issues.append(
+                f"Block '{block.name}' spread {spread:.1f}mm "
+                f"({ratio:.0%} of board diagonal)"
+            )
+
+    score = sum(block_scores) / len(block_scores) if block_scores else 1.0
+    return score, issues
+
+
+def _score_boundary(pcb: PCBDesign) -> tuple[float, list[str]]:
+    """Score based on components staying within board boundary.
+
+    Any component outside the board outline gets a penalty.
+    """
+    if not pcb.outline.polygon:
+        return 1.0, []
+
+    bxs = [p.x for p in pcb.outline.polygon]
+    bys = [p.y for p in pcb.outline.polygon]
+    min_x, max_x = min(bxs), max(bxs)
+    min_y, max_y = min(bys), max(bys)
+
+    out_count = 0
+    issues: list[str] = []
+    margin = 1.0  # 1mm margin
+
+    for fp in pcb.footprints:
+        x, y = fp.position.x, fp.position.y
+        if x < min_x - margin or x > max_x + margin or \
+           y < min_y - margin or y > max_y + margin:
+            out_count += 1
+            issues.append(f"{fp.ref} outside board boundary")
+
+    score = _clamp01(1.0 - out_count * 0.2)
+    return score, issues
+
+
+def compute_fast_placement_score(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> QualityScore:
+    """Compute a placement-focused quality score without full validation.
+
+    Designed for the SA optimizer inner loop where speed matters more than
+    full accuracy. Evaluates 5 placement sub-dimensions:
+
+    - **Collisions** (30%): courtyard overlap detection
+    - **Net proximity** (30%): signal-connected components should be close
+    - **Passive proximity** (20%): passives near their associated ICs
+    - **Block cohesion** (15%): feature-block components should cluster
+    - **Boundary** (5%): components within board outline
+
+    Args:
+        pcb: The PCB design to evaluate.
+        requirements: Project requirements with nets and feature blocks.
+
+    Returns:
+        A :class:`QualityScore` with placement-derived scores.
+    """
+    # Sub-dimension scores
+    collision_score, collision_issues = _score_collisions(pcb)
+    net_score, net_issues = _score_net_proximity(pcb, requirements)
+    passive_score, passive_issues = _compute_placement_score_from_pcb(pcb)
+    block_score, block_issues = _score_block_cohesion(pcb, requirements)
+    boundary_score, boundary_issues = _score_boundary(pcb)
+
+    # Weighted placement composite
+    placement_score = (
+        _FAST_WEIGHT_COLLISION * collision_score
+        + _FAST_WEIGHT_NET_PROXIMITY * net_score
+        + _FAST_WEIGHT_PASSIVE_PROXIMITY * passive_score
+        + _FAST_WEIGHT_BLOCK_COHESION * block_score
+        + _FAST_WEIGHT_BOUNDARY * boundary_score
+    )
+
+    # For fast path, other dimensions are derived from placement sub-scores
+    # Collisions affect manufacturing, boundary affects electrical
+    manufacturing_score = _clamp01(
+        0.5 + 0.5 * collision_score  # collisions drag down manufacturing
+    )
+    electrical_score = _clamp01(
+        0.5 + 0.5 * boundary_score  # off-board = electrical issues
+    )
+
+    # Overall: use full weight system but with placement-derived estimates
+    scores = (
+        (electrical_score, _WEIGHT_ELECTRICAL),
+        (manufacturing_score, _WEIGHT_MANUFACTURING),
+        (placement_score, _WEIGHT_PLACEMENT),
+        (net_score, _WEIGHT_SIGNAL_INTEGRITY),  # net proximity ≈ SI proxy
+        (1.0, _WEIGHT_THERMAL),  # thermal neutral without power analysis
+    )
+    overall = _weighted_geometric_mean(scores)
+    grade = score_to_grade(overall)
+
+    breakdown = (
+        ScoreDetail(
+            category="Collisions",
+            score=collision_score,
+            weight=_FAST_WEIGHT_COLLISION,
+            issues=tuple(collision_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Net Proximity",
+            score=net_score,
+            weight=_FAST_WEIGHT_NET_PROXIMITY,
+            issues=tuple(net_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Passive Proximity",
+            score=passive_score,
+            weight=_FAST_WEIGHT_PASSIVE_PROXIMITY,
+            issues=tuple(passive_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Block Cohesion",
+            score=block_score,
+            weight=_FAST_WEIGHT_BLOCK_COHESION,
+            issues=tuple(block_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Boundary",
+            score=boundary_score,
+            weight=_FAST_WEIGHT_BOUNDARY,
+            issues=tuple(boundary_issues[:5]),
+        ),
+    )
+
+    return QualityScore(
+        board_cost=0.0,
+        electrical_score=round(electrical_score, 4),
+        manufacturing_score=round(manufacturing_score, 4),
+        thermal_score=1.0,
+        signal_integrity_score=round(net_score, 4),
+        placement_score=round(placement_score, 4),
+        overall_score=round(overall, 4),
+        grade=grade,
+        breakdown=breakdown,
+    )
 
 
 # ---------------------------------------------------------------------------
