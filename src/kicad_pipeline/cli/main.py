@@ -125,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_agents_subparser(subparsers)
 
+    # suggestions subcommand
+    from kicad_pipeline.cli.suggestions_cmd import register_subcommand as _reg_suggestions
+
+    _reg_suggestions(subparsers)
+
     return parser
 
 
@@ -192,6 +197,10 @@ def main(argv: list[str] | None = None) -> int:
         from kicad_pipeline.cli.agents_cmd import dispatch_agents
 
         return dispatch_agents(args)
+    if args.command == "suggestions":
+        from kicad_pipeline.cli.suggestions_cmd import _run_suggestions
+
+        return _run_suggestions(args)
 
     parser.print_help()
     return 0

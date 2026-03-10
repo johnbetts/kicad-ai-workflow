@@ -194,3 +194,12 @@ class IPCSyncError(IPCError):
 
 class AgentError(OrchestrationError):
     """Raised when multi-agent coordination operations fail."""
+
+
+# ---------------------------------------------------------------------------
+# Optimization
+# ---------------------------------------------------------------------------
+
+
+class OptimizationError(KiCadPipelineError):
+    """Raised when optimization operations fail."""

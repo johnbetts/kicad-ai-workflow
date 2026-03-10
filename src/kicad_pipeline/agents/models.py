@@ -59,6 +59,8 @@ class CommandType(Enum):
     RERUN = "rerun"
     BUG_UPDATE = "bug_update"
     RELOAD = "reload"
+    OPTIMIZE = "optimize"
+    APPLY_OPTIMIZATION = "apply_optimization"
 
 
 # ---------------------------------------------------------------------------

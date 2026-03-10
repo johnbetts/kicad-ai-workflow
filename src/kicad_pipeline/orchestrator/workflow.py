@@ -241,13 +241,23 @@ class WorkflowEngine:
             self._generate_production(variant_name, vdir)
 
     def _generate_requirements(self, vdir: Path) -> None:
-        """Validate that requirements.json exists."""
+        """Validate that requirements.json exists and download datasheets."""
         req_path = vdir / "requirements.json"
         if not req_path.exists():
             raise OrchestrationError(
                 f"requirements.json not found at {req_path}"
             )
         log.info("Requirements file validated: %s", req_path)
+
+        # Download datasheets for components (best-effort)
+        try:
+            from kicad_pipeline.requirements.decomposer import load_requirements
+            from kicad_pipeline.research.datasheets import download_datasheets
+
+            req = load_requirements(req_path)
+            download_datasheets(req, vdir / "docs" / "datasheets")
+        except Exception:
+            log.info("Datasheet download skipped or failed (non-blocking)")
 
     @staticmethod
     def _enrich_requirements(req: object) -> object:
@@ -271,6 +281,7 @@ class WorkflowEngine:
             write_hierarchical_schematic,
             write_schematic,
         )
+        from kicad_pipeline.validation.consistency import compute_requirements_hash
 
         req = load_requirements(vdir / "requirements.json")
         req = self._enrich_requirements(req)  # type: ignore[assignment]
@@ -291,15 +302,42 @@ class WorkflowEngine:
             write_project_file(variant_name, vdir)
             log.info("Project file written: %s", pro_path)
 
+        # Store requirements hash for later drift detection
+        req_path = vdir / "requirements.json"
+        if req_path.exists():
+            req_hash = compute_requirements_hash(req_path)
+            variant = self._get_variant(variant_name)
+            sr = self._get_stage(variant, StageId.SCHEMATIC)
+            updated_sr = replace(sr, requirements_hash=req_hash)
+            variant = self._update_stage(variant, updated_sr)
+            self._update_variant(variant)
+            log.info("Requirements hash stored: %s", req_hash[:12])
+
     def _generate_pcb(self, variant_name: str, vdir: Path) -> None:
         """Build and write a PCB from requirements."""
         from kicad_pipeline.pcb.board_templates import detect_template
         from kicad_pipeline.pcb.builder import build_pcb, write_pcb
         from kicad_pipeline.project_file import write_project_file
         from kicad_pipeline.requirements.decomposer import load_requirements
+        from kicad_pipeline.validation.consistency import (
+            check_consistency,
+            check_requirements_hash,
+            consistency_report_to_text,
+        )
 
         req = load_requirements(vdir / "requirements.json")
         req = self._enrich_requirements(req)  # type: ignore[assignment]
+
+        # Generate layout guide if not already present
+        guide_path = vdir / "docs" / "layout_guide.md"
+        if not guide_path.exists():
+            try:
+                from kicad_pipeline.research.layout_guide import generate_layout_guide
+
+                generate_layout_guide(req, guide_path)
+            except Exception:
+                log.info("Layout guide generation skipped (non-blocking)")
+
         # Auto-detect board template from mechanical constraints
         tmpl = detect_template(req.mechanical)
         board_template = tmpl.name if tmpl is not None else None
@@ -316,10 +354,31 @@ class WorkflowEngine:
         )
         log.info("Project file updated with netclasses: %s", vdir)
 
+        # Check for requirements drift since schematic generation
+        req_path = vdir / "requirements.json"
+        variant = self._get_variant(variant_name)
+        sch_stage = self._get_stage(variant, StageId.SCHEMATIC)
+        if sch_stage.requirements_hash and req_path.exists():
+            drift = check_requirements_hash(sch_stage.requirements_hash, req_path)
+            if drift is not None:
+                log.warning("Requirements drift: %s", drift.message)
+
+        # Run schematic-PCB consistency check (warnings only at PCB stage)
+        sch_path = vdir / f"{variant_name}.kicad_sch"
+        if sch_path.exists() and pcb_path.exists():
+            report = check_consistency(sch_path, pcb_path)
+            if not report.passed:
+                log.warning(
+                    "Schematic-PCB consistency: %d errors, %d warnings",
+                    len(report.errors),
+                    len(report.warnings),
+                )
+                log.warning(consistency_report_to_text(report))
+
     def _generate_validation(
         self, variant_name: str, vdir: Path, warnings: list[str]
     ) -> None:
-        """Run pre-production parts validation as a hard gate."""
+        """Run pre-production validation: consistency check + parts validation."""
         from kicad_pipeline.pcb.board_templates import detect_template
         from kicad_pipeline.pcb.builder import build_pcb
         from kicad_pipeline.production.bom import generate_bom
@@ -330,7 +389,35 @@ class WorkflowEngine:
         )
         from kicad_pipeline.requirements.component_db import ComponentDB
         from kicad_pipeline.requirements.decomposer import load_requirements
+        from kicad_pipeline.validation.consistency import (
+            check_consistency,
+            consistency_report_to_text,
+        )
 
+        val_dir = vdir / "validation"
+        val_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Hard gate: schematic-PCB consistency ---
+        sch_path = vdir / f"{variant_name}.kicad_sch"
+        pcb_path = vdir / f"{variant_name}.kicad_pcb"
+        if sch_path.exists() and pcb_path.exists():
+            consistency = check_consistency(sch_path, pcb_path)
+            (val_dir / "consistency_report.txt").write_text(
+                consistency_report_to_text(consistency), encoding="utf-8"
+            )
+            log.info("Consistency report written to %s", val_dir)
+
+            if not consistency.passed:
+                raise OrchestrationError(
+                    f"Schematic-PCB consistency check failed: "
+                    f"{len(consistency.errors)} error(s). "
+                    f"See {val_dir / 'consistency_report.txt'}"
+                )
+
+            for w in consistency.warnings:
+                warnings.append(f"Consistency: {w.message}")
+
+        # --- Parts validation ---
         req = load_requirements(vdir / "requirements.json")
         req = self._enrich_requirements(req)  # type: ignore[assignment]
         tmpl = detect_template(req.mechanical)
@@ -344,8 +431,6 @@ class WorkflowEngine:
         )
 
         # Write reports
-        val_dir = vdir / "validation"
-        val_dir.mkdir(parents=True, exist_ok=True)
         (val_dir / "parts_validation_report.txt").write_text(
             report_to_text(report), encoding="utf-8"
         )
@@ -365,11 +450,101 @@ class WorkflowEngine:
                         f"— adds $3 JLCPCB setup fee"
                     )
 
-        # Hard gate: block if parts are unavailable
+        # Warn about low stock parts
+        if report.low_stock_count > 0:
+            for ps in report.parts:
+                if ps.status == "low_stock":
+                    warnings.append(
+                        f"{ps.lcsc} ({', '.join(ps.ref_designators)}) "
+                        f"low stock: {ps.stock_qty} units — "
+                        f"approval required"
+                    )
+
+        # --- Full validation suite (non-blocking) ---
+        try:
+            from kicad_pipeline.validation.drc import run_drc
+            from kicad_pipeline.validation.electrical import run_electrical_checks
+            from kicad_pipeline.validation.manufacturing import run_manufacturing_checks
+            from kicad_pipeline.validation.report import (
+                build_validation_report,
+                format_report_markdown,
+            )
+            from kicad_pipeline.validation.signal_integrity import run_si_checks
+            from kicad_pipeline.validation.thermal import run_thermal_checks
+
+            from kicad_pipeline.optimization.scoring import compute_quality_score
+
+            drc_report = run_drc(pcb)
+            electrical_report = run_electrical_checks(pcb, req)
+            manufacturing_report = run_manufacturing_checks(pcb)
+            thermal_report = run_thermal_checks(pcb, req)
+            si_report = run_si_checks(pcb, req)
+
+            full_report = build_validation_report(
+                drc=drc_report,
+                electrical=electrical_report,
+                manufacturing=manufacturing_report,
+                thermal=thermal_report,
+                si=si_report,
+            )
+
+            # Write full validation report
+            (val_dir / "full_validation_report.md").write_text(
+                format_report_markdown(full_report), encoding="utf-8"
+            )
+
+            # Compute and write quality score
+            quality = compute_quality_score(pcb, req, validation_report=full_report)
+            import json as _json
+
+            (val_dir / "quality_score.json").write_text(
+                _json.dumps(
+                    {
+                        "overall_score": quality.overall_score,
+                        "grade": quality.grade,
+                        "board_cost": quality.board_cost,
+                        "electrical_score": quality.electrical_score,
+                        "manufacturing_score": quality.manufacturing_score,
+                        "thermal_score": quality.thermal_score,
+                        "signal_integrity_score": quality.signal_integrity_score,
+                        "placement_score": quality.placement_score,
+                        "breakdown": [
+                            {
+                                "category": d.category,
+                                "score": d.score,
+                                "weight": d.weight,
+                                "issues": list(d.issues),
+                            }
+                            for d in quality.breakdown
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            log.info("Quality score: %.2f (%s)", quality.overall_score, quality.grade)
+
+            for d in quality.breakdown:
+                if d.issues:
+                    for issue in d.issues[:3]:
+                        warnings.append(f"{d.category}: {issue}")
+        except Exception as exc:
+            log.warning("Extended validation failed (non-blocking): %s", exc)
+            warnings.append(f"Extended validation skipped: {exc}")
+
+        # Hard gate: block if parts are unavailable or low stock
         if not report.all_parts_available:
+            details: list[str] = []
+            unavailable = report.unresolved_count - report.low_stock_count
+            if unavailable > 0:
+                details.append(f"{unavailable} unavailable")
+            if report.low_stock_count > 0:
+                details.append(
+                    f"{report.low_stock_count} low stock (<1000 qty)"
+                )
             raise OrchestrationError(
-                f"Parts validation failed: {report.unresolved_count} part(s) "
-                f"need manual resolution. See {val_dir / 'parts_validation_report.txt'}"
+                f"Parts validation failed: {', '.join(details)}. "
+                f"See {val_dir / 'parts_validation_report.txt'}"
             )
 
     def _generate_production(self, variant_name: str, vdir: Path) -> None:
@@ -471,20 +646,29 @@ class WorkflowEngine:
         }
 
     def _review_validation(self, vdir: Path) -> dict[str, object]:
-        """Summarize parts validation report."""
+        """Summarize parts validation and consistency reports."""
         import json as _json
 
         report_path = vdir / "validation" / "parts_validation_report.json"
         if not report_path.exists():
             return {"stage": "validation", "error": "validation report not found"}
         data = _json.loads(report_path.read_text(encoding="utf-8"))
-        return {
+        result: dict[str, object] = {
             "stage": "validation",
             "all_parts_available": data.get("all_parts_available", False),
             "unresolved_count": data.get("unresolved_count", 0),
             "total_bom_cost_usd": data.get("total_bom_cost_usd"),
             "summary": data.get("summary_text", ""),
         }
+
+        # Include consistency report if available
+        consistency_path = vdir / "validation" / "consistency_report.txt"
+        if consistency_path.exists():
+            result["consistency_report"] = consistency_path.read_text(
+                encoding="utf-8"
+            )
+
+        return result
 
     def _review_production(
         self, variant_name: str, vdir: Path

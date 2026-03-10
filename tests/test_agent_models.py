@@ -111,8 +111,14 @@ class TestCommandType:
     def test_reload(self) -> None:
         assert CommandType.RELOAD.value == "reload"
 
+    def test_optimize(self) -> None:
+        assert CommandType.OPTIMIZE.value == "optimize"
+
+    def test_apply_optimization(self) -> None:
+        assert CommandType.APPLY_OPTIMIZATION.value == "apply_optimization"
+
     def test_member_count(self) -> None:
-        assert len(CommandType) == 3
+        assert len(CommandType) == 5
 
 
 # ---------------------------------------------------------------------------
