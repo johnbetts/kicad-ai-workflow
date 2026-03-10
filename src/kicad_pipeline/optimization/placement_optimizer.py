@@ -476,41 +476,164 @@ def optimize_placement_sa(
 # ---------------------------------------------------------------------------
 
 
+class _PlacementGrid:
+    """Simple occupancy tracker to prevent component overlaps.
+
+    Tracks placed component bounding boxes and checks for collisions
+    before accepting new placements.
+    """
+
+    def __init__(self, board_bounds: tuple[float, float, float, float]) -> None:
+        self.min_x, self.min_y, self.max_x, self.max_y = board_bounds
+        # (cx, cy, half_w, half_h) for each placed component
+        self._placed: list[tuple[float, float, float, float]] = []
+        self._margin = 0.5  # mm clearance between components
+
+    def is_free(self, cx: float, cy: float, w: float, h: float) -> bool:
+        """Check if placing a component here would overlap any existing one."""
+        hw = w / 2.0 + self._margin
+        hh = h / 2.0 + self._margin
+        for px, py, phw, phh in self._placed:
+            if abs(cx - px) < hw + phw and abs(cy - py) < hh + phh:
+                return False
+        return True
+
+    def place(self, cx: float, cy: float, w: float, h: float) -> None:
+        """Register a component at (cx, cy) with size (w, h)."""
+        self._placed.append((cx, cy, w / 2.0, h / 2.0))
+
+    def find_free_pos(
+        self,
+        target_x: float,
+        target_y: float,
+        w: float,
+        h: float,
+    ) -> tuple[float, float]:
+        """Find nearest free position to (target_x, target_y).
+
+        Searches in expanding concentric rings around the target.
+        """
+        margin = 2.0
+        bmin_x = self.min_x + margin
+        bmin_y = self.min_y + margin
+        bmax_x = self.max_x - margin
+        bmax_y = self.max_y - margin
+
+        # Clamp target to board
+        tx = max(bmin_x, min(bmax_x, target_x))
+        ty = max(bmin_y, min(bmax_y, target_y))
+
+        if self.is_free(tx, ty, w, h):
+            return (tx, ty)
+
+        # Spiral search — try 8 directions at increasing radii
+        step = max(w, h) * 0.5 + self._margin
+        for ring in range(1, 40):
+            r = step * ring
+            for angle_idx in range(8 * ring):
+                angle = 2 * math.pi * angle_idx / (8 * ring)
+                cx = tx + r * math.cos(angle)
+                cy = ty + r * math.sin(angle)
+                cx = max(bmin_x, min(bmax_x, cx))
+                cy = max(bmin_y, min(bmax_y, cy))
+                if self.is_free(cx, cy, w, h):
+                    return (cx, cy)
+
+        # Fallback — return clamped target (will collide but won't crash)
+        return (tx, ty)
+
+
+def _group_footprint_area(
+    refs: tuple[str, ...],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> tuple[float, float]:
+    """Estimate the bounding box needed for a group of components.
+
+    Arranges components in a tight 2-column layout to estimate area.
+    Returns (width, height) in mm.
+    """
+    sizes = [fp_sizes.get(r, (2.0, 2.0)) for r in refs]
+    if not sizes:
+        return (2.0, 2.0)
+    if len(sizes) == 1:
+        return (sizes[0][0] + 1.0, sizes[0][1] + 1.0)
+
+    # Sort largest first, pack in 2 columns
+    sizes.sort(key=lambda s: s[0] * s[1], reverse=True)
+    cols = min(2, len(sizes))
+    col_widths = [0.0] * cols
+    col_heights = [0.0] * cols
+    for i, (w, h) in enumerate(sizes):
+        c = i % cols
+        col_widths[c] = max(col_widths[c], w)
+        col_heights[c] += h + 0.5  # gap between rows
+
+    total_w = sum(col_widths) + 1.0 * (cols - 1) + 1.0  # inter-col gap + margin
+    total_h = max(col_heights) + 1.0  # margin
+    return (total_w, total_h)
+
+
 def _place_subcircuit_group(
     anchor_pos: tuple[float, float],
     refs: tuple[str, ...],
     anchor_ref: str,
     fp_sizes: dict[str, tuple[float, float]],
     board_bounds: tuple[float, float, float, float],
+    grid: _PlacementGrid,
 ) -> dict[str, tuple[float, float]]:
     """Arrange sub-circuit components tightly around the anchor.
 
-    Places components in a spiral pattern around the anchor position,
-    respecting footprint sizes for clearance.
+    Uses the occupancy grid to avoid collisions with already-placed
+    components. Places anchor first, then remaining components in a
+    spiral pattern checking for free positions.
 
     Returns:
         Dict mapping ref → (x, y) position.
     """
-    positions: dict[str, tuple[float, float]] = {anchor_ref: anchor_pos}
     min_x, min_y, max_x, max_y = board_bounds
+    positions: dict[str, tuple[float, float]] = {}
+
+    # Place anchor
+    aw, ah = fp_sizes.get(anchor_ref, (2.0, 2.0))
+    ax, ay = grid.find_free_pos(anchor_pos[0], anchor_pos[1], aw, ah)
+    grid.place(ax, ay, aw, ah)
+    positions[anchor_ref] = (ax, ay)
+
     other_refs = [r for r in refs if r != anchor_ref]
+    if not other_refs:
+        return positions
 
-    # Place in expanding ring around anchor
-    angle_step = 2 * math.pi / max(len(other_refs), 1)
-    radius = 3.0  # start 3mm from anchor
+    # Sort by size (largest first) so they get placed closer to anchor
+    other_with_size = [
+        (ref, fp_sizes.get(ref, (2.0, 2.0))) for ref in other_refs
+    ]
+    other_with_size.sort(key=lambda x: x[1][0] * x[1][1], reverse=True)
 
-    for i, ref in enumerate(other_refs):
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
-        aw, ah = fp_sizes.get(anchor_ref, (2.0, 2.0))
-        min_dist = (max(w, h) + max(aw, ah)) / 2.0 + 0.5
-        r = max(radius, min_dist)
+    # Place others around anchor, checking occupancy
+    # Use 4 cardinal + 4 diagonal directions for better spreading
+    n = len(other_with_size)
+    angle_step = 2 * math.pi / max(n, 1)
+    for i, (ref, (w, h)) in enumerate(other_with_size):
+        # Use direction-aware clearance: along X use widths, along Y use heights
         angle = angle_step * i
-        x = anchor_pos[0] + r * math.cos(angle)
-        y = anchor_pos[1] + r * math.sin(angle)
-        # Clamp to board bounds with margin
-        x = max(min_x + 2.0, min(max_x - 2.0, x))
-        y = max(min_y + 2.0, min(max_y - 2.0, y))
-        positions[ref] = (x, y)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        # Minimum distance along this direction to clear anchor + component
+        clear_x = (w + aw) / 2.0 + 0.5
+        clear_y = (h + ah) / 2.0 + 0.5
+        # Project clearance onto direction vector
+        if abs(cos_a) > 0.01 or abs(sin_a) > 0.01:
+            min_dist = math.sqrt(
+                (clear_x * cos_a) ** 2 + (clear_y * sin_a) ** 2,
+            )
+        else:
+            min_dist = max(clear_x, clear_y)
+        min_dist = max(min_dist, 1.5)  # at least 1.5mm
+
+        target_x = ax + min_dist * cos_a
+        target_y = ay + min_dist * sin_a
+        fx, fy = grid.find_free_pos(target_x, target_y, w, h)
+        grid.place(fx, fy, w, h)
+        positions[ref] = (fx, fy)
 
     return positions
 
@@ -534,8 +657,13 @@ def _assign_zone_position(
     zone_rect: tuple[float, float, float, float],
     index: int,
     total: int,
+    group_sizes: list[tuple[float, float]] | None = None,
 ) -> tuple[float, float]:
-    """Assign a position within a zone for the index-th group."""
+    """Assign a position within a zone for the index-th group.
+
+    When *group_sizes* is provided, cells are sized proportionally to
+    the footprint area of each group to avoid overlap.
+    """
     x1, y1, x2, y2 = zone_rect
     zw = x2 - x1
     zh = y2 - y1
@@ -545,13 +673,16 @@ def _assign_zone_position(
     if total <= 1:
         return (cx, cy)
 
-    # Grid within zone
-    cols = max(1, math.ceil(math.isqrt(total)))
+    # Grid within zone — use enough columns to spread groups
+    cols = max(1, math.ceil(math.sqrt(total)))
+    rows_needed = max(1, (total + cols - 1) // cols)
+
+    # If group sizes provided, compute per-cell offsets proportionally
+    cell_w = zw / cols
+    cell_h = zh / rows_needed
+
     row = index // cols
     col = index % cols
-    cell_w = zw / cols
-    rows_needed = max(1, (total + cols - 1) // cols)
-    cell_h = zh / rows_needed
     x = x1 + cell_w * (col + 0.5)
     y = y1 + cell_h * (row + 0.5)
     return (x, y)
@@ -561,13 +692,16 @@ def _apply_review_fixes(
     positions: dict[str, tuple[float, float, float]],
     review: PlacementReview,
     fixed_refs: set[str],
+    fp_sizes: dict[str, tuple[float, float]],
 ) -> dict[str, tuple[float, float, float]]:
     """Apply suggested position fixes from review violations.
 
     Only applies fixes for critical and major violations that have
-    a suggested_position and affect movable components.
+    a suggested_position, affect movable components, and do NOT create
+    a new collision with already-placed components.
     """
     result = dict(positions)
+
     for violation in review.violations:
         if violation.severity == "minor":
             continue
@@ -579,8 +713,25 @@ def _apply_review_fixes(
                 continue
             _x, _y, rot = result[ref]
             sx, sy = violation.suggested_position
-            result[ref] = (sx, sy, rot)
-            break  # one fix per violation
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            hw = w / 2.0 + 0.5
+            hh = h / 2.0 + 0.5
+
+            # Check if new position would collide with any other component
+            collides = False
+            for other_ref, (ox, oy, _orot) in result.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                ohw = ow / 2.0 + 0.5
+                ohh = oh / 2.0 + 0.5
+                if abs(sx - ox) < hw + ohw and abs(sy - oy) < hh + ohh:
+                    collides = True
+                    break
+
+            if not collides:
+                result[ref] = (sx, sy, rot)
+            break  # one fix attempt per violation
 
     return result
 
@@ -648,19 +799,28 @@ def optimize_placement_ee(
     )
 
     # -----------------------------------------------------------------------
-    # Phase 3: Inter-Group MST Placement
+    # Phase 3: Inter-Group MST Placement (collision-aware)
     # -----------------------------------------------------------------------
     _log.info("Phase 3: Inter-group placement via MST")
 
-    # Start with existing positions for fixed refs
+    # Build rotation lookup for preserving original orientations
+    rotation_lookup: dict[str, float] = {
+        fp.ref: fp.rotation for fp in initial_pcb.footprints
+    }
+
+    # Initialise occupancy grid
+    grid = _PlacementGrid(bounds)
+
+    # Start with existing positions for fixed refs (register them on grid)
     new_positions: dict[str, tuple[float, float, float]] = {}
     for fp in initial_pcb.footprints:
         if fp.ref in fixed_refs:
             new_positions[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
+            w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
+            grid.place(fp.position.x, fp.position.y, w, h)
 
     # Place sub-circuit groups within their assigned zones
     placed_refs: set[str] = set(fixed_refs)
-    subcircuit_positions: dict[str, tuple[float, float]] = {}
 
     for zone_assignment in zone_assignments:
         zone_rect = zone_assignment.zone_rect
@@ -674,9 +834,10 @@ def optimize_placement_ee(
 
         # Place each sub-circuit group
         sc_list = list(zone_assignment.subcircuits)
+        total_in_zone = len(sc_list) + len(zone_assignment.loose_refs)
         for sc_idx, sc in enumerate(sc_list):
             anchor_pos = _assign_zone_position(
-                adjusted_rect, sc_idx, len(sc_list) + len(zone_assignment.loose_refs),
+                adjusted_rect, sc_idx, total_in_zone,
             )
             group_positions = _place_subcircuit_group(
                 anchor_pos=anchor_pos,
@@ -684,35 +845,28 @@ def optimize_placement_ee(
                 anchor_ref=sc.anchor_ref,
                 fp_sizes=fp_sizes,
                 board_bounds=bounds,
+                grid=grid,
             )
             for ref, (x, y) in group_positions.items():
                 if ref in fixed_refs:
                     continue
-                # Preserve existing rotation or default 0
-                existing_rot = 0.0
-                for fp in initial_pcb.footprints:
-                    if fp.ref == ref:
-                        existing_rot = fp.rotation
-                        break
-                new_positions[ref] = (x, y, existing_rot)
+                rot = rotation_lookup.get(ref, 0.0)
+                new_positions[ref] = (x, y, rot)
                 placed_refs.add(ref)
-                subcircuit_positions[ref] = (x, y)
 
-        # Place loose refs
+        # Place loose refs — also collision-aware
         loose_offset = len(sc_list)
-        total_in_zone = len(sc_list) + len(zone_assignment.loose_refs)
         for lr_idx, ref in enumerate(zone_assignment.loose_refs):
             if ref in placed_refs:
                 continue
-            x, y = _assign_zone_position(
+            target_x, target_y = _assign_zone_position(
                 adjusted_rect, loose_offset + lr_idx, total_in_zone,
             )
-            existing_rot = 0.0
-            for fp in initial_pcb.footprints:
-                if fp.ref == ref:
-                    existing_rot = fp.rotation
-                    break
-            new_positions[ref] = (x, y, existing_rot)
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            fx, fy = grid.find_free_pos(target_x, target_y, w, h)
+            grid.place(fx, fy, w, h)
+            rot = rotation_lookup.get(ref, 0.0)
+            new_positions[ref] = (fx, fy, rot)
             placed_refs.add(ref)
 
     # Handle any refs not yet placed (shouldn't happen, but safety net)
@@ -721,26 +875,56 @@ def optimize_placement_ee(
             new_positions[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
 
     # -----------------------------------------------------------------------
-    # Phase 4: Intra-Group Refinement
+    # Phase 3.5: Connector Edge Pinning (collision-aware)
     # -----------------------------------------------------------------------
-    _log.info("Phase 4: Intra-group refinement")
-    # For each subcircuit, pull connected components closer to anchor
-    for sc in subcircuits:
-        anchor = sc.anchor_ref
-        if anchor not in new_positions:
+    # Build a fresh grid for connector placement (re-register all placed)
+    conn_grid = _PlacementGrid(bounds)
+    connector_refs: list[str] = []
+    for fp in initial_pcb.footprints:
+        ref = fp.ref
+        if ref not in new_positions:
             continue
-        ax, ay, arot = new_positions[anchor]
-        for ref in sc.refs:
-            if ref == anchor or ref in fixed_refs or ref not in new_positions:
-                continue
-            rx, ry, rrot = new_positions[ref]
-            # Pull toward anchor — move 50% closer
-            nx = rx + (ax - rx) * 0.3
-            ny = ry + (ay - ry) * 0.3
-            # Clamp
-            nx = max(min_x + 2.0, min(max_x - 2.0, nx))
-            ny = max(min_y + 2.0, min(max_y - 2.0, ny))
-            new_positions[ref] = (nx, ny, rrot)
+        if ref.startswith("J") and ref not in fixed_refs:
+            connector_refs.append(ref)
+            continue
+        # Register non-connector positions on grid
+        cx, cy, _rot = new_positions[ref]
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        conn_grid.place(cx, cy, w, h)
+
+    edge_margin = 3.0  # mm from board edge
+    for ref in connector_refs:
+        cx, cy, rot = new_positions[ref]
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+
+        # Find nearest edge and compute target position on that edge
+        dist_left = cx - min_x
+        dist_right = max_x - cx
+        dist_top = cy - min_y
+        dist_bottom = max_y - cy
+        min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+
+        target_x, target_y = cx, cy
+        if min_edge_dist <= 5.0:
+            # Already near edge — keep position but use grid for collision check
+            pass
+        elif dist_left == min_edge_dist:
+            target_x = min_x + edge_margin + w / 2.0
+        elif dist_right == min_edge_dist:
+            target_x = max_x - edge_margin - w / 2.0
+        elif dist_top == min_edge_dist:
+            target_y = min_y + edge_margin + h / 2.0
+        else:
+            target_y = max_y - edge_margin - h / 2.0
+
+        fx, fy = conn_grid.find_free_pos(target_x, target_y, w, h)
+        conn_grid.place(fx, fy, w, h)
+        new_positions[ref] = (fx, fy, rot)
+
+    # -----------------------------------------------------------------------
+    # Phase 4: Intra-Group Refinement (skip — grid already handles tight placement)
+    # -----------------------------------------------------------------------
+    _log.info("Phase 4: Intra-group refinement (via occupancy grid)")
 
     # -----------------------------------------------------------------------
     # Phase 5: EE Review Loop
@@ -778,7 +962,9 @@ def optimize_placement_ee(
             break
 
         # Apply suggested fixes
-        new_positions = _apply_review_fixes(new_positions, review, fixed_refs)
+        new_positions = _apply_review_fixes(
+            new_positions, review, fixed_refs, fp_sizes,
+        )
 
     # Build final PCB
     if best_review is None:

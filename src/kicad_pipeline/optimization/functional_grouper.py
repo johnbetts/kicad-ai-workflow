@@ -458,9 +458,11 @@ def _detect_decoupling_pairs(
     ref_to_nets: dict[str, set[str]],
     claimed: set[str],
 ) -> list[DetectedSubCircuit]:
-    """Detect decoupling capacitor pairs: C near IC power pin."""
-    results: list[DetectedSubCircuit] = []
+    """Detect decoupling capacitor groups: all caps near an IC's power pins.
 
+    Merges multiple caps sharing the same IC anchor into a single sub-circuit
+    so the placement engine treats them as one group.
+    """
     ics = [c for c in requirements.components
            if c.ref.startswith("U") and c.ref not in claimed]
     caps = [c for c in requirements.components
@@ -474,6 +476,10 @@ def _detect_decoupling_pairs(
             if _is_power_net(net_name):
                 pnets.add(net_name)
         ic_power_nets[ic.ref] = pnets
+
+    # Collect caps per IC anchor
+    ic_caps: dict[str, list[str]] = {}
+    ic_shared_nets: dict[str, set[str]] = {}
 
     for cap in caps:
         if cap.ref in claimed:
@@ -493,26 +499,31 @@ def _detect_decoupling_pairs(
                 best_ic = ic.ref
 
         if best_ic and best_overlap > 0:
-            # Don't claim the IC — it may have multiple decoupling caps
             claimed.add(cap.ref)
-
-            # Domain from shared power net
+            ic_caps.setdefault(best_ic, []).append(cap.ref)
             shared = cap_power & ic_power_nets.get(best_ic, set())
-            domain = VoltageDomain.DIGITAL_3V3
-            for net_name in shared:
-                if not _is_gnd_net(net_name):
-                    v = _parse_voltage_from_net(net_name)
-                    if v is not None:
-                        domain = _classify_voltage(v)
-                        break
+            ic_shared_nets.setdefault(best_ic, set()).update(shared)
 
-            results.append(DetectedSubCircuit(
-                circuit_type=SubCircuitType.DECOUPLING,
-                refs=(best_ic, cap.ref),
-                anchor_ref=best_ic,
-                net_connections=tuple(sorted(shared)),
-                domain=domain,
-            ))
+    # Build one sub-circuit per IC with all its decoupling caps
+    results: list[DetectedSubCircuit] = []
+    for ic_ref, cap_refs in ic_caps.items():
+        shared = ic_shared_nets.get(ic_ref, set())
+        domain = VoltageDomain.DIGITAL_3V3
+        for net_name in shared:
+            if not _is_gnd_net(net_name):
+                v = _parse_voltage_from_net(net_name)
+                if v is not None:
+                    domain = _classify_voltage(v)
+                    break
+
+        all_refs = tuple(sorted([ic_ref, *cap_refs]))
+        results.append(DetectedSubCircuit(
+            circuit_type=SubCircuitType.DECOUPLING,
+            refs=all_refs,
+            anchor_ref=ic_ref,
+            net_connections=tuple(sorted(shared)),
+            domain=domain,
+        ))
 
     return results
 
