@@ -1989,6 +1989,92 @@ def optimize_placement_ee(
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
             positions[cap_ref] = (tx, ty, crot)
 
+    # 3c2. ADC channel formation — repeatable channel strips near ADC ICs
+    # Detect nets connecting an ADC IC pin to exactly 2R + 1D + 1C (voltage
+    # divider + protection pattern), then arrange each channel's 4 passives
+    # in a consistent horizontal strip stacked vertically by channel index.
+    _log.info("  3c2: ADC channel formation")
+    adc_channel_refs: set[str] = set()  # protect during collision resolution
+
+    # Build net → refs mapping from requirements
+    net_components: dict[str, list[tuple[str, str]]] = {}
+    for net in requirements.nets:
+        net_components[net.name] = [(c.ref, c.pin) for c in net.connections]
+
+    # Find ADC channel nets: connect U* pin to 2R + 1D + 1C
+    adc_channels: list[tuple[str, str, list[str]]] = []  # (ic_ref, ic_pin, [passive_refs])
+    for net_name, conns in net_components.items():
+        ic_refs = [(r, p) for r, p in conns if r.startswith("U") and r in positions]
+        passive_refs = [r for r, p in conns
+                        if r in positions and r[0] in "RDC" and not r.startswith("U")]
+        if len(ic_refs) == 1 and len(passive_refs) == 4:
+            # Check pattern: 2R + 1D + 1C
+            r_count = sum(1 for r in passive_refs if r.startswith("R"))
+            d_count = sum(1 for r in passive_refs if r.startswith("D"))
+            c_count = sum(1 for r in passive_refs if r.startswith("C"))
+            if r_count == 2 and d_count == 1 and c_count == 1:
+                ic_ref, ic_pin = ic_refs[0]
+                adc_channels.append((ic_ref, ic_pin, passive_refs))
+
+    # Group channels by IC and sort by pin number
+    ic_channels: dict[str, list[tuple[str, list[str]]]] = {}
+    for ic_ref, ic_pin, passives in adc_channels:
+        ic_channels.setdefault(ic_ref, []).append((ic_pin, passives))
+    for ic_ref in ic_channels:
+        ic_channels[ic_ref].sort(key=lambda x: x[0])
+
+    # Place each IC's channels in consistent strips
+    for ic_ref, channels in ic_channels.items():
+        if ic_ref not in positions:
+            continue
+        ix, iy, _irot = positions[ic_ref]
+        iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
+
+        for ch_idx, (ic_pin, passives) in enumerate(channels):
+            # Sort passives: R_top (100k), R_bot (12k), D_clamp, C_filter
+            r_refs = sorted([r for r in passives if r.startswith("R")])
+            d_refs = [r for r in passives if r.startswith("D")]
+            c_refs = [r for r in passives if r.startswith("C")]
+
+            # Determine which side of IC this pin is on
+            # For MSOP-10: pins 1-5 left, pins 6-10 right
+            pin_num = int(ic_pin) if ic_pin.isdigit() else 5
+            on_left = pin_num <= 5
+
+            # Channel strip: place passives in a row extending away from IC
+            strip_dir = -1.0 if on_left else 1.0  # -1 = extend left, +1 = extend right
+            # Vertical offset: stack channels with 3mm spacing
+            ch_y = iy - ih / 2.0 + (ch_idx + 0.5) * (ih / max(len(channels), 1))
+
+            cursor_x = ix + strip_dir * (iw / 2.0 + 1.0)
+
+            # Place in order: R_bot (nearest IC), D_clamp, C_filter, R_top (farthest)
+            strip_order = []
+            if len(r_refs) >= 2:
+                strip_order.append(r_refs[1])  # R_bot (12k, lower value = index 1 if sorted by ref)
+            strip_order.extend(d_refs)
+            strip_order.extend(c_refs)
+            if len(r_refs) >= 1:
+                strip_order.append(r_refs[0])  # R_top (100k)
+
+            for ref in strip_order:
+                if ref not in positions or ref in fixed_refs:
+                    continue
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                px = cursor_x + strip_dir * w / 2.0
+                py = ch_y
+                px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+                py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+                _, _, rot = positions[ref]
+                positions[ref] = (px, py, rot)
+                adc_channel_refs.add(ref)
+                cursor_x = px + strip_dir * (w / 2.0 + 0.5)
+
+        _log.debug(
+            "    3c2: %s — %d channels arranged",
+            ic_ref, len(channels),
+        )
+
     # 3d. Crystal-MCU proximity — within 10mm
     _log.info("  3d: Crystal-MCU proximity")
     from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref
@@ -2044,7 +2130,8 @@ def optimize_placement_ee(
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
     # Protect relay sub-circuit positions — move other components around them
-    relay_fixed = fixed_refs | relay_support_refs | {
+    subcircuit_fixed = relay_support_refs | adc_channel_refs
+    relay_fixed = fixed_refs | subcircuit_fixed | {
         r for r in positions if r.startswith("K")
     }
     positions = _resolve_collisions(
@@ -2077,7 +2164,7 @@ def optimize_placement_ee(
     post_clamp_collisions = len(_count_collisions(positions, fp_sizes))
     if post_clamp_collisions > 0:
         _log.info("  %d post-clamp collisions — resolving", post_clamp_collisions)
-        relay_fixed_clamp = fixed_refs | relay_support_refs | {
+        relay_fixed_clamp = fixed_refs | subcircuit_fixed | {
             r for r in positions if r.startswith("K")
         }
         positions = _resolve_collisions(
@@ -2116,7 +2203,7 @@ def optimize_placement_ee(
             break
 
         # Apply suggested fixes — protect relay sub-circuit positions
-        relay_fixed_review = fixed_refs | relay_support_refs | {
+        relay_fixed_review = fixed_refs | subcircuit_fixed | {
             r for r in positions if r.startswith("K")
         }
         positions = _apply_review_fixes(
@@ -2130,7 +2217,7 @@ def optimize_placement_ee(
         _log.info(
             "  %d post-review collisions — resolving", len(post_review_collisions),
         )
-        relay_fixed_post = fixed_refs | relay_support_refs | {
+        relay_fixed_post = fixed_refs | subcircuit_fixed | {
             r for r in best_positions if r.startswith("K")
         }
         best_positions = _resolve_collisions(

@@ -175,6 +175,42 @@ The integration test (`test_placement_visual.py`) depends on:
 - `matplotlib` being installed
 - The test is `scope="module"` so the board is built once and shared across all test classes
 
+## Placement Iteration Problem-Solving Approach
+
+When iterating on PCB placement, optimize **one functional group at a time** until it is
+approved via human feedback, then move to the next group. Do not try to fix everything at once.
+
+### Group-by-group iteration order:
+1. **Relay group** — relays in 1xN row, support components (Q/D/R) in tight grid below
+2. **Analog group** — each ADC channel should have a repeatable grouping of passives
+   between the ADC IC and the screw terminal (voltage divider + clamp + filter as strip)
+3. **MCU group** — tight clustering around ESP32 with decoupling caps, crystal, pull-ups
+4. **Power group** — buck converter chains, regulators grouped by output rail
+5. **Ethernet group** — PHY/magnetics/connector close together
+6. **L-series (inductors/ferrites) LAST** — they belong at boundaries between groups by definition
+
+### Per-group process:
+1. Analyze the group's internal signal chains (trace netlist connectivity)
+2. Identify repeatable sub-circuit patterns (voltage divider channels, driver circuits)
+3. Implement layout logic that arranges each sub-circuit in a consistent, recognizable pattern
+4. Protect placed sub-circuit positions during collision resolution
+5. Regenerate, render, measure distances
+6. Get human feedback — if approved, commit and move to next group
+
+### Key principles:
+- **Repeatable patterns** — identical sub-circuits should have identical layouts
+- **Signal flow order** — components between input and output should follow signal path
+- **Protect what works** — once a sub-circuit is placed correctly, protect it from
+  collision resolution and review fixes (add to `subcircuit_fixed` set)
+- **Measure before and after** — use actual distances, not visual guesses
+- **Never re-try a failed approach** — track failures in `docs/placement_iteration_log.md`
+- **Components from other groups in a zone must be moved out** — fix inter-group contamination
+- **L-series passives are boundary components** — place them at group boundaries last
+
+### Error tracking:
+Document errors, failed fixes, and lessons learned in `docs/placement_iteration_log.md`
+to avoid repeating the same mistakes. Reference this file before attempting any fix.
+
 ## Testing
 
 pytest only. Every module gets a test file.
