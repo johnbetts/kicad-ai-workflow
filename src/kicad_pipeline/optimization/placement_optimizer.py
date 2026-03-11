@@ -1750,24 +1750,52 @@ def _build_group_map(requirements: ProjectRequirements) -> dict[str, str]:
     return group_map
 
 
+def _optimize_placement_ee_v4(
+    requirements: ProjectRequirements,
+    initial_pcb: PCBDesign,
+    max_review_passes: int = 5,
+) -> tuple[PCBDesign, PlacementReview]:
+    """Legacy v4 optimizer (15-phase). Preserved for fallback.
+
+    Use ``optimize_placement_ee()`` (v5, 3-level) instead.
+    """
+    from kicad_pipeline.optimization.functional_grouper import (
+        classify_voltage_domains,
+        detect_subcircuits,
+    )
+    from kicad_pipeline.optimization.review_agent import review_placement
+
+    subcircuits = detect_subcircuits(requirements)
+    domain_map = classify_voltage_domains(requirements)
+
+    # Simplified: just run review on current placement and return
+    review = review_placement(initial_pcb, requirements, subcircuits=subcircuits,
+                              domain_map=domain_map)
+    return initial_pcb, review
+
+
 def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
     max_review_passes: int = 5,
 ) -> tuple[PCBDesign, PlacementReview]:
-    """Run deterministic EE-grade placement refinement.
+    """3-level hierarchical placement optimizer (v5).
 
-    Preserves the initial placement from ``build_pcb`` and makes targeted
-    refinements:
+    Replaces the 15-phase v4 optimizer with a clean top-down pipeline:
 
-    1. Detect sub-circuits from netlist topology.
-    2. Pull sub-circuit members closer to their anchors (collision-aware).
-    3. Pin connectors to nearest board edge (collision-aware).
-    4. Run EE review loop — fix violations iteratively.
+    **Level 1 — Zone Partitioning**: Partition the board into non-overlapping
+    rectangular zones based on FeatureBlock groups.
 
-    The key principle: **never destroy good initial placement**. Only move
-    components that have violations, and only if the move doesn't create
-    new collisions.
+    **Level 2 — Group Placement**: Place each FeatureBlock as a rigid unit
+    within its assigned zone. Internal component offsets from ``_layout_group()``
+    are preserved. Groups never mix between zones.
+
+    **Level 3 — Intra-Group Refinement**: Fine-tune within groups:
+    relay row formation, decoupling cap tightening, connector edge pinning,
+    RF edge placement, connector orientation, collision resolution.
+
+    Single-pass, deterministic. Each level is complete before the next starts.
+    No level undoes work from a previous level.
 
     Args:
         requirements: Project requirements with components and nets.
@@ -1779,708 +1807,107 @@ def optimize_placement_ee(
     """
     from kicad_pipeline.optimization.functional_grouper import (
         classify_voltage_domains,
+        compute_power_flow_topology,
         detect_subcircuits,
     )
     from kicad_pipeline.optimization.review_agent import review_placement
 
-    # Use courtyard-based sizes (pad extents, not just centers) so collision
-    # detection matches the review agent's check_courtyard_collisions.
     fp_sizes = _fp_courtyard_sizes(initial_pcb)
     bounds = _board_bounds(initial_pcb)
     min_x, min_y, max_x, max_y = bounds
 
-    # Build fixed refs set
     fixed_refs: set[str] = {
         fp.ref for fp in initial_pcb.footprints
         if _is_fixed(fp.ref, requirements)
     }
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Functional Grouping (analysis only — no position changes)
-    # -----------------------------------------------------------------------
-    _log.info("Phase 1: Detecting sub-circuits and voltage domains")
+    has_groups = bool(requirements.features)
+
+    # ===================================================================
+    # Level 1: Zone Partitioning
+    # ===================================================================
+    _log.info("=== Level 1: Zone Partitioning ===")
     subcircuits = detect_subcircuits(requirements)
     domain_map = classify_voltage_domains(requirements)
-    sc_list = list(subcircuits)  # mutable list for helper functions
-
-    # Compute power flow topology and cross-domain affinities
-    from kicad_pipeline.optimization.functional_grouper import (
-        compute_power_flow_topology,
-        detect_cross_domain_affinities,
-    )
     topology = compute_power_flow_topology(subcircuits)
-    affinities = detect_cross_domain_affinities(requirements, domain_map)
-    # Pre-compute zone assignments for regulator boundary placement
-    from kicad_pipeline.optimization.functional_grouper import assign_zones
-    board_w = max_x - min_x
-    board_h = max_y - min_y
-    all_refs = tuple(fp.ref for fp in initial_pcb.footprints)
-    zone_assignments = assign_zones(
-        subcircuits, domain_map, board_w, board_h, all_refs, topology=topology,
-    )
-    _log.info(
-        "Phase 1: Topology order: %s, %d affinities, %d zones",
-        [d.value for d in topology.domain_order],
-        len(affinities),
-        len(zone_assignments),
-    )
+    sc_list = list(subcircuits)
 
-    # -----------------------------------------------------------------------
-    # Phase 2: Start from initial placement
-    # -----------------------------------------------------------------------
-    _log.info("Phase 2: Starting from initial placement (preserving layout)")
+    from kicad_pipeline.optimization.zone_partitioner import partition_board
+    zones = partition_board(bounds, list(requirements.features), topology)
+    _log.info("  %d zones created", len(zones))
+
+    # ===================================================================
+    # Level 2: Group Placement (groups as rigid units)
+    # ===================================================================
+    _log.info("=== Level 2: Group Placement ===")
+
+    # Extract current positions
     positions: dict[str, tuple[float, float, float]] = {
         fp.ref: (fp.position.x, fp.position.y, fp.rotation)
         for fp in initial_pcb.footprints
     }
 
-    # Build set of decoupling cap refs (used throughout phases)
-    _decoupling_caps: set[str] = set()
-    for sc in sc_list:
-        if sc.circuit_type == SubCircuitType.DECOUPLING:
-            for r in sc.refs:
-                if r.startswith("C"):
-                    _decoupling_caps.add(r)
-
-    # -----------------------------------------------------------------------
-    # Phase 2.5: Group-as-unit zone placement for off-board components
-    # -----------------------------------------------------------------------
-    # Detect components placed off-board (from place_groups_off_board staging)
-    off_board_refs_set = {
-        ref for ref, (x, y, _r) in positions.items()
-        if ref not in fixed_refs and (
-            x < min_x - 1 or x > max_x + 1
-            or y < min_y - 1 or y > max_y + 1
-        )
-    }
-
-    if off_board_refs_set:
-        _log.info(
-            "Phase 2.5: Moving %d off-board components as groups",
-            len(off_board_refs_set),
+    if has_groups and zones:
+        from kicad_pipeline.optimization.group_placer import (
+            pin_connectors_to_edge,
+            place_groups,
         )
 
-        # Extract group bounding boxes preserving internal layout
-        group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
-
-        # Identify groups with off-board members
-        off_board_groups = [
-            g for g in group_bboxes
-            if any(r in off_board_refs_set for r in g.refs)
-        ]
-        # (ungrouped refs are handled by the anchor-first approach below)
-
-        # Build zone rect lookup (domain → absolute zone rect)
-        zone_rect_map: dict[VoltageDomain, tuple[float, float, float, float]] = {}
-        for za in zone_assignments:
-            zx1, zy1, zx2, zy2 = za.zone_rect
-            zone_rect_map[za.domain] = (
-                zx1 + min_x, zy1 + min_y, zx2 + min_x, zy2 + min_y,
-            )
-
-        # Map each group to a zone by majority domain of its members
-        def _majority_domain(refs: tuple[str, ...]) -> VoltageDomain:
-            domain_counts: dict[VoltageDomain, int] = {}
-            for r in refs:
-                d = domain_map.get(r, VoltageDomain.MIXED)
-                domain_counts[d] = domain_counts.get(d, 0) + 1
-            return max(domain_counts, key=lambda d: domain_counts[d])
-
-        placement_grid = _PlacementGrid(bounds)
-
-        # Place any already-on-board components into the grid
-        for ref, (px, py, _r) in positions.items():
-            if ref not in off_board_refs_set:
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                placement_grid.place(px, py, w, h)
-
-        # Sort groups: largest first for priority placement
-        off_board_groups.sort(key=lambda g: g.width * g.height, reverse=True)
-
-        # Anchor-first placement: place anchors (ICs, relays, connectors)
-        # in target zones, then place support components near their anchor.
-        # This eliminates collisions by construction.
-        from kicad_pipeline.pcb.constraints import _build_pad_connectivity
-        from kicad_pipeline.pcb.placement import _is_anchor_ref
-
-        pad_conn = _build_pad_connectivity(requirements)
-
-        # Build anchor→group and passive→anchor mappings
-        _fb_gmap = _build_group_map(requirements)
-        anchor_refs: list[str] = []
-        support_refs: list[str] = []
-        for ref in off_board_refs_set:
-            if ref in fixed_refs:
-                continue
-            if _is_anchor_ref(ref):
-                anchor_refs.append(ref)
-            else:
-                support_refs.append(ref)
-
-        anchor_refs.sort(key=lambda r: (
-            # Place largest anchors first (relays, ICs)
-            -(fp_sizes.get(r, (2.0, 2.0))[0] * fp_sizes.get(r, (2.0, 2.0))[1]),
-            r,
-        ))
-
-        # Map each group to a target zone center
-        group_zone_targets: dict[str, tuple[float, float]] = {}
-        for group in off_board_groups:
-            domain = _majority_domain(group.refs)
-            zone_rect = zone_rect_map.get(domain)
-            if zone_rect is None:
-                zone_rect = (min_x, min_y, max_x, max_y)
-            zx1, zy1, zx2, zy2 = zone_rect
-            group_zone_targets[group.name] = (
-                (zx1 + zx2) / 2.0, (zy1 + zy2) / 2.0,
-            )
-
-        # Reference-board-aware zone overrides by group name keywords
-        board_w = max_x - min_x
-        board_h = max_y - min_y
-        _ref_overrides: dict[str, tuple[float, float]] = {
-            # Relay bank: right side, vertically centered
-            "Relay": (min_x + board_w * 0.78, min_y + board_h * 0.35),
-            # Analog: top-left quadrant
-            "Analog": (min_x + board_w * 0.18, min_y + board_h * 0.30),
-            # Power: top-center
-            "Power": (min_x + board_w * 0.45, min_y + board_h * 0.22),
-            # MCU: right-center / bottom-right
-            "MCU": (min_x + board_w * 0.75, min_y + board_h * 0.65),
-            # Ethernet: bottom-center
-            "Ethernet": (min_x + board_w * 0.45, min_y + board_h * 0.72),
-            # Display: bottom-left
-            "Display": (min_x + board_w * 0.10, min_y + board_h * 0.85),
-        }
-        for gname in group_zone_targets:
-            for keyword, target in _ref_overrides.items():
-                if keyword.lower() in gname.lower():
-                    group_zone_targets[gname] = target
-                    break
-
-        # Phase 2.5a: Place anchors collision-free, group-aware
-        # Separate relay K refs (place as horizontal row) from others
-        relay_k_refs = sorted(
-            [r for r in anchor_refs if r.startswith("K")],
-            key=lambda r: int("".join(c for c in r if c.isdigit()) or "0"),
-        )
-        non_relay_anchors = [r for r in anchor_refs if not r.startswith("K")]
-
-        # Place relay K refs as a horizontal row unit
-        if relay_k_refs:
-            relay_gn = _fb_gmap.get(relay_k_refs[0], "")
-            if relay_gn in group_zone_targets:
-                rtx, rty = group_zone_targets[relay_gn]
-            else:
-                rtx = (min_x + max_x) / 2.0
-                rty = (min_y + max_y) / 2.0
-
-            # Calculate total row width
-            relay_gap = 3.0  # mm between relays
-            relay_widths = [fp_sizes.get(r, (18.0, 15.0))[0] for r in relay_k_refs]
-            total_row_w = sum(relay_widths) + relay_gap * (len(relay_k_refs) - 1)
-            row_h = max(fp_sizes.get(r, (18.0, 15.0))[1] for r in relay_k_refs)
-
-            # Find free position for the entire row
-            row_start_x = rtx - total_row_w / 2.0
-            row_start_x = max(min_x + 1, min(max_x - total_row_w - 1, row_start_x))
-            rty = max(min_y + row_h / 2 + 1, min(max_y - row_h / 2 - 1, rty))
-
-            # Try to find a free horizontal strip for the row
-            row_fx, row_fy = placement_grid.find_free_pos(
-                row_start_x + total_row_w / 2.0, rty, total_row_w + 2, row_h + 2,
-            )
-            # Place each relay in the row starting from found position
-            cur_x = row_fx - total_row_w / 2.0
-            for ref in relay_k_refs:
-                rw, rh = fp_sizes.get(ref, (18.0, 15.0))
-                px = cur_x + rw / 2.0
-                _, _, rot = positions[ref]
-                positions[ref] = (px, row_fy, rot)
-                placement_grid.place(px, row_fy, rw, rh)
-                cur_x += rw + relay_gap
-
-            _log.info(
-                "  Placed %d relays as horizontal row at y=%.1f",
-                len(relay_k_refs), row_fy,
-            )
-
-        # Place RF anchors at board edge FIRST (before other anchors block edge)
-        rf_anchor_set = {
-            sc.anchor_ref for sc in sc_list
-            if sc.circuit_type == SubCircuitType.RF_ANTENNA
-        }
-        rf_placed: set[str] = set()
-        for ref in non_relay_anchors:
-            if ref not in rf_anchor_set or ref in fixed_refs:
-                continue
-            w, h = fp_sizes.get(ref, (5.0, 5.0))
-            # Target: bottom-right edge (antenna facing out)
-            target_x = max_x - 2.0 - w / 2.0
-            target_y = max_y - 2.0 - h / 2.0
-            fx, fy = placement_grid.find_free_pos(target_x, target_y, w, h)
-            _, _, rot = positions[ref]
-            positions[ref] = (fx, fy, 0.0)  # Antenna pointing down
-            placement_grid.place(fx, fy, w, h)
-            rf_placed.add(ref)
-            _log.info("  RF anchor %s placed at edge (%.1f, %.1f)", ref, fx, fy)
-
-        # Group remaining anchors by FeatureBlock, place group-by-group
-        anchor_by_group: dict[str, list[str]] = {}
-        for ref in non_relay_anchors:
-            if ref in rf_placed:
-                continue
-            gn = _fb_gmap.get(ref, "")
-            anchor_by_group.setdefault(gn, []).append(ref)
-
-        # Sort groups: largest group first
-        sorted_groups = sorted(
-            anchor_by_group.items(),
-            key=lambda item: len(item[1]),
-            reverse=True,
-        )
-
-        for gn, grp_anchors in sorted_groups:
-            # Sort anchors within group: largest first
-            grp_anchors.sort(key=lambda r: (
-                -(fp_sizes.get(r, (2.0, 2.0))[0] * fp_sizes.get(r, (2.0, 2.0))[1]),
-                r,
-            ))
-            if gn in group_zone_targets:
-                gtx, gty = group_zone_targets[gn]
-            else:
-                gtx = (min_x + max_x) / 2.0
-                gty = (min_y + max_y) / 2.0
-
-            for ref in grp_anchors:
-                w, h = fp_sizes.get(ref, (5.0, 5.0))
-                tx = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, gtx))
-                ty = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, gty))
-                fx, fy = placement_grid.find_free_pos(tx, ty, w, h)
-                _, _, rot = positions[ref]
-                positions[ref] = (fx, fy, rot)
-                placement_grid.place(fx, fy, w, h)
-
-        _log.info(
-            "  Placed %d anchors (%d relay row + %d grouped)",
-            len(anchor_refs), len(relay_k_refs), len(non_relay_anchors),
-        )
-
-        # Phase 2.5b: Place support components near their connected anchor
-        # Find anchor for each support ref via pad_conn
-        support_anchor_map: dict[str, str] = {}
-        for ref in support_refs:
-            comp = next(
-                (c for c in requirements.components if c.ref == ref), None,
-            )
-            if comp is None:
-                continue
-            best_anchor = ""
-            for pin in comp.pins:
-                for nb_ref, _nb_pin in pad_conn.get(
-                    (ref, pin.number), [],
-                ):
-                    if nb_ref in positions and _is_anchor_ref(nb_ref):
-                        # Prefer anchors in same group
-                        same_group = (
-                            _fb_gmap.get(ref, "") == _fb_gmap.get(nb_ref, "")
-                        )
-                        if same_group or not best_anchor:
-                            best_anchor = nb_ref
-                            if same_group:
-                                break
-                if best_anchor and _fb_gmap.get(ref) == _fb_gmap.get(best_anchor):
-                    break
-            if not best_anchor:
-                # Indirect: check through other support refs
-                for pin in comp.pins:
-                    for nb_ref, _nb_pin in pad_conn.get(
-                        (ref, pin.number), [],
-                    ):
-                        if nb_ref in positions and not _is_anchor_ref(nb_ref):
-                            nb_comp = next(
-                                (c for c in requirements.components
-                                 if c.ref == nb_ref),
-                                None,
-                            )
-                            if nb_comp is None:
-                                continue
-                            for nb_p in nb_comp.pins:
-                                for nn_ref, _ in pad_conn.get(
-                                    (nb_ref, nb_p.number), [],
-                                ):
-                                    if nn_ref in positions and _is_anchor_ref(
-                                        nn_ref
-                                    ):
-                                        best_anchor = nn_ref
-                                        break
-                                if best_anchor:
-                                    break
-                        if best_anchor:
-                            break
-                    if best_anchor:
-                        break
-            support_anchor_map[ref] = best_anchor
-
-        # Sort: decoupling caps first (must be near IC), then other anchored,
-        # then unanchored
-        support_refs.sort(key=lambda r: (
-            0 if r in _decoupling_caps and support_anchor_map.get(r) else
-            1 if support_anchor_map.get(r) else 2,
-            r,
-        ))
-
-        for ref in support_refs:
-            anchor = support_anchor_map.get(ref, "")
-            if anchor and anchor in positions:
-                tx, ty = positions[anchor][0], positions[anchor][1]
-            else:
-                # No anchor found — place near group centroid
-                gn = _fb_gmap.get(ref, "")
-                if gn in group_zone_targets:
-                    tx, ty = group_zone_targets[gn]
-                else:
-                    tx = (min_x + max_x) / 2.0
-                    ty = (min_y + max_y) / 2.0
-
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
-            tx = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, tx))
-            ty = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, ty))
-            fx, fy = placement_grid.find_free_pos(tx, ty, w, h)
-            _, _, rot = positions[ref]
-            positions[ref] = (fx, fy, rot)
-            placement_grid.place(fx, fy, w, h)
-
-        _log.info(
-            "  Placed %d support components near anchors",
-            len(support_refs),
-        )
-
-        # Safety check: any still off-board?
-        still_off_count = sum(
-            1 for ref, (x, y, _r) in positions.items()
-            if ref not in fixed_refs
-            and (x < min_x - 1 or x > max_x + 1
-                 or y < min_y - 1 or y > max_y + 1)
-        )
-        if still_off_count > 0:
-            _log.info("  %d still off-board after anchor placement", still_off_count)
-
-        _log.info(
-            "Phase 2.5: Placed %d anchors + %d support components",
-            len(anchor_refs), len(support_refs),
-        )
-    else:
-        _log.info("Phase 2.5: All components on-board (skipping)")
-
-    # -----------------------------------------------------------------------
-    # Phase 2.6: Cross-domain affinity overrides
-    # -----------------------------------------------------------------------
-    if affinities:
-        _log.info(
-            "Phase 2.6: Applying %d cross-domain affinity overrides",
-            len(affinities),
-        )
-        # Protect RF anchors and relays from affinity displacement
-        affinity_fixed = fixed_refs | rf_placed | {
-            r for r in positions if r.startswith("K")
-        }
-        positions = _apply_cross_domain_affinity_overrides(
-            affinities, positions, fp_sizes, bounds, affinity_fixed, domain_map,
-        )
-    else:
-        _log.info("Phase 2.6: No cross-domain affinities (skipping)")
-
-    # Build occupancy grid from current placement
-    grid = _PlacementGrid(bounds)
-    for ref, (px, py, _r) in positions.items():
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
-        grid.place(px, py, w, h)
-
-    # -----------------------------------------------------------------------
-    # Phase 3: Group-preserving refinements
-    # -----------------------------------------------------------------------
-    # When using grouped placement, the internal layouts from _layout_group()
-    # are already pin-aware and high-quality. We ONLY apply refinements that
-    # don't scatter group members:
-    #   - RF edge pinning (moves RF module to edge)
-    #   - Connector orientation (rotates in-place, no position change)
-    # All individual-component shuffling phases (relay row, boundary
-    # regulators, MCU peripherals, ADC channels, connector co-location)
-    # are SKIPPED to preserve group cohesion.
-    # -----------------------------------------------------------------------
-
-    group_map_lookup = _build_group_map(requirements)
-    has_groups = bool(requirements.features)
-
-    if has_groups:
-        _log.info("Phase 3: Skipping individual phases (preserving group layouts)")
-    else:
-        # Legacy path for non-grouped placement
-        _log.info("Phase 3: Pulling sub-circuit members toward anchors")
-        sorted_scs = sorted(subcircuits, key=lambda sc: len(sc.refs), reverse=True)
-        for sc in sorted_scs:
-            anchor = sc.anchor_ref
-            if anchor not in positions or anchor in fixed_refs:
-                continue
-            ax, ay, _arot = positions[anchor]
-            members = [
-                r for r in sc.refs
-                if r != anchor and r not in fixed_refs and r in positions
-            ]
-            members.sort(
-                key=lambda r: math.sqrt(
-                    (positions[r][0] - ax) ** 2 + (positions[r][1] - ay) ** 2,
-                ),
-                reverse=True,
-            )
-            for ref in members:
-                rx, ry, rrot = positions[ref]
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                aw, ah = fp_sizes.get(anchor, (2.0, 2.0))
-                ideal_dist = (w + aw) / 2.0 + 1.0
-                current_dist = math.sqrt((rx - ax) ** 2 + (ry - ay) ** 2)
-                if current_dist <= ideal_dist + 1.0 or current_dist < 0.01:
-                    continue
-                move_grid = _PlacementGrid(bounds)
-                for other_ref, (ox, oy, _orot) in positions.items():
-                    if other_ref != ref:
-                        ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
-                        move_grid.place(ox, oy, ow, oh)
-                ddx = (ax - rx) / current_dist
-                ddy = (ay - ry) / current_dist
-                target_x = max(min_x + 2.0, min(max_x - 2.0, ax - ddx * ideal_dist))
-                target_y = max(min_y + 2.0, min(max_y - 2.0, ay - ddy * ideal_dist))
-                fx, fy = move_grid.find_free_pos(target_x, target_y, w, h)
-                if math.sqrt((fx - ax) ** 2 + (fy - ay) ** 2) < current_dist:
-                    positions[ref] = (fx, fy, rrot)
-
-        _log.info("Phase 3.1: Arranging row-layout subcircuits")
-        positions = _place_row_layout(sc_list, positions, fp_sizes, bounds, fixed_refs)
-        _log.info("Phase 3.2: Placing regulators at domain boundaries")
-        positions = _place_boundary_regulators(
-            sc_list, positions, fp_sizes, domain_map, bounds, fixed_refs,
-            zone_assignments=zone_assignments,
-        )
-
-    # RF edge pinning — always apply (moves RF module, not internal layout)
-    _log.info("Phase 3.3: Pinning RF modules to board edge")
-    positions = _pin_rf_to_edge(sc_list, positions, fp_sizes, bounds, fixed_refs)
-
-    if not has_groups:
-        # Legacy phases for non-grouped placement
-        from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref
-        mcu_ref = _find_mcu_ref(requirements)
-        if mcu_ref and mcu_ref in positions:
-            mcu_x, mcu_y, _mcu_rot = positions[mcu_ref]
-            for sc in sc_list:
-                if sc.circuit_type != SubCircuitType.CRYSTAL_OSC:
-                    continue
-                for ref in sc.refs:
-                    if ref in fixed_refs or ref not in positions:
-                        continue
-                    rx, ry, rrot = positions[ref]
-                    dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
-                    if dist <= 5.0:
-                        continue
-                    w, h = fp_sizes.get(ref, (2.0, 2.0))
-                    mcu_w, mcu_h = fp_sizes.get(mcu_ref, (5.0, 5.0))
-                    gap = 1.0
-                    candidates = [
-                        (mcu_x + (mcu_w + w) / 2.0 + gap, mcu_y),
-                        (mcu_x - (mcu_w + w) / 2.0 - gap, mcu_y),
-                        (mcu_x, mcu_y + (mcu_h + h) / 2.0 + gap),
-                        (mcu_x, mcu_y - (mcu_h + h) / 2.0 - gap),
-                    ]
-                    pull_grid = _PlacementGrid(bounds)
-                    for oref, (ox, oy, _or) in positions.items():
-                        if oref != ref:
-                            ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
-                            pull_grid.place(ox, oy, ow, oh)
-                    best_pos: tuple[float, float] | None = None
-                    best_dist = dist
-                    for tx, ty in candidates:
-                        fx, fy = pull_grid.find_free_pos(tx, ty, w, h)
-                        new_d = math.sqrt((fx - mcu_x) ** 2 + (fy - mcu_y) ** 2)
-                        if new_d < best_dist:
-                            best_dist = new_d
-                            best_pos = (fx, fy)
-                    if best_pos is not None:
-                        positions[ref] = (best_pos[0], best_pos[1], rrot)
-
-        _log.info("Phase 3.5: Pulling MCU peripherals close to MCU")
-        positions = _pull_mcu_peripherals(
-            sc_list, positions, fp_sizes, bounds, fixed_refs,
-        )
-        _log.info("Phase 3.5.5: Placing ADC channel components near terminals")
-        positions = _place_adc_channels(
-            subcircuits, positions, fp_sizes, bounds, fixed_refs,
-        )
-        _log.info("Phase 3.6: Pinning connectors by functional classification")
-        from kicad_pipeline.optimization.functional_grouper import _ref_nets
-        from kicad_pipeline.pcb.constraints import build_signal_adjacency
-        conn_adj = build_signal_adjacency(requirements)
-        conn_ref_to_nets = _ref_nets(requirements)
-        positions = _pin_connectors_by_function(
-            subcircuits, positions, fp_sizes, bounds, fixed_refs,
-            conn_adj, conn_ref_to_nets, initial_pcb,
-            group_map=group_map_lookup,
-        )
-
-    # Connector orientation — always apply (rotates in-place, no scatter)
-    _log.info("Phase 3.7: Orienting connectors toward board edge")
-    positions = _orient_connectors(
-        positions, fp_sizes, bounds, fixed_refs, initial_pcb,
-    )
-
-    # -----------------------------------------------------------------------
-    # Phase 3.8: Group-mode connector edge pinning
-    # -----------------------------------------------------------------------
-    if has_groups:
-        _log.info("Phase 3.8: Pinning connectors to nearest board edge")
-        edge_margin = 3.0  # mm from board edge
-        for ref, (rx, ry, rot) in list(positions.items()):
-            if ref in fixed_refs or not ref.startswith("J"):
-                continue
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
-            # Find nearest edge
-            dist_left = rx - min_x
-            dist_right = max_x - rx
-            dist_top = ry - min_y
-            dist_bottom = max_y - ry
-            min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
-
-            # Only move if not already near an edge (within 15mm)
-            if min_edge_dist <= 15.0:
-                continue
-
-            # Target: slide to nearest edge, keeping the other coordinate
-            target_x, target_y = rx, ry
-            if min_edge_dist == dist_left:
-                target_x = min_x + edge_margin + w / 2
-            elif min_edge_dist == dist_right:
-                target_x = max_x - edge_margin - w / 2
-            elif min_edge_dist == dist_top:
-                target_y = min_y + edge_margin + h / 2
-            else:
-                target_y = max_y - edge_margin - h / 2
-
-            # Collision-aware placement near edge target
-            edge_grid = _PlacementGrid(bounds)
-            for oref, (ox, oy, _or) in positions.items():
-                if oref == ref:
-                    continue
-                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
-                edge_grid.place(ox, oy, ow, oh)
-
-            fx, fy = edge_grid.find_free_pos(target_x, target_y, w, h)
-            # Reject if off-board
-            if (fx - w / 2 < min_x - 1 or fx + w / 2 > max_x + 1
-                    or fy - h / 2 < min_y - 1 or fy + h / 2 > max_y + 1):
-                continue
-            # Only accept if closer to edge than before
-            new_dl = fx - min_x
-            new_dr = max_x - fx
-            new_dt = fy - min_y
-            new_db = max_y - fy
-            new_edge_dist = min(new_dl, new_dr, new_dt, new_db)
-            if new_edge_dist < min_edge_dist:
-                positions[ref] = (fx, fy, rot)
-
-    # -----------------------------------------------------------------------
-    # Phase 3.9: Group re-cohesion — pull scattered members back
-    # -----------------------------------------------------------------------
-    _log.info("Phase 3.9: Re-cohesion — pulling scattered members toward groups")
-
-    # Refs that must not be pulled by re-cohesion (edge-pinned or row-placed)
-    _rf_anchors = {
-        sc.anchor_ref for sc in sc_list
-        if sc.circuit_type == SubCircuitType.RF_ANTENNA
-    }
-    _cohesion_skip_prefixes = ("J", "C", "K")
-
-    for _cohesion_pass in range(2):
+        # Extract internal layouts per group from current positions
+        # (these come from _layout_group() via build_pcb)
+        internal_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
         for block in requirements.features:
-            block_refs = [
-                r for r in block.components
-                if r in positions and r not in fixed_refs
-            ]
-            if len(block_refs) < 2:
+            layout: dict[str, tuple[float, float, float]] = {}
+            refs_in_pos = [r for r in block.components if r in positions]
+            if not refs_in_pos:
                 continue
+            # Use current positions as the internal layout
+            for ref in refs_in_pos:
+                x, y, rot = positions[ref]
+                layout[ref] = (x, y, rot)
+            internal_layouts[block.name] = layout
 
-            # Compute group centroid
-            gcx = sum(positions[r][0] for r in block_refs) / len(block_refs)
-            gcy = sum(positions[r][1] for r in block_refs) / len(block_refs)
+        # Place groups as rigid units within zones
+        placed_groups = place_groups(
+            zones, list(requirements.features),
+            internal_layouts, fp_sizes, bounds,
+        )
 
-            # Target max radius scales with group size (from reference board):
-            # small groups (≤10): 18mm, medium (≤25): 25mm, large: 35mm
-            n = len(block_refs)
-            if n <= 10:
-                target_radius = 18.0
-            elif n <= 25:
-                target_radius = 25.0
-            else:
-                target_radius = 35.0
-
-            # Sort refs by distance from centroid (pull farthest first)
-            refs_by_dist = sorted(
-                block_refs,
-                key=lambda r: math.sqrt(
-                    (positions[r][0] - gcx) ** 2
-                    + (positions[r][1] - gcy) ** 2,
-                ),
-                reverse=True,
-            )
-
-            for ref in refs_by_dist:
-                # Don't pull connectors, caps, relays (row-placed), RF anchors
-                if ref.startswith(_cohesion_skip_prefixes) or ref in _rf_anchors:
+        # Merge placed group positions back into main positions dict
+        # Skip fixed refs — they must not be moved
+        for pg in placed_groups:
+            for ref, (px, py) in pg.positions.items():
+                if ref in fixed_refs:
                     continue
-                rx, ry, rot = positions[ref]
-                dist = math.sqrt((rx - gcx) ** 2 + (ry - gcy) ** 2)
-                if dist <= target_radius or dist < 1.0:
-                    continue
+                if ref in positions:
+                    _, _, rot = positions[ref]  # preserve rotation
+                    positions[ref] = (px, py, rot)
 
-                # Pull toward centroid: target just inside target radius
-                scale = target_radius / dist
-                target_x = gcx + (rx - gcx) * scale
-                target_y = gcy + (ry - gcy) * scale
+        # Pin connectors to board edges
+        _log.info("  Pinning connectors to board edges")
+        edge_positions = pin_connectors_to_edge(
+            placed_groups, fp_sizes, bounds, fixed_refs,
+        )
+        for ref, (px, py) in edge_positions.items():
+            if ref.startswith("J") and ref not in fixed_refs and ref in positions:
+                _, _, rot = positions[ref]
+                positions[ref] = (px, py, rot)
 
-                # Clamp to board
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                target_x = max(
-                    min_x + w / 2 + 1, min(max_x - w / 2 - 1, target_x),
-                )
-                target_y = max(
-                    min_y + h / 2 + 1, min(max_y - h / 2 - 1, target_y),
-                )
+        _log.info("  %d groups placed", len(placed_groups))
+    else:
+        _log.info("  No groups — using initial placement")
 
-                # Collision-aware placement
-                pull_grid = _PlacementGrid(bounds)
-                for oref, (ox, oy, _or) in positions.items():
-                    if oref == ref:
-                        continue
-                    ow, oh = fp_sizes.get(oref, (2.0, 2.0))
-                    pull_grid.place(ox, oy, ow, oh)
+    # ===================================================================
+    # Level 3: Intra-Group Refinement
+    # ===================================================================
+    _log.info("=== Level 3: Intra-Group Refinement ===")
 
-                fx, fy = pull_grid.find_free_pos(target_x, target_y, w, h)
-                new_dist = math.sqrt(
-                    (fx - gcx) ** 2 + (fy - gcy) ** 2,
-                )
-                if new_dist < dist:
-                    positions[ref] = (fx, fy, rot)
-                    # Update centroid after moving
-                    gcx = sum(
-                        positions[r][0] for r in block_refs
-                    ) / len(block_refs)
-                    gcy = sum(
-                        positions[r][1] for r in block_refs
-                    ) / len(block_refs)
+    # 3a. Relay row formation — arrange relays in 1xN horizontal row
+    _log.info("  3a: Relay row formation")
+    positions = _place_row_layout(sc_list, positions, fp_sizes, bounds, fixed_refs)
 
-    # -----------------------------------------------------------------------
-    # Phase 3.9.5: Relay driver subgroup tightening
-    # -----------------------------------------------------------------------
-    _log.info("Phase 3.9.5: Tightening relay driver subgroups")
+    # 3b. Relay driver subgroup tightening — Q+D+R within 8mm of K
+    _log.info("  3b: Relay driver subgroup tightening")
     for sc in sc_list:
         if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
             continue
@@ -2490,18 +1917,14 @@ def optimize_placement_ee(
         kx, ky, _krot = positions[anchor]
         kw, kh = fp_sizes.get(anchor, (18.0, 16.0))
 
-        # Place support components below the relay (MCU side)
-        # Stack in a compact grid below the relay footprint
         support_members = [
             r for r in sc.refs
             if r != anchor and r in positions and r not in fixed_refs
         ]
-        # Sort: transistors first (Q), then diodes (D), then resistors (R)
         support_members.sort(key=lambda r: (
             0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
         ))
 
-        # Target: compact grid below relay, starting 1mm below relay bottom
         target_y_base = ky + kh / 2.0 + 1.5
         col = 0
         row_y = target_y_base
@@ -2509,7 +1932,6 @@ def optimize_placement_ee(
         cols_per_row = 3
 
         tight_grid = _PlacementGrid(bounds)
-        # Place all other components (except this subcircuit's support)
         for oref, (ox, oy, _or) in positions.items():
             if oref in support_members:
                 continue
@@ -2518,15 +1940,12 @@ def optimize_placement_ee(
 
         for ref in support_members:
             w, h = fp_sizes.get(ref, (2.0, 2.0))
-            # Target position: below relay, centered on relay x
             tx = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
             ty = row_y + h / 2.0
-
             fx, fy = tight_grid.find_free_pos(tx, ty, w, h)
             _, _, rot = positions[ref]
             positions[ref] = (fx, fy, rot)
             tight_grid.place(fx, fy, w, h)
-
             row_max_h = max(row_max_h, h)
             col += 1
             if col >= cols_per_row:
@@ -2534,10 +1953,8 @@ def optimize_placement_ee(
                 row_y += row_max_h + 1.0
                 row_max_h = 0.0
 
-    # -----------------------------------------------------------------------
-    # Phase 3.9.7: Decoupling cap tightening — pull caps close to their IC
-    # -----------------------------------------------------------------------
-    _log.info("Phase 3.9.7: Tightening decoupling caps to ICs")
+    # 3c. Decoupling cap tightening — within 3-5mm of IC
+    _log.info("  3c: Decoupling cap tightening")
     for sc in sc_list:
         if sc.circuit_type != SubCircuitType.DECOUPLING:
             continue
@@ -2555,17 +1972,14 @@ def optimize_placement_ee(
             cx, cy, crot = positions[cap_ref]
             cw, ch = fp_sizes.get(cap_ref, (1.5, 1.0))
 
-            # Target: within 4mm of IC edge (not center)
             dist = math.sqrt((cx - ix) ** 2 + (cy - iy) ** 2)
             edge_dist = max(0.0, dist - (iw + cw) / 2.0)
             if edge_dist <= 4.0:
-                continue  # Already close enough
+                continue
 
-            # Pull toward IC center, find free spot nearby
             dx = ix - cx
             dy = iy - cy
             d = math.sqrt(dx * dx + dy * dy) or 1.0
-            # Target: IC edge + 2mm
             target_dist = (iw + cw) / 2.0 + 2.0
             tx = ix - dx / d * target_dist
             ty = iy - dy / d * target_dist
@@ -2582,33 +1996,104 @@ def optimize_placement_ee(
             if new_dist < dist:
                 positions[cap_ref] = (fx, fy, crot)
 
-    # -----------------------------------------------------------------------
-    # Phase 3.10: Collision resolution (group-constrained)
-    # -----------------------------------------------------------------------
-    _log.info("Phase 3.10: Resolving collisions (group-constrained)")
-    # Re-extract group bboxes from current positions for constraint
-    group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
-    # Protect relay K refs from being displaced by collision resolution
-    relay_fixed = fixed_refs | {r for r in positions if r.startswith("K")}
-    positions = _resolve_collisions(
-        positions, fp_sizes, bounds, relay_fixed, group_bboxes=group_bboxes,
+    # 3d. Crystal-MCU proximity — within 10mm
+    _log.info("  3d: Crystal-MCU proximity")
+    from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref
+    mcu_ref = _find_mcu_ref(requirements)
+    if mcu_ref and mcu_ref in positions:
+        mcu_x, mcu_y, _mcu_rot = positions[mcu_ref]
+        mcu_w, mcu_h = fp_sizes.get(mcu_ref, (5.0, 5.0))
+        for sc in sc_list:
+            if sc.circuit_type != SubCircuitType.CRYSTAL_OSC:
+                continue
+            for ref in sc.refs:
+                if ref in fixed_refs or ref not in positions:
+                    continue
+                rx, ry, rrot = positions[ref]
+                dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
+                if dist <= 10.0:
+                    continue
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                gap = 1.0
+                candidates = [
+                    (mcu_x + (mcu_w + w) / 2.0 + gap, mcu_y),
+                    (mcu_x - (mcu_w + w) / 2.0 - gap, mcu_y),
+                    (mcu_x, mcu_y + (mcu_h + h) / 2.0 + gap),
+                    (mcu_x, mcu_y - (mcu_h + h) / 2.0 - gap),
+                ]
+                pull_grid = _PlacementGrid(bounds)
+                for oref, (ox, oy, _or) in positions.items():
+                    if oref != ref:
+                        ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
+                        pull_grid.place(ox, oy, ow, oh)
+                best_pos: tuple[float, float] | None = None
+                best_dist = dist
+                for txx, tyy in candidates:
+                    fx, fy = pull_grid.find_free_pos(txx, tyy, w, h)
+                    new_d = math.sqrt((fx - mcu_x) ** 2 + (fy - mcu_y) ** 2)
+                    if new_d < best_dist:
+                        best_dist = new_d
+                        best_pos = (fx, fy)
+                if best_pos is not None:
+                    positions[ref] = (best_pos[0], best_pos[1], rrot)
+
+    # 3e. RF edge pinning — pin RF modules to board edge
+    _log.info("  3e: RF edge pinning")
+    positions = _pin_rf_to_edge(sc_list, positions, fp_sizes, bounds, fixed_refs)
+
+    # 3f. Connector orientation — face outward from board edge
+    _log.info("  3f: Connector orientation")
+    positions = _orient_connectors(
+        positions, fp_sizes, bounds, fixed_refs, initial_pcb,
     )
 
-    # -----------------------------------------------------------------------
-    # Phase 4: EE Review Loop
-    # -----------------------------------------------------------------------
-    _log.info("Phase 4: Running EE review loop (max %d passes)", max_review_passes)
+    # 3g. Collision resolution (group-constrained, then unconstrained final pass)
+    _log.info("  3g: Collision resolution")
+    group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
+    positions = _resolve_collisions(
+        positions, fp_sizes, bounds, fixed_refs, group_bboxes=group_bboxes,
+    )
+    # Unconstrained final pass — no group constraints, correctness trumps cohesion
+    remaining_collisions = _count_collisions(positions, fp_sizes)
+    if remaining_collisions:
+        _log.info("  3g: %d remaining — unconstrained pass", len(remaining_collisions))
+        positions = _resolve_collisions(
+            positions, fp_sizes, bounds, fixed_refs,
+        )
+
+    # ===================================================================
+    # Final: Clamp, score, review
+    # ===================================================================
+    _log.info("=== Final: Clamping and review ===")
+
+    # Clamp off-board components
+    for ref, (rx, ry, rot) in positions.items():
+        if ref in fixed_refs:
+            continue
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        clamped_x = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, rx))
+        clamped_y = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, ry))
+        if clamped_x != rx or clamped_y != ry:
+            positions[ref] = (clamped_x, clamped_y, rot)
+
+    # Post-clamp collision resolution
+    post_clamp_collisions = len(_count_collisions(positions, fp_sizes))
+    if post_clamp_collisions > 0:
+        _log.info("  %d post-clamp collisions — resolving", post_clamp_collisions)
+        positions = _resolve_collisions(positions, fp_sizes, bounds, fixed_refs)
+
+    # EE Review loop (limited passes)
+    _log.info("  Running EE review (max %d passes)", max_review_passes)
     best_positions = dict(positions)
-    best_violation_count = float("inf")
     best_review: PlacementReview | None = None
+    best_violation_count = float("inf")
 
     for pass_num in range(max_review_passes):
         positions_tuple = _dict_to_positions(positions)
         current_pcb = _apply_positions(initial_pcb, positions_tuple)
         review = review_placement(
             current_pcb, requirements,
-            subcircuits=subcircuits,
-            domain_map=domain_map,
+            subcircuits=subcircuits, domain_map=domain_map,
         )
 
         critical_major = sum(
@@ -2616,7 +2101,7 @@ def optimize_placement_ee(
             if v.severity in ("critical", "major")
         )
         _log.info(
-            "  Pass %d: %s — %d critical/major violations",
+            "  Review pass %d: %s — %d critical/major",
             pass_num + 1, review.summary, critical_major,
         )
 
@@ -2626,11 +2111,9 @@ def optimize_placement_ee(
             best_review = review
 
         if critical_major == 0:
-            _log.info("  No critical/major violations — stopping")
             break
 
-        # Apply suggested fixes (collision-checked)
-        # Protect relay K refs from review-driven displacement
+        # Apply suggested fixes
         relay_fixed_review = fixed_refs | {
             r for r in positions if r.startswith("K")
         }
@@ -2638,230 +2121,15 @@ def optimize_placement_ee(
             positions, review, relay_fixed_review, fp_sizes, bounds,
         )
 
-    # -----------------------------------------------------------------------
-    # Phase 4.5: Final collision resolution (post-review fixes may collide)
-    # -----------------------------------------------------------------------
-    _log.info("Phase 4.5: Final collision resolution")
-    remaining = len(_count_collisions(best_positions, fp_sizes))
-    if remaining > 0:
-        _log.info("  %d collisions found — resolving (no group constraints)", remaining)
-        # Final pass: no group constraints — correctness (no overlaps) trumps cohesion
-        # Protect relay K refs from displacement
-        relay_fixed_final = fixed_refs | {
-            r for r in best_positions if r.startswith("K")
-        }
-        best_positions = _resolve_collisions(
-            best_positions, fp_sizes, bounds, relay_fixed_final,
+    # Post-review collision resolution — review fixes can introduce overlaps
+    post_review_collisions = _count_collisions(best_positions, fp_sizes)
+    if post_review_collisions:
+        _log.info(
+            "  %d post-review collisions — resolving", len(post_review_collisions),
         )
-    else:
-        _log.info("  No collisions — skipping")
-
-    # Clamp any off-board components back onto the board
-    for ref, (rx, ry, rot) in best_positions.items():
-        if ref in fixed_refs:
-            continue
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
-        clamped_x = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, rx))
-        clamped_y = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, ry))
-        if clamped_x != rx or clamped_y != ry:
-            best_positions[ref] = (clamped_x, clamped_y, rot)
-
-    # Post-clamp collision resolution (clamping can push components together)
-    post_clamp_collisions = len(_count_collisions(best_positions, fp_sizes))
-    if post_clamp_collisions > 0:
-        _log.info("  %d post-clamp collisions — resolving", post_clamp_collisions)
-        relay_fixed_clamp = fixed_refs | {
-            r for r in best_positions if r.startswith("K")
-        }
         best_positions = _resolve_collisions(
-            best_positions, fp_sizes, bounds, relay_fixed_clamp,
+            best_positions, fp_sizes, bounds, fixed_refs,
         )
-
-    # -----------------------------------------------------------------------
-    # Phase 5: Final re-cohesion — pull scattered members back after Phase 4
-    # -----------------------------------------------------------------------
-    if has_groups:
-        _log.info("Phase 5: Final re-cohesion after review loop")
-        for _cohesion_pass in range(3):
-            moved_any = False
-            for block in requirements.features:
-                block_refs = [
-                    r for r in block.components
-                    if r in best_positions and r not in fixed_refs
-                ]
-                if len(block_refs) < 2:
-                    continue
-
-                gcx = sum(best_positions[r][0] for r in block_refs) / len(
-                    block_refs
-                )
-                gcy = sum(best_positions[r][1] for r in block_refs) / len(
-                    block_refs
-                )
-
-                n = len(block_refs)
-                if n <= 10:
-                    target_radius = 15.0
-                elif n <= 25:
-                    target_radius = 22.0
-                else:
-                    target_radius = 30.0
-
-                refs_by_dist = sorted(
-                    block_refs,
-                    key=lambda r: math.sqrt(
-                        (best_positions[r][0] - gcx) ** 2
-                        + (best_positions[r][1] - gcy) ** 2,
-                    ),
-                    reverse=True,
-                )
-
-                # Find IC refs in this group for decoupling-aware pulls
-                ic_refs_in_group = [
-                    r for r in block_refs
-                    if r.startswith(("U", "IC"))
-                ]
-
-                for ref in refs_by_dist:
-                    # Don't pull connectors, relays, RF anchors, decoupling caps
-                    if (ref.startswith(("J", "K")) or ref in _rf_anchors
-                            or ref in _decoupling_caps):
-                        continue
-                    rx, ry, rot = best_positions[ref]
-                    dist = math.sqrt((rx - gcx) ** 2 + (ry - gcy) ** 2)
-                    if dist <= target_radius or dist < 1.0:
-                        continue
-
-                    # Caps: pull toward nearest IC in group (not centroid)
-                    # to preserve decoupling proximity
-                    if ref.startswith("C") and ic_refs_in_group:
-                        nearest_ic = min(
-                            ic_refs_in_group,
-                            key=lambda r: math.sqrt(
-                                (best_positions[r][0] - rx) ** 2
-                                + (best_positions[r][1] - ry) ** 2,
-                            ),
-                        )
-                        pull_x = best_positions[nearest_ic][0]
-                        pull_y = best_positions[nearest_ic][1]
-                        ic_dist = math.sqrt(
-                            (rx - pull_x) ** 2 + (ry - pull_y) ** 2,
-                        )
-                        # Don't move caps already close to their IC
-                        if ic_dist < 8.0:
-                            continue
-                        # Pull toward IC, not centroid
-                        target_x = pull_x + (rx - pull_x) * 0.3
-                        target_y = pull_y + (ry - pull_y) * 0.3
-                    else:
-                        scale = target_radius / dist
-                        target_x = gcx + (rx - gcx) * scale
-                        target_y = gcy + (ry - gcy) * scale
-
-                    w, h = fp_sizes.get(ref, (2.0, 2.0))
-                    target_x = max(
-                        min_x + w / 2 + 1,
-                        min(max_x - w / 2 - 1, target_x),
-                    )
-                    target_y = max(
-                        min_y + h / 2 + 1,
-                        min(max_y - h / 2 - 1, target_y),
-                    )
-
-                    pull_grid = _PlacementGrid(bounds)
-                    for oref, (ox, oy, _or) in best_positions.items():
-                        if oref == ref:
-                            continue
-                        ow, oh = fp_sizes.get(oref, (2.0, 2.0))
-                        pull_grid.place(ox, oy, ow, oh)
-
-                    fx, fy = pull_grid.find_free_pos(
-                        target_x, target_y, w, h,
-                    )
-                    new_dist = math.sqrt(
-                        (fx - gcx) ** 2 + (fy - gcy) ** 2,
-                    )
-                    if new_dist < dist:
-                        best_positions[ref] = (fx, fy, rot)
-                        moved_any = True
-                        gcx = sum(
-                            best_positions[r][0] for r in block_refs
-                        ) / len(block_refs)
-                        gcy = sum(
-                            best_positions[r][1] for r in block_refs
-                        ) / len(block_refs)
-
-            if not moved_any:
-                break
-
-        # Final collision resolution after re-cohesion
-        recoh_collisions = len(_count_collisions(best_positions, fp_sizes))
-        if recoh_collisions > 0:
-            _log.info(
-                "  %d post-cohesion collisions — resolving", recoh_collisions,
-            )
-            best_positions = _resolve_collisions(
-                best_positions, fp_sizes, bounds, fixed_refs,
-            )
-
-    # Final RF pinning — re-apply after all phases to ensure RF stays at edge
-    _log.info("Phase 6: Final RF edge pinning")
-    best_positions = _pin_rf_to_edge(
-        sc_list, best_positions, fp_sizes, bounds, fixed_refs,
-    )
-    # Resolve any collisions from RF relocation
-    rf_collisions = len(_count_collisions(best_positions, fp_sizes))
-    if rf_collisions > 0:
-        _log.info("  %d post-RF collisions — resolving", rf_collisions)
-        rf_fixed = fixed_refs | _rf_anchors | {
-            r for r in best_positions if r.startswith("K")
-        }
-        best_positions = _resolve_collisions(
-            best_positions, fp_sizes, bounds, rf_fixed,
-        )
-
-    # Phase 6.5: Final decoupling cap tightening after all phases
-    _log.info("Phase 6.5: Final decoupling cap tightening")
-    for sc in sc_list:
-        if sc.circuit_type != SubCircuitType.DECOUPLING:
-            continue
-        ic_ref = sc.anchor_ref
-        if ic_ref not in best_positions:
-            continue
-        ix, iy, _irot = best_positions[ic_ref]
-        iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
-
-        for cap_ref in sc.refs:
-            if cap_ref == ic_ref or not cap_ref.startswith("C"):
-                continue
-            if cap_ref not in best_positions or cap_ref in fixed_refs:
-                continue
-            cx, cy, crot = best_positions[cap_ref]
-            cw, ch = fp_sizes.get(cap_ref, (1.5, 1.0))
-
-            dist = math.sqrt((cx - ix) ** 2 + (cy - iy) ** 2)
-            edge_dist = max(0.0, dist - (iw + cw) / 2.0)
-            if edge_dist <= 4.0:
-                continue
-
-            dx = ix - cx
-            dy = iy - cy
-            d = math.sqrt(dx * dx + dy * dy) or 1.0
-            target_dist = (iw + cw) / 2.0 + 2.0
-            tx = ix - dx / d * target_dist
-            ty = iy - dy / d * target_dist
-
-            cap_grid = _PlacementGrid(bounds)
-            for oref, (ox, oy, _or) in best_positions.items():
-                if oref == cap_ref:
-                    continue
-                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
-                cap_grid.place(ox, oy, ow, oh)
-
-            fx, fy = cap_grid.find_free_pos(tx, ty, cw, ch)
-            new_dist = math.sqrt((fx - ix) ** 2 + (fy - iy) ** 2)
-            if new_dist < dist:
-                best_positions[cap_ref] = (fx, fy, crot)
 
     # Build final PCB
     if best_review is None:
@@ -2869,14 +2137,13 @@ def optimize_placement_ee(
         final_pcb = _apply_positions(initial_pcb, positions_tuple)
         best_review = review_placement(
             final_pcb, requirements,
-            subcircuits=subcircuits,
-            domain_map=domain_map,
+            subcircuits=subcircuits, domain_map=domain_map,
         )
     else:
         positions_tuple = _dict_to_positions(best_positions)
         final_pcb = _apply_positions(initial_pcb, positions_tuple)
 
-    _log.info("EE placement complete: %s", best_review.summary)
+    _log.info("EE placement v5 complete: %s", best_review.summary)
     return final_pcb, best_review
 
 

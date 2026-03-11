@@ -42,15 +42,18 @@ _DOMAIN_LABELS: dict[str, str] = {
     "mixed": "Mixed/Unclassified",
 }
 
-# FeatureBlock group colors
-GROUP_COLORS: dict[str, str] = {
-    "Power Supply": "#ff8800",
-    "Relay Outputs": "#ff4444",
-    "MCU + Peripherals": "#44cc44",
-    "Analog Inputs": "#ffcc00",
-    "Ethernet + PoE": "#4488ff",
-    "Display": "#cc44ff",
+# FeatureBlock group color map — uses keyword matching, not exact names
+_GROUP_COLOR_MAP: dict[str, str] = {
+    "power": "#ff8800",
+    "relay": "#ff4444",
+    "mcu": "#44cc44",
+    "analog": "#ffcc00",
+    "ethernet": "#4488ff",
+    "display": "#cc44ff",
 }
+
+# Backward-compatible alias
+GROUP_COLORS = _GROUP_COLOR_MAP
 
 # Fallback palette for groups not in the named map
 _FALLBACK_GROUP_PALETTE: tuple[str, ...] = (
@@ -77,9 +80,11 @@ def _fp_size(fp: Footprint) -> tuple[float, float]:
 
 
 def _get_group_color(group_name: str, idx: int) -> str:
-    """Get color for a group name, falling back to palette."""
-    if group_name in GROUP_COLORS:
-        return GROUP_COLORS[group_name]
+    """Get color for a group name using keyword matching, falling back to palette."""
+    lower = group_name.lower()
+    for key, color in _GROUP_COLOR_MAP.items():
+        if key in lower:
+            return color
     return _FALLBACK_GROUP_PALETTE[idx % len(_FALLBACK_GROUP_PALETTE)]
 
 
@@ -310,4 +315,92 @@ def render_placement(
     fig.savefig(str(out), dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     logger.info("Placement render saved: %s", out)
+    return out
+
+
+def render_zones(
+    zones: list[object],
+    board_bounds: tuple[float, float, float, float],
+    output_path: str | Path,
+    *,
+    title: str | None = None,
+    figsize: tuple[float, float] = (14, 9),
+    dpi: int = 150,
+) -> Path:
+    """Render board zone partitioning to PNG.
+
+    Shows colored rectangular zones with labels. Used for Level 1
+    visual verification of the zone partitioner.
+
+    Args:
+        zones: List of BoardZone instances.
+        board_bounds: (min_x, min_y, max_x, max_y).
+        output_path: Where to save the PNG.
+        title: Optional plot title.
+        figsize: Figure size in inches.
+        dpi: Output resolution.
+
+    Returns:
+        Path to the saved image.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+    except ImportError as exc:
+        msg = "matplotlib is required for placement rendering: pip install matplotlib"
+        raise ImportError(msg) from exc
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    bx1, by1, bx2, by2 = board_bounds
+
+    # Board outline
+    board_rect = Rectangle(
+        (bx1, by1), bx2 - bx1, by2 - by1,
+        fill=True, facecolor="#f0f0f0", edgecolor="black", linewidth=2,
+    )
+    ax.add_patch(board_rect)
+
+    # Draw zones
+    zone_colors = list(_GROUP_COLOR_MAP.values()) + list(_FALLBACK_GROUP_PALETTE)
+    for i, zone in enumerate(zones):
+        zx1, zy1, zx2, zy2 = zone.rect  # type: ignore[attr-defined]
+        color = zone_colors[i % len(zone_colors)]
+
+        # Match zone name to color
+        for key, c in _GROUP_COLOR_MAP.items():
+            if key in zone.name.lower():  # type: ignore[attr-defined]
+                color = c
+                break
+
+        rect = Rectangle(
+            (zx1, zy1), zx2 - zx1, zy2 - zy1,
+            fill=True, facecolor=color, edgecolor="black",
+            alpha=0.3, linewidth=1.5,
+        )
+        ax.add_patch(rect)
+
+        # Zone label
+        ax.text(
+            (zx1 + zx2) / 2, (zy1 + zy2) / 2,
+            f"{zone.name}\n({', '.join(zone.groups)})",  # type: ignore[attr-defined]
+            ha="center", va="center",
+            fontsize=8, fontweight="bold",
+            color="black",
+        )
+
+    ax.set_aspect("equal")
+    ax.invert_yaxis()
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_title(title or "Board Zone Partitioning (Level 1)")
+    ax.grid(True, alpha=0.15)
+    fig.tight_layout()
+
+    out = Path(output_path)
+    fig.savefig(str(out), dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Zone render saved: %s", out)
     return out

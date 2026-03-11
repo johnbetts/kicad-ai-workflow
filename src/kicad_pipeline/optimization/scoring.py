@@ -30,7 +30,7 @@ _WEIGHT_THERMAL: float = 0.10
 
 # Fast-path sub-dimension weights (EE-aligned, v2)
 _FAST_WEIGHT_COLLISION: float = 0.20
-_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.10
+_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.05
 _FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.15
 _FAST_WEIGHT_CONNECTOR_EDGE: float = 0.10
 _FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.10
@@ -38,7 +38,9 @@ _FAST_WEIGHT_MCU_PERIPHERAL: float = 0.10
 _FAST_WEIGHT_RF_EDGE: float = 0.05
 _FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.05
 _FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.05
-_FAST_WEIGHT_GROUP_COHESION: float = 0.10
+_FAST_WEIGHT_GROUP_COHESION: float = 0.05
+_FAST_WEIGHT_SUBGROUP_COHESION: float = 0.05
+_FAST_WEIGHT_GROUP_ISOLATION: float = 0.05
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -738,6 +740,136 @@ def _score_rf_edge_placement(
     return score, issues
 
 
+def _score_subgroup_cohesion(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, tuple[str, ...]]:
+    """Score subgroup cohesion -- relay driver, ADC channel, decoupling groups.
+
+    Measures whether components that form functional subgroups (e.g. each
+    relay driver's Q+D+R, each ADC channel's resistor ladder) are kept
+    tightly together.
+
+    Returns (score, issues) where score is 0-1.
+    """
+    from kicad_pipeline.optimization.functional_grouper import (
+        SubCircuitType,
+        detect_subcircuits,
+    )
+
+    subcircuits = detect_subcircuits(requirements)
+    fp_pos: dict[str, tuple[float, float]] = {
+        fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints
+    }
+
+    issues: list[str] = []
+    scores: list[float] = []
+
+    # Subgroup types and their max spread thresholds
+    thresholds: dict[SubCircuitType, float] = {
+        SubCircuitType.RELAY_DRIVER: 8.0,
+        SubCircuitType.ADC_CHANNEL: 10.0,
+        SubCircuitType.DECOUPLING: 5.0,
+        SubCircuitType.BUCK_CONVERTER: 12.0,
+        SubCircuitType.CRYSTAL_OSC: 8.0,
+    }
+
+    for sc in subcircuits:
+        threshold = thresholds.get(sc.circuit_type)
+        if threshold is None:
+            continue
+
+        positions = [fp_pos[r] for r in sc.refs if r in fp_pos]
+        if len(positions) < 2:
+            continue
+
+        # Compute spread (max distance between any two members)
+        max_dist = 0.0
+        for i, p1 in enumerate(positions):
+            for p2 in positions[i + 1:]:
+                d = math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+                max_dist = max(max_dist, d)
+
+        if max_dist <= threshold:
+            scores.append(1.0)
+        else:
+            ratio = threshold / max(max_dist, 0.01)
+            scores.append(_clamp01(ratio))
+            issues.append(
+                f"{sc.circuit_type.value} ({', '.join(sc.refs[:3])}): "
+                f"spread {max_dist:.1f}mm > {threshold:.0f}mm"
+            )
+
+    if not scores:
+        return (1.0, ())
+
+    return (sum(scores) / len(scores), tuple(issues))
+
+
+def _score_group_isolation(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, tuple[str, ...]]:
+    """Score inter-group isolation -- minimum gap between group bounding boxes.
+
+    Score 1.0 if all inter-group gaps >= 10mm, penalize proportionally
+    for overlap or insufficient gap.
+
+    Returns (score, issues).
+    """
+    if not requirements.features or len(requirements.features) < 2:
+        return (1.0, ())
+
+    fp_pos: dict[str, tuple[float, float]] = {
+        fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints
+    }
+
+    # Compute bounding boxes for each group
+    group_bboxes: list[tuple[str, float, float, float, float]] = []
+    for block in requirements.features:
+        positions = [fp_pos[r] for r in block.components if r in fp_pos]
+        if len(positions) < 2:
+            continue
+        xs = [p[0] for p in positions]
+        ys = [p[1] for p in positions]
+        group_bboxes.append((block.name, min(xs) - 1, min(ys) - 1, max(xs) + 1, max(ys) + 1))
+
+    if len(group_bboxes) < 2:
+        return (1.0, ())
+
+    target_gap = 10.0  # mm
+    issues: list[str] = []
+    scores: list[float] = []
+
+    for i, (name_a, ax1, ay1, ax2, ay2) in enumerate(group_bboxes):
+        for name_b, bx1, by1, bx2, by2 in group_bboxes[i + 1:]:
+            # Compute minimum gap between two bounding boxes
+            dx = max(0.0, max(ax1 - bx2, bx1 - ax2))
+            dy = max(0.0, max(ay1 - by2, by1 - ay2))
+
+            if dx == 0.0 and dy == 0.0:
+                # Overlapping
+                overlap_x = min(ax2, bx2) - max(ax1, bx1)
+                overlap_y = min(ay2, by2) - max(ay1, by1)
+                gap = -min(overlap_x, overlap_y)
+                scores.append(0.0)
+                issues.append(f"{name_a} overlaps {name_b} by {abs(gap):.1f}mm")
+            else:
+                gap = math.sqrt(dx * dx + dy * dy)
+                if gap >= target_gap:
+                    scores.append(1.0)
+                else:
+                    scores.append(_clamp01(gap / target_gap))
+                    issues.append(
+                        f"{name_a} <-> {name_b}: gap {gap:.1f}mm < {target_gap:.0f}mm"
+                    )
+
+    if not scores:
+        return (1.0, ())
+
+    return (sum(scores) / len(scores), tuple(issues))
+
+
 def compute_fast_placement_score(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -770,7 +902,13 @@ def compute_fast_placement_score(
     rf_edge_score, rf_edge_issues = _score_rf_edge_placement(pcb, requirements)
     group_cohesion_score, group_cohesion_issues = _score_group_cohesion(pcb, requirements)
 
-    # Weighted placement composite (10 dimensions)
+    # Subgroup cohesion
+    subgroup_score, subgroup_issues = _score_subgroup_cohesion(pcb, requirements)
+
+    # Group isolation
+    grp_isolation_score, grp_isolation_issues = _score_group_isolation(pcb, requirements)
+
+    # Weighted placement composite (12 dimensions)
     placement_score = (
         _FAST_WEIGHT_COLLISION * collision_score
         + _FAST_WEIGHT_SUBCIRCUIT_COHESION * cohesion_score
@@ -782,6 +920,8 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_CONNECTOR_ORIENTATION * 1.0  # orientation scored via review
         + _FAST_WEIGHT_REGULATOR_BOUNDARY * boundary_score
         + _FAST_WEIGHT_GROUP_COHESION * group_cohesion_score
+        + _FAST_WEIGHT_SUBGROUP_COHESION * subgroup_score
+        + _FAST_WEIGHT_GROUP_ISOLATION * grp_isolation_score
     )
 
     # For fast path, other dimensions are derived from placement sub-scores
@@ -851,6 +991,18 @@ def compute_fast_placement_score(
             score=group_cohesion_score,
             weight=_FAST_WEIGHT_GROUP_COHESION,
             issues=tuple(group_cohesion_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Subgroup Cohesion",
+            score=subgroup_score,
+            weight=_FAST_WEIGHT_SUBGROUP_COHESION,
+            issues=tuple(subgroup_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Group Isolation",
+            score=grp_isolation_score,
+            weight=_FAST_WEIGHT_GROUP_ISOLATION,
+            issues=tuple(grp_isolation_issues[:5]),
         ),
     )
 
