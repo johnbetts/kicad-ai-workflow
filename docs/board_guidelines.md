@@ -384,3 +384,292 @@ For components with thermal/exposed pads:
 | Via in pad (no plugging) | Solder wicking during reflow | Use plugged/filled vias or move via away |
 | Daisy-chain power | Voltage drop accumulates | Star topology from regulator |
 | No ESD on external connectors | Susceptible to discharge damage | TVS diodes within 5mm of connector |
+
+---
+
+## 10. Subcircuit Pattern Library
+
+Physical layout patterns for common subcircuits. Each pattern shows signal flow order,
+pad connections, clearance targets, and rotation guidance. Use these as the reference
+when reviewing or optimizing component placement.
+
+**Notation**: `[pad N]` indicates which pad of a component connects to which pad of
+the next. Arrow `-->` shows signal flow direction. Components in `( )` are optional.
+
+### 10.1 Voltage Divider / ADC Input Channel
+
+**Signal flow**: Connector pin --> R_top --> midpoint --> R_bot --> GND
+
+```
+                    Signal In (from connector)
+                         |
+                    +-----------+
+                    |  R_top    |  pad 1 = signal in
+                    |  (10k)    |  pad 2 = midpoint
+                    +-----------+
+                         |
+                    midpoint net ----+---- to ADC input pin
+                         |          |
+                    +-----------+   |
+                    |  R_bot    |   +-----------+
+                    |  (10k)    |   | D_clamp   |  anode = midpoint
+                    +-----------+   | (TVS/Zener)|  cathode = GND or 3V3
+                         |         +-----------+
+                        GND              |
+                                   +-----------+
+                                   | C_filter  |  pad 1 = midpoint
+                                   | (100nF)   |  pad 2 = GND
+                                   +-----------+
+                                         |
+                                        GND
+```
+
+**Physical layout** (top view, 0603 pads):
+```
+  [Connector]
+      |
+  [ R_top ]     ← vertical, pad1=top (signal in), pad2=bottom (midpoint)
+      |
+  [ R_bot ]     ← vertical, pad1=top (midpoint), pad2=bottom (GND)
+      |
+     GND
+            [ D_clamp ]  ← horizontal, beside midpoint, anode facing R_top/R_bot junction
+            [ C_filter ] ← horizontal, below D_clamp, pad1 facing midpoint net
+```
+
+**Clearance targets**:
+- R_top pad2 to R_bot pad1: ≤1.5mm (series, same net = midpoint)
+- D_clamp/C_filter to midpoint junction: ≤2.5mm
+- Entire channel width: ≤8mm
+- Channel-to-channel spacing: 3-5mm (repeating pattern)
+- Channel group to ADC IC: ≤15mm
+
+**Rotation rules**:
+- R_top, R_bot: 0deg (vertical) — pads aligned along signal flow
+- D_clamp: 90deg — anode pad facing the midpoint net trace
+- C_filter: 90deg — pad1 facing midpoint net
+
+**Repeatable pattern**: All ADC channels should use identical layout, offset horizontally.
+Channel order should match ADC pin order (AIN0 closest to pin, AIN3 furthest).
+
+### 10.2 Relay Driver Circuit
+
+**Signal flow**: GPIO --> R_gate --> Q base --> Q collector --> K coil --> +5V
+                                                                  D_flyback across K coil
+
+```
+  GPIO (from MCU)
+      |
+  +-----------+
+  |  R_gate   |  pad 1 = GPIO net
+  |  (1k)     |  pad 2 = Q base
+  +-----------+
+      |
+  +-----------+
+  |  Q (NPN)  |  base = R_gate pad2
+  | (BC817)   |  collector = K coil pin
+  +-----------+  emitter = GND
+      |
+  collector net
+      |
+  +-----------+       +-----------+
+  |  K relay  |       | D_flyback |  cathode = +5V (coil supply)
+  |  coil     |       | (1N4148)  |  anode = collector net
+  +-----------+       +-----------+
+      |                     |
+    +5V coil              +5V
+      |
+  [Terminal Block] (relay contacts, on board edge)
+```
+
+**Physical layout** (top view):
+```
+  MCU side                                    Board edge side
+  ─────────                                   ──────────────
+  [R_gate] ── [Q] ── [D_flyback]  ──  [K relay]  ──  [Terminal]
+                         |
+                       +5V rail
+```
+
+**Clearance targets**:
+- R_gate to Q: ≤3mm (gate resistor close to transistor base)
+- Q collector to K coil pin: ≤5mm
+- D_flyback across K coil pins: ≤3mm from coil
+- K relay to terminal block: ≤10mm
+- Relay driver subgroup (R+Q+D): spread ≤8mm
+
+**Rotation rules**:
+- R_gate: horizontal, pad2 facing Q base pad
+- Q (SOT-23): orient so base faces R_gate, collector faces relay
+- D_flyback: orient cathode toward +5V rail, anode toward collector
+- K relay: coils parallel to board edge, contacts toward terminal
+
+**Repeatable pattern**: All relay drivers in a 1xN row. Support components (R, Q, D)
+on MCU side of each relay. Terminal blocks on board edge side.
+
+### 10.3 Buck Converter
+
+**Signal flow**: VIN --> C_in --> U (VIN pin) --> SW --> L --> VOUT --> C_out
+                                    U (FB pin) <-- voltage divider
+
+```
+  Power In
+      |
+  +-----------+
+  |  C_in     |  pad 1 = VIN
+  | (22uF)    |  pad 2 = GND
+  +-----------+
+      |
+  +-----------+
+  |  U (buck) |  VIN = C_in, SW = inductor, FB = divider, GND = ground
+  | AP63205WU |  BST = C_bst
+  +-----------+
+      |  SW pin
+  +-----------+
+  |  L (ind)  |  pad 1 = SW, pad 2 = VOUT
+  | (4.7uH)  |
+  +-----------+
+      |
+  +-----------+
+  |  C_out    |  pad 1 = VOUT
+  | (22uF)    |  pad 2 = GND
+  +-----------+
+      |
+   VOUT rail
+
+  Near FB pin:
+  +-----------+
+  |  R_fb_top |  pad 1 = VOUT, pad 2 = FB
+  +-----------+
+      |
+  +-----------+
+  |  R_fb_bot |  pad 1 = FB, pad 2 = GND
+  +-----------+
+```
+
+**Physical layout** (top view):
+```
+  [C_in] ── [U buck] ── [L] ── [C_out]
+                |
+             [C_bst]
+                |
+          [R_fb_top]
+          [R_fb_bot]
+```
+
+**Clearance targets**:
+- C_in to U VIN pin: ≤3mm
+- L to U SW pin: ≤5mm (short, wide trace)
+- C_out to L output: ≤5mm
+- Feedback divider to FB pin: ≤5mm
+- C_bst to BST/SW pins: ≤3mm
+- Total converter footprint: ≤20x15mm
+
+**Key rule**: Minimize the high-current loop area (VIN → SW → L → C_out → GND → C_in).
+Keep this loop tight and on the same layer.
+
+### 10.4 LDO Regulator
+
+**Signal flow**: VIN --> C_in --> U (VIN) --> U (VOUT) --> C_out --> VOUT rail
+
+```
+  [C_in] ── [U LDO] ── [C_out]
+```
+
+**Physical layout**: Linear, all three components in a row.
+
+**Clearance targets**:
+- C_in to U VIN pin: ≤5mm
+- C_out to U VOUT pin: ≤5mm
+- Total footprint: ≤15x8mm
+
+### 10.5 Decoupling Pair
+
+**Signal flow**: VCC pin --> C_small (100nF) --> C_bulk (10uF) --> GND
+
+```
+  IC VCC pin
+      |
+  [C_small 100nF]  ← closest to pin (≤3mm edge-to-edge)
+      |
+  [C_bulk 10uF]    ← slightly further (≤8mm from pin)
+      |
+     GND via
+```
+
+**Clearance targets**:
+- C_small to IC VCC pin: ≤3mm edge-to-edge (NOT center-to-center)
+- C_bulk to IC: ≤8mm
+- Both caps connected to same GND via or nearby GND vias
+
+**Rotation rules**: Orient so one pad connects directly to VCC trace, other pad
+has short path to GND via. Minimize loop area (VCC → cap → GND → back to IC GND).
+
+### 10.6 RC Low-Pass Filter
+
+**Signal flow**: Signal In --> R --> junction --> C --> GND
+                                     junction --> Signal Out (filtered)
+
+```
+  Signal In ── [R] ── junction ── Signal Out
+                         |
+                        [C]
+                         |
+                        GND
+```
+
+**Physical layout**: R and C in an L-shape. R inline with signal, C perpendicular
+dropping to ground.
+
+**Clearance targets**:
+- R pad2 to C pad1: ≤1.5mm (same net = junction)
+- Total footprint: ≤5x5mm
+
+### 10.7 Crystal Oscillator
+
+**Signal flow**: MCU OSC_IN --> Y pin1 --> Y pin2 --> MCU OSC_OUT
+                               Y pin1 --> C_load1 --> GND
+                               Y pin2 --> C_load2 --> GND
+
+```
+       MCU
+    [OSC pins]
+        |
+   +---------+
+   | C_load1 |    [Y crystal]    | C_load2 |
+   +---------+                   +---------+
+       |                              |
+      GND                           GND
+```
+
+**Physical layout**: Crystal between the two MCU oscillator pins. Load caps
+flanking the crystal, each connecting one crystal pin to GND.
+
+**Clearance targets**:
+- Crystal to MCU OSC pins: ≤5mm
+- Load caps to crystal pins: ≤3mm
+- All components within 10mm of MCU
+- Solid ground plane underneath — no signal routing
+
+**Rotation rules**: Orient crystal so pin1/pin2 align with MCU OSC_IN/OSC_OUT pins
+for shortest symmetric traces.
+
+### 10.8 I2C Pull-Up Network
+
+**Signal flow**: VCC --> R_sda --> SDA bus
+                 VCC --> R_scl --> SCL bus
+
+```
+    VCC
+     |
+  [R_sda]  [R_scl]
+     |        |
+    SDA      SCL
+```
+
+**Physical layout**: Two resistors side by side, near the MCU I2C pins (not near
+the peripheral). Both connect to the same VCC rail.
+
+**Clearance targets**:
+- Pull-ups to MCU I2C pins: ≤10mm
+- R_sda to R_scl: ≤3mm (same orientation, parallel)

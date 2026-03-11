@@ -408,8 +408,11 @@ def _check_collisions(
     positions = _fp_positions(pcb)
     pcb_positions = {fp.ref: PcbPoint(fp.position.x, fp.position.y) for fp in pcb.footprints}
     fp_sizes = _fp_size_dict(pcb)
+    fp_rotations = {fp.ref: fp.rotation for fp in pcb.footprints}
 
-    collision_strs = check_courtyard_collisions(pcb_positions, fp_sizes)
+    collision_strs = check_courtyard_collisions(
+        pcb_positions, fp_sizes, rotations=fp_rotations,
+    )
     for msg in collision_strs:
         # Parse refs from collision message
         # Format: "Courtyard collision: REF1 and REF2"

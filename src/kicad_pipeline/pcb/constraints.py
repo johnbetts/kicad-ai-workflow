@@ -1800,6 +1800,10 @@ def check_courtyard_collisions(
                 pos.y + bbox.max_y,
             )
         w, h = footprint_sizes.get(ref, (3.0, 3.0))
+        # Swap width/height for ±90° rotations (axis-aligned approximation)
+        rot = rots.get(ref, 0.0) % 360.0
+        if 45.0 < rot < 135.0 or 225.0 < rot < 315.0:
+            w, h = h, w
         return (
             pos.x - w / 2.0,
             pos.y - h / 2.0,

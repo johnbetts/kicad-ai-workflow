@@ -2038,67 +2038,308 @@ def optimize_placement_ee(
         ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
         adc_grid.place(ox, oy, ow, oh)
 
-    # Unified stacking: all channels in a single vertical stack centered on IC centroid
-    # Each strip extends LEFT from its IC (toward input terminals)
-    strip_dir = -1.0
-    _CHANNEL_SPACING_MM = 3.0  # 0603 passives ~1.6mm tall, 3mm for clear separation
+    # Per-IC vertical channel columns: each channel is a vertical strip
+    # running UPWARD from the ADC IC toward the connectors / 24V source
+    # (top edge of board).  Channels are spread horizontally side-by-side.
+    #
+    # Signal flow (top to bottom): connector → R_top → C_filter → D_clamp → R_bot → IC
+    # Physical layout (upward from IC):  IC ← R_bot ← D_clamp ← C_filter ← R_top
+    #
+    # All components at 0° rotation (horizontal pads) so pads align
+    # vertically in the signal path.
+    _CHANNEL_SPACING_MM = 4.5  # horizontal gap between channel columns (SOD-323 = 3.7mm wide)
+    _STRIP_GAP_MM = 0.5  # vertical gap between components within a column
 
-    # Flatten and sort all channels: by IC ref then pin
-    all_ch_list: list[tuple[str, str, list[str]]] = []
-    for ic_ref, ic_pin, passives in adc_channels:
-        all_ch_list.append((ic_ref, ic_pin, passives))
-    all_ch_list.sort(key=lambda c: (c[0], c[1]))
+    # Sort ICs for deterministic processing order
+    sorted_ic_refs = sorted(ic_channels.keys())
 
-    # Use centroid of ADC ICs for vertical centering
-    ic_ys = [positions[r][1] for r in adc_ic_refs if r in positions]
-    centroid_y = sum(ic_ys) / len(ic_ys) if ic_ys else bounds[1] + 20.0
+    # Track occupied X ranges to prevent inter-IC channel overlap.
+    # Each entry: (x_min, x_max) of the channel columns for an IC.
+    _occupied_x_ranges: list[tuple[float, float]] = []
 
-    total_ch_height = (len(all_ch_list) - 1) * _CHANNEL_SPACING_MM
-    ch_y_start = centroid_y - total_ch_height / 2.0
-
-    for ch_idx, (ic_ref, ic_pin, passives) in enumerate(all_ch_list):
+    for ic_ref in sorted_ic_refs:
+        ch_list = ic_channels[ic_ref]
         if ic_ref not in positions:
             continue
         ix, iy, _irot = positions[ic_ref]
         iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
 
-        r_refs = sorted([r for r in passives if r.startswith("R")])
-        d_refs = [r for r in passives if r.startswith("D")]
-        c_refs = [r for r in passives if r.startswith("C")]
+        n_ch = len(ch_list)
+        total_ch_width = (n_ch - 1) * _CHANNEL_SPACING_MM
+        # Center the channel columns horizontally on the IC
+        ch_x_start = ix - total_ch_width / 2.0
+        ch_x_end = ch_x_start + total_ch_width
 
-        ch_y = ch_y_start + ch_idx * _CHANNEL_SPACING_MM
-        strip_x = ix + strip_dir * (iw / 2.0 + 1.0)
+        # Shift right if this IC's channel band overlaps with previously placed ICs
+        _comp_half_w = 2.0  # half-width of widest component (SOD-323 = 3.7mm)
+        for ox_min, ox_max in _occupied_x_ranges:
+            if (ch_x_start - _comp_half_w < ox_max + _comp_half_w
+                    and ch_x_end + _comp_half_w > ox_min - _comp_half_w):
+                # Overlap — shift this IC's channels to the right of the occupied range
+                shift = (ox_max + _comp_half_w + _CHANNEL_SPACING_MM) - ch_x_start
+                if shift > 0:
+                    ch_x_start += shift
+                    ch_x_end = ch_x_start + total_ch_width
 
-        # Place in order from IC outward: R_bot, D_clamp, C_filter, R_top
-        strip_order = []
-        if len(r_refs) >= 2:
-            strip_order.append(r_refs[1])  # R_bot
-        strip_order.extend(d_refs)
-        strip_order.extend(c_refs)
-        if len(r_refs) >= 1:
-            strip_order.append(r_refs[0])  # R_top
+        _occupied_x_ranges.append((ch_x_start, ch_x_end))
 
-        for ref in strip_order:
-            if ref not in positions or ref in fixed_refs:
-                continue
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
-            target_x = strip_x + strip_dir * w / 2.0
-            target_y = ch_y
-            target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
-            target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
+        for ch_idx, (ic_pin, passives) in enumerate(ch_list):
+            r_refs = sorted([r for r in passives if r.startswith("R")])
+            d_refs = [r for r in passives if r.startswith("D")]
+            c_refs = [r for r in passives if r.startswith("C")]
 
-            _, _, rot = positions[ref]
-            px, py = adc_grid.find_free_pos(target_x, target_y, w, h,
-                                            max_radius=5.0)
-            positions[ref] = (px, py, rot)
-            adc_channel_refs.add(ref)
-            adc_grid.place(px, py, w, h)
-            strip_x = px + strip_dir * (w / 2.0 + 0.5)
+            ch_x = ch_x_start + ch_idx * _CHANNEL_SPACING_MM
+
+            # Place upward from IC: R_bot closest to IC, R_top farthest
+            strip_order: list[str] = []
+            if len(r_refs) >= 2:
+                strip_order.append(r_refs[1])  # R_bot (closest to IC)
+            strip_order.extend(d_refs)          # D_clamp
+            strip_order.extend(c_refs)          # C_filter
+            if len(r_refs) >= 1:
+                strip_order.append(r_refs[0])  # R_top (closest to connector)
+
+            # Start placing above the IC
+            strip_y = iy - ih / 2.0 - 1.0
+
+            for ref in strip_order:
+                if ref not in positions or ref in fixed_refs:
+                    continue
+                raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
+                # All components at 0° for vertical signal flow
+                w, h = raw_w, raw_h
+                rot = 0.0
+                target_x = ch_x
+                target_y = strip_y - h / 2.0
+                target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
+                target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
+
+                # Deterministic placement — exact position, no grid search.
+                # This ensures repeatable strip patterns across all channels.
+                positions[ref] = (target_x, target_y, rot)
+                adc_channel_refs.add(ref)
+                strip_y = target_y - (h / 2.0 + _STRIP_GAP_MM)
 
     _log.info(
         "    3c2: %d channels across %d ICs",
         len(adc_channels), len(adc_ic_refs),
     )
+
+    # 3c3. Analog subcircuit clustering — pull remaining analog passives
+    # (ladder switch resistors, optocoupler components, ADC decoupling)
+    # into vertical columns next to the ADC channel columns.
+    #
+    # Strategy: find SMALL PASSIVE components (R, C, D, LED, SW) on signal
+    # nets that connect to ADC IC pins.  Then follow one hop through
+    # non-power nets but ONLY through small passives/discretes — never
+    # through ICs (which fan out to the entire board) or connectors.
+    _log.info("  3c3: Analog subcircuit clustering")
+
+    _POWER_NET_PREFIXES = (
+        "VCC", "VDD", "GND", "AGND", "DGND", "AVCC", "+3V3", "+5V",
+        "VIN", "VBUS", "V_", "+12V", "+24V", "I2C_",
+    )
+
+    def _is_power_or_bus_net(name: str) -> bool:
+        upper = name.upper()
+        return any(upper.startswith(p) for p in _POWER_NET_PREFIXES)
+
+    _SMALL_PREFIXES = ("R", "C", "D", "L", "LED", "SW")
+
+    def _is_small_passive(ref: str) -> bool:
+        return any(ref.startswith(p) for p in _SMALL_PREFIXES)
+
+    # Find small passives on ADC signal nets (excluding power/bus/I2C)
+    analog_signal_refs: set[str] = set()
+    for net in requirements.nets:
+        if _is_power_or_bus_net(net.name):
+            continue
+        # Must connect to an ADC IC pin (not just share a power net)
+        ic_conn = [c for c in net.connections
+                   if c.ref in adc_ic_refs and c.ref in positions]
+        if not ic_conn:
+            continue
+        for c in net.connections:
+            if (c.ref in positions
+                    and c.ref not in adc_channel_refs
+                    and c.ref not in adc_ic_refs
+                    and c.ref not in fixed_refs
+                    and _is_small_passive(c.ref)):
+                analog_signal_refs.add(c.ref)
+
+    # One hop: follow non-power nets through small passives only
+    # Also allow U refs with ≤6 pins (optocouplers, small ICs) but NOT MCUs
+    hop2_refs: set[str] = set()
+    for ref in list(analog_signal_refs):
+        for net in requirements.nets:
+            if _is_power_or_bus_net(net.name):
+                continue
+            if not any(c.ref == ref for c in net.connections):
+                continue
+            for c in net.connections:
+                if (c.ref != ref and c.ref in positions
+                        and c.ref not in adc_channel_refs
+                        and c.ref not in adc_ic_refs
+                        and c.ref not in fixed_refs
+                        and c.ref not in analog_signal_refs):
+                    # Allow small passives and small ICs (optocouplers)
+                    if _is_small_passive(c.ref):
+                        hop2_refs.add(c.ref)
+                    elif c.ref.startswith("U"):
+                        # Only pull small ICs (≤6 pins)
+                        comp = next((comp for comp in requirements.components
+                                     if comp.ref == c.ref), None)
+                        if comp and len(comp.pins) <= 6:
+                            hop2_refs.add(c.ref)
+
+    # Hop 3: for small ICs found in hop2, follow their remaining non-power
+    # nets to pull in the full subcircuit (e.g., U7 opto → R25, R32, D17, LED2)
+    hop3_refs: set[str] = set()
+    small_ics_found = {r for r in hop2_refs if r.startswith("U")}
+    for ic_ref in small_ics_found:
+        for net in requirements.nets:
+            if _is_power_or_bus_net(net.name):
+                continue
+            if not any(c.ref == ic_ref for c in net.connections):
+                continue
+            for c in net.connections:
+                if (c.ref != ic_ref and c.ref in positions
+                        and c.ref not in adc_channel_refs
+                        and c.ref not in adc_ic_refs
+                        and c.ref not in fixed_refs
+                        and _is_small_passive(c.ref)):
+                    hop3_refs.add(c.ref)
+    # Hop 4: one more hop from hop3 refs (e.g., R25→OPTO_IN→D17/R32/SW3)
+    hop4_refs: set[str] = set()
+    for ref in hop3_refs:
+        for net in requirements.nets:
+            if _is_power_or_bus_net(net.name):
+                continue
+            if not any(c.ref == ref for c in net.connections):
+                continue
+            for c in net.connections:
+                if (c.ref != ref and c.ref in positions
+                        and c.ref not in adc_channel_refs
+                        and c.ref not in adc_ic_refs
+                        and c.ref not in fixed_refs
+                        and _is_small_passive(c.ref)):
+                    hop4_refs.add(c.ref)
+
+    all_analog_cluster_refs = (
+        analog_signal_refs | hop2_refs | hop3_refs | hop4_refs
+    ) - adc_channel_refs
+
+    if all_analog_cluster_refs and _occupied_x_ranges:
+        last_x_max = max(xmax for _, xmax in _occupied_x_ranges)
+        cluster_x = last_x_max + _CHANNEL_SPACING_MM + 2.0
+
+        adc_ys = [positions[r][1] for r in adc_channel_refs if r in positions]
+        cluster_y_top = min(adc_ys) - 1.0 if adc_ys else bounds[1] + 5.0
+
+        # Sort: ICs first (larger), then passives by ref
+        sorted_cluster = sorted(
+            all_analog_cluster_refs,
+            key=lambda r: (0 if r.startswith("U") else 2, r),
+        )
+
+        # Place in a vertical column, wrapping to next column after 15mm
+        _COL_GAP = 5.0
+        _ROW_GAP = 0.5
+        cur_x = cluster_x
+        cur_y = cluster_y_top
+        placed_count = 0
+
+        for ref in sorted_cluster:
+            if ref not in positions:
+                continue
+            raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = raw_w, raw_h
+            rot = 0.0
+
+            target_x = cur_x
+            target_y = cur_y + h / 2.0
+            target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
+            target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
+
+            positions[ref] = (target_x, target_y, rot)
+            adc_channel_refs.add(ref)
+            placed_count += 1
+
+            cur_y = target_y + h / 2.0 + _ROW_GAP
+
+            if cur_y > cluster_y_top + 15.0:
+                cur_x += _COL_GAP
+                cur_y = cluster_y_top
+
+        _log.info("    3c3: clustered %d analog refs near ADC channels", placed_count)
+
+    # 3c3b. Pull remaining analog group outliers toward the cluster.
+    # Find all refs in the same FeatureBlock as the ADC ICs, then pull
+    # any that are >15mm from the analog centroid into the cluster area.
+    analog_group_refs: set[str] = set()
+    for feat in requirements.features:
+        feat_refs = set(feat.components)
+        if feat_refs & adc_ic_refs:
+            analog_group_refs = feat_refs
+            break
+
+    if analog_group_refs and adc_channel_refs:
+        # Compute centroid of already-placed analog refs
+        placed_analog = [
+            positions[r] for r in (adc_channel_refs | adc_ic_refs)
+            if r in positions
+        ]
+        if placed_analog:
+            cx = sum(p[0] for p in placed_analog) / len(placed_analog)
+            cy = sum(p[1] for p in placed_analog) / len(placed_analog)
+            # Find outlier refs (>15mm from centroid, not already placed)
+            outlier_refs: list[str] = []
+            for ref in sorted(analog_group_refs):
+                if (ref in positions
+                        and ref not in adc_channel_refs
+                        and ref not in adc_ic_refs
+                        and ref not in fixed_refs
+                        and not ref.startswith("J")):  # keep connectors on edges
+                    rx, ry, _rrot = positions[ref]
+                    dist = math.sqrt((rx - cx) ** 2 + (ry - cy) ** 2)
+                    if dist > 15.0:
+                        outlier_refs.append(ref)
+
+            if outlier_refs:
+                # Compute cluster placement area — to the right of ADC channels
+                adc_xs = [positions[r][0] for r in adc_channel_refs
+                          if r in positions]
+                adc_ys = [positions[r][1] for r in adc_channel_refs
+                          if r in positions]
+                outlier_x = max(adc_xs) + _CHANNEL_SPACING_MM + 2.0
+                outlier_y_top = min(adc_ys) - 1.0
+                oc_x = outlier_x
+                oc_y = outlier_y_top
+                _OC_COL_GAP = 5.0
+                _OC_ROW_GAP = 0.5
+
+                for ref in outlier_refs:
+                    raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
+                    w, h = raw_w, raw_h
+                    rot = 0.0
+
+                    target_x = oc_x
+                    target_y = oc_y + h / 2.0
+                    target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
+                    target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
+
+                    positions[ref] = (target_x, target_y, rot)
+                    adc_channel_refs.add(ref)
+
+                    oc_y = target_y + h / 2.0 + _OC_ROW_GAP
+                    if oc_y > outlier_y_top + 15.0:
+                        oc_x += _OC_COL_GAP
+                        oc_y = outlier_y_top
+
+                _log.info(
+                    "    3c3b: pulled %d outliers into analog cluster",
+                    len(outlier_refs),
+                )
 
     # 3d. Crystal-MCU proximity — within 10mm
     _log.info("  3d: Crystal-MCU proximity")
@@ -2151,11 +2392,103 @@ def optimize_placement_ee(
         positions, fp_sizes, bounds, fixed_refs, initial_pcb,
     )
 
+    # 3c3. MCU peripheral tightening — AFTER RF pinning so U3 is at final position
+    _log.info("  3c3: MCU peripheral tightening")
+    mcu_peripheral_refs: set[str] = set()
+    from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref as _find_mcu
+    mcu_ref_c3 = _find_mcu(requirements)
+    if mcu_ref_c3 and mcu_ref_c3 in positions:
+        mcu_x, mcu_y, _mcu_rot = positions[mcu_ref_c3]
+        mcu_w, mcu_h = fp_sizes.get(mcu_ref_c3, (5.0, 5.0))
+
+        # Find MCU's FeatureBlock group
+        mcu_group_refs: set[str] = set()
+        for feat in requirements.features:
+            feat_refs = set()
+            for comp in feat.components:
+                r = comp.ref if hasattr(comp, "ref") else comp
+                feat_refs.add(r)
+            if mcu_ref_c3 in feat_refs:
+                mcu_group_refs = feat_refs
+                break
+
+        # Build occupancy grid WITHOUT MCU group passives (they'll be repositioned)
+        mcu_grid = _PlacementGrid(bounds)
+        for oref, (ox, oy, _or) in positions.items():
+            if oref in mcu_group_refs and oref != mcu_ref_c3:
+                continue
+            ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
+            mcu_grid.place(ox, oy, ow, oh)
+
+        # Pull passives toward MCU perimeter — skip connectors (edge-pinned)
+        _MCU_TARGET_GAP = 2.0
+        _MCU_CLOSE_THRESHOLD = 8.0  # Already close enough, just register
+        connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
+
+        # Protect the MCU ref itself from 3g collision resolution
+        mcu_peripheral_refs.add(mcu_ref_c3)
+
+        # Sort closest first for tighter packing
+        mcu_sorted = sorted(
+            [r for r in mcu_group_refs
+             if r != mcu_ref_c3 and r not in fixed_refs
+             and r not in connector_refs and r in positions],
+            key=lambda r: math.sqrt(
+                (positions[r][0] - mcu_x) ** 2
+                + (positions[r][1] - mcu_y) ** 2
+            ),
+        )
+
+        for ref in mcu_sorted:
+            rx, ry, rrot = positions[ref]
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
+
+            if dist <= _MCU_CLOSE_THRESHOLD:
+                mcu_grid.place(rx, ry, w, h)
+                mcu_peripheral_refs.add(ref)
+                continue
+
+            # Target: MCU perimeter + gap
+            dx = rx - mcu_x
+            dy = ry - mcu_y
+            d = max(0.1, math.sqrt(dx * dx + dy * dy))
+            target_dist = max(mcu_w, mcu_h) / 2.0 + max(w, h) / 2.0 + _MCU_TARGET_GAP
+            tx = mcu_x + dx / d * target_dist
+            ty = mcu_y + dy / d * target_dist
+            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+
+            # Dynamic search radius — must be large enough to reach from
+            # target position to current position (component may be 80mm away)
+            search_radius = max(dist, 30.0)
+            px, py = mcu_grid.find_free_pos(tx, ty, w, h,
+                                            max_radius=search_radius)
+            new_dist = math.sqrt((px - mcu_x) ** 2 + (py - mcu_y) ** 2)
+            _log.info(
+                "    %s: (%.1f,%.1f)→(%.1f,%.1f) dist %.1f→%.1f target(%.1f,%.1f)",
+                ref, rx, ry, px, py, dist, new_dist, tx, ty,
+            )
+            positions[ref] = (px, py, rrot)
+            mcu_peripheral_refs.add(ref)
+            mcu_grid.place(px, py, w, h)
+
+        # Register connectors in grid (don't move them)
+        for ref in connector_refs:
+            if ref in positions:
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                mcu_grid.place(*positions[ref][:2], w, h)
+
+        _log.info(
+            "    3c3: pulled %d peripherals toward %s at (%.1f, %.1f)",
+            len(mcu_peripheral_refs), mcu_ref_c3, mcu_x, mcu_y,
+        )
+
     # 3g. Collision resolution (group-constrained, then unconstrained final pass)
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
-    # Protect relay sub-circuit positions — move other components around them
-    subcircuit_fixed = relay_support_refs | adc_channel_refs
+    # Protect relay sub-circuit, ADC channel, and MCU peripheral positions
+    subcircuit_fixed = relay_support_refs | adc_channel_refs | mcu_peripheral_refs
     relay_fixed = fixed_refs | subcircuit_fixed | {
         r for r in positions if r.startswith("K")
     }

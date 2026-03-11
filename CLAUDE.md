@@ -300,6 +300,29 @@ This chain must be rock-solid. Mistakes = wrong connections on manufactured boar
   - For ICs/modules: verify JLCPCB stocks the exact part before specifying it
 - BOM validation checks: stock availability, pricing, and replacement suggestions
 
+## Placement Review Workflow (Group-by-Group)
+
+When optimizing PCB placement, follow this group-by-group workflow:
+
+### Process
+1. **Select one functional group** to work on (follow the iteration order in "Placement Iteration Problem-Solving Approach")
+2. **Regenerate the board** and render placement PNGs
+3. **Invoke `/pcb-placement-review`** — the skill performs a 4-phase bottom-up review:
+   - Phase 1: Identify subcircuit patterns and component order
+   - Phase 2: Verify subgroup arrangement and clearances (with rendered PNG)
+   - Phase 3: Check group cohesion — subgroups relative to parent
+   - Phase 4: Board-level relationships and isolation
+4. **Apply specific corrections** from the review (ref, x, y, rotation)
+5. **Re-render and re-review** — verify fixes visually
+6. **Ask the human for sign-off** on this group before moving to next
+
+### Rules
+- Complete one group at a time — do not scatter fixes across groups
+- Human verification between groups is **mandatory**
+- After all groups are individually approved, do a final Phase 4 inter-group review
+- The rendered PNG is the source of truth — scores can be misleading
+- Reference `docs/board_guidelines.md` Section 10 for subcircuit pattern layouts
+
 ## Quality Gates
 
 Before marking any module complete:
