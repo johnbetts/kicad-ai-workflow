@@ -2,9 +2,9 @@
 
 Produces color-coded placement diagrams showing:
 - Board outline with component bounding boxes
-- Voltage domain coloring (VIN_24V=red, BUCK_12V=orange, etc.)
+- FeatureBlock group coloring (or voltage domain fallback)
+- Dotted bounding box boundaries around groups
 - Signal net ratsnest (thin lines between connected components)
-- Subcircuit grouping annotations
 - Quality score overlay
 
 Requires matplotlib (optional dependency).
@@ -24,15 +24,39 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Voltage domain → display color
+# Voltage domain -> display color (keys match VoltageDomain.value)
 _DOMAIN_COLORS: dict[str, str] = {
-    "VIN_24V": "#ff4444",
-    "BUCK_12V": "#ff8800",
-    "LDO_5V": "#ffcc00",
-    "DIGITAL_3V3": "#44aaff",
-    "ANALOG": "#44ff44",
-    "MIXED": "#cccccc",
+    "24v": "#ff4444",      # VIN_24V - red
+    "5v": "#ff8800",       # POWER_5V - orange
+    "3v3": "#44aaff",      # DIGITAL_3V3 - blue
+    "analog": "#44ff44",   # ANALOG - green
+    "mixed": "#cccccc",    # MIXED - gray
 }
+
+# Display labels for legend
+_DOMAIN_LABELS: dict[str, str] = {
+    "24v": "24V Power",
+    "5v": "5V Power",
+    "3v3": "3.3V Digital",
+    "analog": "Analog",
+    "mixed": "Mixed/Unclassified",
+}
+
+# FeatureBlock group colors
+GROUP_COLORS: dict[str, str] = {
+    "Power Supply": "#ff8800",
+    "Relay Outputs": "#ff4444",
+    "MCU + Peripherals": "#44cc44",
+    "Analog Inputs": "#ffcc00",
+    "Ethernet + PoE": "#4488ff",
+    "Display": "#cc44ff",
+}
+
+# Fallback palette for groups not in the named map
+_FALLBACK_GROUP_PALETTE: tuple[str, ...] = (
+    "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+    "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
+)
 
 # Power net names to exclude from ratsnest
 _POWER_NETS = frozenset({
@@ -52,6 +76,13 @@ def _fp_size(fp: Footprint) -> tuple[float, float]:
     return max(w, 1.5), max(h, 1.5)
 
 
+def _get_group_color(group_name: str, idx: int) -> str:
+    """Get color for a group name, falling back to palette."""
+    if group_name in GROUP_COLORS:
+        return GROUP_COLORS[group_name]
+    return _FALLBACK_GROUP_PALETTE[idx % len(_FALLBACK_GROUP_PALETTE)]
+
+
 def render_placement(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -60,6 +91,7 @@ def render_placement(
     title: str | None = None,
     score: QualityScore | None = None,
     domain_map: dict[str, VoltageDomain] | None = None,
+    group_map: dict[str, str] | None = None,
     show_ratsnest: bool = True,
     figsize: tuple[float, float] = (18, 12),
     dpi: int = 200,
@@ -72,8 +104,11 @@ def render_placement(
         output_path: Where to save the PNG.
         title: Plot title (auto-generated if None).
         score: Optional QualityScore to overlay.
-        domain_map: Optional ref→VoltageDomain map for coloring.
-            If None, classify_voltage_domains is called.
+        domain_map: Optional ref->VoltageDomain map for coloring.
+            Used when group_map is None.
+        group_map: Optional ref->group_name map for group-based coloring.
+            When provided, components are colored by FeatureBlock group
+            instead of voltage domain, and group boundaries are drawn.
         show_ratsnest: Draw signal net connections.
         figsize: Figure size in inches.
         dpi: Output resolution.
@@ -86,21 +121,42 @@ def render_placement(
         matplotlib.use("Agg")
         import matplotlib.patches as mpatches
         import matplotlib.pyplot as plt
-        from matplotlib.patches import FancyBboxPatch
+        from matplotlib.patches import FancyBboxPatch, Rectangle
     except ImportError as exc:
         msg = "matplotlib is required for placement rendering: pip install matplotlib"
         raise ImportError(msg) from exc
 
-    # Build domain map if not provided
-    if domain_map is None:
-        from kicad_pipeline.optimization.functional_grouper import classify_voltage_domains
-        domain_map = classify_voltage_domains(requirements)
+    # Determine coloring mode
+    use_groups = group_map is not None and len(group_map) > 0
 
-    # Map ref → domain name string
-    ref_domain: dict[str, str] = {}
-    for comp in requirements.components:
-        d = domain_map.get(comp.ref)
-        ref_domain[comp.ref] = d.value if d else "MIXED"
+    # Build color mapping
+    if use_groups:
+        assert group_map is not None  # for type narrowing
+        # Assign color per group
+        unique_groups = sorted(set(group_map.values()))
+        group_color_map: dict[str, str] = {
+            name: _get_group_color(name, i)
+            for i, name in enumerate(unique_groups)
+        }
+        ref_color: dict[str, str] = {
+            ref: group_color_map.get(gname, "#cccccc")
+            for ref, gname in group_map.items()
+        }
+    else:
+        # Fallback to voltage domain coloring
+        if domain_map is None:
+            from kicad_pipeline.optimization.functional_grouper import (
+                classify_voltage_domains,
+            )
+            domain_map = classify_voltage_domains(requirements)
+        ref_domain: dict[str, str] = {}
+        for comp in requirements.components:
+            d = domain_map.get(comp.ref)
+            ref_domain[comp.ref] = d.value if d else "MIXED"
+        ref_color = {
+            ref: _DOMAIN_COLORS.get(dval, "#cccccc")
+            for ref, dval in ref_domain.items()
+        }
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
 
@@ -116,8 +172,7 @@ def render_placement(
     for fp in pcb.footprints:
         x, y = fp.position.x, fp.position.y
         w, h = _fp_size(fp)
-        domain = ref_domain.get(fp.ref, "MIXED")
-        color = _DOMAIN_COLORS.get(domain, "#cccccc")
+        color = ref_color.get(fp.ref, "#cccccc")
 
         rect = FancyBboxPatch(
             (x - w / 2, y - h / 2), w, h,
@@ -128,6 +183,49 @@ def render_placement(
         fontsize = 5 if len(fp.ref) <= 3 else 4
         ax.text(x, y, fp.ref, ha="center", va="center",
                 fontsize=fontsize, fontweight="bold", color="black")
+
+    # Draw group bounding boxes with dotted lines
+    if use_groups:
+        assert group_map is not None
+        ref_pos = {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+        unique_groups = sorted(set(group_map.values()))
+        group_color_map = {
+            name: _get_group_color(name, i)
+            for i, name in enumerate(unique_groups)
+        }
+
+        for gname in unique_groups:
+            grefs = [r for r, g in group_map.items() if g == gname and r in ref_pos]
+            if len(grefs) < 2:
+                continue
+
+            gxs = [ref_pos[r][0] for r in grefs]
+            gys = [ref_pos[r][1] for r in grefs]
+            margin = 2.0
+            gx_min = min(gxs) - margin
+            gy_min = min(gys) - margin
+            gx_max = max(gxs) + margin
+            gy_max = max(gys) + margin
+
+            color = group_color_map.get(gname, "#888888")
+            boundary = Rectangle(
+                (gx_min, gy_min),
+                gx_max - gx_min,
+                gy_max - gy_min,
+                fill=False,
+                edgecolor=color,
+                linestyle="--",
+                linewidth=1.5,
+                alpha=0.7,
+            )
+            ax.add_patch(boundary)
+
+            # Group name label above boundary
+            ax.text(
+                (gx_min + gx_max) / 2, gy_min - 0.5,
+                gname, ha="center", va="bottom",
+                fontsize=6, fontweight="bold", color=color, alpha=0.8,
+            )
 
     # Signal ratsnest
     if show_ratsnest:
@@ -145,12 +243,44 @@ def render_placement(
                     )
 
     # Legend
-    used_domains = set(ref_domain.values())
-    legend_patches = [
-        mpatches.Patch(color=c, alpha=0.6, label=n)
-        for n, c in _DOMAIN_COLORS.items()
-        if n in used_domains
-    ]
+    if use_groups:
+        assert group_map is not None
+        unique_groups = sorted(set(group_map.values()))
+        group_color_map = {
+            name: _get_group_color(name, i)
+            for i, name in enumerate(unique_groups)
+        }
+        legend_patches = [
+            mpatches.Patch(color=group_color_map[g], alpha=0.6, label=g)
+            for g in unique_groups
+        ]
+    else:
+        used_domains = set(ref_color.values())
+        legend_patches = [
+            mpatches.Patch(color=c, alpha=0.6, label=_DOMAIN_LABELS.get(n, n))
+            for n, c in _DOMAIN_COLORS.items()
+            if c in used_domains or n in {
+                ref_domain.get(comp.ref, "MIXED")
+                for comp in requirements.components
+            }
+        ]
+        # Re-build properly using domain labels
+        if domain_map is not None:
+            used_domain_vals = {
+                domain_map.get(comp.ref)
+                for comp in requirements.components
+                if domain_map.get(comp.ref) is not None
+            }
+            used_names = {d.value for d in used_domain_vals if d is not None}
+            legend_patches = [
+                mpatches.Patch(
+                    color=_DOMAIN_COLORS.get(n, "#cccccc"),
+                    alpha=0.6,
+                    label=_DOMAIN_LABELS.get(n, n),
+                )
+                for n in _DOMAIN_COLORS
+                if n in used_names
+            ]
     if legend_patches:
         ax.legend(handles=legend_patches, loc="upper left", fontsize=7)
 
@@ -171,7 +301,7 @@ def render_placement(
 
     if title is None:
         name = requirements.project.name or "PCB"
-        title = f"{name} — Placement ({len(pcb.footprints)} components)"
+        title = f"{name} -- Placement ({len(pcb.footprints)} components)"
     ax.set_title(title)
     ax.grid(True, alpha=0.15)
     fig.tight_layout()

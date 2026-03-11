@@ -11,6 +11,11 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from kicad_pipeline.constants import (
+    DECOUPLING_CAP_MAX_DISTANCE_MM,
+    DECOUPLING_CAP_MIN_DISTANCE_MM,
+    PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
+)
 from kicad_pipeline.models.pcb import (
     BoardEdge,
     PlacementConstraint,
@@ -20,7 +25,7 @@ from kicad_pipeline.models.pcb import (
 )
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.pcb import BoardOutline, Keepout
+    from kicad_pipeline.models.pcb import BoardOutline, FootprintBBox, Keepout
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.pcb.board_templates import BoardTemplate
 
@@ -260,7 +265,11 @@ def _is_power_net(net_name: str) -> bool:
     name = net_name.upper().strip()
     if name in ("GND", "AGND", "DGND", "PGND", "VGND", "VSS", "VEE"):
         return True
-    return name.startswith("+") or name.startswith("V") or name.startswith("-")
+    if name.startswith("+") or name.startswith("V") or name.startswith("-"):
+        return True
+    # Catch domain-prefixed power rails like RELAY_5V, MCU_3V3, etc.
+    import re
+    return bool(re.search(r"_\d+V\d*$", name))
 
 
 def build_signal_adjacency(
@@ -473,8 +482,8 @@ def constraints_from_requirements(
                             constraint_type=PlacementConstraintType.NEAR,
                             target_ref=conn.ref,
                             target_pin=conn.pin,
-                            max_distance_mm=5.0,
-                            min_distance_mm=3.0,
+                            max_distance_mm=DECOUPLING_CAP_MAX_DISTANCE_MM,
+                            min_distance_mm=DECOUPLING_CAP_MIN_DISTANCE_MM,
                             priority=30,
                         ))
                         break
@@ -517,7 +526,7 @@ def constraints_from_requirements(
                 constraint_type=PlacementConstraintType.NEAR,
                 target_ref=best_target[0],
                 target_pin=best_target[1],
-                max_distance_mm=5.0,
+                max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
                 priority=25,
             ))
 
@@ -688,6 +697,48 @@ def constraints_from_requirements(
 
 
 # ---------------------------------------------------------------------------
+# BBox-aware grid marking helpers
+# ---------------------------------------------------------------------------
+
+
+def _grid_rect_for_ref(
+    ref: str,
+    x_rel: float,
+    y_rel: float,
+    footprint_sizes: dict[str, tuple[float, float]],
+    footprint_bboxes: dict[str, FootprintBBox] | None,
+    rotation: float = 0.0,
+    gap: float | None = None,
+) -> tuple[float, float, float, float]:
+    """Compute ``(rx, ry, rw, rh)`` for occupancy-grid marking.
+
+    When *footprint_bboxes* is provided and contains *ref*, uses the
+    rotation-aware bbox (which handles pin-1 origins automatically).
+    Otherwise falls back to center-based ``w/2, h/2`` from *footprint_sizes*.
+    """
+    if footprint_bboxes is not None and ref in footprint_bboxes:
+        bbox = footprint_bboxes[ref].rotated(rotation)
+        if gap is None:
+            w, h = bbox.width, bbox.height
+            gap = _placement_gap(w, h)
+        return (
+            x_rel + bbox.min_x - gap,
+            y_rel + bbox.min_y - gap,
+            bbox.width + 2 * gap,
+            bbox.height + 2 * gap,
+        )
+    w, h = footprint_sizes.get(ref, (3.0, 3.0))
+    if gap is None:
+        gap = _placement_gap(w, h)
+    return (
+        x_rel - w / 2 - gap,
+        y_rel - h / 2 - gap,
+        w + 2 * gap,
+        h + 2 * gap,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Constraint solver
 # ---------------------------------------------------------------------------
 
@@ -699,6 +750,7 @@ def solve_placement(
     keepouts: tuple[Keepout, ...] = (),
     grid_mm: float = _DEFAULT_GRID_MM,
     requirements: ProjectRequirements | None = None,
+    footprint_bboxes: dict[str, FootprintBBox] | None = None,
 ) -> PlacementResult:
     """Solve component placement using a greedy constraint-based algorithm.
 
@@ -718,6 +770,9 @@ def solve_placement(
         keepouts: Keepout zones to avoid.
         grid_mm: Placement grid pitch in mm.
         requirements: Optional project requirements for rotation optimization.
+        footprint_bboxes: Optional mapping from ref to :class:`FootprintBBox`.
+            When provided, uses rotation-aware bounding boxes and origin-type
+            offsets instead of simple centered ``w/2, h/2`` assumptions.
 
     Returns:
         :class:`PlacementResult` with positions, rotations, and violations.
@@ -787,12 +842,13 @@ def solve_placement(
             y_rel = c.y - origin_y
             w, h = footprint_sizes.get(ref, (3.0, 3.0))
             positions[ref] = Point(x=c.x, y=c.y)
-            rotations[ref] = c.rotation if c.rotation is not None else 0.0
-            gap = _placement_gap(w, h)
-            grid.mark_rect(
-                x_rel - w / 2 - gap, y_rel - h / 2 - gap,
-                w + 2 * gap, h + 2 * gap,
+            rot = c.rotation if c.rotation is not None else 0.0
+            rotations[ref] = rot
+            rx, ry, rw, rh = _grid_rect_for_ref(
+                ref, x_rel, y_rel, footprint_sizes, footprint_bboxes,
+                rotation=rot,
             )
+            grid.mark_rect(rx, ry, rw, rh)
             log.debug("FIXED: %s at (%.1f, %.1f)", ref, c.x, c.y)
 
     # 2. Place EDGE
@@ -826,13 +882,25 @@ def solve_placement(
             x, y, rot = _edge_position(edge, board_w, board_h, w, h, offset)
             x += origin_x
             y += origin_y
+            gap = _placement_gap(w, h)
+            rx = x - origin_x - w / 2 - gap
+            ry = y - origin_y - h / 2 - gap
+            rw = w + 2 * gap
+            rh = h + 2 * gap
+            # Check if computed position conflicts with already-placed components
+            if not grid.is_rect_free(rx, ry, rw, rh):
+                alt = grid.find_nearest_free(rx, ry, rw, rh)
+                if alt is not None:
+                    x = alt[0] + w / 2 + gap + origin_x
+                    y = alt[1] + h / 2 + gap + origin_y
+                    rx, ry = alt
+                    log.debug(
+                        "EDGE(%s): %s shifted to avoid overlap → (%.1f, %.1f)",
+                        edge.value, ref, x, y,
+                    )
             positions[ref] = Point(x=x, y=y)
             rotations[ref] = rot
-            gap = _placement_gap(w, h)
-            grid.mark_rect(
-                x - origin_x - w / 2 - gap, y - origin_y - h / 2 - gap,
-                w + 2 * gap, h + 2 * gap,
-            )
+            grid.mark_rect(rx, ry, rw, rh)
             log.debug("EDGE(%s): %s at (%.1f, %.1f) rot=%.0f", edge.value, ref, x, y, rot)
 
     # 3. Place NEAR (with retry for deferred placements whose targets
@@ -1198,7 +1266,7 @@ def rpi_hat_constraints(
                             constraint_type=PlacementConstraintType.NEAR,
                             target_ref=ic_ref,
                             target_pin=ic_net_pin[net.name],
-                            max_distance_mm=5.0,
+                            max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
                             priority=28,
                         ))
                     else:
@@ -1207,7 +1275,7 @@ def rpi_hat_constraints(
                             constraint_type=PlacementConstraintType.NEAR,
                             target_ref=sw_ref,
                             target_pin=sw_net_pin[net.name],
-                            max_distance_mm=5.0,
+                            max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
                             priority=28,
                         ))
                     break
@@ -1698,40 +1766,52 @@ def check_courtyard_collisions(
     positions: dict[str, Point],
     footprint_sizes: dict[str, tuple[float, float]],
     keepouts: tuple[Keepout, ...] = (),
+    footprint_bboxes: dict[str, FootprintBBox] | None = None,
+    rotations: dict[str, float] | None = None,
 ) -> tuple[str, ...]:
     """Check for courtyard overlaps between placed components.
 
     Uses axis-aligned bounding boxes centered on each component position.
-    Also checks for overlaps with keepout zones.
+    When *footprint_bboxes* is provided, uses rotation-aware bounding boxes
+    that correctly handle non-center origins (e.g. THT connectors).
 
     Args:
         positions: Placed positions for all components.
         footprint_sizes: Mapping from ref to ``(width, height)`` in mm.
         keepouts: Optional keepout zones to check against.
+        footprint_bboxes: Optional mapping from ref to :class:`FootprintBBox`.
+        rotations: Optional mapping from ref to rotation in degrees.
 
     Returns:
         Tuple of violation description strings.
     """
     violations: list[str] = []
     refs = list(positions.keys())
+    rots = rotations or {}
+
+    def _bounds(ref: str) -> tuple[float, float, float, float]:
+        pos = positions[ref]
+        if footprint_bboxes is not None and ref in footprint_bboxes:
+            bbox = footprint_bboxes[ref].rotated(rots.get(ref, 0.0))
+            return (
+                pos.x + bbox.min_x,
+                pos.y + bbox.min_y,
+                pos.x + bbox.max_x,
+                pos.y + bbox.max_y,
+            )
+        w, h = footprint_sizes.get(ref, (3.0, 3.0))
+        return (
+            pos.x - w / 2.0,
+            pos.y - h / 2.0,
+            pos.x + w / 2.0,
+            pos.y + h / 2.0,
+        )
 
     # Component vs component collision
     for i, ref_a in enumerate(refs):
-        pos_a = positions[ref_a]
-        w_a, h_a = footprint_sizes.get(ref_a, (3.0, 3.0))
-        ax0 = pos_a.x - w_a / 2.0
-        ay0 = pos_a.y - h_a / 2.0
-        ax1 = pos_a.x + w_a / 2.0
-        ay1 = pos_a.y + h_a / 2.0
-
+        ax0, ay0, ax1, ay1 = _bounds(ref_a)
         for ref_b in refs[i + 1:]:
-            pos_b = positions[ref_b]
-            w_b, h_b = footprint_sizes.get(ref_b, (3.0, 3.0))
-            bx0 = pos_b.x - w_b / 2.0
-            by0 = pos_b.y - h_b / 2.0
-            bx1 = pos_b.x + w_b / 2.0
-            by1 = pos_b.y + h_b / 2.0
-
+            bx0, by0, bx1, by1 = _bounds(ref_b)
             if ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0:
                 violations.append(
                     f"Courtyard collision: {ref_a} and {ref_b}"
@@ -1739,13 +1819,7 @@ def check_courtyard_collisions(
 
     # Component vs keepout collision
     for ref in refs:
-        pos = positions[ref]
-        w, h = footprint_sizes.get(ref, (3.0, 3.0))
-        cx0 = pos.x - w / 2.0
-        cy0 = pos.y - h / 2.0
-        cx1 = pos.x + w / 2.0
-        cy1 = pos.y + h / 2.0
-
+        cx0, cy0, cx1, cy1 = _bounds(ref)
         for ko_idx, ko in enumerate(keepouts):
             ko_xs = [p.x for p in ko.polygon]
             ko_ys = [p.y for p in ko.polygon]
@@ -1760,5 +1834,132 @@ def check_courtyard_collisions(
                 violations.append(
                     f"Courtyard collision: {ref} overlaps keepout zone {ko_idx}"
                 )
+
+    return tuple(violations)
+
+
+def validate_placement_constraints(
+    positions: dict[str, Point],
+    constraints: tuple[PlacementConstraint, ...],
+) -> tuple[str, ...]:
+    """Post-placement check: which NEAR/AWAY_FROM constraints are violated?
+
+    Measures actual distances between placed components and reports violations
+    for constraints whose distance requirements are not satisfied.
+
+    Args:
+        positions: Final placed positions for all components.
+        constraints: Original placement constraints.
+
+    Returns:
+        Tuple of violation description strings.
+    """
+    violations: list[str] = []
+
+    for c in constraints:
+        if c.constraint_type == PlacementConstraintType.NEAR:
+            if c.target_ref is None or c.target_ref not in positions:
+                continue
+            if c.ref not in positions:
+                continue
+            pos = positions[c.ref]
+            target_pos = positions[c.target_ref]
+            dist = math.hypot(pos.x - target_pos.x, pos.y - target_pos.y)
+            max_d = c.max_distance_mm or PASSIVE_NEAR_IC_MAX_DISTANCE_MM
+            min_d = c.min_distance_mm or 0.0
+            if dist > max_d:
+                violations.append(
+                    f"{c.ref} too far from {c.target_ref}:"
+                    f" {dist:.1f}mm > {max_d:.1f}mm max"
+                )
+            if min_d > 0.0 and dist < min_d:
+                violations.append(
+                    f"{c.ref} too close to {c.target_ref}:"
+                    f" {dist:.1f}mm < {min_d:.1f}mm min"
+                )
+
+        elif c.constraint_type == PlacementConstraintType.AWAY_FROM:
+            if c.target_ref is None or c.target_ref not in positions:
+                continue
+            if c.ref not in positions:
+                continue
+            pos = positions[c.ref]
+            target_pos = positions[c.target_ref]
+            dist = math.hypot(pos.x - target_pos.x, pos.y - target_pos.y)
+            min_d = c.min_distance_mm or 0.0
+            if min_d > 0.0 and dist < min_d:
+                violations.append(
+                    f"{c.ref} too close to {c.target_ref}:"
+                    f" {dist:.1f}mm < {min_d:.1f}mm min"
+                )
+
+    return tuple(violations)
+
+
+def validate_signal_chain_placement(
+    requirements: ProjectRequirements,
+    positions: dict[str, Point],
+) -> tuple[str, ...]:
+    """Advisory: check signal chains are placed without unnecessary crossings.
+
+    Uses :func:`build_signal_adjacency` and :func:`trace_linear_chains` to
+    identify linear signal chains (>=3 components).  For each chain, measures
+    the total wire length of the placed order and compares to the optimal
+    ordering.  Flags chains with >50% excess wire length.
+
+    Args:
+        requirements: Project requirements with net topology.
+        positions: Final placed positions for all components.
+
+    Returns:
+        Tuple of advisory strings (empty if placement is optimal).
+    """
+    adj = build_signal_adjacency(requirements)
+    chains = trace_linear_chains(adj)
+    violations: list[str] = []
+
+    for chain in chains:
+        if len(chain) < 3:
+            continue
+
+        # Only consider chains where all components are placed
+        placed = [ref for ref in chain if ref in positions]
+        if len(placed) < 3:
+            continue
+
+        # Measure total wire length in the current chain order
+        def _chain_length(order: tuple[str, ...] | list[str]) -> float:
+            total = 0.0
+            for i in range(len(order) - 1):
+                p1 = positions[order[i]]
+                p2 = positions[order[i + 1]]
+                total += math.hypot(p2.x - p1.x, p2.y - p1.y)
+            return total
+
+        current_length = _chain_length(placed)
+
+        # Compute optimal ordering by sorting on dominant axis
+        # (greedy nearest-neighbor would be better but this is adequate
+        # for advisory purposes)
+        xs = [positions[r].x for r in placed]
+        ys = [positions[r].y for r in placed]
+        x_span = max(xs) - min(xs)
+        y_span = max(ys) - min(ys)
+
+        if x_span >= y_span:
+            optimal_order = sorted(placed, key=lambda r: positions[r].x)
+        else:
+            optimal_order = sorted(placed, key=lambda r: positions[r].y)
+
+        optimal_length = _chain_length(optimal_order)
+
+        # Flag if >50% excess
+        if optimal_length > 0 and current_length > optimal_length * 1.5:
+            excess = (current_length / optimal_length - 1.0) * 100.0
+            violations.append(
+                f"Signal chain [{' → '.join(placed)}] has"
+                f" {excess:.0f}% excess wire length"
+                f" ({current_length:.1f}mm vs {optimal_length:.1f}mm optimal)"
+            )
 
     return tuple(violations)

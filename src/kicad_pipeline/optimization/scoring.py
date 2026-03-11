@@ -30,7 +30,7 @@ _WEIGHT_THERMAL: float = 0.10
 
 # Fast-path sub-dimension weights (EE-aligned, v2)
 _FAST_WEIGHT_COLLISION: float = 0.20
-_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.20
+_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.10
 _FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.15
 _FAST_WEIGHT_CONNECTOR_EDGE: float = 0.10
 _FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.10
@@ -38,6 +38,7 @@ _FAST_WEIGHT_MCU_PERIPHERAL: float = 0.10
 _FAST_WEIGHT_RF_EDGE: float = 0.05
 _FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.05
 _FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.05
+_FAST_WEIGHT_GROUP_COHESION: float = 0.10
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -359,6 +360,70 @@ def _score_block_cohesion(
             )
 
     score = sum(block_scores) / len(block_scores) if block_scores else 1.0
+    return score, issues
+
+
+# Group cohesion thresholds (mm)
+_GROUP_SPREAD_SMALL_THRESHOLD: float = 30.0  # groups with <= 5 components
+_GROUP_SPREAD_LARGE_THRESHOLD: float = 60.0  # groups with > 5 components
+
+
+def _score_group_cohesion(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score based on max spread within each FeatureBlock group.
+
+    For each FeatureBlock, compute the maximum distance between any two
+    members. Score 1.0 if within threshold, penalize proportionally beyond.
+    Small groups (<=5 components) have tighter threshold (15mm) than
+    large groups (25mm).
+    """
+    if not requirements.features:
+        return 1.0, []
+
+    pos = _fp_position_dict(pcb)
+    group_scores: list[float] = []
+    issues: list[str] = []
+
+    for block in requirements.features:
+        block_positions = [
+            pos[ref] for ref in block.components if ref in pos
+        ]
+        if len(block_positions) < 2:
+            group_scores.append(1.0)
+            continue
+
+        # Compute max pairwise distance (spread)
+        max_dist = 0.0
+        for i in range(len(block_positions)):
+            for j in range(i + 1, len(block_positions)):
+                dx = block_positions[i][0] - block_positions[j][0]
+                dy = block_positions[i][1] - block_positions[j][1]
+                d = math.sqrt(dx * dx + dy * dy)
+                if d > max_dist:
+                    max_dist = d
+
+        threshold = (
+            _GROUP_SPREAD_SMALL_THRESHOLD
+            if len(block_positions) <= 5
+            else _GROUP_SPREAD_LARGE_THRESHOLD
+        )
+
+        if max_dist <= threshold:
+            group_scores.append(1.0)
+        else:
+            # Penalize proportionally: at 2x threshold score = 0.0
+            overshoot = (max_dist - threshold) / threshold
+            s = _clamp01(1.0 - overshoot)
+            group_scores.append(s)
+            if s < 0.8:
+                issues.append(
+                    f"Group '{block.name}' spread {max_dist:.1f}mm "
+                    f"(threshold {threshold:.0f}mm)"
+                )
+
+    score = sum(group_scores) / len(group_scores) if group_scores else 1.0
     return score, issues
 
 
@@ -703,8 +768,9 @@ def compute_fast_placement_score(
     boundary_score, _boundary_issues = _score_boundary(pcb)
     mcu_periph_score, mcu_periph_issues = _score_mcu_peripheral_proximity(pcb, requirements)
     rf_edge_score, rf_edge_issues = _score_rf_edge_placement(pcb, requirements)
+    group_cohesion_score, group_cohesion_issues = _score_group_cohesion(pcb, requirements)
 
-    # Weighted placement composite (9 dimensions)
+    # Weighted placement composite (10 dimensions)
     placement_score = (
         _FAST_WEIGHT_COLLISION * collision_score
         + _FAST_WEIGHT_SUBCIRCUIT_COHESION * cohesion_score
@@ -715,6 +781,7 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_RF_EDGE * rf_edge_score
         + _FAST_WEIGHT_CONNECTOR_ORIENTATION * 1.0  # orientation scored via review
         + _FAST_WEIGHT_REGULATOR_BOUNDARY * boundary_score
+        + _FAST_WEIGHT_GROUP_COHESION * group_cohesion_score
     )
 
     # For fast path, other dimensions are derived from placement sub-scores
@@ -778,6 +845,12 @@ def compute_fast_placement_score(
             score=rf_edge_score,
             weight=_FAST_WEIGHT_RF_EDGE,
             issues=tuple(rf_edge_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Group Cohesion",
+            score=group_cohesion_score,
+            weight=_FAST_WEIGHT_GROUP_COHESION,
+            issues=tuple(group_cohesion_issues[:5]),
         ),
     )
 

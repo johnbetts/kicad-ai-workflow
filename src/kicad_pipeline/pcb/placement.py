@@ -618,6 +618,7 @@ def layout_pcb(
     fixed_positions: dict[str, tuple[float, float, float]] | None = None,
     board_template: object | None = None,
     keepouts: tuple[object, ...] = (),
+    footprint_bboxes: dict[str, object] | None = None,
 ) -> LayoutResult:
     """Compute a full PCB placement for all components in *requirements*.
 
@@ -690,10 +691,13 @@ def layout_pcb(
             typed_keepouts = tuple(
                 k for k in keepouts if isinstance(k, KeepoutModel)
             )
+            # Pass bboxes through (typed loosely here; solver uses FootprintBBox)
+            _bboxes = footprint_bboxes  # type: ignore[assignment]
             result = solve_placement(
                 constraint_list, board, footprint_sizes,
                 keepouts=typed_keepouts, grid_mm=0.5,
                 requirements=requirements,
+                footprint_bboxes=_bboxes,
             )
             positions = dict(result.positions)
             rotations = dict(result.rotations)
@@ -702,6 +706,15 @@ def layout_pcb(
             if result.violations:
                 for violation in result.violations:
                     log.warning("layout_pcb: placement violation: %s", violation)
+
+            # Post-placement constraint validation
+            from kicad_pipeline.pcb.constraints import validate_placement_constraints
+
+            post_violations = validate_placement_constraints(
+                result.positions, constraint_list,
+            )
+            for pv in post_violations:
+                log.info("layout_pcb: post-placement: %s", pv)
 
             # Ensure all component refs are placed
             all_refs = {c.ref for c in requirements.components}
@@ -837,7 +850,7 @@ _PASSIVE_STANDOFF_MM: float = 1.0
 _PASSIVE_STACK_GAP_MM: float = 0.5
 """Gap between stacked passives assigned to the same anchor pin."""
 
-_ANCHOR_GAP_MM: float = 8.0
+_ANCHOR_GAP_MM: float = 2.0
 """Horizontal gap between anchor components in the group layout."""
 
 _OVERLAP_MAX_PASSES: int = 10
@@ -1128,16 +1141,32 @@ def _layout_group(
     primary_anchors = [a for a in anchors if _ref_prefix(a) in ("K", "U", "J", "Y")]
     secondary_anchors = [a for a in anchors if _ref_prefix(a) not in ("K", "U", "J", "Y")]
 
-    # Place primaries in horizontal row
+    # Detect relay groups: if ALL primary anchors are relays (K refs), use
+    # single-row layout (1xN) — relays should never wrap to multiple rows.
+    is_relay_group = (
+        len(primary_anchors) >= 2
+        and all(_ref_prefix(a) == "K" for a in primary_anchors)
+    )
+
+    # Place primaries in rows, wrapping to 2D grid when row exceeds threshold
+    # Relay groups: no wrapping (single row), support components go below
+    max_row_width = 999.0 if is_relay_group else 120.0
     cursor_x = _GROUP_MARGIN_MM
     anchor_y = _GROUP_MARGIN_MM
     max_anchor_h = 0.0
+    row_h = 0.0  # height of current row for wrapping
 
     for aref in primary_anchors:
         w, h = footprint_sizes.get(aref, (5.0, 5.0))
+        # Wrap to next row if this anchor would exceed max width
+        if cursor_x + w > max_row_width and cursor_x > _GROUP_MARGIN_MM + 1:
+            anchor_y += row_h + _ANCHOR_GAP_MM
+            cursor_x = _GROUP_MARGIN_MM
+            row_h = 0.0
         layout[aref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
         cursor_x += w + _ANCHOR_GAP_MM
-        max_anchor_h = max(max_anchor_h, h)
+        row_h = max(row_h, h)
+        max_anchor_h = max(max_anchor_h, anchor_y + h - _GROUP_MARGIN_MM)
 
     # Place secondary anchors (Q) near the primary they connect to
     for sref in secondary_anchors:
@@ -1251,6 +1280,85 @@ def _layout_group(
     # Step 7: Resolve overlaps
     # ------------------------------------------------------------------
     _resolve_overlaps(layout, footprint_sizes)
+
+    # ------------------------------------------------------------------
+    # Step 7.5: Relay group post-processing — support below relay row
+    # ------------------------------------------------------------------
+    if is_relay_group:
+        # Reorganize: K refs in a single top row, all support components
+        # (Q, D, R, C) placed directly below their associated relay.
+        relay_refs = sorted(
+            [r for r in layout if _ref_prefix(r) == "K"],
+            key=lambda r: layout[r][0],  # left to right
+        )
+        if relay_refs:
+            # Find the bottom of the relay row
+            relay_bottom = max(
+                layout[r][1] + footprint_sizes.get(r, (18.0, 15.0))[1] / 2.0
+                for r in relay_refs
+            )
+            support_y_start = relay_bottom + _PASSIVE_STANDOFF_MM
+
+            # Map each non-relay ref to its associated relay
+            for ref in list(layout.keys()):
+                if _ref_prefix(ref) == "K":
+                    continue
+                # Find which relay this ref is assigned to (via pad_conn)
+                owning_relay = ""
+                comp = next(
+                    (c for c in requirements.components if c.ref == ref), None,
+                )
+                if comp:
+                    for pin in comp.pins:
+                        for nb_ref, _nb_pin in pad_conn.get(
+                            (ref, pin.number), [],
+                        ):
+                            if nb_ref in relay_refs:
+                                owning_relay = nb_ref
+                                break
+                            # Indirect: check through any non-K ref
+                            if _ref_prefix(nb_ref) != "K":
+                                nb_comp = next(
+                                    (c for c in requirements.components
+                                     if c.ref == nb_ref),
+                                    None,
+                                )
+                                if nb_comp:
+                                    for nb_p in nb_comp.pins:
+                                        for nn_ref, _ in pad_conn.get(
+                                            (nb_ref, nb_p.number), [],
+                                        ):
+                                            if nn_ref in relay_refs:
+                                                owning_relay = nn_ref
+                                                break
+                                        if owning_relay:
+                                            break
+                        if owning_relay:
+                            break
+
+                if owning_relay and owning_relay in layout:
+                    relay_x = layout[owning_relay][0]
+                else:
+                    # Fallback: place under first relay
+                    relay_x = layout[relay_refs[0]][0]
+
+                # Place below the relay, stacking support components
+                w, h = footprint_sizes.get(ref, (2.0, 2.0))
+                # Find next free Y slot under this relay
+                occupied_ys = [
+                    layout[r][1] + footprint_sizes.get(r, (2.0, 2.0))[1] / 2.0
+                    for r in layout
+                    if r != ref
+                    and _ref_prefix(r) != "K"
+                    and abs(layout[r][0] - relay_x) < 10.0
+                    and layout[r][1] > relay_bottom
+                ]
+                slot_y = (
+                    max(occupied_ys) + h / 2.0 + 1.5
+                    if occupied_ys
+                    else support_y_start + h / 2.0
+                )
+                layout[ref] = (relay_x, slot_y, 0.0)
 
     # ------------------------------------------------------------------
     # Step 8: Overflow row for unassigned passives
