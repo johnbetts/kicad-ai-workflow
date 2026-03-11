@@ -494,7 +494,7 @@ class _PlacementGrid:
         self.min_x, self.min_y, self.max_x, self.max_y = board_bounds
         # (cx, cy, half_w, half_h) for each placed component
         self._placed: list[tuple[float, float, float, float]] = []
-        self._margin = 0.5  # mm clearance between components
+        self._margin = 0.25  # mm clearance between components
 
     def is_free(self, cx: float, cy: float, w: float, h: float) -> bool:
         """Check if placing a component here would overlap any existing one."""
@@ -741,6 +741,150 @@ def _apply_review_fixes(
             if new_dist < old_dist:
                 result[ref] = (fx, fy, rot)
             break  # one fix attempt per violation
+
+    return result
+
+
+def _fp_courtyard_sizes(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
+    """Build ref → (width, height) from pad extents (matching review agent).
+
+    Includes physical pad sizes, not just pad centers. This produces larger
+    (more accurate) bounding boxes that match the review agent's collision
+    detection.
+    """
+    result: dict[str, tuple[float, float]] = {}
+    for fp in pcb.footprints:
+        if not fp.pads:
+            result[fp.ref] = (3.0, 3.0)
+            continue
+        xs = ([p.position.x - p.size_x / 2 for p in fp.pads]
+              + [p.position.x + p.size_x / 2 for p in fp.pads])
+        ys = ([p.position.y - p.size_y / 2 for p in fp.pads]
+              + [p.position.y + p.size_y / 2 for p in fp.pads])
+        w = max(xs) - min(xs) + 1.0
+        h = max(ys) - min(ys) + 1.0
+        result[fp.ref] = (w, h)
+    return result
+
+
+def _rotation_aware_size(
+    ref: str,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> tuple[float, float]:
+    """Get rotation-aware bounding box for a component."""
+    w, h = fp_sizes.get(ref, (2.0, 2.0))
+    if ref in positions:
+        rot = positions[ref][2]
+        if rot % 180 in (90.0, 270.0):
+            w, h = h, w
+    return w, h
+
+
+def _count_collisions(
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> list[tuple[str, str]]:
+    """Detect all AABB collisions (rotation-aware, matching scoring)."""
+    collisions: list[tuple[str, str]] = []
+    refs = list(positions.keys())
+    for i, ref_a in enumerate(refs):
+        xa, ya, rot_a = positions[ref_a]
+        wa, ha = fp_sizes.get(ref_a, (2.0, 2.0))
+        if rot_a % 180 in (90.0, 270.0):
+            wa, ha = ha, wa
+
+        for ref_b in refs[i + 1:]:
+            xb, yb, rot_b = positions[ref_b]
+            wb, hb = fp_sizes.get(ref_b, (2.0, 2.0))
+            if rot_b % 180 in (90.0, 270.0):
+                wb, hb = hb, wb
+
+            if (abs(xa - xb) < (wa + wb) / 2.0
+                    and abs(ya - yb) < (ha + hb) / 2.0):
+                collisions.append((ref_a, ref_b))
+    return collisions
+
+
+def _resolve_collisions(
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+) -> dict[str, tuple[float, float, float]]:
+    """Resolve courtyard collisions using grid-based relocation.
+
+    For each colliding component (smaller one in the pair), relocate it
+    to the nearest free position using the occupancy grid. This guarantees
+    the relocated component won't collide with anything already placed.
+    """
+    result = dict(positions)
+
+    collisions = _count_collisions(result, fp_sizes)
+    if not collisions:
+        _log.info("  Collision resolution: no collisions found")
+        return result
+
+    _log.info("  Collision resolution: %d initial collisions", len(collisions))
+
+    # Find all refs involved in collisions, sorted smallest-first
+    # (move small components, keep large ones in place)
+    colliding_refs: set[str] = set()
+    for ref_a, ref_b in collisions:
+        if ref_a not in fixed_refs:
+            colliding_refs.add(ref_a)
+        if ref_b not in fixed_refs:
+            colliding_refs.add(ref_b)
+
+    # Sort: move smaller components first (less disruptive)
+    sorted_refs = sorted(
+        colliding_refs,
+        key=lambda r: fp_sizes.get(r, (2.0, 2.0))[0] * fp_sizes.get(r, (2.0, 2.0))[1],
+    )
+
+    # Iteratively relocate colliding components
+    for _pass in range(3):
+        moved = 0
+        for ref in sorted_refs:
+            if ref in fixed_refs:
+                continue
+            rx, ry, rot = result[ref]
+            w, h = _rotation_aware_size(ref, result, fp_sizes)
+
+            # Check if this ref still collides
+            has_collision = False
+            for other_ref, (ox, oy, _orot) in result.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
+                if (abs(rx - ox) < (w + ow) / 2.0
+                        and abs(ry - oy) < (h + oh) / 2.0):
+                    has_collision = True
+                    break
+
+            if not has_collision:
+                continue
+
+            # Build grid WITHOUT this component
+            grid = _PlacementGrid(bounds)
+            for other_ref, (ox, oy, _orot) in result.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
+                grid.place(ox, oy, ow, oh)
+
+            # Find nearest free position to current location
+            fx, fy = grid.find_free_pos(rx, ry, w, h)
+            result[ref] = (fx, fy, rot)
+            moved += 1
+
+        remaining = len(_count_collisions(result, fp_sizes))
+        _log.info(
+            "  Collision resolution pass %d: relocated %d, %d remaining",
+            _pass + 1, moved, remaining,
+        )
+        if remaining == 0:
+            break
 
     return result
 
@@ -1144,9 +1288,10 @@ def optimize_placement_ee(
         detect_subcircuits,
     )
     from kicad_pipeline.optimization.review_agent import review_placement
-    from kicad_pipeline.optimization.scoring import _fp_size_dict
 
-    fp_sizes = _fp_size_dict(initial_pcb)
+    # Use courtyard-based sizes (pad extents, not just centers) so collision
+    # detection matches the review agent's check_courtyard_collisions.
+    fp_sizes = _fp_courtyard_sizes(initial_pcb)
     bounds = _board_bounds(initial_pcb)
     min_x, min_y, max_x, max_y = bounds
 
@@ -1173,11 +1318,97 @@ def optimize_placement_ee(
         for fp in initial_pcb.footprints
     }
 
+    # -----------------------------------------------------------------------
+    # Phase 2.5: Move off-board components onto the board
+    # -----------------------------------------------------------------------
+    # Detect components placed off-board (from place_groups_off_board staging)
+    off_board_refs = [
+        ref for ref, (x, y, _r) in positions.items()
+        if ref not in fixed_refs and (
+            x < min_x - 1 or x > max_x + 1
+            or y < min_y - 1 or y > max_y + 1
+        )
+    ]
+
+    if off_board_refs:
+        _log.info(
+            "Phase 2.5: Moving %d off-board components onto the board",
+            len(off_board_refs),
+        )
+
+        # Group off-board refs by voltage domain → assign board zones
+        domain_groups: dict[VoltageDomain, list[str]] = {}
+        for ref in off_board_refs:
+            d = domain_map.get(ref, VoltageDomain.MIXED)
+            domain_groups.setdefault(d, []).append(ref)
+
+        # Sort domain groups: high-voltage domains at top, digital at bottom
+        domain_priority = [
+            VoltageDomain.VIN_24V, VoltageDomain.POWER_5V,
+            VoltageDomain.ANALOG, VoltageDomain.DIGITAL_3V3,
+            VoltageDomain.MIXED,
+        ]
+
+        # Divide board into horizontal strips by domain
+        board_w = max_x - min_x
+        board_h = max_y - min_y
+        active_domains = [d for d in domain_priority if d in domain_groups]
+
+        if active_domains:
+            strip_h = board_h / len(active_domains)
+            placement_grid = _PlacementGrid(bounds)
+
+            # Place any already-on-board (fixed) components into the grid
+            for ref, (px, py, _r) in positions.items():
+                if ref not in off_board_refs:
+                    w, h = fp_sizes.get(ref, (2.0, 2.0))
+                    placement_grid.place(px, py, w, h)
+
+            for zone_idx, domain in enumerate(active_domains):
+                zone_refs = sorted(domain_groups[domain])
+                zone_y_start = min_y + zone_idx * strip_h
+
+                # Find subcircuit anchors in this domain first
+                domain_anchors: list[str] = []
+                domain_others: list[str] = []
+                anchor_set = {sc.anchor_ref for sc in subcircuits}
+                for ref in zone_refs:
+                    if ref in anchor_set:
+                        domain_anchors.append(ref)
+                    else:
+                        domain_others.append(ref)
+
+                # Place anchors first, spread across zone width
+                all_to_place = domain_anchors + domain_others
+                for i, ref in enumerate(all_to_place):
+                    w, h = fp_sizes.get(ref, (2.0, 2.0))
+                    # Spread targets across zone
+                    n = len(all_to_place)
+                    cols = max(1, min(n, int(board_w / max(w + 1.0, 3.0))))
+                    row = i // cols
+                    col = i % cols
+                    target_x = min_x + 3.0 + (board_w - 6.0) * (col + 0.5) / cols
+                    rows_needed = (n + cols - 1) // cols
+                    row_frac = (row + 0.5) / max(rows_needed, 1)
+                    target_y = zone_y_start + 2.0 + (strip_h - 4.0) * row_frac
+
+                    fx, fy = placement_grid.find_free_pos(target_x, target_y, w, h)
+                    placement_grid.place(fx, fy, w, h)
+                    _, _, rot = positions[ref]
+                    positions[ref] = (fx, fy, rot)
+
+        _log.info(
+            "Phase 2.5: Placed %d components in %d domain zones",
+            len(off_board_refs), len(active_domains),
+        )
+    else:
+        _log.info("Phase 2.5: All components on-board (skipping)")
+
     # Build occupancy grid from current placement
     grid = _PlacementGrid(bounds)
-    for fp in initial_pcb.footprints:
-        w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
-        grid.place(fp.position.x, fp.position.y, w, h)
+    for ref, (px, py, _r) in positions.items():
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        grid.place(px, py, w, h)
 
     # -----------------------------------------------------------------------
     # Phase 3: Pull sub-circuit members toward anchors (using occupancy grid)
@@ -1337,6 +1568,12 @@ def optimize_placement_ee(
     positions = _orient_connectors(
         positions, fp_sizes, bounds, fixed_refs, initial_pcb,
     )
+
+    # -----------------------------------------------------------------------
+    # Phase 3.7: Collision resolution
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.7: Resolving collisions")
+    positions = _resolve_collisions(positions, fp_sizes, bounds, fixed_refs)
 
     # -----------------------------------------------------------------------
     # Phase 4: EE Review Loop
