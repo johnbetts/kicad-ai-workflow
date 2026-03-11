@@ -957,3 +957,348 @@ class TestCrossDomainAffinity:
         affinities = detect_cross_domain_affinities(reqs, domain_map)
         fb_aff = [a for a in affinities if a.reason == "feedback"]
         assert len(fb_aff) == 1
+
+
+# ---------------------------------------------------------------------------
+# Power flow topology tests
+# ---------------------------------------------------------------------------
+
+
+class TestPowerFlowTopology:
+    """Tests for compute_power_flow_topology()."""
+
+    def test_two_regulators_correct_order(self) -> None:
+        """Buck 24V->5V and LDO 5V->3.3V gives 24V, 5V, 3.3V order."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            PowerFlowTopology,
+            compute_power_flow_topology,
+        )
+        subcircuits = (
+            DetectedSubCircuit(
+                circuit_type=SubCircuitType.BUCK_CONVERTER,
+                refs=("U1",), anchor_ref="U1",
+                net_connections=(), domain=VoltageDomain.POWER_5V,
+                layout_hint="boundary",
+                input_domain=VoltageDomain.VIN_24V,
+                output_domain=VoltageDomain.POWER_5V,
+            ),
+            DetectedSubCircuit(
+                circuit_type=SubCircuitType.LDO_REGULATOR,
+                refs=("U2",), anchor_ref="U2",
+                net_connections=(), domain=VoltageDomain.DIGITAL_3V3,
+                layout_hint="boundary",
+                input_domain=VoltageDomain.POWER_5V,
+                output_domain=VoltageDomain.DIGITAL_3V3,
+            ),
+        )
+        topo = compute_power_flow_topology(subcircuits)
+        assert isinstance(topo, PowerFlowTopology)
+        assert topo.domain_order[0] == VoltageDomain.VIN_24V
+        assert VoltageDomain.POWER_5V in topo.domain_order
+        assert VoltageDomain.DIGITAL_3V3 in topo.domain_order
+        idx_24 = topo.domain_order.index(VoltageDomain.VIN_24V)
+        idx_5 = topo.domain_order.index(VoltageDomain.POWER_5V)
+        idx_3 = topo.domain_order.index(VoltageDomain.DIGITAL_3V3)
+        assert idx_24 < idx_5 < idx_3
+        assert len(topo.regulator_boundaries) == 2
+
+    def test_no_regulators_voltage_fallback(self) -> None:
+        """No regulators → domains ordered by voltage magnitude."""
+        from kicad_pipeline.optimization.functional_grouper import compute_power_flow_topology
+        subcircuits = (
+            DetectedSubCircuit(
+                circuit_type=SubCircuitType.RELAY_DRIVER,
+                refs=("K1",), anchor_ref="K1",
+                net_connections=(), domain=VoltageDomain.VIN_24V,
+            ),
+            DetectedSubCircuit(
+                circuit_type=SubCircuitType.DECOUPLING,
+                refs=("U1", "C1"), anchor_ref="U1",
+                net_connections=(), domain=VoltageDomain.DIGITAL_3V3,
+            ),
+        )
+        topo = compute_power_flow_topology(subcircuits)
+        assert topo.domain_order[0] == VoltageDomain.VIN_24V
+        assert topo.regulator_boundaries == ()
+
+    def test_single_regulator(self) -> None:
+        """Single buck converter produces correct 2-domain order."""
+        from kicad_pipeline.optimization.functional_grouper import compute_power_flow_topology
+        subcircuits = (
+            DetectedSubCircuit(
+                circuit_type=SubCircuitType.BUCK_CONVERTER,
+                refs=("U1",), anchor_ref="U1",
+                net_connections=(), domain=VoltageDomain.POWER_5V,
+                layout_hint="boundary",
+                input_domain=VoltageDomain.VIN_24V,
+                output_domain=VoltageDomain.POWER_5V,
+            ),
+        )
+        topo = compute_power_flow_topology(subcircuits)
+        assert topo.domain_order[0] == VoltageDomain.VIN_24V
+        assert topo.domain_order[1] == VoltageDomain.POWER_5V
+        assert len(topo.regulator_boundaries) == 1
+
+    def test_frozen_dataclass(self) -> None:
+        """PowerFlowTopology is immutable."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            PowerFlowTopology,
+        )
+        topo = PowerFlowTopology(
+            domain_order=(VoltageDomain.VIN_24V,),
+            regulator_boundaries=(),
+        )
+        with pytest.raises(AttributeError):
+            topo.domain_order = ()  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Topology-aware zone assignment tests
+# ---------------------------------------------------------------------------
+
+
+class TestTopologyAwareZones:
+    """Tests for topology-aware assign_zones()."""
+
+    def test_landscape_left_to_right_zones(self) -> None:
+        """Landscape board (w > h * 1.3) → left-to-right zone strips."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            PowerFlowTopology,
+        )
+        topology = PowerFlowTopology(
+            domain_order=(VoltageDomain.VIN_24V, VoltageDomain.POWER_5V,
+                          VoltageDomain.DIGITAL_3V3),
+            regulator_boundaries=(),
+        )
+        domain_map = {
+            "K1": VoltageDomain.VIN_24V,
+            "U1": VoltageDomain.POWER_5V,
+            "U2": VoltageDomain.DIGITAL_3V3,
+        }
+        zones = assign_zones(
+            subcircuits=(), domain_map=domain_map,
+            board_width=140.0, board_height=80.0,
+            all_refs=("K1", "U1", "U2"), topology=topology,
+        )
+        assert len(zones) == 3
+        # First zone (VIN_24V) should be leftmost
+        vin_zone = next(z for z in zones if z.domain == VoltageDomain.VIN_24V)
+        dig_zone = next(z for z in zones if z.domain == VoltageDomain.DIGITAL_3V3)
+        assert vin_zone.zone_rect[0] < dig_zone.zone_rect[0]
+
+    def test_portrait_top_to_bottom_zones(self) -> None:
+        """Portrait board (h > w) → top-to-bottom zone strips."""
+        from kicad_pipeline.optimization.functional_grouper import PowerFlowTopology
+        topology = PowerFlowTopology(
+            domain_order=(VoltageDomain.VIN_24V, VoltageDomain.DIGITAL_3V3),
+            regulator_boundaries=(),
+        )
+        domain_map = {
+            "K1": VoltageDomain.VIN_24V,
+            "U2": VoltageDomain.DIGITAL_3V3,
+        }
+        zones = assign_zones(
+            subcircuits=(), domain_map=domain_map,
+            board_width=60.0, board_height=100.0,
+            all_refs=("K1", "U2"), topology=topology,
+        )
+        assert len(zones) == 2
+        vin_zone = next(z for z in zones if z.domain == VoltageDomain.VIN_24V)
+        dig_zone = next(z for z in zones if z.domain == VoltageDomain.DIGITAL_3V3)
+        # VIN should be above (smaller y1) digital zone
+        assert vin_zone.zone_rect[1] < dig_zone.zone_rect[1]
+
+
+# ---------------------------------------------------------------------------
+# ADC channel detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdcChannelDetection:
+    """Tests for _detect_adc_channels()."""
+
+    def test_adc_channel_detected(self) -> None:
+        """Voltage divider + connector + MCU ADC pin → ADC_CHANNEL subcircuit."""
+        components = [
+            _comp("R1", "10k", pins=(
+                _pin("1", "1", net="+24V"),
+                _pin("2", "2", net="ADC_SENSE1"),
+            )),
+            _comp("R2", "2.2k", pins=(
+                _pin("1", "1", net="ADC_SENSE1"),
+                _pin("2", "2", net="GND"),
+            )),
+            _comp("J1", "Conn_01x02", fp="Conn_01x02", pins=(
+                _pin("1", "1", net="ADC_SENSE1"),
+                _pin("2", "2", net="GND"),
+            )),
+            _comp("U1", "STM32", fp="LQFP-48", pins=(
+                _pin("1", "VDD", net="+3V3"),
+                _pin("2", "PA0", net="ADC_SENSE1"),
+            )),
+        ]
+        nets = [
+            Net(name="+24V", connections=(NetConnection(ref="R1", pin="1"),)),
+            Net(name="ADC_SENSE1", connections=(
+                NetConnection(ref="R1", pin="2"),
+                NetConnection(ref="R2", pin="1"),
+                NetConnection(ref="J1", pin="1"),
+                NetConnection(ref="U1", pin="2"),
+            )),
+            Net(name="GND", connections=(
+                NetConnection(ref="R2", pin="2"),
+                NetConnection(ref="J1", pin="2"),
+            )),
+            Net(name="+3V3", connections=(NetConnection(ref="U1", pin="1"),)),
+        ]
+        reqs = _make_requirements(components, nets)
+        subcircuits = detect_subcircuits(reqs)
+        adc_channels = [s for s in subcircuits
+                        if s.circuit_type == SubCircuitType.ADC_CHANNEL]
+        assert len(adc_channels) == 1
+        assert "J1" in adc_channels[0].refs
+        assert "R1" in adc_channels[0].refs
+        assert adc_channels[0].anchor_ref == "J1"
+
+    def test_no_connector_no_adc_channel(self) -> None:
+        """Voltage divider without connector → no ADC_CHANNEL."""
+        components = [
+            _comp("R1", "10k", pins=(
+                _pin("1", "1", net="+24V"),
+                _pin("2", "2", net="ADC_SENSE1"),
+            )),
+            _comp("R2", "2.2k", pins=(
+                _pin("1", "1", net="ADC_SENSE1"),
+                _pin("2", "2", net="GND"),
+            )),
+            _comp("U1", "STM32", fp="LQFP-48", pins=(
+                _pin("1", "VDD", net="+3V3"),
+                _pin("2", "PA0", net="ADC_SENSE1"),
+            )),
+        ]
+        nets = [
+            Net(name="+24V", connections=(NetConnection(ref="R1", pin="1"),)),
+            Net(name="ADC_SENSE1", connections=(
+                NetConnection(ref="R1", pin="2"),
+                NetConnection(ref="R2", pin="1"),
+                NetConnection(ref="U1", pin="2"),
+            )),
+            Net(name="GND", connections=(NetConnection(ref="R2", pin="2"),)),
+            Net(name="+3V3", connections=(NetConnection(ref="U1", pin="1"),)),
+        ]
+        reqs = _make_requirements(components, nets)
+        subcircuits = detect_subcircuits(reqs)
+        adc_channels = [s for s in subcircuits
+                        if s.circuit_type == SubCircuitType.ADC_CHANNEL]
+        assert len(adc_channels) == 0
+
+    def test_adc_channel_enum_membership(self) -> None:
+        """ADC_CHANNEL is a valid SubCircuitType."""
+        assert SubCircuitType.ADC_CHANNEL.value == "adc_channel"
+
+
+# ---------------------------------------------------------------------------
+# Enhanced MCU peripheral detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnhancedMcuPeripherals:
+    """Tests for expanded MCU peripheral detection."""
+
+    def test_test_point_detected_as_peripheral(self) -> None:
+        """TP* directly connected to MCU → included in peripheral cluster."""
+        components = [
+            _comp("U1", "STM32", fp="LQFP-48", pins=(
+                _pin("1", "VDD", net="+3V3"),
+                _pin("2", "PA0", net="DBG_SIG"),
+            )),
+            _comp("TP1", "TestPoint", fp="TestPoint_Pad", pins=(
+                _pin("1", "1", net="DBG_SIG"),
+            )),
+        ]
+        nets = [
+            Net(name="+3V3", connections=(NetConnection(ref="U1", pin="1"),)),
+            Net(name="DBG_SIG", connections=(
+                NetConnection(ref="U1", pin="2"),
+                NetConnection(ref="TP1", pin="1"),
+            )),
+        ]
+        reqs = _make_requirements(components, nets)
+        subcircuits = detect_subcircuits(reqs)
+        mcu_clusters = [s for s in subcircuits
+                        if s.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER]
+        assert len(mcu_clusters) == 1
+        assert "TP1" in mcu_clusters[0].refs
+
+    def test_i2c_pullup_detected_as_peripheral(self) -> None:
+        """R on SDA/SCL net connected to MCU → included in peripheral cluster."""
+        components = [
+            _comp("U1", "STM32", fp="LQFP-48", pins=(
+                _pin("1", "VDD", net="+3V3"),
+                _pin("2", "SDA", net="I2C_SDA"),
+                _pin("3", "SCL", net="I2C_SCL"),
+            )),
+            _comp("R1", "4.7k", pins=(
+                _pin("1", "1", net="+3V3"),
+                _pin("2", "2", net="I2C_SDA"),
+            )),
+            _comp("R2", "4.7k", pins=(
+                _pin("1", "1", net="+3V3"),
+                _pin("2", "2", net="I2C_SCL"),
+            )),
+        ]
+        nets = [
+            Net(name="+3V3", connections=(
+                NetConnection(ref="U1", pin="1"),
+                NetConnection(ref="R1", pin="1"),
+                NetConnection(ref="R2", pin="1"),
+            )),
+            Net(name="I2C_SDA", connections=(
+                NetConnection(ref="U1", pin="2"),
+                NetConnection(ref="R1", pin="2"),
+            )),
+            Net(name="I2C_SCL", connections=(
+                NetConnection(ref="U1", pin="3"),
+                NetConnection(ref="R2", pin="2"),
+            )),
+        ]
+        reqs = _make_requirements(components, nets)
+        subcircuits = detect_subcircuits(reqs)
+        mcu_clusters = [s for s in subcircuits
+                        if s.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER]
+        assert len(mcu_clusters) == 1
+        assert "R1" in mcu_clusters[0].refs
+        assert "R2" in mcu_clusters[0].refs
+
+    def test_small_connector_detected_as_peripheral(self) -> None:
+        """Small connector (2-6 pins) on MCU signal → included in peripheral."""
+        components = [
+            _comp("U1", "STM32", fp="LQFP-48", pins=(
+                _pin("1", "VDD", net="+3V3"),
+                _pin("2", "PA0", net="SIG1"),
+                _pin("3", "PA1", net="SIG2"),
+            )),
+            _comp("J1", "Conn_01x03", fp="Conn_01x03", pins=(
+                _pin("1", "1", net="SIG1"),
+                _pin("2", "2", net="SIG2"),
+                _pin("3", "3", net="GND"),
+            )),
+        ]
+        nets = [
+            Net(name="+3V3", connections=(NetConnection(ref="U1", pin="1"),)),
+            Net(name="SIG1", connections=(
+                NetConnection(ref="U1", pin="2"),
+                NetConnection(ref="J1", pin="1"),
+            )),
+            Net(name="SIG2", connections=(
+                NetConnection(ref="U1", pin="3"),
+                NetConnection(ref="J1", pin="2"),
+            )),
+            Net(name="GND", connections=(NetConnection(ref="J1", pin="3"),)),
+        ]
+        reqs = _make_requirements(components, nets)
+        subcircuits = detect_subcircuits(reqs)
+        mcu_clusters = [s for s in subcircuits
+                        if s.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER]
+        assert len(mcu_clusters) == 1
+        assert "J1" in mcu_clusters[0].refs

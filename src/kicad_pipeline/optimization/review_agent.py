@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
+    CONNECTOR_FUNCTIONAL_PROXIMITY_MAX_MM,
     DECOUPLING_CAP_MAX_DISTANCE_MM,
     MCU_PERIPHERAL_MAX_DISTANCE_MM,
     REGULATOR_BOUNDARY_TOLERANCE_MM,
@@ -68,6 +69,7 @@ class PlacementRule(enum.Enum):
     RF_EDGE_PLACEMENT = "rf_edge_placement"
     CONNECTOR_ORIENTATION = "connector_orientation"
     REGULATOR_BOUNDARY = "regulator_boundary"
+    CONNECTOR_FUNCTIONAL_PROXIMITY = "connector_functional_proximity"
 
 
 # ---------------------------------------------------------------------------
@@ -395,20 +397,53 @@ def _check_connector_edge(
 def _check_collisions(
     pcb: PCBDesign,
 ) -> list[PlacementViolation]:
-    """Check for courtyard collisions between components."""
+    """Check for courtyard collisions between components.
+
+    Provides suggested_position for the smaller component: pushes it
+    away from the larger one in the clearance direction.
+    """
     from kicad_pipeline.models.pcb import Point as PcbPoint
 
     violations: list[PlacementViolation] = []
-    positions = {fp.ref: PcbPoint(fp.position.x, fp.position.y) for fp in pcb.footprints}
+    positions = _fp_positions(pcb)
+    pcb_positions = {fp.ref: PcbPoint(fp.position.x, fp.position.y) for fp in pcb.footprints}
     fp_sizes = _fp_size_dict(pcb)
 
-    collision_strs = check_courtyard_collisions(positions, fp_sizes)
+    collision_strs = check_courtyard_collisions(pcb_positions, fp_sizes)
     for msg in collision_strs:
-        # Parse refs from collision message (format: "REF1 vs REF2: ...")
-        parts = msg.split(":")
-        refs_part = parts[0] if parts else msg
-        refs = tuple(r.strip() for r in refs_part.replace(" vs ", ",").split(",")
-                     if r.strip())
+        # Parse refs from collision message
+        # Format: "Courtyard collision: REF1 and REF2"
+        import re as _re
+        ref_match = _re.findall(r"\b([A-Z]+\d+)\b", msg)
+        refs = tuple(dict.fromkeys(ref_match))  # deduplicate, preserve order
+
+        # Compute suggested position: push smaller component away
+        suggested: tuple[float, float] | None = None
+        if len(refs) >= 2 and refs[0] in positions and refs[1] in positions:
+            r1, r2 = refs[0], refs[1]
+            s1 = fp_sizes.get(r1, (2.0, 2.0))
+            s2 = fp_sizes.get(r2, (2.0, 2.0))
+
+            # Move the smaller component
+            if s1[0] * s1[1] <= s2[0] * s2[1]:
+                to_move, anchor = r1, r2
+                ms, as_ = s1, s2
+            else:
+                to_move, anchor = r2, r1
+                ms, as_ = s2, s1
+
+            mx, my = positions[to_move]
+            ax, ay = positions[anchor]
+            dx = mx - ax
+            dy = my - ay
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist < 0.01:
+                dx, dy, dist = 1.0, 0.0, 1.0
+            # Push away: enough to clear half-widths + gap
+            needed = (ms[0] + as_[0]) / 2.0 + 0.5
+            scale = needed / dist
+            suggested = (ax + dx * scale, ay + dy * scale)
+
         violations.append(PlacementViolation(
             rule=PlacementRule.COLLISION,
             severity="critical",
@@ -416,7 +451,7 @@ def _check_collisions(
             message=msg,
             current_value=0.0,
             threshold=0.0,
-            suggested_position=None,
+            suggested_position=suggested,
         ))
 
     return violations
@@ -609,6 +644,53 @@ def _check_rf_edge_placement(
     return violations
 
 
+def _check_connector_functional_proximity(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> list[PlacementViolation]:
+    """Check that connectors are near their functional group.
+
+    Flags connectors that are on a different edge than the centroid of
+    their functional subcircuit group.
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    threshold = CONNECTOR_FUNCTIONAL_PROXIMITY_MAX_MM
+
+    # Map connector refs to their subcircuit group centroid
+    for sc in subcircuits:
+        connector_refs = [r for r in sc.refs if _ref_prefix(r) == "J"]
+        if not connector_refs:
+            continue
+        # Compute centroid of non-connector members
+        non_conn = [r for r in sc.refs if _ref_prefix(r) != "J" and r in positions]
+        if not non_conn:
+            continue
+        cx = sum(positions[r][0] for r in non_conn) / len(non_conn)
+        cy = sum(positions[r][1] for r in non_conn) / len(non_conn)
+
+        for ref in connector_refs:
+            pos = positions.get(ref)
+            if pos is None:
+                continue
+            d = _dist(pos, (cx, cy))
+            if d > threshold:
+                suggested = _point_toward((cx, cy), pos, threshold * 0.8)
+                violations.append(PlacementViolation(
+                    rule=PlacementRule.CONNECTOR_FUNCTIONAL_PROXIMITY,
+                    severity="major",
+                    refs=(ref,),
+                    message=f"{ref} is {d:.1f}mm from its functional group "
+                            f"({sc.circuit_type.value}) centroid "
+                            f"(max {threshold}mm)",
+                    current_value=d,
+                    threshold=threshold,
+                    suggested_position=suggested,
+                ))
+
+    return violations
+
+
 def _check_regulator_boundary(
     pcb: PCBDesign,
     subcircuits: tuple[DetectedSubCircuit, ...],
@@ -756,6 +838,9 @@ def review_placement(
     )
     all_violations.extend(
         _check_regulator_boundary(pcb, subcircuits, domain_map)
+    )
+    all_violations.extend(
+        _check_connector_functional_proximity(pcb, subcircuits)
     )
 
     violations = tuple(all_violations)

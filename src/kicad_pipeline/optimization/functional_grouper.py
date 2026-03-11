@@ -42,6 +42,7 @@ class SubCircuitType(enum.Enum):
     VOLTAGE_DIVIDER = "voltage_divider"
     MCU_PERIPHERAL_CLUSTER = "mcu_peripheral_cluster"
     RF_ANTENNA = "rf_antenna"
+    ADC_CHANNEL = "adc_channel"
 
 
 class VoltageDomain(enum.Enum):
@@ -113,6 +114,20 @@ class BoardZoneAssignment:
     zone_rect: tuple[float, float, float, float]  # x1, y1, x2, y2
     subcircuits: tuple[DetectedSubCircuit, ...]
     loose_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PowerFlowTopology:
+    """Power flow topology derived from regulator input/output domains.
+
+    Describes the ordering of voltage domains following the power
+    distribution path (highest voltage input to lowest voltage output)
+    and the regulator boundaries between adjacent domains.
+    """
+
+    domain_order: tuple[VoltageDomain, ...]
+    regulator_boundaries: tuple[tuple[VoltageDomain, VoltageDomain, str], ...]
+    """Each entry: (input_domain, output_domain, regulator_anchor_ref)."""
 
 
 # ---------------------------------------------------------------------------
@@ -775,24 +790,35 @@ def _find_mcu_ref(
     return None
 
 
+_I2C_SPI_KEYWORDS: frozenset[str] = frozenset({
+    "SDA", "SCL", "I2C", "MOSI", "MISO", "SCK", "SPI", "SCLK",
+})
+
+
 def _detect_mcu_peripherals(
     requirements: ProjectRequirements,
     adj: dict[str, set[str]],
+    ref_to_nets: dict[str, set[str]],
+    net_to_refs: dict[str, set[str]],
     claimed: set[str],
 ) -> list[DetectedSubCircuit]:
-    """Detect MCU peripheral cluster: switches, LEDs, debug headers near MCU.
+    """Detect MCU peripheral cluster: switches, LEDs, debug headers, test points,
+    I2C/SPI pull-up resistors, and small connectors near MCU.
 
     Walks signal adjacency from the MCU to find directly-connected
-    peripherals (SW*, LED*, debug/display connectors).
+    peripherals (SW*, LED*, TP*, debug/display connectors, I2C pullups,
+    small signal connectors).
     """
     mcu_ref = _find_mcu_ref(requirements)
     if mcu_ref is None or mcu_ref in claimed:
         return []
 
+    comp_map = {c.ref: c for c in requirements.components}
+
     # Walk 1-hop signal adjacency from MCU
     mcu_neighbours = adj.get(mcu_ref, set())
     peripheral_refs: list[str] = []
-    peripheral_prefixes = {"SW", "LED", "BTN"}
+    peripheral_prefixes = {"SW", "LED", "BTN", "TP"}
 
     for nb in mcu_neighbours:
         if nb in claimed:
@@ -801,25 +827,38 @@ def _detect_mcu_peripherals(
         if prefix in peripheral_prefixes:
             peripheral_refs.append(nb)
             continue
-        # Check for debug/display connectors
+        # Check for debug/display/small connectors
         if prefix == "J":
-            comp = next((c for c in requirements.components if c.ref == nb), None)
+            comp = comp_map.get(nb)
             if comp:
                 val_desc = f"{comp.value} {comp.description or ''}".upper()
+                # Debug/display connectors
                 if any(kw in val_desc for kw in ("DEBUG", "JTAG", "SWD", "DISPLAY",
                                                    "OLED", "LCD", "UART", "SERIAL")):
                     peripheral_refs.append(nb)
                     continue
-        # Also pick up LEDs connected via resistor (2-hop)
+                # Small connectors (2-6 pins) on MCU signal nets
+                pin_count = len(comp.pins) if comp.pins else 0
+                if 2 <= pin_count <= 6 and nb not in peripheral_refs:
+                    peripheral_refs.append(nb)
+                    continue
+        # I2C/SPI pull-up resistors: R on SDA/SCL/MOSI/MISO nets connected to MCU
         if prefix == "R":
+            r_nets = ref_to_nets.get(nb, set())
+            is_bus_pullup = any(
+                any(kw in n.upper() for kw in _I2C_SPI_KEYWORDS)
+                for n in r_nets
+            )
+            if is_bus_pullup and nb not in peripheral_refs:
+                peripheral_refs.append(nb)
+                continue
+            # Also pick up LEDs connected via resistor (2-hop)
             r_neighbours = adj.get(nb, set())
             for rn in r_neighbours:
                 if rn in claimed or rn == mcu_ref:
                     continue
                 if _ref_prefix(rn) in ("LED", "D"):
-                    comp = next(
-                        (c for c in requirements.components if c.ref == rn), None,
-                    )
+                    comp = comp_map.get(rn)
                     if comp and "LED" in (comp.value or "").upper():
                         if nb not in peripheral_refs:
                             peripheral_refs.append(nb)
@@ -871,6 +910,201 @@ def _detect_rf_antenna(
             ))
 
     return results
+
+
+def _detect_adc_channels(
+    requirements: ProjectRequirements,
+    net_to_refs: dict[str, set[str]],
+    ref_to_nets: dict[str, set[str]],
+    adj: dict[str, set[str]],
+    subcircuits: list[DetectedSubCircuit],
+    claimed: set[str],
+) -> list[DetectedSubCircuit]:
+    """Detect ADC channel subcircuits: voltage divider + connector + protection.
+
+    For each VOLTAGE_DIVIDER subcircuit, traces nets to find a connected
+    connector (J*) and an ADC/MCU pin. If both found, creates an ADC_CHANNEL
+    subcircuit grouping the divider, connector, and any protection components.
+    The anchor is the connector (channel should be placed near its terminal).
+    """
+    results: list[DetectedSubCircuit] = []
+    mcu_ref = _find_mcu_ref(requirements)
+
+    # Find voltage divider subcircuits
+    dividers = [sc for sc in subcircuits
+                if sc.circuit_type == SubCircuitType.VOLTAGE_DIVIDER]
+
+    for divider in dividers:
+        # Get all nets connected to divider components
+        divider_nets: set[str] = set()
+        for ref in divider.refs:
+            divider_nets.update(ref_to_nets.get(ref, set()))
+
+        # Look for connected connector (J*) via shared signal nets
+        connector_ref: str | None = None
+        for net_name in divider_nets:
+            if _is_power_net(net_name) or _is_gnd_net(net_name):
+                continue
+            for ref in net_to_refs.get(net_name, set()):
+                if ref in claimed or ref in divider.refs:
+                    continue
+                if _ref_prefix(ref) == "J":
+                    connector_ref = ref
+                    break
+            if connector_ref:
+                break
+
+        # Look for MCU/ADC connection via divider midpoint net
+        has_mcu_connection = False
+        for net_name in divider.net_connections:
+            for ref in net_to_refs.get(net_name, set()):
+                if ref == mcu_ref:
+                    has_mcu_connection = True
+                    break
+                # Check for ADC keyword in net name
+                if any(kw in net_name.upper() for kw in _ANALOG_KEYWORDS):
+                    has_mcu_connection = True
+                    break
+            if has_mcu_connection:
+                break
+
+        if not connector_ref or not has_mcu_connection:
+            continue
+
+        # Build ADC channel subcircuit
+        adc_refs: list[str] = list(divider.refs)
+        adc_refs.append(connector_ref)
+        claimed.add(connector_ref)
+
+        # Look for protection components (e.g. TVS diode) on the divider nets
+        for net_name in divider_nets:
+            if _is_power_net(net_name) or _is_gnd_net(net_name):
+                continue
+            for ref in net_to_refs.get(net_name, set()):
+                if ref in claimed or ref in adc_refs:
+                    continue
+                prefix = _ref_prefix(ref)
+                if prefix in ("D", "Z"):  # TVS diodes, zener protection
+                    adc_refs.append(ref)
+                    claimed.add(ref)
+
+        results.append(DetectedSubCircuit(
+            circuit_type=SubCircuitType.ADC_CHANNEL,
+            refs=tuple(sorted(adc_refs)),
+            anchor_ref=connector_ref,
+            net_connections=divider.net_connections,
+            domain=divider.domain,
+            layout_hint="cluster",
+        ))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Power flow topology
+# ---------------------------------------------------------------------------
+
+
+def _voltage_magnitude(domain: VoltageDomain) -> float:
+    """Return a representative voltage magnitude for domain ordering."""
+    return {
+        VoltageDomain.VIN_24V: 24.0,
+        VoltageDomain.POWER_5V: 5.0,
+        VoltageDomain.DIGITAL_3V3: 3.3,
+        VoltageDomain.ANALOG: 3.3,
+        VoltageDomain.MIXED: 0.0,
+    }.get(domain, 0.0)
+
+
+def compute_power_flow_topology(
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> PowerFlowTopology:
+    """Derive power flow topology from regulator subcircuits.
+
+    Walks BUCK_CONVERTER and LDO_REGULATOR subcircuits to build a graph
+    of input_domain -> output_domain edges, then topologically sorts
+    the domains from highest voltage to lowest.
+
+    Falls back to voltage-magnitude ordering when no regulators are found.
+
+    Args:
+        subcircuits: Detected subcircuits (must include regulators).
+
+    Returns:
+        PowerFlowTopology with ordered domains and boundary info.
+    """
+    # Collect regulator edges: input_domain -> output_domain
+    boundaries: list[tuple[VoltageDomain, VoltageDomain, str]] = []
+    edges: dict[VoltageDomain, set[VoltageDomain]] = {}  # in -> {out, ...}
+    all_domains: set[VoltageDomain] = set()
+
+    for sc in subcircuits:
+        if sc.circuit_type not in (
+            SubCircuitType.BUCK_CONVERTER,
+            SubCircuitType.LDO_REGULATOR,
+        ):
+            # Collect domains from all subcircuits
+            if sc.domain != VoltageDomain.MIXED:
+                all_domains.add(sc.domain)
+            continue
+
+        if sc.input_domain is not None and sc.output_domain is not None:
+            boundaries.append((sc.input_domain, sc.output_domain, sc.anchor_ref))
+            edges.setdefault(sc.input_domain, set()).add(sc.output_domain)
+            all_domains.add(sc.input_domain)
+            all_domains.add(sc.output_domain)
+        if sc.domain != VoltageDomain.MIXED:
+            all_domains.add(sc.domain)
+
+    # Remove MIXED from ordering
+    all_domains.discard(VoltageDomain.MIXED)
+
+    if not boundaries:
+        # No regulators — sort by voltage magnitude (highest first)
+        ordered = sorted(all_domains, key=_voltage_magnitude, reverse=True)
+        return PowerFlowTopology(
+            domain_order=tuple(ordered) if ordered else (VoltageDomain.MIXED,),
+            regulator_boundaries=(),
+        )
+
+    # Topological sort: Kahn's algorithm (highest voltage sources first)
+    in_degree: dict[VoltageDomain, int] = {d: 0 for d in all_domains}
+    for _src, dsts in edges.items():
+        for dst in dsts:
+            if dst in in_degree:
+                in_degree[dst] += 1
+
+    # Start with zero in-degree nodes, sorted by voltage magnitude descending
+    queue = sorted(
+        [d for d, deg in in_degree.items() if deg == 0],
+        key=_voltage_magnitude,
+        reverse=True,
+    )
+    result: list[VoltageDomain] = []
+    visited: set[VoltageDomain] = set()
+
+    while queue:
+        node = queue.pop(0)
+        if node in visited:
+            continue
+        visited.add(node)
+        result.append(node)
+        for dst in sorted(edges.get(node, set()), key=_voltage_magnitude, reverse=True):
+            if dst in in_degree:
+                in_degree[dst] -= 1
+                if in_degree[dst] <= 0 and dst not in visited:
+                    queue.append(dst)
+        # Re-sort queue by voltage magnitude
+        queue.sort(key=_voltage_magnitude, reverse=True)
+
+    # Add any domains not reached by topo-sort (disconnected from regulators)
+    for d in sorted(all_domains - visited, key=_voltage_magnitude, reverse=True):
+        result.append(d)
+
+    return PowerFlowTopology(
+        domain_order=tuple(result),
+        regulator_boundaries=tuple(boundaries),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1010,8 +1244,17 @@ def detect_subcircuits(
     rf_antennas = _detect_rf_antenna(requirements, claimed)
     all_subcircuits.extend(rf_antennas)
 
-    # MCU peripheral cluster detection
-    mcu_peripherals = _detect_mcu_peripherals(requirements, adj, claimed)
+    # ADC channel detection (after voltage dividers, before MCU peripherals)
+    adc_channels = _detect_adc_channels(
+        requirements, net_to_refs, ref_to_nets, adj,
+        all_subcircuits, claimed,
+    )
+    all_subcircuits.extend(adc_channels)
+
+    # MCU peripheral cluster detection (expanded: TP, I2C pullups, small connectors)
+    mcu_peripherals = _detect_mcu_peripherals(
+        requirements, adj, ref_to_nets, net_to_refs, claimed,
+    )
     all_subcircuits.extend(mcu_peripherals)
 
     _log.info(
@@ -1089,26 +1332,30 @@ def assign_zones(
     board_width: float,
     board_height: float,
     all_refs: tuple[str, ...],
+    topology: PowerFlowTopology | None = None,
 ) -> tuple[BoardZoneAssignment, ...]:
     """Assign sub-circuits and loose components to board zones by domain.
 
-    Zone layout (from docs/placement_requirements.md Section 7):
-    - Top-left: Power input (24V)
-    - Top-right: Relay / 5V section
-    - Middle-right: Analog
-    - Bottom: Digital (3V3) / MCU
-    - Loose connectors assigned to nearest edge zone
+    When *topology* is provided, zones follow the power flow ordering:
+    - Landscape boards (width > height x 1.3): left-to-right zones
+    - Portrait/square boards: top-to-bottom zones
+    - Boundary strips reserved between adjacent zones for regulators
+
+    Falls back to quadrant layout when no topology is available.
 
     Args:
         subcircuits: Detected sub-circuits.
-        domain_map: Component ref → voltage domain mapping.
+        domain_map: Component ref -> voltage domain mapping.
         board_width: Board width in mm.
         board_height: Board height in mm.
         all_refs: All component refs in the design.
+        topology: Optional power flow topology for ordering.
 
     Returns:
         Tuple of zone assignments.
     """
+    from kicad_pipeline.constants import ZONE_BOUNDARY_WIDTH_MM
+
     # Collect refs in subcircuits
     subcircuit_refs: set[str] = set()
     for sc in subcircuits:
@@ -1127,19 +1374,62 @@ def assign_zones(
         domain = domain_map.get(ref, VoltageDomain.MIXED)
         domain_loose.setdefault(domain, []).append(ref)
 
-    # Define zone rectangles — proportional to board dimensions
-    half_w = board_width / 2.0
-    half_h = board_height / 2.0
-    zone_rects: dict[VoltageDomain, tuple[float, float, float, float]] = {
-        VoltageDomain.VIN_24V: (0.0, 0.0, half_w, half_h),
-        VoltageDomain.POWER_5V: (half_w, 0.0, board_width, half_h),
-        VoltageDomain.ANALOG: (half_w, half_h * 0.6, board_width, half_h + half_h * 0.4),
-        VoltageDomain.DIGITAL_3V3: (0.0, half_h, board_width, board_height),
-        VoltageDomain.MIXED: (0.0, half_h, half_w, board_height),
-    }
+    # Determine which domains are active (have components)
+    active_domains: list[VoltageDomain] = []
+    if topology is not None and len(topology.domain_order) > 0:
+        # Use topology ordering, only including domains with components
+        for d in topology.domain_order:
+            if d in domain_subcircuits or d in domain_loose:
+                active_domains.append(d)
+        # Add any active domains not in topology
+        for d in VoltageDomain:
+            if d not in active_domains and (d in domain_subcircuits or d in domain_loose):
+                active_domains.append(d)
+    else:
+        # Fallback: voltage-magnitude ordering
+        priority = [
+            VoltageDomain.VIN_24V, VoltageDomain.POWER_5V,
+            VoltageDomain.ANALOG, VoltageDomain.DIGITAL_3V3,
+            VoltageDomain.MIXED,
+        ]
+        for d in priority:
+            if d in domain_subcircuits or d in domain_loose:
+                active_domains.append(d)
+
+    if not active_domains:
+        return ()
+
+    # Compute zone rectangles based on board aspect ratio and topology
+    is_landscape = board_width > board_height * 1.3
+    n_zones = len(active_domains)
+    boundary_w = ZONE_BOUNDARY_WIDTH_MM if n_zones > 1 else 0.0
+    total_boundary = boundary_w * max(0, n_zones - 1)
+
+    zone_rects: dict[VoltageDomain, tuple[float, float, float, float]] = {}
+
+    if is_landscape:
+        # Left-to-right zones following domain order
+        usable_w = board_width - total_boundary
+        strip_w = usable_w / n_zones if n_zones > 0 else board_width
+        cursor = 0.0
+        for domain in active_domains:
+            x1 = cursor
+            x2 = cursor + strip_w
+            zone_rects[domain] = (x1, 0.0, x2, board_height)
+            cursor = x2 + boundary_w
+    else:
+        # Top-to-bottom zones following domain order
+        usable_h = board_height - total_boundary
+        strip_h = usable_h / n_zones if n_zones > 0 else board_height
+        cursor = 0.0
+        for domain in active_domains:
+            y1 = cursor
+            y2 = cursor + strip_h
+            zone_rects[domain] = (0.0, y1, board_width, y2)
+            cursor = y2 + boundary_w
 
     assignments: list[BoardZoneAssignment] = []
-    for domain in VoltageDomain:
+    for domain in active_domains:
         scs = domain_subcircuits.get(domain, [])
         loose = domain_loose.get(domain, [])
         if not scs and not loose:

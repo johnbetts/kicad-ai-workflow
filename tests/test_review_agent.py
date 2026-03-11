@@ -470,3 +470,97 @@ class TestVoltageIsolationExemption:
             "R1" in v.refs and "U1" in v.refs
             for v in violations_exempt
         )
+
+
+# ---------------------------------------------------------------------------
+# Collision suggested_position tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollisionSuggestedPosition:
+    """Tests for collision detection with suggested position fixes."""
+
+    def test_collision_provides_suggested_position(self) -> None:
+        """Overlapping components → collision violation with suggested position."""
+        pcb = _make_pcb([
+            _fp("U1", 50, 40),  # overlapping
+            _fp("C1", 50, 40),  # same position
+        ])
+        review = review_placement(pcb, _make_requirements(
+            [_comp("U1", "IC"), _comp("C1", "100nF")],
+            [],
+        ))
+        collisions = [v for v in review.violations
+                      if v.rule == PlacementRule.COLLISION]
+        assert len(collisions) >= 1
+        # Should have a suggested position to resolve overlap
+        assert collisions[0].suggested_position is not None
+
+    def test_no_collision_no_violation(self) -> None:
+        """Well-separated components → no collision violation."""
+        pcb = _make_pcb([
+            _fp("U1", 20, 20),
+            _fp("C1", 80, 60),
+        ])
+        review = review_placement(pcb, _make_requirements(
+            [_comp("U1", "IC"), _comp("C1", "100nF")],
+            [],
+        ))
+        collisions = [v for v in review.violations
+                      if v.rule == PlacementRule.COLLISION]
+        assert len(collisions) == 0
+
+
+# ---------------------------------------------------------------------------
+# Connector functional proximity tests
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorFunctionalProximity:
+    """Tests for CONNECTOR_FUNCTIONAL_PROXIMITY rule."""
+
+    def test_connector_far_from_group_flagged(self) -> None:
+        """Connector in ADC_CHANNEL far from group centroid → violation."""
+        from kicad_pipeline.optimization.review_agent import (
+            _check_connector_functional_proximity,
+        )
+
+        pcb = _make_pcb([
+            _fp("J1", 95, 5),   # connector far away
+            _fp("R1", 30, 40),  # divider near center
+            _fp("R2", 32, 40),  # divider near center
+        ])
+        subcircuits = (DetectedSubCircuit(
+            circuit_type=SubCircuitType.ADC_CHANNEL,
+            refs=("J1", "R1", "R2"),
+            anchor_ref="J1",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+        ),)
+        violations = _check_connector_functional_proximity(pcb, subcircuits)
+        conn_violations = [v for v in violations
+                          if v.rule == PlacementRule.CONNECTOR_FUNCTIONAL_PROXIMITY]
+        assert len(conn_violations) >= 1
+        assert "J1" in conn_violations[0].refs
+        assert conn_violations[0].suggested_position is not None
+
+    def test_connector_near_group_ok(self) -> None:
+        """Connector near its functional group centroid → no violation."""
+        from kicad_pipeline.optimization.review_agent import (
+            _check_connector_functional_proximity,
+        )
+
+        pcb = _make_pcb([
+            _fp("J1", 32, 40),  # connector near group
+            _fp("R1", 30, 40),
+            _fp("R2", 34, 40),
+        ])
+        subcircuits = (DetectedSubCircuit(
+            circuit_type=SubCircuitType.ADC_CHANNEL,
+            refs=("J1", "R1", "R2"),
+            anchor_ref="J1",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+        ),)
+        violations = _check_connector_functional_proximity(pcb, subcircuits)
+        assert len(violations) == 0

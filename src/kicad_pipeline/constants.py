@@ -232,6 +232,15 @@ REGULATOR_BOUNDARY_TOLERANCE_MM: float = 5.0
 CROSS_DOMAIN_AFFINITY_MAX_MM: float = 25.0
 """Maximum distance for cross-domain affinity components (mm)."""
 
+CONNECTOR_FUNCTIONAL_PROXIMITY_MAX_MM: float = 15.0
+"""Maximum distance from a connector to its functional group centroid (mm)."""
+
+ADC_CHANNEL_MAX_SPREAD_MM: float = 12.0
+"""Maximum spread for ADC channel components (divider + connector + protection) (mm)."""
+
+ZONE_BOUNDARY_WIDTH_MM: float = 8.0
+"""Width of the boundary strip between adjacent voltage domain zones (mm)."""
+
 # ---------------------------------------------------------------------------
 # Power budget
 # ---------------------------------------------------------------------------

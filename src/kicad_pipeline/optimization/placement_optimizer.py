@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING
 
 from kicad_pipeline.models.pcb import Point
 from kicad_pipeline.optimization.functional_grouper import (
+    BoardZoneAssignment,
     DetectedSubCircuit,
+    DomainAffinity,
     SubCircuitType,
     VoltageDomain,
 )
@@ -992,15 +994,23 @@ def _place_boundary_regulators(
     domain_map: dict[str, VoltageDomain],
     bounds: tuple[float, float, float, float],
     fixed_refs: set[str],
+    zone_assignments: tuple[BoardZoneAssignment, ...] | None = None,
 ) -> dict[str, tuple[float, float, float]]:
     """Place regulators at the boundary between their input and output domains.
 
-    Positions the regulator at the geometric midpoint between the centroids
-    of its input domain and output domain components.
+    When *zone_assignments* are available, uses the shared edge between
+    input and output zone rects. Falls back to midpoint between domain
+    centroids.
     """
     min_x, min_y, max_x, max_y = bounds
 
-    # Compute domain centroids
+    # Build zone rect lookup
+    zone_rects: dict[VoltageDomain, tuple[float, float, float, float]] = {}
+    if zone_assignments:
+        for za in zone_assignments:
+            zone_rects[za.domain] = za.zone_rect
+
+    # Compute domain centroids (fallback)
     domain_positions: dict[VoltageDomain, list[tuple[float, float]]] = {}
     for ref, (x, y, _rot) in positions.items():
         d = domain_map.get(ref)
@@ -1021,14 +1031,39 @@ def _place_boundary_regulators(
         if sc.anchor_ref in fixed_refs or sc.anchor_ref not in positions:
             continue
 
-        in_centroid = domain_centroids.get(sc.input_domain)
-        out_centroid = domain_centroids.get(sc.output_domain)
-        if in_centroid is None or out_centroid is None:
-            continue
+        # Try zone rects first: find shared edge between input/output zones
+        in_rect = zone_rects.get(sc.input_domain)
+        out_rect = zone_rects.get(sc.output_domain)
 
-        # Target: midpoint between domain centroids
-        target_x = (in_centroid[0] + out_centroid[0]) / 2.0
-        target_y = (in_centroid[1] + out_centroid[1]) / 2.0
+        if in_rect and out_rect:
+            # Find the shared boundary between the two zone rects
+            # Check if they share a vertical boundary (left-right layout)
+            ix1, iy1, ix2, iy2 = in_rect
+            ox1, oy1, ox2, oy2 = out_rect
+            # Input right edge meets output left edge
+            if abs(ix2 - ox1) < 12.0:
+                target_x = (ix2 + ox1) / 2.0 + min_x
+                target_y = (max(iy1, oy1) + min(iy2, oy2)) / 2.0 + min_y
+            # Input bottom edge meets output top edge
+            elif abs(iy2 - oy1) < 12.0:
+                target_x = (max(ix1, ox1) + min(ix2, ox2)) / 2.0 + min_x
+                target_y = (iy2 + oy1) / 2.0 + min_y
+            else:
+                # No clear shared edge — use centroid midpoint
+                in_c = domain_centroids.get(sc.input_domain)
+                out_c = domain_centroids.get(sc.output_domain)
+                if in_c is None or out_c is None:
+                    continue
+                target_x = (in_c[0] + out_c[0]) / 2.0
+                target_y = (in_c[1] + out_c[1]) / 2.0
+        else:
+            in_centroid = domain_centroids.get(sc.input_domain)
+            out_centroid = domain_centroids.get(sc.output_domain)
+            if in_centroid is None or out_centroid is None:
+                continue
+            # Target: midpoint between domain centroids
+            target_x = (in_centroid[0] + out_centroid[0]) / 2.0
+            target_y = (in_centroid[1] + out_centroid[1]) / 2.0
         target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
         target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
 
@@ -1256,6 +1291,312 @@ def _orient_connectors(
     return positions
 
 
+def _classify_connector_function(
+    ref: str,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    adj: dict[str, set[str]],
+    ref_to_nets: dict[str, set[str]],
+) -> str:
+    """Classify a connector by its functional role based on signal adjacency.
+
+    Returns one of: "relay_terminal", "mcu_peripheral", "power_input",
+    "analog_input", "general".
+    """
+    from kicad_pipeline.pcb.constraints import _is_power_net
+
+    # Check if connector is in a subcircuit
+    for sc in subcircuits:
+        if ref in sc.refs:
+            if sc.circuit_type == SubCircuitType.RELAY_DRIVER:
+                return "relay_terminal"
+            if sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER:
+                return "mcu_peripheral"
+            if sc.circuit_type == SubCircuitType.ADC_CHANNEL:
+                return "analog_input"
+
+    # Check signal adjacency
+    neighbours = adj.get(ref, set())
+    relay_refs = {sc.anchor_ref for sc in subcircuits
+                  if sc.circuit_type == SubCircuitType.RELAY_DRIVER}
+    mcu_refs = {sc.anchor_ref for sc in subcircuits
+                if sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER}
+
+    # Check if connector shares nets with relays
+    for nb in neighbours:
+        if nb in relay_refs or any(nb in sc.refs for sc in subcircuits
+                                    if sc.circuit_type == SubCircuitType.RELAY_DRIVER):
+            return "relay_terminal"
+
+    # Check if connected to MCU
+    for nb in neighbours:
+        if nb in mcu_refs:
+            return "mcu_peripheral"
+
+    # Check for analog nets
+    conn_nets = ref_to_nets.get(ref, set())
+    from kicad_pipeline.optimization.functional_grouper import _ANALOG_KEYWORDS
+    if any(any(kw in n.upper() for kw in _ANALOG_KEYWORDS) for n in conn_nets):
+        return "analog_input"
+
+    # Check for power-only connector
+    if all(_is_power_net(n) or n.upper() in {"GND", "VCC"}
+           for n in conn_nets if n.strip()):
+        return "power_input"
+
+    return "general"
+
+
+def _pin_connectors_by_function(
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+    adj: dict[str, set[str]],
+    ref_to_nets: dict[str, set[str]],
+    pcb: PCBDesign,
+) -> dict[str, tuple[float, float, float]]:
+    """Pin connectors to board edges based on their functional classification.
+
+    Instead of pushing every connector to its nearest edge, classifies
+    each connector by function and pins it to the edge that makes sense:
+    - relay_terminal: same edge as relay bank
+    - mcu_peripheral: edge nearest MCU
+    - power_input: edge nearest power zone
+    - analog_input: same edge as relay terminals (measuring those circuits)
+    - general: nearest edge (fallback)
+    """
+    min_x, min_y, max_x, max_y = bounds
+    edge_margin = 3.0
+
+    # Compute functional group centroids for edge targeting
+    relay_centroid: tuple[float, float] | None = None
+    relay_positions = []
+    for sc in subcircuits:
+        if sc.circuit_type == SubCircuitType.RELAY_DRIVER and sc.anchor_ref in positions:
+            rx, ry, _ = positions[sc.anchor_ref]
+            relay_positions.append((rx, ry))
+    if relay_positions:
+        relay_centroid = (
+            sum(p[0] for p in relay_positions) / len(relay_positions),
+            sum(p[1] for p in relay_positions) / len(relay_positions),
+        )
+
+    mcu_centroid: tuple[float, float] | None = None
+    for sc in subcircuits:
+        if (sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER
+                and sc.anchor_ref in positions):
+            mx, my, _ = positions[sc.anchor_ref]
+            mcu_centroid = (mx, my)
+            break
+
+    # Find dominant edge for relay group (edge closest to relay centroid)
+    def _nearest_edge(
+        cx: float, cy: float,
+    ) -> str:
+        dists = {
+            "left": cx - min_x,
+            "right": max_x - cx,
+            "top": cy - min_y,
+            "bottom": max_y - cy,
+        }
+        return min(dists, key=lambda k: dists[k])
+
+    relay_edge = _nearest_edge(*relay_centroid) if relay_centroid else "left"
+
+    for fp in pcb.footprints:
+        ref = fp.ref
+        if ref in fixed_refs or not ref.startswith("J"):
+            continue
+        if ref not in positions:
+            continue
+
+        cx, cy, rot = positions[ref]
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+
+        # Classify connector function
+        func = _classify_connector_function(ref, subcircuits, adj, ref_to_nets)
+
+        # Determine target edge based on function
+        if func == "relay_terminal":
+            target_edge = relay_edge
+        elif func == "analog_input":
+            target_edge = relay_edge  # analog inputs near relay terminals
+        elif func == "mcu_peripheral" and mcu_centroid:
+            target_edge = _nearest_edge(*mcu_centroid)
+        elif func == "power_input":
+            # Power connectors toward the high-voltage zone
+            is_left = relay_centroid and relay_centroid[0] < (max_x + min_x) / 2
+            target_edge = "left" if is_left else "right"
+        else:
+            # General: nearest edge to current position
+            target_edge = _nearest_edge(cx, cy)
+
+        # Compute target position on target edge
+        target_x, target_y = cx, cy
+        if target_edge == "left":
+            target_x = min_x + edge_margin + w / 2.0
+        elif target_edge == "right":
+            target_x = max_x - edge_margin - w / 2.0
+        elif target_edge == "top":
+            target_y = min_y + edge_margin + h / 2.0
+        else:
+            target_y = max_y - edge_margin - h / 2.0
+
+        # Only move if not already on the target edge
+        current_edge_dist = min(
+            cx - min_x, max_x - cx, cy - min_y, max_y - cy,
+        )
+        if current_edge_dist <= 5.0:
+            # Already on an edge — check if it's the right edge
+            current_edge = _nearest_edge(cx, cy)
+            if current_edge == target_edge:
+                continue  # Already on correct edge
+
+        # Use grid-based collision-aware placement
+        edge_grid = _PlacementGrid(bounds)
+        for other_ref, (ox, oy, _orot) in positions.items():
+            if other_ref == ref:
+                continue
+            ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
+            edge_grid.place(ox, oy, ow, oh)
+
+        rw, rh = _rotation_aware_size(ref, positions, fp_sizes)
+        fx, fy = edge_grid.find_free_pos(target_x, target_y, rw, rh)
+
+        # Only accept if closer to target edge than before
+        new_edge_dist = min(
+            fx - min_x, max_x - fx, fy - min_y, max_y - fy,
+        )
+        if new_edge_dist < current_edge_dist or _nearest_edge(fx, fy) == target_edge:
+            positions[ref] = (fx, fy, rot)
+
+    return positions
+
+
+def _place_adc_channels(
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+) -> dict[str, tuple[float, float, float]]:
+    """Pull ADC channel subcircuit members near their input terminal connector.
+
+    ADC_CHANNEL subcircuits have the connector as anchor — pull divider
+    and protection components close to it.
+    """
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.ADC_CHANNEL:
+            continue
+        anchor = sc.anchor_ref
+        if anchor not in positions or anchor in fixed_refs:
+            continue
+        ax, ay, _ = positions[anchor]
+        aw, ah = fp_sizes.get(anchor, (2.0, 2.0))
+
+        for ref in sc.refs:
+            if ref == anchor or ref in fixed_refs or ref not in positions:
+                continue
+            rx, ry, rrot = positions[ref]
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            current_dist = math.sqrt((rx - ax) ** 2 + (ry - ay) ** 2)
+
+            from kicad_pipeline.constants import ADC_CHANNEL_MAX_SPREAD_MM
+            if current_dist <= ADC_CHANNEL_MAX_SPREAD_MM:
+                continue
+
+            # Target: tight to connector
+            ideal_dist = (w + aw) / 2.0 + 1.0
+            if current_dist < 0.01:
+                continue
+            dx = (ax - rx) / current_dist
+            dy = (ay - ry) / current_dist
+            tx = ax - dx * ideal_dist
+            ty = ay - dy * ideal_dist
+            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+
+            move_grid = _PlacementGrid(bounds)
+            for oref, (ox, oy, _orot) in positions.items():
+                if oref == ref:
+                    continue
+                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+                move_grid.place(ox, oy, ow, oh)
+
+            fx, fy = move_grid.find_free_pos(tx, ty, w, h)
+            new_dist = math.sqrt((fx - ax) ** 2 + (fy - ay) ** 2)
+            if new_dist < current_dist:
+                positions[ref] = (fx, fy, rrot)
+
+    return positions
+
+
+def _apply_cross_domain_affinity_overrides(
+    affinities: tuple[DomainAffinity, ...],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+    domain_map: dict[str, VoltageDomain],
+) -> dict[str, tuple[float, float, float]]:
+    """Move cross-domain monitoring components closer to their target domain.
+
+    For "measurement" affinities (e.g. ADC monitoring 24V relay outputs),
+    moves source_refs toward the centroid of target_refs so they're placed
+    near the domain boundary they're monitoring.
+    """
+    result = dict(positions)
+
+    for aff in affinities:
+        if aff.reason != "measurement":
+            continue
+
+        # Compute centroid of target refs (the domain being measured)
+        target_positions = [
+            (result[r][0], result[r][1])
+            for r in aff.target_refs if r in result
+        ]
+        if not target_positions:
+            continue
+        target_cx = sum(p[0] for p in target_positions) / len(target_positions)
+        target_cy = sum(p[1] for p in target_positions) / len(target_positions)
+
+        # Move source refs toward target domain boundary
+        for ref in aff.source_refs:
+            if ref in fixed_refs or ref not in result:
+                continue
+            rx, ry, rot = result[ref]
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+
+            current_dist = math.sqrt((rx - target_cx) ** 2 + (ry - target_cy) ** 2)
+            if current_dist < 10.0:
+                continue  # Already reasonably close
+
+            # Target: partway toward the target domain (60% of the way)
+            tx = rx + (target_cx - rx) * 0.6
+            ty = ry + (target_cy - ry) * 0.6
+
+            # Build grid without this component
+            move_grid = _PlacementGrid(bounds)
+            for oref, (ox, oy, _orot) in result.items():
+                if oref == ref:
+                    continue
+                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+                move_grid.place(ox, oy, ow, oh)
+
+            fx, fy = move_grid.find_free_pos(tx, ty, w, h)
+            new_dist = math.sqrt((fx - target_cx) ** 2 + (fy - target_cy) ** 2)
+            if new_dist < current_dist:
+                result[ref] = (fx, fy, rot)
+                _log.info(
+                    "  Affinity override: moved %s %.1fmm closer to %s domain",
+                    ref, current_dist - new_dist, aff.target_domain.value,
+                )
+
+    return result
+
+
 def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
@@ -1309,6 +1650,28 @@ def optimize_placement_ee(
     domain_map = classify_voltage_domains(requirements)
     sc_list = list(subcircuits)  # mutable list for helper functions
 
+    # Compute power flow topology and cross-domain affinities
+    from kicad_pipeline.optimization.functional_grouper import (
+        compute_power_flow_topology,
+        detect_cross_domain_affinities,
+    )
+    topology = compute_power_flow_topology(subcircuits)
+    affinities = detect_cross_domain_affinities(requirements, domain_map)
+    # Pre-compute zone assignments for regulator boundary placement
+    from kicad_pipeline.optimization.functional_grouper import assign_zones
+    board_w = max_x - min_x
+    board_h = max_y - min_y
+    all_refs = tuple(fp.ref for fp in initial_pcb.footprints)
+    zone_assignments = assign_zones(
+        subcircuits, domain_map, board_w, board_h, all_refs, topology=topology,
+    )
+    _log.info(
+        "Phase 1: Topology order: %s, %d affinities, %d zones",
+        [d.value for d in topology.domain_order],
+        len(affinities),
+        len(zone_assignments),
+    )
+
     # -----------------------------------------------------------------------
     # Phase 2: Start from initial placement
     # -----------------------------------------------------------------------
@@ -1319,7 +1682,7 @@ def optimize_placement_ee(
     }
 
     # -----------------------------------------------------------------------
-    # Phase 2.5: Move off-board components onto the board
+    # Phase 2.5: Topology-aware zone placement for off-board components
     # -----------------------------------------------------------------------
     # Detect components placed off-board (from place_groups_off_board staging)
     off_board_refs = [
@@ -1332,30 +1695,39 @@ def optimize_placement_ee(
 
     if off_board_refs:
         _log.info(
-            "Phase 2.5: Moving %d off-board components onto the board",
+            "Phase 2.5: Moving %d off-board components using topology-aware zones",
             len(off_board_refs),
         )
 
-        # Group off-board refs by voltage domain → assign board zones
+        # Group off-board refs by voltage domain
         domain_groups: dict[VoltageDomain, list[str]] = {}
         for ref in off_board_refs:
             d = domain_map.get(ref, VoltageDomain.MIXED)
             domain_groups.setdefault(d, []).append(ref)
 
-        # Sort domain groups: high-voltage domains at top, digital at bottom
-        domain_priority = [
-            VoltageDomain.VIN_24V, VoltageDomain.POWER_5V,
-            VoltageDomain.ANALOG, VoltageDomain.DIGITAL_3V3,
-            VoltageDomain.MIXED,
-        ]
-
-        # Divide board into horizontal strips by domain
         board_w = max_x - min_x
         board_h = max_y - min_y
-        active_domains = [d for d in domain_priority if d in domain_groups]
+
+        # Use topology-aware zone assignment
+        from kicad_pipeline.optimization.functional_grouper import assign_zones
+        zone_assignments = assign_zones(
+            subcircuits, domain_map, board_w, board_h,
+            tuple(off_board_refs), topology=topology,
+        )
+
+        # Build zone rect lookup
+        zone_rect_map: dict[VoltageDomain, tuple[float, float, float, float]] = {
+            za.domain: za.zone_rect for za in zone_assignments
+        }
+
+        # Determine active domains from topology order
+        active_domains = [d for d in topology.domain_order if d in domain_groups]
+        # Add domains not in topology
+        for d in domain_groups:
+            if d not in active_domains:
+                active_domains.append(d)
 
         if active_domains:
-            strip_h = board_h / len(active_domains)
             placement_grid = _PlacementGrid(bounds)
 
             # Place any already-on-board (fixed) components into the grid
@@ -1364,33 +1736,41 @@ def optimize_placement_ee(
                     w, h = fp_sizes.get(ref, (2.0, 2.0))
                     placement_grid.place(px, py, w, h)
 
-            for zone_idx, domain in enumerate(active_domains):
-                zone_refs = sorted(domain_groups[domain])
-                zone_y_start = min_y + zone_idx * strip_h
+            for domain in active_domains:
+                zone_refs = sorted(domain_groups.get(domain, []))
+                if not zone_refs:
+                    continue
+                zone_rect = zone_rect_map.get(domain)
+                if zone_rect is None:
+                    # Fallback: full board
+                    zone_rect = (0.0, 0.0, board_w, board_h)
+
+                # Offset zone_rect to board origin
+                zx1, zy1, zx2, zy2 = zone_rect
+                zx1 += min_x
+                zy1 += min_y
+                zx2 += min_x
+                zy2 += min_y
+                zw = zx2 - zx1
+                zh = zy2 - zy1
 
                 # Find subcircuit anchors in this domain first
-                domain_anchors: list[str] = []
-                domain_others: list[str] = []
                 anchor_set = {sc.anchor_ref for sc in subcircuits}
-                for ref in zone_refs:
-                    if ref in anchor_set:
-                        domain_anchors.append(ref)
-                    else:
-                        domain_others.append(ref)
+                domain_anchors = [r for r in zone_refs if r in anchor_set]
+                domain_others = [r for r in zone_refs if r not in anchor_set]
 
-                # Place anchors first, spread across zone width
+                # Place anchors first, spread across zone
                 all_to_place = domain_anchors + domain_others
                 for i, ref in enumerate(all_to_place):
                     w, h = fp_sizes.get(ref, (2.0, 2.0))
-                    # Spread targets across zone
                     n = len(all_to_place)
-                    cols = max(1, min(n, int(board_w / max(w + 1.0, 3.0))))
+                    cols = max(1, min(n, int(zw / max(w + 1.0, 3.0))))
                     row = i // cols
                     col = i % cols
-                    target_x = min_x + 3.0 + (board_w - 6.0) * (col + 0.5) / cols
-                    rows_needed = (n + cols - 1) // cols
+                    target_x = zx1 + 3.0 + max(0.0, zw - 6.0) * (col + 0.5) / max(cols, 1)
+                    rows_needed = max(1, (n + cols - 1) // cols)
                     row_frac = (row + 0.5) / max(rows_needed, 1)
-                    target_y = zone_y_start + 2.0 + (strip_h - 4.0) * row_frac
+                    target_y = zy1 + 2.0 + max(0.0, zh - 4.0) * row_frac
 
                     fx, fy = placement_grid.find_free_pos(target_x, target_y, w, h)
                     placement_grid.place(fx, fy, w, h)
@@ -1398,11 +1778,25 @@ def optimize_placement_ee(
                     positions[ref] = (fx, fy, rot)
 
         _log.info(
-            "Phase 2.5: Placed %d components in %d domain zones",
+            "Phase 2.5: Placed %d components in %d topology-ordered zones",
             len(off_board_refs), len(active_domains),
         )
     else:
         _log.info("Phase 2.5: All components on-board (skipping)")
+
+    # -----------------------------------------------------------------------
+    # Phase 2.6: Cross-domain affinity overrides
+    # -----------------------------------------------------------------------
+    if affinities:
+        _log.info(
+            "Phase 2.6: Applying %d cross-domain affinity overrides",
+            len(affinities),
+        )
+        positions = _apply_cross_domain_affinity_overrides(
+            affinities, positions, fp_sizes, bounds, fixed_refs, domain_map,
+        )
+    else:
+        _log.info("Phase 2.6: No cross-domain affinities (skipping)")
 
     # Build occupancy grid from current placement
     grid = _PlacementGrid(bounds)
@@ -1492,6 +1886,7 @@ def optimize_placement_ee(
     _log.info("Phase 3.2: Placing regulators at domain boundaries")
     positions = _place_boundary_regulators(
         sc_list, positions, fp_sizes, domain_map, bounds, fixed_refs,
+        zone_assignments=zone_assignments,
     )
 
     # -----------------------------------------------------------------------
@@ -1501,78 +1896,93 @@ def optimize_placement_ee(
     positions = _pin_rf_to_edge(sc_list, positions, fp_sizes, bounds, fixed_refs)
 
     # -----------------------------------------------------------------------
-    # Phase 3.4: MCU peripheral pulling
+    # Phase 3.4: Crystal-to-MCU proximity (BEFORE MCU peripherals for priority)
     # -----------------------------------------------------------------------
-    _log.info("Phase 3.4: Pulling MCU peripherals close to MCU")
+    # Crystal oscillators must be within 5mm of their MCU — place first
+    # so they get the closest slots before peripherals claim them.
+    from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref
+    mcu_ref = _find_mcu_ref(requirements)
+    if mcu_ref and mcu_ref in positions:
+        mcu_x, mcu_y, _mcu_rot = positions[mcu_ref]
+        for sc in sc_list:
+            if sc.circuit_type != SubCircuitType.CRYSTAL_OSC:
+                continue
+            for ref in sc.refs:
+                if ref in fixed_refs or ref not in positions:
+                    continue
+                rx, ry, rrot = positions[ref]
+                dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
+                if dist <= 5.0:
+                    continue  # already close enough
+                # Pull toward MCU — try all 4 sides
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                mcu_w, mcu_h = fp_sizes.get(mcu_ref, (5.0, 5.0))
+                gap = 1.0
+                candidates = [
+                    (mcu_x + (mcu_w + w) / 2.0 + gap, mcu_y),   # right
+                    (mcu_x - (mcu_w + w) / 2.0 - gap, mcu_y),   # left
+                    (mcu_x, mcu_y + (mcu_h + h) / 2.0 + gap),   # below
+                    (mcu_x, mcu_y - (mcu_h + h) / 2.0 - gap),   # above
+                ]
+                pull_grid = _PlacementGrid(bounds)
+                for oref, (ox, oy, _or) in positions.items():
+                    if oref == ref:
+                        continue
+                    ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
+                    pull_grid.place(ox, oy, ow, oh)
+                # Try each side, pick closest free position
+                best_pos: tuple[float, float] | None = None
+                best_dist = dist
+                for tx, ty in candidates:
+                    fx, fy = pull_grid.find_free_pos(tx, ty, w, h)
+                    new_d = math.sqrt((fx - mcu_x) ** 2 + (fy - mcu_y) ** 2)
+                    if new_d < best_dist:
+                        best_dist = new_d
+                        best_pos = (fx, fy)
+                if best_pos is not None:
+                    positions[ref] = (best_pos[0], best_pos[1], rrot)
+
+    # -----------------------------------------------------------------------
+    # Phase 3.5: MCU peripheral pulling
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.5: Pulling MCU peripherals close to MCU")
     positions = _pull_mcu_peripherals(
         sc_list, positions, fp_sizes, bounds, fixed_refs,
     )
 
     # -----------------------------------------------------------------------
-    # Phase 3.5: Connector Edge Pinning (collision-aware)
+    # Phase 3.5.5: ADC channel placement
     # -----------------------------------------------------------------------
-    _log.info("Phase 3.5: Pinning connectors to nearest board edge")
-    edge_margin = 3.0  # mm from board edge
-
-    for fp in initial_pcb.footprints:
-        ref = fp.ref
-        if ref in fixed_refs or not ref.startswith("J"):
-            continue
-        if ref not in positions:
-            continue
-        cx, cy, rot = positions[ref]
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
-
-        # Find nearest edge
-        dist_left = cx - min_x
-        dist_right = max_x - cx
-        dist_top = cy - min_y
-        dist_bottom = max_y - cy
-        min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
-
-        if min_edge_dist <= 5.0:
-            # Already near edge — don't move
-            continue
-
-        # Compute target on nearest edge
-        target_x, target_y = cx, cy
-        if dist_left == min_edge_dist:
-            target_x = min_x + edge_margin + w / 2.0
-        elif dist_right == min_edge_dist:
-            target_x = max_x - edge_margin - w / 2.0
-        elif dist_top == min_edge_dist:
-            target_y = min_y + edge_margin + h / 2.0
-        else:
-            target_y = max_y - edge_margin - h / 2.0
-
-        # Check collision at new position
-        hw = w / 2.0 + 0.5
-        hh = h / 2.0 + 0.5
-        can_move = True
-        for other_ref, (ox, oy, _orot) in positions.items():
-            if other_ref == ref:
-                continue
-            ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
-            if (abs(target_x - ox) < hw + ow / 2.0 + 0.5
-                    and abs(target_y - oy) < hh + oh / 2.0 + 0.5):
-                can_move = False
-                break
-
-        if can_move:
-            positions[ref] = (target_x, target_y, rot)
+    _log.info("Phase 3.5.5: Placing ADC channel components near terminals")
+    positions = _place_adc_channels(
+        subcircuits, positions, fp_sizes, bounds, fixed_refs,
+    )
 
     # -----------------------------------------------------------------------
-    # Phase 3.6: Connector Orientation (mating face toward edge)
+    # Phase 3.6: Functional Connector Co-Location
     # -----------------------------------------------------------------------
-    _log.info("Phase 3.6: Orienting connectors toward board edge")
+    _log.info("Phase 3.6: Pinning connectors by functional classification")
+    from kicad_pipeline.optimization.functional_grouper import _ref_nets
+    from kicad_pipeline.pcb.constraints import build_signal_adjacency
+    conn_adj = build_signal_adjacency(requirements)
+    conn_ref_to_nets = _ref_nets(requirements)
+    positions = _pin_connectors_by_function(
+        subcircuits, positions, fp_sizes, bounds, fixed_refs,
+        conn_adj, conn_ref_to_nets, initial_pcb,
+    )
+
+    # -----------------------------------------------------------------------
+    # Phase 3.7: Connector Orientation (mating face toward edge)
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.7: Orienting connectors toward board edge")
     positions = _orient_connectors(
         positions, fp_sizes, bounds, fixed_refs, initial_pcb,
     )
 
     # -----------------------------------------------------------------------
-    # Phase 3.7: Collision resolution
+    # Phase 3.8: Collision resolution
     # -----------------------------------------------------------------------
-    _log.info("Phase 3.7: Resolving collisions")
+    _log.info("Phase 3.8: Resolving collisions")
     positions = _resolve_collisions(positions, fp_sizes, bounds, fixed_refs)
 
     # -----------------------------------------------------------------------
@@ -1614,6 +2024,19 @@ def optimize_placement_ee(
         positions = _apply_review_fixes(
             positions, review, fixed_refs, fp_sizes, bounds,
         )
+
+    # -----------------------------------------------------------------------
+    # Phase 4.5: Final collision resolution (post-review fixes may collide)
+    # -----------------------------------------------------------------------
+    _log.info("Phase 4.5: Final collision resolution")
+    remaining = len(_count_collisions(best_positions, fp_sizes))
+    if remaining > 0:
+        _log.info("  %d collisions found — resolving", remaining)
+        best_positions = _resolve_collisions(
+            best_positions, fp_sizes, bounds, fixed_refs,
+        )
+    else:
+        _log.info("  No collisions — skipping")
 
     # Build final PCB
     if best_review is None:
