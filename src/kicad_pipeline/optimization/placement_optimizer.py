@@ -2023,57 +2023,82 @@ def optimize_placement_ee(
     for ic_ref in ic_channels:
         ic_channels[ic_ref].sort(key=lambda x: x[0])
 
-    # Place each IC's channels in consistent strips
-    for ic_ref, channels in ic_channels.items():
+    # First pass: collect all ADC channel passive refs and IC refs
+    all_adc_passive_refs: set[str] = set()
+    adc_ic_refs: set[str] = set()
+    for _ic_ref, _ic_pin, passives in adc_channels:
+        all_adc_passive_refs.update(passives)
+        adc_ic_refs.add(_ic_ref)
+
+    # Build occupancy grid WITHOUT ADC channel passives so they can be freely placed
+    adc_grid = _PlacementGrid(bounds)
+    for oref, (ox, oy, _orot) in positions.items():
+        if oref in all_adc_passive_refs:
+            continue  # Don't block with current (scattered) positions
+        ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
+        adc_grid.place(ox, oy, ow, oh)
+
+    # Unified stacking: all channels in a single vertical stack centered on IC centroid
+    # Each strip extends LEFT from its IC (toward input terminals)
+    strip_dir = -1.0
+    _CHANNEL_SPACING_MM = 3.0  # 0603 passives ~1.6mm tall, 3mm for clear separation
+
+    # Flatten and sort all channels: by IC ref then pin
+    all_ch_list: list[tuple[str, str, list[str]]] = []
+    for ic_ref, ic_pin, passives in adc_channels:
+        all_ch_list.append((ic_ref, ic_pin, passives))
+    all_ch_list.sort(key=lambda c: (c[0], c[1]))
+
+    # Use centroid of ADC ICs for vertical centering
+    ic_ys = [positions[r][1] for r in adc_ic_refs if r in positions]
+    centroid_y = sum(ic_ys) / len(ic_ys) if ic_ys else bounds[1] + 20.0
+
+    total_ch_height = (len(all_ch_list) - 1) * _CHANNEL_SPACING_MM
+    ch_y_start = centroid_y - total_ch_height / 2.0
+
+    for ch_idx, (ic_ref, ic_pin, passives) in enumerate(all_ch_list):
         if ic_ref not in positions:
             continue
         ix, iy, _irot = positions[ic_ref]
         iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
 
-        for ch_idx, (ic_pin, passives) in enumerate(channels):
-            # Sort passives: R_top (100k), R_bot (12k), D_clamp, C_filter
-            r_refs = sorted([r for r in passives if r.startswith("R")])
-            d_refs = [r for r in passives if r.startswith("D")]
-            c_refs = [r for r in passives if r.startswith("C")]
+        r_refs = sorted([r for r in passives if r.startswith("R")])
+        d_refs = [r for r in passives if r.startswith("D")]
+        c_refs = [r for r in passives if r.startswith("C")]
 
-            # Determine which side of IC this pin is on
-            # For MSOP-10: pins 1-5 left, pins 6-10 right
-            pin_num = int(ic_pin) if ic_pin.isdigit() else 5
-            on_left = pin_num <= 5
+        ch_y = ch_y_start + ch_idx * _CHANNEL_SPACING_MM
+        strip_x = ix + strip_dir * (iw / 2.0 + 1.0)
 
-            # Channel strip: place passives in a row extending away from IC
-            strip_dir = -1.0 if on_left else 1.0  # -1 = extend left, +1 = extend right
-            # Vertical offset: stack channels with 3mm spacing
-            ch_y = iy - ih / 2.0 + (ch_idx + 0.5) * (ih / max(len(channels), 1))
+        # Place in order from IC outward: R_bot, D_clamp, C_filter, R_top
+        strip_order = []
+        if len(r_refs) >= 2:
+            strip_order.append(r_refs[1])  # R_bot
+        strip_order.extend(d_refs)
+        strip_order.extend(c_refs)
+        if len(r_refs) >= 1:
+            strip_order.append(r_refs[0])  # R_top
 
-            cursor_x = ix + strip_dir * (iw / 2.0 + 1.0)
+        for ref in strip_order:
+            if ref not in positions or ref in fixed_refs:
+                continue
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            target_x = strip_x + strip_dir * w / 2.0
+            target_y = ch_y
+            target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
+            target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
 
-            # Place in order: R_bot (nearest IC), D_clamp, C_filter, R_top (farthest)
-            strip_order = []
-            if len(r_refs) >= 2:
-                strip_order.append(r_refs[1])  # R_bot (12k, lower value = index 1 if sorted by ref)
-            strip_order.extend(d_refs)
-            strip_order.extend(c_refs)
-            if len(r_refs) >= 1:
-                strip_order.append(r_refs[0])  # R_top (100k)
+            _, _, rot = positions[ref]
+            px, py = adc_grid.find_free_pos(target_x, target_y, w, h,
+                                            max_radius=5.0)
+            positions[ref] = (px, py, rot)
+            adc_channel_refs.add(ref)
+            adc_grid.place(px, py, w, h)
+            strip_x = px + strip_dir * (w / 2.0 + 0.5)
 
-            for ref in strip_order:
-                if ref not in positions or ref in fixed_refs:
-                    continue
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                px = cursor_x + strip_dir * w / 2.0
-                py = ch_y
-                px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-                py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-                _, _, rot = positions[ref]
-                positions[ref] = (px, py, rot)
-                adc_channel_refs.add(ref)
-                cursor_x = px + strip_dir * (w / 2.0 + 0.5)
-
-        _log.debug(
-            "    3c2: %s — %d channels arranged",
-            ic_ref, len(channels),
-        )
+    _log.info(
+        "    3c2: %d channels across %d ICs",
+        len(adc_channels), len(adc_ic_refs),
+    )
 
     # 3d. Crystal-MCU proximity — within 10mm
     _log.info("  3d: Crystal-MCU proximity")
@@ -2137,12 +2162,21 @@ def optimize_placement_ee(
     positions = _resolve_collisions(
         positions, fp_sizes, bounds, relay_fixed, group_bboxes=group_bboxes,
     )
-    # Unconstrained final pass — no group constraints, correctness trumps cohesion
+    # Targeted final pass — only unprotect refs that are actually colliding
     remaining_collisions = _count_collisions(positions, fp_sizes)
     if remaining_collisions:
-        _log.info("  3g: %d remaining — unconstrained pass", len(remaining_collisions))
+        _log.info("  3g: %d remaining — targeted pass", len(remaining_collisions))
+        # Only unprotect subcircuit refs that are involved in collisions
+        colliding_refs = set()
+        for a, b in remaining_collisions:
+            colliding_refs.add(a)
+            colliding_refs.add(b)
+        # Keep protection on subcircuit refs NOT involved in collisions
+        targeted_fixed = fixed_refs | (subcircuit_fixed - colliding_refs) | {
+            r for r in positions if r.startswith("K")
+        }
         positions = _resolve_collisions(
-            positions, fp_sizes, bounds, fixed_refs,
+            positions, fp_sizes, bounds, targeted_fixed,
         )
 
     # ===================================================================
