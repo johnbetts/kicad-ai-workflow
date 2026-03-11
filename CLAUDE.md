@@ -155,10 +155,13 @@ Then **follow the visual inspection process** in `docs/visual_inspection_process
 1. Read the rendered PNG image(s)
 2. Inspect as a professional board designer/fabricator (use the checklist)
 3. List every issue found
-4. Fix the root cause in the placement engine
-5. Regenerate and repeat until no major issues remain
+4. **ASK THE HUMAN for feedback** using AskUserQuestion — NEVER skip this step
+5. If human says "worse" → revert last commit and try a different approach
+6. Incorporate human feedback (it overrides AI assessment), fix root causes
+7. Regenerate and go to step 1
 
-This is a mandatory loop — never declare placement done without visual inspection.
+**Human feedback is mandatory** — never declare placement done without human sign-off.
+Numerical scores can be misleading. A 0.97 score means nothing if the human says it looks wrong.
 
 **When working through a sub-agent** on a real project (e.g. nl-s-3c-complete), run the
 project's own build script instead:

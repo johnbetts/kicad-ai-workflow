@@ -3,22 +3,27 @@
 ## When to Use
 
 Every time a board is regenerated with visual placement, follow this process.
-Do NOT declare placement "done" until the loop exits cleanly.
+Do NOT declare placement "done" until the human says done.
 
 ## The Loop
 
 ```
 1. Regenerate board → render PNGs to output/
 2. Read the rendered image(s)
-3. Inspect as a professional board designer and fabricator (see checklist below)
-4. List every issue found
-5. Fix the root cause in the placement engine code
-6. Go to step 1
+3. AI inspects as a professional board designer/fabricator (see checklist below)
+4. List every issue found with severity
+5. STOP AND ASK THE HUMAN for feedback (see Step 5 below)
+6. Incorporate human feedback — prioritize their observations over AI's
+7. Fix the root cause(s) in the placement engine code
+8. Go to step 1
 ```
 
-Exit condition: The visual inspection finds no major issues, OR the user says stop.
+**Exit conditions (in priority order):**
+1. Human says "done" or "good enough" → stop iterating
+2. Human says "stop" → stop iterating
+3. NEVER exit on AI judgment alone — always get human sign-off
 
-## Step 3: Visual Inspection Checklist
+## Step 3: AI Visual Inspection
 
 Look at the image and tell me what you think is wrong, if you were a professional
 board designer and fabricator. Specifically check:
@@ -71,6 +76,26 @@ board designer and fabricator. Specifically check:
 - [ ] What would a senior EE reviewer say about this layout?
 - [ ] Does it look like a human designed it, or like an algorithm dumped parts on a board?
 
+## Step 5: Human Feedback (MANDATORY)
+
+After AI inspection, ALWAYS ask the human using AskUserQuestion:
+
+```
+Question: "How does this placement look? What issues do you see?"
+Options:
+  - "Looks good — done" → exit loop
+  - "Getting better — keep iterating" → fix AI-identified issues, go to step 1
+  - "Worse than before — revert and try different approach" → git revert, change strategy
+  - Other (free text) → human provides specific feedback to address
+```
+
+**Rules for human feedback:**
+- Human feedback OVERRIDES AI inspection — if the human says it's worse, it's worse
+- If the human says "worse than before", REVERT the last commit and try a different approach
+- If the human provides specific issues, fix THOSE issues first (not AI-identified ones)
+- Do NOT argue with the human about scores — numerical scores can be misleading
+- A board that scores 0.97 but looks wrong to a human IS wrong
+
 ## Fixing Issues
 
 When issues are found, fix the **root cause** in the placement engine, not symptoms:
@@ -85,6 +110,7 @@ When issues are found, fix the **root cause** in the placement engine, not sympt
 | Long ratsnest | Groups placed far from connected groups | `zone_partitioner.py` zone layout |
 | Decoupling caps far from IC | Level 3c tightening radius too large | `placement_optimizer.py` |
 | No signal flow | Zone order doesn't follow power flow | `zone_partitioner.py` |
+| Board worse than before | Last changes made things worse | `git revert`, try different approach |
 
 ## Regeneration Command
 
