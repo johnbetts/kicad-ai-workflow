@@ -2673,14 +2673,37 @@ def optimize_placement_ee(
         # Place MCU itself in the grid
         mcu_grid.place(mcu_x, mcu_y, mcu_w, mcu_h)
 
-        # --- Step 2: Register connectors in grid (don't move them) ---
-        # Connectors are already edge-pinned by Level 2 / phase 3f.
+        # --- Step 2: Place MCU connectors to the RIGHT of the MCU IC ---
+        # Large direct-IO connectors (J14 TFT, J15 GPIO, J16 SD, J2 USB)
+        # go right of the MCU. Each is placed using the occupancy grid to
+        # avoid mutual collisions between connectors.
         connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
-        for ref in sorted(connector_refs):
-            if ref in positions:
+        if mcu_zone_rect is not None:
+            # Target: right of MCU, stacked vertically with grid-aware placement
+            conn_x = mcu_x + mcu_w / 2.0 + 3.0  # 3mm gap right of MCU
+            conn_y = mcu_y - 10.0  # Start above MCU center
+            for ref in sorted(connector_refs):
+                if ref not in positions or ref in fixed_refs:
+                    continue
                 w, h = fp_sizes.get(ref, (2.0, 2.0))
-                mcu_grid.place(*positions[ref][:2], w, h)
+                tx = conn_x + w / 2.0
+                ty = conn_y + h / 2.0
+                tx = max(bounds[0] + 2.0, min(bounds[2] - w / 2.0 - 1.0, tx))
+                ty = max(bounds[1] + 2.0, min(bounds[3] - h / 2.0 - 1.0, ty))
+                # Use grid to find collision-free position near target
+                px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=30.0)
+                positions[ref] = (px, py, 0.0)
+                mcu_grid.place(px, py, w, h)
                 mcu_peripheral_refs.add(ref)
+                conn_y = py + h / 2.0 + 2.0
+                _log.info("    %s → right of MCU (%.1f, %.1f) [%.1fx%.1fmm]",
+                          ref, px, py, w, h)
+        else:
+            for ref in sorted(connector_refs):
+                if ref in positions:
+                    w, h = fp_sizes.get(ref, (2.0, 2.0))
+                    mcu_grid.place(*positions[ref][:2], w, h)
+                    mcu_peripheral_refs.add(ref)
 
         # Protect the MCU ref itself from 3g collision resolution
         mcu_peripheral_refs.add(mcu_ref_c3)
@@ -2772,12 +2795,181 @@ def optimize_placement_ee(
             len(mcu_peripheral_refs), mcu_ref_c3, mcu_x, mcu_y,
         )
 
+    # 3c4. Ethernet group organization — vertical signal-chain column
+    # Signal chain: MCU SPI → U6 (W5500) → Y1 (crystal) + load caps
+    #               → J13 (RJ45 Magjack) on bottom edge
+    #               U8 (PoE) beside J13 with its caps
+    _log.info("  3c4: Ethernet group organization")
+    ethernet_fixed: set[str] = set()
+
+    eth_group_refs: set[str] = set()
+    for feat in requirements.features:
+        if "ethernet" in feat.name.lower():
+            for comp in feat.components:
+                r = comp.ref if hasattr(comp, "ref") else comp
+                eth_group_refs.add(r)
+            break
+
+    if eth_group_refs:
+        eth_zone_rect: tuple[float, float, float, float] | None = None
+        for z in zones:
+            if z.name == "ethernet":
+                eth_zone_rect = z.rect
+                break
+
+        eth_ics = sorted([r for r in eth_group_refs
+                          if r.startswith("U") and r in positions])
+        eth_connectors = sorted([r for r in eth_group_refs
+                                 if r.startswith("J") and r in positions])
+
+        if eth_ics and eth_zone_rect is not None:
+            ezx1, ezy1, ezx2, ezy2 = eth_zone_rect
+            _ETH_STRIP_GAP = 0.5
+
+            # Build net → eth refs mapping
+            eth_net_refs: dict[str, set[str]] = {}
+            for net in requirements.nets:
+                e_refs = set()
+                for conn in net.connections:
+                    if conn.ref in eth_group_refs:
+                        e_refs.add(conn.ref)
+                if e_refs:
+                    eth_net_refs[net.name] = e_refs
+
+            # Build occupancy grid WITHOUT ethernet group
+            eth_grid = _PlacementGrid(bounds)
+            for oref, (ox, oy, _orot) in positions.items():
+                if oref in eth_group_refs:
+                    continue
+                ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
+                eth_grid.place(ox, oy, ow, oh)
+
+            # Identify the main Ethernet IC (W5500 = largest U in group)
+            eth_main_ic = eth_ics[0]  # U6 (W5500)
+            # Crystal (Y prefix)
+            crystal_refs = sorted([r for r in eth_group_refs
+                                   if r.startswith("Y") and r in positions])
+            # PoE module (second U if exists)
+            poe_ic = eth_ics[1] if len(eth_ics) > 1 else ""
+
+            # Decoupling caps for W5500 — small caps on power nets
+            eth_decoupling = sorted([
+                r for r in eth_group_refs
+                if r.startswith("C") and r in positions
+                and r not in crystal_refs
+                and fp_sizes.get(r, (0, 0))[0] < 5.0  # small caps only
+            ])
+
+            # Crystal load caps (typically 18pF, on crystal nets)
+            crystal_net_names: set[str] = set()
+            for net_name, erefs in eth_net_refs.items():
+                if any(r.startswith("Y") for r in erefs):
+                    crystal_net_names.add(net_name)
+            crystal_load_caps = sorted([
+                r for r in eth_group_refs
+                if r.startswith("C") and r in positions
+                and any(r in eth_net_refs.get(n, set())
+                        for n in crystal_net_names)
+            ])
+
+            # PoE caps (connected to PoE IC)
+            poe_net_names: set[str] = set()
+            for net_name, erefs in eth_net_refs.items():
+                if poe_ic and poe_ic in erefs:
+                    poe_net_names.add(net_name)
+            poe_caps = sorted([
+                r for r in eth_group_refs
+                if r.startswith("C") and r in positions
+                and r not in crystal_load_caps
+                and any(r in eth_net_refs.get(n, set())
+                        for n in poe_net_names)
+            ])
+
+            # Remaining caps (not crystal load, not PoE)
+            other_caps = sorted(
+                [r for r in eth_decoupling
+                 if r not in crystal_load_caps and r not in poe_caps],
+            )
+
+            # Layout: vertical column flowing top→bottom
+            # Column 1: U6 → Y1 + load caps → decoupling caps
+            # Column 2 (right): U8 (PoE) + PoE caps
+            # Bottom: J13 (RJ45) on board edge
+
+            # Anchor: center of ethernet zone
+            eth_anchor_x = (ezx1 + ezx2) / 2.0
+            eth_anchor_y = ezy1 + 3.0
+
+            placed_eth: set[str] = set()
+
+            def _place_eth_column(
+                refs: list[str], col_x: float, start_y: float,
+            ) -> float:
+                cy = start_y
+                for ref in refs:
+                    if (ref not in positions or ref in fixed_refs
+                            or ref in placed_eth or ref == ""):
+                        continue
+                    w, h = fp_sizes.get(ref, (2.0, 2.0))
+                    tx = col_x
+                    ty = cy + h / 2.0
+                    tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                    ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                    px, py = eth_grid.find_free_pos(tx, ty, w, h,
+                                                    max_radius=25.0)
+                    positions[ref] = (px, py, 0.0)
+                    eth_grid.place(px, py, w, h)
+                    ethernet_fixed.add(ref)
+                    placed_eth.add(ref)
+                    cy = py + h / 2.0 + _ETH_STRIP_GAP
+                return cy
+
+            # Column 1: W5500 IC → crystal + load caps → decoupling
+            col1 = ([eth_main_ic] + crystal_refs + crystal_load_caps
+                    + other_caps)
+            col1_bottom = _place_eth_column(col1, eth_anchor_x, eth_anchor_y)
+
+            # Column 2: PoE module + caps (branches right, like power fork)
+            if poe_ic:
+                poe_x = eth_anchor_x + 8.0  # offset right
+                _place_eth_column([poe_ic] + poe_caps, poe_x, eth_anchor_y)
+
+            # J13 (RJ45): place on bottom edge, facing OUTWARD (180° rotation)
+            for ref in eth_connectors:
+                if ref not in positions or ref in fixed_refs:
+                    continue
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                tx = eth_anchor_x
+                ty = bounds[3] - h / 2.0 - 1.0  # bottom edge
+                px, py = eth_grid.find_free_pos(tx, ty, w, h,
+                                                max_radius=25.0)
+                # 180° rotation so connector faces outward from bottom edge
+                positions[ref] = (px, py, 180.0)
+                ethernet_fixed.add(ref)
+                placed_eth.add(ref)
+
+            # Any remaining eth refs
+            remaining_eth = sorted(
+                eth_group_refs - placed_eth - fixed_refs,
+            )
+            if remaining_eth:
+                _place_eth_column(
+                    [r for r in remaining_eth if r in positions],
+                    eth_anchor_x, col1_bottom,
+                )
+
+            _log.info(
+                "    3c4: organized %d ethernet components in signal chain",
+                len(ethernet_fixed),
+            )
+
     # 3g. Collision resolution (group-constrained, then unconstrained final pass)
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
     # Protect relay sub-circuit, ADC channel, and MCU peripheral positions
     subcircuit_fixed = (relay_support_refs | adc_channel_refs
-                        | mcu_peripheral_refs | power_group_fixed)
+                        | mcu_peripheral_refs | power_group_fixed
+                        | ethernet_fixed)
     relay_fixed = fixed_refs | subcircuit_fixed | {
         r for r in positions if r.startswith("K")
     }
