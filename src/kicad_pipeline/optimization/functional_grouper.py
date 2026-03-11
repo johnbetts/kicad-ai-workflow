@@ -486,19 +486,8 @@ def _detect_buck_converters(
                         domain = output_domain
                         break
 
-        if input_domain is None:
-            # Fall back to highest-voltage net (including inductor output)
-            all_comp_nets = comp_nets | (
-                {inductor_output_net} if inductor_output_net else set()
-            )
-            for net_name in all_comp_nets:
-                v = _parse_voltage_from_net(net_name)
-                if v is not None and v > 0:
-                    d = _classify_voltage(v)
-                    if input_domain is None or (v > 0 and d == VoltageDomain.VIN_24V):
-                        input_domain = d
-
         # Infer domains from component description (e.g. "8-32V to 5V")
+        # Must run BEFORE generic net fallback to avoid picking output net as input
         desc_upper = (comp.description or "").upper()
         if input_domain is None or output_domain is None:
             # Match "X-YV to ZV" or "XV to ZV" patterns
@@ -515,6 +504,16 @@ def _detect_buck_converters(
                 if output_domain is None and vout_v > 0:
                     output_domain = _classify_voltage(vout_v)
                     domain = output_domain
+
+        if input_domain is None:
+            # Fall back to highest-voltage net (exclude output net to avoid confusion)
+            exclude = {inductor_output_net} if inductor_output_net else set()
+            for net_name in comp_nets - exclude:
+                v = _parse_voltage_from_net(net_name)
+                if v is not None and v > 0:
+                    d = _classify_voltage(v)
+                    if input_domain is None or (v > 0 and d == VoltageDomain.VIN_24V):
+                        input_domain = d
 
         for r in refs:
             claimed.add(r)
