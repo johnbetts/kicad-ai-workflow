@@ -531,10 +531,15 @@ class _PlacementGrid:
         target_y: float,
         w: float,
         h: float,
+        max_radius: float = 0.0,
     ) -> tuple[float, float]:
         """Find nearest free position to (target_x, target_y).
 
         Searches in expanding concentric rings around the target.
+
+        Args:
+            max_radius: If > 0, limit search to within this distance of target.
+                Returns clamped target if no free position found within radius.
         """
         margin = 2.0
         bmin_x = self.min_x + margin
@@ -551,8 +556,13 @@ class _PlacementGrid:
 
         # Spiral search — try 8 directions at increasing radii
         step = max(w, h) * 0.5 + self._margin
-        for ring in range(1, 40):
+        max_rings = 40
+        if max_radius > 0:
+            max_rings = min(max_rings, max(3, int(max_radius / step) + 1))
+        for ring in range(1, max_rings):
             r = step * ring
+            if max_radius > 0 and r > max_radius:
+                break
             for angle_idx in range(8 * ring):
                 angle = 2 * math.pi * angle_idx / (8 * ring)
                 cx = tx + r * math.cos(angle)
@@ -1007,35 +1017,22 @@ def _place_row_layout(
                 ow, oh = fp_sizes.get(ref, (2.0, 2.0))
                 row_grid.place(ox, oy, ow, oh)
 
+        # Force all relay anchors to the same Y (avg_y) in a tight row
         cursor_x = start_x
         for _, _, sc in anchor_positions:
             anchor_ref = sc.anchor_ref
             aw, ah = fp_sizes.get(anchor_ref, (5.0, 5.0))
             target_x = cursor_x + aw / 2.0
-            target_y = avg_y
             target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
-            target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+            target_y = max(min_y + 2.0, min(max_y - 2.0, avg_y))
 
-            fx, fy = row_grid.find_free_pos(target_x, target_y, aw, ah)
-            row_grid.place(fx, fy, aw, ah)
+            # Place relay directly at target — don't let spiral drift Y
             _, _, old_rot = positions.get(anchor_ref, (0, 0, 0))
-            positions[anchor_ref] = (fx, fy, old_rot)
+            positions[anchor_ref] = (target_x, target_y, old_rot)
+            row_grid.place(target_x, target_y, aw, ah)
 
-            # Place sub-components tight to anchor
-            members = [r for r in sc.refs if r != anchor_ref
-                       and r not in fixed_refs and r in positions]
-            for i, ref in enumerate(members):
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                # Place below anchor in a column
-                offset_y = ah / 2.0 + h / 2.0 + 1.0 + i * (h + 0.5)
-                mx = fx
-                my = fy + offset_y
-                mx = max(min_x + 2.0, min(max_x - 2.0, mx))
-                my = max(min_y + 2.0, min(max_y - 2.0, my))
-                fmx, fmy = row_grid.find_free_pos(mx, my, w, h)
-                row_grid.place(fmx, fmy, w, h)
-                _, _, mrot = positions[ref]
-                positions[ref] = (fmx, fmy, mrot)
+            # Support components are placed by Level 3b — skip here to
+            # avoid double-placement and congestion.
 
             cursor_x += aw + 1.0
 
@@ -1907,7 +1904,10 @@ def optimize_placement_ee(
     positions = _place_row_layout(sc_list, positions, fp_sizes, bounds, fixed_refs)
 
     # 3b. Relay driver subgroup tightening — Q+D+R within 8mm of K
+    # Place support directly below relay in tight grid. Protected during 3g
+    # collision resolution — overlapping components will be moved instead.
     _log.info("  3b: Relay driver subgroup tightening")
+    relay_support_refs: set[str] = set()  # protected from collision resolution
     for sc in sc_list:
         if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
             continue
@@ -1925,32 +1925,32 @@ def optimize_placement_ee(
             0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
         ))
 
-        target_y_base = ky + kh / 2.0 + 1.5
+        target_y_base = ky + kh / 2.0 + 1.0
         col = 0
         row_y = target_y_base
         row_max_h = 0.0
-        cols_per_row = 3
-
-        tight_grid = _PlacementGrid(bounds)
-        for oref, (ox, oy, _or) in positions.items():
-            if oref in support_members:
-                continue
-            ow, oh = fp_sizes.get(oref, (2.0, 2.0))
-            tight_grid.place(ox, oy, ow, oh)
+        cols_per_row = 2  # tight 2-column grid under each relay
 
         for ref in support_members:
             w, h = fp_sizes.get(ref, (2.0, 2.0))
-            tx = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
-            ty = row_y + h / 2.0
-            fx, fy = tight_grid.find_free_pos(tx, ty, w, h)
+            # Direct placement — no grid search. Force position.
+            px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
+            py = row_y + h / 2.0
+            # Clamp to board
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
             _, _, rot = positions[ref]
-            positions[ref] = (fx, fy, rot)
-            tight_grid.place(fx, fy, w, h)
+            _log.debug(
+                "    3b: %s → %s, placed at (%.1f, %.1f) under %s",
+                ref, anchor, px, py, anchor,
+            )
+            positions[ref] = (px, py, rot)
+            relay_support_refs.add(ref)
             row_max_h = max(row_max_h, h)
             col += 1
             if col >= cols_per_row:
                 col = 0
-                row_y += row_max_h + 1.0
+                row_y += row_max_h + 0.5
                 row_max_h = 0.0
 
     # 3c. Decoupling cap tightening — within 3-5mm of IC
@@ -1977,24 +1977,17 @@ def optimize_placement_ee(
             if edge_dist <= 4.0:
                 continue
 
+            # Force cap to within 2mm of IC edge — direct placement
             dx = ix - cx
             dy = iy - cy
             d = math.sqrt(dx * dx + dy * dy) or 1.0
-            target_dist = (iw + cw) / 2.0 + 2.0
+            target_dist = (iw + cw) / 2.0 + 1.5
             tx = ix - dx / d * target_dist
             ty = iy - dy / d * target_dist
-
-            cap_grid = _PlacementGrid(bounds)
-            for oref, (ox, oy, _or) in positions.items():
-                if oref == cap_ref:
-                    continue
-                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
-                cap_grid.place(ox, oy, ow, oh)
-
-            fx, fy = cap_grid.find_free_pos(tx, ty, cw, ch)
-            new_dist = math.sqrt((fx - ix) ** 2 + (fy - iy) ** 2)
-            if new_dist < dist:
-                positions[cap_ref] = (fx, fy, crot)
+            # Clamp to board
+            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+            positions[cap_ref] = (tx, ty, crot)
 
     # 3d. Crystal-MCU proximity — within 10mm
     _log.info("  3d: Crystal-MCU proximity")
@@ -2050,8 +2043,12 @@ def optimize_placement_ee(
     # 3g. Collision resolution (group-constrained, then unconstrained final pass)
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
+    # Protect relay sub-circuit positions — move other components around them
+    relay_fixed = fixed_refs | relay_support_refs | {
+        r for r in positions if r.startswith("K")
+    }
     positions = _resolve_collisions(
-        positions, fp_sizes, bounds, fixed_refs, group_bboxes=group_bboxes,
+        positions, fp_sizes, bounds, relay_fixed, group_bboxes=group_bboxes,
     )
     # Unconstrained final pass — no group constraints, correctness trumps cohesion
     remaining_collisions = _count_collisions(positions, fp_sizes)
@@ -2076,11 +2073,16 @@ def optimize_placement_ee(
         if clamped_x != rx or clamped_y != ry:
             positions[ref] = (clamped_x, clamped_y, rot)
 
-    # Post-clamp collision resolution
+    # Post-clamp collision resolution — protect relay sub-circuits
     post_clamp_collisions = len(_count_collisions(positions, fp_sizes))
     if post_clamp_collisions > 0:
         _log.info("  %d post-clamp collisions — resolving", post_clamp_collisions)
-        positions = _resolve_collisions(positions, fp_sizes, bounds, fixed_refs)
+        relay_fixed_clamp = fixed_refs | relay_support_refs | {
+            r for r in positions if r.startswith("K")
+        }
+        positions = _resolve_collisions(
+            positions, fp_sizes, bounds, relay_fixed_clamp,
+        )
 
     # EE Review loop (limited passes)
     _log.info("  Running EE review (max %d passes)", max_review_passes)
@@ -2113,8 +2115,8 @@ def optimize_placement_ee(
         if critical_major == 0:
             break
 
-        # Apply suggested fixes
-        relay_fixed_review = fixed_refs | {
+        # Apply suggested fixes — protect relay sub-circuit positions
+        relay_fixed_review = fixed_refs | relay_support_refs | {
             r for r in positions if r.startswith("K")
         }
         positions = _apply_review_fixes(
@@ -2122,13 +2124,17 @@ def optimize_placement_ee(
         )
 
     # Post-review collision resolution — review fixes can introduce overlaps
+    # Protect relay sub-circuit positions
     post_review_collisions = _count_collisions(best_positions, fp_sizes)
     if post_review_collisions:
         _log.info(
             "  %d post-review collisions — resolving", len(post_review_collisions),
         )
+        relay_fixed_post = fixed_refs | relay_support_refs | {
+            r for r in best_positions if r.startswith("K")
+        }
         best_positions = _resolve_collisions(
-            best_positions, fp_sizes, bounds, fixed_refs,
+            best_positions, fp_sizes, bounds, relay_fixed_post,
         )
 
     # Build final PCB

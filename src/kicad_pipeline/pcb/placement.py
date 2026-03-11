@@ -1277,16 +1277,13 @@ def _layout_group(
             layout[asn.passive_ref] = (px, py, rot)
 
     # ------------------------------------------------------------------
-    # Step 7: Resolve overlaps
+    # Step 7: Relay group post-processing — support below relay row
     # ------------------------------------------------------------------
-    _resolve_overlaps(layout, footprint_sizes)
-
-    # ------------------------------------------------------------------
-    # Step 7.5: Relay group post-processing — support below relay row
-    # ------------------------------------------------------------------
+    # Done BEFORE overlap resolution so support components start tight,
+    # and overlaps are resolved without breaking sub-circuit clustering.
     if is_relay_group:
         # Reorganize: K refs in a single top row, all support components
-        # (Q, D, R, C) placed directly below their associated relay.
+        # (Q, D, R, C) placed in a tight grid directly below their relay.
         relay_refs = sorted(
             [r for r in layout if _ref_prefix(r) == "K"],
             key=lambda r: layout[r][0],  # left to right
@@ -1297,13 +1294,14 @@ def _layout_group(
                 layout[r][1] + footprint_sizes.get(r, (18.0, 15.0))[1] / 2.0
                 for r in relay_refs
             )
-            support_y_start = relay_bottom + _PASSIVE_STANDOFF_MM
+            # Tight gap between relay bottom and support top
+            support_y_start = relay_bottom + 0.5
 
-            # Map each non-relay ref to its associated relay
+            # Build ownership map: each non-K ref → its owning relay
+            ownership: dict[str, str] = {}
             for ref in list(layout.keys()):
                 if _ref_prefix(ref) == "K":
                     continue
-                # Find which relay this ref is assigned to (via pad_conn)
                 owning_relay = ""
                 comp = next(
                     (c for c in requirements.components if c.ref == ref), None,
@@ -1335,30 +1333,41 @@ def _layout_group(
                                             break
                         if owning_relay:
                             break
+                ownership[ref] = owning_relay or relay_refs[0]
 
-                if owning_relay and owning_relay in layout:
-                    relay_x = layout[owning_relay][0]
-                else:
-                    # Fallback: place under first relay
-                    relay_x = layout[relay_refs[0]][0]
-
-                # Place below the relay, stacking support components
-                w, h = footprint_sizes.get(ref, (2.0, 2.0))
-                # Find next free Y slot under this relay
-                occupied_ys = [
-                    layout[r][1] + footprint_sizes.get(r, (2.0, 2.0))[1] / 2.0
-                    for r in layout
-                    if r != ref
-                    and _ref_prefix(r) != "K"
-                    and abs(layout[r][0] - relay_x) < 10.0
-                    and layout[r][1] > relay_bottom
-                ]
-                slot_y = (
-                    max(occupied_ys) + h / 2.0 + 1.5
-                    if occupied_ys
-                    else support_y_start + h / 2.0
+            # Place support components in a tight 2-column grid below each relay
+            relay_kw = footprint_sizes.get(relay_refs[0], (18.0, 16.0))[0]
+            for kr in relay_refs:
+                kx = layout[kr][0]
+                members = sorted(
+                    [r for r, owner in ownership.items() if owner == kr],
+                    key=lambda r: (
+                        0 if r.startswith("Q") else
+                        1 if r.startswith("D") else 2, r,
+                    ),
                 )
-                layout[ref] = (relay_x, slot_y, 0.0)
+                col = 0
+                row_y = support_y_start
+                row_max_h = 0.0
+                cols_per_row = 2  # tight 2-column grid under each relay
+                col_width = relay_kw / cols_per_row
+
+                for ref in members:
+                    w, h = footprint_sizes.get(ref, (2.0, 2.0))
+                    px = kx - relay_kw / 2.0 + (col + 0.5) * col_width
+                    py = row_y + h / 2.0
+                    layout[ref] = (px, py, 0.0)
+                    row_max_h = max(row_max_h, h)
+                    col += 1
+                    if col >= cols_per_row:
+                        col = 0
+                        row_y += row_max_h + 0.5
+                        row_max_h = 0.0
+
+    # ------------------------------------------------------------------
+    # Step 7.5: Resolve overlaps
+    # ------------------------------------------------------------------
+    _resolve_overlaps(layout, footprint_sizes)
 
     # ------------------------------------------------------------------
     # Step 8: Overflow row for unassigned passives
