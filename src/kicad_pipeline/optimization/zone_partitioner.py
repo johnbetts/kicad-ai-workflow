@@ -36,13 +36,14 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # Default zone layout proportions (fraction of board) — derived from
 # reference board analysis.  Format: (x_start, y_start, x_end, y_end)
 # as fractions of board width/height.
+# CRITICAL: zones must NOT overlap — each zone occupies a distinct region.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
-    "power": (0.30, 0.00, 0.60, 0.45),
-    "relay": (0.55, 0.00, 1.00, 0.55),
-    "analog": (0.00, 0.00, 0.40, 0.55),
-    "mcu": (0.55, 0.45, 1.00, 1.00),
-    "ethernet": (0.25, 0.50, 0.75, 1.00),
-    "display": (0.00, 0.55, 0.25, 1.00),
+    "power": (0.00, 0.00, 0.22, 0.55),      # top-left: power input & regulation
+    "analog": (0.22, 0.00, 0.55, 0.55),      # top-center: analog inputs (wider zone)
+    "relay": (0.55, 0.00, 1.00, 0.55),       # top-right: relay bank (45% width for 1x4 row)
+    "mcu": (0.00, 0.55, 0.40, 1.00),         # bottom-left: MCU & peripherals
+    "ethernet": (0.40, 0.55, 0.70, 1.00),    # bottom-center: ethernet & PoE
+    "display": (0.70, 0.55, 1.00, 1.00),     # bottom-right: display
 }
 
 # Minimum inter-zone gap (mm)

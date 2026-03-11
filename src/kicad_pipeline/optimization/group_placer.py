@@ -192,8 +192,17 @@ def place_groups(
         for gname in bz.groups:
             zone_map[gname] = bz
 
-    # Sort groups: largest (most components) first for priority placement
-    sorted_groups = sorted(groups, key=lambda g: len(g.components), reverse=True)
+    # Sort groups by zone center position (top-to-bottom, left-to-right).
+    # This ensures groups are placed in spatial order, preventing zone swapping
+    # where a group intended for zone A ends up in zone B because B was free first.
+    def _zone_sort_key(g: FeatureBlock) -> tuple[float, float, int]:
+        bz = zone_map.get(g.name)
+        if bz is not None:
+            zx1, zy1, zx2, zy2 = bz.rect
+            return (zy1, zx1, -len(g.components))
+        return (9999.0, 9999.0, -len(g.components))
+
+    sorted_groups = sorted(groups, key=_zone_sort_key)
 
     for group in sorted_groups:
         layout = internal_layouts.get(group.name, {})
@@ -208,6 +217,37 @@ def place_groups(
         zone: BoardZone | None = zone_map.get(group.name)
         if zone is not None:
             zx1, zy1, zx2, zy2 = zone.rect
+            zone_w = zx2 - zx1
+            zone_h = zy2 - zy1
+
+            # If group is larger than its zone, compress internal layout to fit
+            margin = _ZONE_INSET_MM * 2
+            avail_w = zone_w - margin
+            avail_h = zone_h - margin
+            if avail_w > 5.0 and avail_h > 5.0 and (gw > avail_w or gh > avail_h):
+                scale_x = min(1.0, avail_w / gw) if gw > avail_w else 1.0
+                scale_y = min(1.0, avail_h / gh) if gh > avail_h else 1.0
+                # Don't compress more than 40% per axis
+                scale_x = max(scale_x, 0.6)
+                scale_y = max(scale_y, 0.6)
+                # Compress layout around its center (asymmetric — preserves
+                # row layouts when zone is wide but short)
+                center_x = gox + gw / 2.0
+                center_y = goy + gh / 2.0
+                compressed: dict[str, tuple[float, float, float]] = {}
+                for ref, (rx, ry, rot) in layout.items():
+                    new_rx = center_x + (rx - center_x) * scale_x
+                    new_ry = center_y + (ry - center_y) * scale_y
+                    compressed[ref] = (new_rx, new_ry, rot)
+                scale = min(scale_x, scale_y)  # for logging
+                layout = compressed
+                gw, gh = _group_dimensions(layout, fp_sizes)
+                gox, goy = _group_internal_origin(layout, fp_sizes)
+                _log.info(
+                    "  Compressed group '%s' by %.0f%% to fit zone (%.0fx%.0fmm)",
+                    group.name, (1 - scale) * 100, gw, gh,
+                )
+
             # Target center of zone
             target_x = (zx1 + zx2) / 2.0
             target_y = (zy1 + zy2) / 2.0
@@ -218,7 +258,10 @@ def place_groups(
             target_y = (by1 + by2) / 2.0
             zone_name = "unassigned"
 
-        # Find collision-free position for the group bounding box
+        # Find collision-free position, always targeting zone center.
+        # The global grid search starts from zone center and spirals outward,
+        # which keeps the group as close to its zone as possible even if the
+        # exact zone rect is occupied.
         cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
         grid.place(cx, cy, gw, gh)
 
@@ -305,8 +348,8 @@ def pin_connectors_to_edge(
             dist_bottom = by2 - ry
             min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
-            # Only pin if not already near edge
-            if min_dist <= 8.0:
+            # Only skip if already right at the edge
+            if min_dist <= 3.0:
                 continue
 
             new_x, new_y = rx, ry

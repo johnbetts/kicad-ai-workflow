@@ -131,6 +131,47 @@ data/   (jlcpcb_basic_parts.json, rotation_offsets.json, drill_chart.json, e_ser
 docs/   (PLAN.md, architecture.md, kicad_format_reference.md, ai_decisions.md)
 ```
 
+## Board Regeneration & Visual Placement Review
+
+When asked to "regenerate the board" or "run the visual placement test", do this immediately:
+
+```bash
+# Run from the pipeline project root (kicad-ai-workflow)
+pytest tests/integration/test_placement_visual.py -x --tb=short -s 2>&1 | tail -40
+```
+
+This builds the nl-s-3c-complete board from requirements, runs the full 3-level EE placement
+optimizer, renders group-colored and domain-colored PNGs, and checks placement quality scores.
+
+**Output images** are written to a pytest tmp directory — the test output will show the path.
+Copy them to `output/` for easy viewing:
+```bash
+# After test passes, copy renders to output/ for review
+cp /tmp/pytest-*/placement*/placement.png output/placement_groups.png
+cp /tmp/pytest-*/placement*/placement_domains.png output/placement_domains.png
+```
+
+Then **follow the visual inspection process** in `docs/visual_inspection_process.md`:
+1. Read the rendered PNG image(s)
+2. Inspect as a professional board designer/fabricator (use the checklist)
+3. List every issue found
+4. Fix the root cause in the placement engine
+5. Regenerate and repeat until no major issues remain
+
+This is a mandatory loop — never declare placement done without visual inspection.
+
+**When working through a sub-agent** on a real project (e.g. nl-s-3c-complete), run the
+project's own build script instead:
+```bash
+cd /Users/johnbetts/Dropbox/Source/nl-s-3c-complete
+python build_with_pipeline.py
+```
+
+The integration test (`test_placement_visual.py`) depends on:
+- `nl-s-3c-complete/build_with_pipeline.py` existing at the path in the test
+- `matplotlib` being installed
+- The test is `scope="module"` so the board is built once and shared across all test classes
+
 ## Testing
 
 pytest only. Every module gets a test file.
@@ -233,6 +274,28 @@ Before any commit to main:
 ```bash
 pytest tests/ -x && mypy src/ --strict && ruff check src/ tests/
 ```
+
+## Issue Triage Protocol
+
+When a bug surfaces:
+
+1. **Classify**: CORE (pipeline code bug) or DEPLOYMENT (project config/user error)?
+
+2. **If CORE**:
+   - Add entry to `docs/known_issues.md`
+   - Write regression test in `tests/regression/test_known_issues.py`
+   - Fix the pipeline code
+   - Issue RERUN to affected board agents
+
+3. **If DEPLOYMENT**:
+   - Update that project's design docs or requirements
+   - Do NOT change pipeline code
+   - Document in the project's `design/design_decisions.md`
+
+4. **Rules**:
+   - Every core fix MUST have a regression test
+   - Never let the same bug surface twice without a test
+   - Never commit a fix without a test that would have caught it
 
 ## Decision Log
 

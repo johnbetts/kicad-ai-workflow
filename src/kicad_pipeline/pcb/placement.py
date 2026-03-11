@@ -1150,7 +1150,7 @@ def _layout_group(
 
     # Place primaries in rows, wrapping to 2D grid when row exceeds threshold
     # Relay groups: no wrapping (single row), support components go below
-    max_row_width = 999.0 if is_relay_group else 120.0
+    max_row_width = 80.0 if is_relay_group else 35.0
     cursor_x = _GROUP_MARGIN_MM
     anchor_y = _GROUP_MARGIN_MM
     max_anchor_h = 0.0
