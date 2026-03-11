@@ -9,6 +9,7 @@ This test serves as both a regression gate and a visual review artifact.
 
 from __future__ import annotations
 
+import math
 import sys
 import types
 
@@ -81,10 +82,15 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
     """Build PCB and run EE optimizer (cached for all tests in module)."""
     from kicad_pipeline.optimization.functional_grouper import (
         classify_voltage_domains,
+        compute_power_flow_topology,
         detect_cross_domain_affinities,
         detect_subcircuits,
     )
-    from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
+    from kicad_pipeline.optimization.placement_optimizer import (
+        _count_collisions,
+        _fp_courtyard_sizes,
+        optimize_placement_ee,
+    )
     from kicad_pipeline.optimization.scoring import compute_fast_placement_score
     from kicad_pipeline.pcb.builder import build_pcb
     from kicad_pipeline.visualization.placement_render import render_placement
@@ -102,6 +108,15 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
     subcircuits = detect_subcircuits(requirements)
     domain_map = classify_voltage_domains(requirements)
     affinities = detect_cross_domain_affinities(requirements, domain_map)
+    topology = compute_power_flow_topology(subcircuits)
+
+    # Count post-optimization collisions
+    fp_sizes = _fp_courtyard_sizes(pcb_opt)
+    positions = {
+        fp.ref: (fp.position.x, fp.position.y, fp.rotation)
+        for fp in pcb_opt.footprints
+    }
+    post_collisions = _count_collisions(positions, fp_sizes)
 
     # Render to temp directory
     out_dir = tmp_path_factory.mktemp("placement")
@@ -119,6 +134,8 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
         "subcircuits": subcircuits,
         "domain_map": domain_map,
         "affinities": affinities,
+        "topology": topology,
+        "post_collisions": post_collisions,
         "render_path": render_path,
     }
 
@@ -181,6 +198,14 @@ class TestPlacementQuality:
             f"{len(critical)} critical violations (max 5)"
         )
 
+    def test_no_post_optimization_collisions(self, placement_result: dict) -> None:
+        """Phase 4.5 should resolve all collisions after review fixes."""
+        post_collisions = placement_result["post_collisions"]
+        assert len(post_collisions) == 0, (
+            f"{len(post_collisions)} collisions remain after optimization: "
+            f"{post_collisions[:5]}"
+        )
+
 
 class TestSubcircuitDetection:
     """Verify subcircuit detection works on a real board."""
@@ -224,6 +249,118 @@ class TestSubcircuitDetection:
     def test_cross_domain_affinities_detected(self, placement_result: dict) -> None:
         affinities = placement_result["affinities"]
         assert len(affinities) >= 1, "Expected cross-domain affinities"
+
+
+class TestTopologyOrdering:
+    """Verify v3 power flow topology and zone ordering."""
+
+    def test_topology_has_domain_order(self, placement_result: dict) -> None:
+        """Power flow topology should produce a non-empty domain order."""
+        topology = placement_result["topology"]
+        assert len(topology.domain_order) >= 2, (
+            f"Expected 2+ domains in topology, got {len(topology.domain_order)}"
+        )
+
+    def test_topology_highest_voltage_first(self, placement_result: dict) -> None:
+        """First domain in topology should have higher voltage than last."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            _voltage_magnitude,
+        )
+        topology = placement_result["topology"]
+        first_v = _voltage_magnitude(topology.domain_order[0])
+        last_v = _voltage_magnitude(topology.domain_order[-1])
+        assert first_v >= last_v, (
+            f"First domain {topology.domain_order[0].value} ({first_v}V) should have "
+            f">= voltage than last {topology.domain_order[-1].value} ({last_v}V)"
+        )
+
+    def test_topology_regulators_detected(self, placement_result: dict) -> None:
+        """Board with buck/LDO should have regulator boundaries."""
+        topology = placement_result["topology"]
+        assert len(topology.regulator_boundaries) >= 1, (
+            "Expected at least 1 regulator boundary in topology"
+        )
+
+    def test_high_voltage_components_separated_from_low(
+        self, placement_result: dict,
+    ) -> None:
+        """24V components should be spatially separated from 3.3V components."""
+        from kicad_pipeline.optimization.functional_grouper import VoltageDomain
+
+        pcb = placement_result["pcb"]
+        domain_map = placement_result["domain_map"]
+
+        positions = {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+
+        # Compute centroids for 24V and 3.3V domains
+        v24_positions = [
+            positions[r] for r in domain_map
+            if domain_map[r] == VoltageDomain.VIN_24V and r in positions
+        ]
+        v33_positions = [
+            positions[r] for r in domain_map
+            if domain_map[r] == VoltageDomain.DIGITAL_3V3 and r in positions
+        ]
+
+        if not v24_positions or not v33_positions:
+            pytest.skip("Need both 24V and 3.3V domains")
+
+        c24_x = sum(p[0] for p in v24_positions) / len(v24_positions)
+        c24_y = sum(p[1] for p in v24_positions) / len(v24_positions)
+        c33_x = sum(p[0] for p in v33_positions) / len(v33_positions)
+        c33_y = sum(p[1] for p in v33_positions) / len(v33_positions)
+
+        separation = math.sqrt((c24_x - c33_x) ** 2 + (c24_y - c33_y) ** 2)
+        assert separation >= 15.0, (
+            f"24V and 3.3V domain centroids only {separation:.1f}mm apart "
+            "(expected 15mm+ separation)"
+        )
+
+
+class TestRelayTerminalEdge:
+    """Verify relay terminal connectors are on the same edge as the relay bank."""
+
+    def test_relay_terminal_connectors_near_relays(
+        self, placement_result: dict,
+    ) -> None:
+        """Connectors in relay subcircuits should be near the relay bank."""
+        from kicad_pipeline.optimization.functional_grouper import SubCircuitType
+
+        pcb = placement_result["pcb"]
+        subcircuits = placement_result["subcircuits"]
+        positions = {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+
+        # Find relay anchors
+        relay_anchors = []
+        for sc in subcircuits:
+            if sc.circuit_type == SubCircuitType.RELAY_DRIVER and sc.anchor_ref in positions:
+                relay_anchors.append(positions[sc.anchor_ref])
+
+        if not relay_anchors:
+            pytest.skip("No relay drivers in layout")
+
+        # Relay bank centroid
+        relay_cx = sum(p[0] for p in relay_anchors) / len(relay_anchors)
+        relay_cy = sum(p[1] for p in relay_anchors) / len(relay_anchors)
+
+        # Find connectors in any relay subcircuit
+        relay_connectors = []
+        for sc in subcircuits:
+            if sc.circuit_type == SubCircuitType.RELAY_DRIVER:
+                for ref in sc.refs:
+                    if ref.startswith("J") and ref in positions:
+                        relay_connectors.append((ref, positions[ref]))
+
+        if not relay_connectors:
+            pytest.skip("No connectors in relay subcircuits")
+
+        # Each relay connector should be within 30mm of relay centroid
+        for ref, (cx, cy) in relay_connectors:
+            dist = math.sqrt((cx - relay_cx) ** 2 + (cy - relay_cy) ** 2)
+            assert dist <= 30.0, (
+                f"Relay connector {ref} is {dist:.1f}mm from relay bank centroid "
+                "(max 30mm)"
+            )
 
 
 class TestRenderOutput:

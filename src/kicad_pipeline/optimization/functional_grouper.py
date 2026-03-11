@@ -413,7 +413,8 @@ def _detect_buck_converters(
         comp_nets = ref_to_nets.get(comp.ref, set())
         all_nets: set[str] = set()
 
-        # Find inductor on SW net
+        # Find inductor on SW net and track inductor output net
+        inductor_output_net: str | None = None
         for pin in comp.pins:
             if not pin.net:
                 continue
@@ -422,6 +423,13 @@ def _detect_buck_converters(
                     if _ref_prefix(r) == "L" and r not in claimed:
                         refs.append(r)
                         all_nets.add(pin.net)
+                        # Find inductor's other net (output rail)
+                        ind_comp = comp_map.get(r)
+                        if ind_comp:
+                            for ip in ind_comp.pins:
+                                if ip.net and ip.net != pin.net:
+                                    inductor_output_net = ip.net
+                                    all_nets.add(ip.net)
                         break
 
         # Find capacitors on VIN/VOUT nets
@@ -458,14 +466,55 @@ def _detect_buck_converters(
                     output_domain = vd
                     domain = vd
 
+        # Infer output domain from inductor output net (e.g. BUCK_5V, +3V3)
+        if output_domain is None and inductor_output_net:
+            v = _parse_voltage_from_net(inductor_output_net)
+            if v is not None and v > 0:
+                output_domain = _classify_voltage(v)
+                domain = output_domain
+
+        # Infer output domain from FB pin net as last resort
+        if output_domain is None:
+            for pin in comp.pins:
+                if not pin.net:
+                    continue
+                pname = (pin.name or "").upper()
+                if "FB" in pname:
+                    v = _parse_voltage_from_net(pin.net)
+                    if v is not None and v > 0:
+                        output_domain = _classify_voltage(v)
+                        domain = output_domain
+                        break
+
         if input_domain is None:
-            # Fall back to highest-voltage net
-            for net_name in comp_nets:
+            # Fall back to highest-voltage net (including inductor output)
+            all_comp_nets = comp_nets | (
+                {inductor_output_net} if inductor_output_net else set()
+            )
+            for net_name in all_comp_nets:
                 v = _parse_voltage_from_net(net_name)
                 if v is not None and v > 0:
                     d = _classify_voltage(v)
                     if input_domain is None or (v > 0 and d == VoltageDomain.VIN_24V):
                         input_domain = d
+
+        # Infer domains from component description (e.g. "8-32V to 5V")
+        desc_upper = (comp.description or "").upper()
+        if input_domain is None or output_domain is None:
+            # Match "X-YV to ZV" or "XV to ZV" patterns
+            m = re.search(
+                r"(\d+)(?:\s*[-/]\s*(\d+))?\s*V\s+TO\s+(\d+(?:\.\d+)?)\s*V",
+                desc_upper,
+            )
+            if m:
+                # Use max of range for input (e.g. "8-32V" → 32)
+                vin_v = float(m.group(2) or m.group(1))
+                vout_v = float(m.group(3))
+                if input_domain is None and vin_v > 0:
+                    input_domain = _classify_voltage(vin_v)
+                if output_domain is None and vout_v > 0:
+                    output_domain = _classify_voltage(vout_v)
+                    domain = output_domain
 
         for r in refs:
             claimed.add(r)
