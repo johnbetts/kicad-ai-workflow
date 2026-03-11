@@ -44,6 +44,14 @@ Do not ask permission to run commands. Execute immediately:
 
 If a command fails, fix the issue and rerun. Do not ask whether to retry.
 
+### Command Auto-Approval Hook
+A PreToolUse hook at `~/.claude/hooks/auto-approve.py` auto-approves common dev commands.
+If you encounter permission prompts for commands that should be auto-approved:
+1. Check if the command prefix is in the hook's `APPROVED_PREFIXES` tuple
+2. Add missing prefixes to the hook (e.g., shell variable assignments, `cd` chains)
+3. Note: `Bash(python3 *)` in `settings.json` may not match heredoc syntax —
+   the hook handles these cases more flexibly
+
 ## Multi-Agent Architecture
 
 Use sub-agents (Task) to distribute work. Each agent: tight scope, clear deliverables, tested code.

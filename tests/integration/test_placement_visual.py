@@ -136,6 +136,21 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
         score=score, domain_map=domain_map,
     )
 
+    # Write pipeline-generated PCB file to temp dir for review
+    from kicad_pipeline.pcb.builder import write_pcb
+    pcb_path = out_dir / "placement.kicad_pcb"
+    write_pcb(pcb_opt, pcb_path)
+
+    # Auto-copy outputs to output/ for easy review
+    import shutil
+    from pathlib import Path
+    project_root = Path(__file__).resolve().parent.parent.parent
+    output_dir = project_root / "output"
+    output_dir.mkdir(exist_ok=True)
+    shutil.copy2(out_dir / "placement.png", output_dir / "placement_groups.png")
+    shutil.copy2(out_dir / "placement_domains.png", output_dir / "placement_domains.png")
+    shutil.copy2(pcb_path, output_dir / "nl-s-3c-placement.kicad_pcb")
+
     return {
         "pcb": pcb_opt,
         "requirements": requirements,

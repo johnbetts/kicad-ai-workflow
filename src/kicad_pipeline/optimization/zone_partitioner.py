@@ -25,6 +25,7 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "input_connectors": ("24v", "input connector", "harness"),
     "power": ("power", "supply", "regulator", "buck", "ldo"),
     "relay": ("relay", "output", "switching"),
     "analog": ("analog", "adc", "input", "sensor"),
@@ -37,6 +38,7 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # reference board analysis.  Format: (x_start, y_start, x_end, y_end)
 # as fractions of board width/height.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
+    "input_connectors": (0.25, 0.00, 0.75, 0.10),  # Top edge (input connectors)
     "power": (0.30, 0.00, 0.60, 0.45),
     "relay": (0.55, 0.00, 1.00, 0.55),
     "analog": (0.00, 0.00, 0.40, 0.55),

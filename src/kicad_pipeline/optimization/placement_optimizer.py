@@ -1989,6 +1989,227 @@ def optimize_placement_ee(
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
             positions[cap_ref] = (tx, ty, crot)
 
+    # 3c1. Power group organization — vertical signal-chain columns
+    # Two parallel vertical columns (one per buck converter), flowing top→bottom:
+    #   Column 1 (Buck #1): VIN → D5(TVS) → C1(in) → U1 → C2(BST) → L1 → R1/R2(FB) → C3(out)
+    #   Bridge: D1(OR) → C4(bulk) → D2/D3(OR) (connects buck1 output to +5V rail)
+    #   Column 2 (Buck #2): C5(in) → U2 → C17(BST) → L2 → C6/C7(out)
+    #   Tail: R3/D4(LED), L3-L6/C27/C35 (ferrites/misc)
+    _log.info("  3c1: Power group organization")
+    power_group_fixed: set[str] = set()
+
+    # Find power FeatureBlock
+    power_group_refs: set[str] = set()
+    for feat in requirements.features:
+        feat_lower = feat.name.lower()
+        if "power" in feat_lower or "supply" in feat_lower:
+            for comp in feat.components:
+                r = comp.ref if hasattr(comp, "ref") else comp
+                power_group_refs.add(r)
+            break
+
+    if power_group_refs:
+        # Find power zone
+        power_zone_rect: tuple[float, float, float, float] | None = None
+        for z in zones:
+            if z.name == "power":
+                power_zone_rect = z.rect
+                break
+
+        # Classify power components by net connectivity
+        net_to_pwr_refs: dict[str, set[str]] = {}
+        for net in requirements.nets:
+            pwr_in_net = set()
+            for conn in net.connections:
+                if conn.ref in power_group_refs:
+                    pwr_in_net.add(conn.ref)
+            if pwr_in_net:
+                net_to_pwr_refs[net.name] = pwr_in_net
+
+        power_ics = sorted(
+            [r for r in power_group_refs
+             if r.startswith("U") and r in positions],
+        )
+        power_connectors = sorted(
+            [r for r in power_group_refs
+             if r.startswith("J") and r in positions],
+        )
+
+        if power_ics and power_zone_rect is not None:
+            zx1, zy1, zx2, zy2 = power_zone_rect
+
+            _STRIP_GAP = 0.5   # vertical gap between components in a column
+            _COL_SPACING = 5.0  # horizontal gap between columns
+
+            placed_in_col: set[str] = set()  # prevent double-placement
+
+            # Define the two buck converter signal chains (top→bottom order)
+            buck1_ic = power_ics[0] if power_ics else ""
+            buck2_ic = power_ics[1] if len(power_ics) > 1 else ""
+
+            # Ferrite detection
+            ferrite_refs = sorted(
+                [r for r in power_group_refs
+                 if r.startswith("L") and r in positions
+                 and "ferrite" in (
+                     next((fp.value for fp in initial_pcb.footprints
+                           if fp.ref == r), "")
+                 ).lower()],
+            )
+
+            # Buck #1 column: VIN input → 5V output
+            # Signal order: D5(TVS) → C1(input cap) → U1(buck IC) → C2(BST cap)
+            #               → L1(inductor) → R1(FB top) → R2(FB bot) → C3(output cap)
+            vin_passives = sorted(
+                net_to_pwr_refs.get("VIN", set())
+                - set(power_ics) - set(power_connectors),
+            )
+            bst1_passives = sorted(
+                (net_to_pwr_refs.get("BST", set())
+                 | net_to_pwr_refs.get("SW", set()))
+                - {buck1_ic} - set(power_connectors),
+            )
+            # Non-ferrite inductors on SW net (L1)
+            l1_refs = sorted(
+                [r for r in power_group_refs
+                 if r.startswith("L") and r in positions
+                 and r not in ferrite_refs
+                 and r in net_to_pwr_refs.get("SW", set())],
+            )
+            fb_refs = sorted(
+                net_to_pwr_refs.get("FB", set())
+                - {buck1_ic} - set(power_connectors),
+            )
+            buck5v_caps = sorted(
+                net_to_pwr_refs.get("BUCK_5V", set())
+                - {buck1_ic} - set(power_connectors)
+                - set(fb_refs) - set(l1_refs),
+            )
+
+            buck1_column: list[str] = (
+                vin_passives       # D5, C1 (VIN side)
+                + [buck1_ic]       # U1
+                + bst1_passives    # C2 (BST/SW)
+                + l1_refs          # L1 (inductor)
+                + fb_refs          # R1, R2 (feedback divider)
+                + buck5v_caps      # C3 (output cap)
+            )
+
+            # Bridge: OR'ing diodes + 5V bulk cap
+            or_diode_refs = sorted(
+                net_to_pwr_refs.get("BUCK_5V", set())
+                & {r for r in power_group_refs if r.startswith("D")}
+                - set(vin_passives),
+            )
+            v5_rail_refs = sorted(
+                (net_to_pwr_refs.get("+5V", set()) & power_group_refs)
+                - set(power_ics) - set(power_connectors)
+                - set(or_diode_refs),
+            )
+
+            bridge_column: list[str] = or_diode_refs + v5_rail_refs
+
+            # Buck #2 column: +5V input → 3.3V output
+            buck2_in_caps = sorted(
+                net_to_pwr_refs.get("+5V", set())
+                & {r for r in power_group_refs if r.startswith("C")}
+                - set(v5_rail_refs),
+            )
+            bst2_passives = sorted(
+                (net_to_pwr_refs.get("BST2", set())
+                 | net_to_pwr_refs.get("SW2", set()))
+                - {buck2_ic} - set(power_connectors),
+            )
+            l2_refs = sorted(
+                [r for r in power_group_refs
+                 if r.startswith("L") and r in positions
+                 and r not in ferrite_refs
+                 and r in net_to_pwr_refs.get("SW2", set())],
+            )
+            v33_caps = sorted(
+                net_to_pwr_refs.get("+3V3", set())
+                & power_group_refs
+                - {buck2_ic} - set(power_connectors),
+            )
+
+            buck2_column: list[str] = (
+                buck2_in_caps      # C5 (5V input cap)
+                + [buck2_ic]       # U2
+                + bst2_passives    # C17 (BST2/SW2)
+                + l2_refs          # L2 (inductor)
+                + v33_caps         # C6, C7 (output caps)
+            )
+
+            # Tail: LED, ferrites, remaining
+            led_refs = sorted(
+                (net_to_pwr_refs.get("LED_A", set()) & power_group_refs)
+                - set(power_connectors),
+            )
+
+            all_classified = (
+                set(buck1_column) | set(bridge_column) | set(buck2_column)
+                | set(led_refs) | set(ferrite_refs) | set(power_connectors)
+            )
+            remaining_refs = sorted(
+                power_group_refs - all_classified - {""} - fixed_refs,
+            )
+            tail_column: list[str] = led_refs + ferrite_refs + remaining_refs
+
+            # Place columns vertically, like ADC channel strips
+            # All columns share the same X anchor; each column starts below
+            # the previous column's last component.
+            anchor_x = zx1 + 5.0
+            anchor_y = zy1 + 3.0
+
+            def _place_column(
+                refs: list[str],
+                col_x: float,
+                start_y: float,
+            ) -> float:
+                """Place refs in a vertical column. Returns bottom Y."""
+                cy = start_y
+                for ref in refs:
+                    if (ref not in positions or ref in fixed_refs
+                            or ref in placed_in_col or ref == ""):
+                        continue
+                    w, h = fp_sizes.get(ref, (2.0, 2.0))
+                    tx = col_x
+                    ty = cy + h / 2.0
+                    tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                    ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                    positions[ref] = (tx, ty, 0.0)
+                    power_group_fixed.add(ref)
+                    placed_in_col.add(ref)
+                    cy = ty + h / 2.0 + _STRIP_GAP
+                return cy
+
+            # Register connectors (don't move them)
+            for ref in power_connectors:
+                power_group_fixed.add(ref)
+
+            # Column 1: Buck #1 chain (VIN → 5V)
+            col1_bottom = _place_column(buck1_column, anchor_x, anchor_y)
+
+            # Bridge: OR diodes + 5V bulk (continue column 1)
+            bridge_y = col1_bottom
+            col1_bottom = _place_column(bridge_column, anchor_x, bridge_y)
+
+            # Column 2: Buck #2 chain (5V → 3.3V) — branches RIGHT at the
+            # +5V output point (where bridge starts), not below column 1.
+            # This shows the power tree fork: 24V→5V flows down, 5V→3.3V
+            # branches right at the 5V rail.
+            col2_x = anchor_x + _COL_SPACING
+            col2_bottom = _place_column(buck2_column, col2_x, bridge_y)
+
+            # Tail: LED + ferrites + misc — below whichever column is shorter
+            tail_y = max(col1_bottom, col2_bottom)
+            _place_column(tail_column, anchor_x, tail_y)
+
+            _log.info(
+                "    3c1: organized %d power components in vertical signal chain",
+                len(power_group_fixed),
+            )
+
     # 3c2. ADC channel formation — repeatable channel strips near ADC ICs
     # Detect nets connecting an ADC IC pin to exactly 2R + 1D + 1C (voltage
     # divider + protection pattern), then arrange each channel's 4 passives
@@ -2555,7 +2776,8 @@ def optimize_placement_ee(
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
     # Protect relay sub-circuit, ADC channel, and MCU peripheral positions
-    subcircuit_fixed = relay_support_refs | adc_channel_refs | mcu_peripheral_refs
+    subcircuit_fixed = (relay_support_refs | adc_channel_refs
+                        | mcu_peripheral_refs | power_group_fixed)
     relay_fixed = fixed_refs | subcircuit_fixed | {
         r for r in positions if r.startswith("K")
     }
