@@ -1834,6 +1834,14 @@ def optimize_placement_ee(
         for fp in initial_pcb.footprints
     }
 
+    # Build set of decoupling cap refs (used throughout phases)
+    _decoupling_caps: set[str] = set()
+    for sc in sc_list:
+        if sc.circuit_type == SubCircuitType.DECOUPLING:
+            for r in sc.refs:
+                if r.startswith("C"):
+                    _decoupling_caps.add(r)
+
     # -----------------------------------------------------------------------
     # Phase 2.5: Group-as-unit zone placement for off-board components
     # -----------------------------------------------------------------------
@@ -2114,9 +2122,12 @@ def optimize_placement_ee(
                         break
             support_anchor_map[ref] = best_anchor
 
-        # Sort: place support refs that have a known anchor first
+        # Sort: decoupling caps first (must be near IC), then other anchored,
+        # then unanchored
         support_refs.sort(key=lambda r: (
-            0 if support_anchor_map.get(r) else 1, r,
+            0 if r in _decoupling_caps and support_anchor_map.get(r) else
+            1 if support_anchor_map.get(r) else 2,
+            r,
         ))
 
         for ref in support_refs:
@@ -2467,6 +2478,111 @@ def optimize_placement_ee(
                     ) / len(block_refs)
 
     # -----------------------------------------------------------------------
+    # Phase 3.9.5: Relay driver subgroup tightening
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.9.5: Tightening relay driver subgroups")
+    for sc in sc_list:
+        if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
+            continue
+        anchor = sc.anchor_ref
+        if anchor not in positions:
+            continue
+        kx, ky, _krot = positions[anchor]
+        kw, kh = fp_sizes.get(anchor, (18.0, 16.0))
+
+        # Place support components below the relay (MCU side)
+        # Stack in a compact grid below the relay footprint
+        support_members = [
+            r for r in sc.refs
+            if r != anchor and r in positions and r not in fixed_refs
+        ]
+        # Sort: transistors first (Q), then diodes (D), then resistors (R)
+        support_members.sort(key=lambda r: (
+            0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
+        ))
+
+        # Target: compact grid below relay, starting 1mm below relay bottom
+        target_y_base = ky + kh / 2.0 + 1.5
+        col = 0
+        row_y = target_y_base
+        row_max_h = 0.0
+        cols_per_row = 3
+
+        tight_grid = _PlacementGrid(bounds)
+        # Place all other components (except this subcircuit's support)
+        for oref, (ox, oy, _or) in positions.items():
+            if oref in support_members:
+                continue
+            ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+            tight_grid.place(ox, oy, ow, oh)
+
+        for ref in support_members:
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            # Target position: below relay, centered on relay x
+            tx = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
+            ty = row_y + h / 2.0
+
+            fx, fy = tight_grid.find_free_pos(tx, ty, w, h)
+            _, _, rot = positions[ref]
+            positions[ref] = (fx, fy, rot)
+            tight_grid.place(fx, fy, w, h)
+
+            row_max_h = max(row_max_h, h)
+            col += 1
+            if col >= cols_per_row:
+                col = 0
+                row_y += row_max_h + 1.0
+                row_max_h = 0.0
+
+    # -----------------------------------------------------------------------
+    # Phase 3.9.7: Decoupling cap tightening — pull caps close to their IC
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.9.7: Tightening decoupling caps to ICs")
+    for sc in sc_list:
+        if sc.circuit_type != SubCircuitType.DECOUPLING:
+            continue
+        ic_ref = sc.anchor_ref
+        if ic_ref not in positions:
+            continue
+        ix, iy, _irot = positions[ic_ref]
+        iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
+
+        for cap_ref in sc.refs:
+            if cap_ref == ic_ref or not cap_ref.startswith("C"):
+                continue
+            if cap_ref not in positions or cap_ref in fixed_refs:
+                continue
+            cx, cy, crot = positions[cap_ref]
+            cw, ch = fp_sizes.get(cap_ref, (1.5, 1.0))
+
+            # Target: within 4mm of IC edge (not center)
+            dist = math.sqrt((cx - ix) ** 2 + (cy - iy) ** 2)
+            edge_dist = max(0.0, dist - (iw + cw) / 2.0)
+            if edge_dist <= 4.0:
+                continue  # Already close enough
+
+            # Pull toward IC center, find free spot nearby
+            dx = ix - cx
+            dy = iy - cy
+            d = math.sqrt(dx * dx + dy * dy) or 1.0
+            # Target: IC edge + 2mm
+            target_dist = (iw + cw) / 2.0 + 2.0
+            tx = ix - dx / d * target_dist
+            ty = iy - dy / d * target_dist
+
+            cap_grid = _PlacementGrid(bounds)
+            for oref, (ox, oy, _or) in positions.items():
+                if oref == cap_ref:
+                    continue
+                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+                cap_grid.place(ox, oy, ow, oh)
+
+            fx, fy = cap_grid.find_free_pos(tx, ty, cw, ch)
+            new_dist = math.sqrt((fx - ix) ** 2 + (fy - iy) ** 2)
+            if new_dist < dist:
+                positions[cap_ref] = (fx, fy, crot)
+
+    # -----------------------------------------------------------------------
     # Phase 3.10: Collision resolution (group-constrained)
     # -----------------------------------------------------------------------
     _log.info("Phase 3.10: Resolving collisions (group-constrained)")
@@ -2607,8 +2723,9 @@ def optimize_placement_ee(
                 ]
 
                 for ref in refs_by_dist:
-                    # Don't pull connectors, relays (row-placed), RF anchors
-                    if ref.startswith(("J", "K")) or ref in _rf_anchors:
+                    # Don't pull connectors, relays, RF anchors, decoupling caps
+                    if (ref.startswith(("J", "K")) or ref in _rf_anchors
+                            or ref in _decoupling_caps):
                         continue
                     rx, ry, rot = best_positions[ref]
                     dist = math.sqrt((rx - gcx) ** 2 + (ry - gcy) ** 2)
@@ -2702,6 +2819,49 @@ def optimize_placement_ee(
         best_positions = _resolve_collisions(
             best_positions, fp_sizes, bounds, rf_fixed,
         )
+
+    # Phase 6.5: Final decoupling cap tightening after all phases
+    _log.info("Phase 6.5: Final decoupling cap tightening")
+    for sc in sc_list:
+        if sc.circuit_type != SubCircuitType.DECOUPLING:
+            continue
+        ic_ref = sc.anchor_ref
+        if ic_ref not in best_positions:
+            continue
+        ix, iy, _irot = best_positions[ic_ref]
+        iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
+
+        for cap_ref in sc.refs:
+            if cap_ref == ic_ref or not cap_ref.startswith("C"):
+                continue
+            if cap_ref not in best_positions or cap_ref in fixed_refs:
+                continue
+            cx, cy, crot = best_positions[cap_ref]
+            cw, ch = fp_sizes.get(cap_ref, (1.5, 1.0))
+
+            dist = math.sqrt((cx - ix) ** 2 + (cy - iy) ** 2)
+            edge_dist = max(0.0, dist - (iw + cw) / 2.0)
+            if edge_dist <= 4.0:
+                continue
+
+            dx = ix - cx
+            dy = iy - cy
+            d = math.sqrt(dx * dx + dy * dy) or 1.0
+            target_dist = (iw + cw) / 2.0 + 2.0
+            tx = ix - dx / d * target_dist
+            ty = iy - dy / d * target_dist
+
+            cap_grid = _PlacementGrid(bounds)
+            for oref, (ox, oy, _or) in best_positions.items():
+                if oref == cap_ref:
+                    continue
+                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+                cap_grid.place(ox, oy, ow, oh)
+
+            fx, fy = cap_grid.find_free_pos(tx, ty, cw, ch)
+            new_dist = math.sqrt((fx - ix) ** 2 + (fy - iy) ** 2)
+            if new_dist < dist:
+                best_positions[cap_ref] = (fx, fy, crot)
 
     # Build final PCB
     if best_review is None:
