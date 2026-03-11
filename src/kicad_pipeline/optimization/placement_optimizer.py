@@ -2412,75 +2412,142 @@ def optimize_placement_ee(
                 mcu_group_refs = feat_refs
                 break
 
-        # Build occupancy grid WITHOUT MCU group passives (they'll be repositioned)
+        # --- Step 0: Move U3 into its MCU zone if outside ---
+        mcu_zone_rect: tuple[float, float, float, float] | None = None
+        for z in zones:
+            if z.name == "mcu":
+                mcu_zone_rect = z.rect
+                break
+        if mcu_zone_rect is not None:
+            zx1, zy1, zx2, zy2 = mcu_zone_rect
+            # Check if MCU center is outside zone (with margin for its size)
+            margin_x = mcu_w / 2.0 + 2.0
+            margin_y = mcu_h / 2.0 + 2.0
+            zone_cx = (zx1 + zx2) / 2.0
+            zone_cy = (zy1 + zy2) / 2.0
+            if (mcu_x < zx1 + margin_x or mcu_x > zx2 - margin_x
+                    or mcu_y < zy1 + margin_y or mcu_y > zy2 - margin_y):
+                _log.info(
+                    "    U3 at (%.1f,%.1f) outside MCU zone "
+                    "(%.0f,%.0f)-(%.0f,%.0f), moving to zone center",
+                    mcu_x, mcu_y, zx1, zy1, zx2, zy2,
+                )
+                mcu_x = zone_cx
+                mcu_y = zone_cy
+                # Clamp to board bounds
+                mcu_x = max(bounds[0] + mcu_w / 2.0 + 2.0,
+                            min(bounds[2] - mcu_w / 2.0 - 2.0, mcu_x))
+                mcu_y = max(bounds[1] + mcu_h / 2.0 + 2.0,
+                            min(bounds[3] - mcu_h / 2.0 - 2.0, mcu_y))
+                positions[mcu_ref_c3] = (mcu_x, mcu_y, 0.0)
+                _log.info("    U3 moved to (%.1f, %.1f)", mcu_x, mcu_y)
+
+        # --- Step 1: Build occupancy grid WITHOUT MCU group ---
         mcu_grid = _PlacementGrid(bounds)
         for oref, (ox, oy, _or) in positions.items():
-            if oref in mcu_group_refs and oref != mcu_ref_c3:
+            if oref in mcu_group_refs:
                 continue
             ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
             mcu_grid.place(ox, oy, ow, oh)
+        # Place MCU itself in the grid
+        mcu_grid.place(mcu_x, mcu_y, mcu_w, mcu_h)
 
-        # Pull passives toward MCU perimeter — skip connectors (edge-pinned)
-        _MCU_TARGET_GAP = 2.0
-        _MCU_CLOSE_THRESHOLD = 8.0  # Already close enough, just register
+        # --- Step 2: Register connectors in grid (don't move them) ---
+        # Connectors are already edge-pinned by Level 2 / phase 3f.
         connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
+        for ref in sorted(connector_refs):
+            if ref in positions:
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                mcu_grid.place(*positions[ref][:2], w, h)
+                mcu_peripheral_refs.add(ref)
 
         # Protect the MCU ref itself from 3g collision resolution
         mcu_peripheral_refs.add(mcu_ref_c3)
 
-        # Sort closest first for tighter packing
-        mcu_sorted = sorted(
-            [r for r in mcu_group_refs
-             if r != mcu_ref_c3 and r not in fixed_refs
-             and r not in connector_refs and r in positions],
-            key=lambda r: math.sqrt(
-                (positions[r][0] - mcu_x) ** 2
-                + (positions[r][1] - mcu_y) ** 2
-            ),
-        )
+        # --- Step 3: Identify MCU subcircuits for organized placement ---
+        # Build net adjacency for MCU group refs
+        ref_nets: dict[str, set[str]] = {}
+        for net in requirements.nets:
+            net_refs = set()
+            for conn in net.connections:
+                net_refs.add(conn.ref)
+            for r in net_refs:
+                if r in mcu_group_refs:
+                    ref_nets.setdefault(r, set()).update(
+                        net_refs & mcu_group_refs,
+                    )
 
-        for ref in mcu_sorted:
+        # Classify MCU passives into functional subcircuits
+        # Place decoupling caps first (closest to MCU), then others
+        decoupling_refs: list[str] = []
+        other_passive_refs: list[str] = []
+        for ref in sorted(mcu_group_refs):
+            if ref == mcu_ref_c3 or ref in connector_refs or ref in fixed_refs:
+                continue
+            if ref not in positions:
+                continue
+            # Decoupling caps: C refs directly connected to MCU
+            if ref.startswith("C") and mcu_ref_c3 in ref_nets.get(ref, set()):
+                decoupling_refs.append(ref)
+            else:
+                other_passive_refs.append(ref)
+
+        # --- Step 4: Place decoupling caps tight against MCU perimeter ---
+        _DECOUP_GAP = 1.5  # edge-to-edge gap for decoupling
+        # Place decoupling on the side with most board space (away from edges)
+        decoup_side_y = mcu_y - mcu_h / 2.0 - _DECOUP_GAP  # default: above
+        if decoup_side_y < bounds[1] + 3.0:
+            decoup_side_y = mcu_y + mcu_h / 2.0 + _DECOUP_GAP  # below
+
+        decoup_x = mcu_x - mcu_w / 4.0  # Start from left quarter of MCU
+        for ref in decoupling_refs:
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            tx = decoup_x
+            ty = decoup_side_y
+            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+            px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=15.0)
+            positions[ref] = (px, py, 0.0)
+            mcu_peripheral_refs.add(ref)
+            mcu_grid.place(px, py, w, h)
+            decoup_x += w + 1.0
+            _log.info("    %s (decoupling): →(%.1f,%.1f)", ref, px, py)
+
+        # --- Step 5: Place remaining passives around MCU perimeter ---
+        _MCU_TARGET_GAP = 2.0
+        # Sort by signal chain proximity — refs connected to MCU first
+        def _mcu_distance_key(ref: str) -> float:
+            connected_to_mcu = mcu_ref_c3 in ref_nets.get(ref, set())
+            rx, ry, _ = positions[ref]
+            dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
+            return (0 if connected_to_mcu else 1, dist)
+
+        other_sorted = sorted(other_passive_refs, key=_mcu_distance_key)
+
+        for ref in other_sorted:
             rx, ry, rrot = positions[ref]
             w, h = fp_sizes.get(ref, (2.0, 2.0))
-            dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
 
-            if dist <= _MCU_CLOSE_THRESHOLD:
-                mcu_grid.place(rx, ry, w, h)
-                mcu_peripheral_refs.add(ref)
-                continue
-
-            # Target: MCU perimeter + gap
+            # Target: MCU perimeter + gap, preserving direction
             dx = rx - mcu_x
             dy = ry - mcu_y
             d = max(0.1, math.sqrt(dx * dx + dy * dy))
-            target_dist = max(mcu_w, mcu_h) / 2.0 + max(w, h) / 2.0 + _MCU_TARGET_GAP
+            target_dist = (max(mcu_w, mcu_h) / 2.0
+                           + max(w, h) / 2.0 + _MCU_TARGET_GAP)
             tx = mcu_x + dx / d * target_dist
             ty = mcu_y + dy / d * target_dist
             tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
 
-            # Dynamic search radius — must be large enough to reach from
-            # target position to current position (component may be 80mm away)
-            search_radius = max(dist, 30.0)
+            search_radius = max(d, 30.0)
             px, py = mcu_grid.find_free_pos(tx, ty, w, h,
                                             max_radius=search_radius)
-            new_dist = math.sqrt((px - mcu_x) ** 2 + (py - mcu_y) ** 2)
-            _log.info(
-                "    %s: (%.1f,%.1f)→(%.1f,%.1f) dist %.1f→%.1f target(%.1f,%.1f)",
-                ref, rx, ry, px, py, dist, new_dist, tx, ty,
-            )
             positions[ref] = (px, py, rrot)
             mcu_peripheral_refs.add(ref)
             mcu_grid.place(px, py, w, h)
 
-        # Register connectors in grid (don't move them)
-        for ref in connector_refs:
-            if ref in positions:
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                mcu_grid.place(*positions[ref][:2], w, h)
-
         _log.info(
-            "    3c3: pulled %d peripherals toward %s at (%.1f, %.1f)",
+            "    3c3: organized %d peripherals around %s at (%.1f, %.1f)",
             len(mcu_peripheral_refs), mcu_ref_c3, mcu_x, mcu_y,
         )
 
