@@ -18,8 +18,15 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.models.pcb import Point
+from kicad_pipeline.optimization.functional_grouper import (
+    DetectedSubCircuit,
+    SubCircuitType,
+    VoltageDomain,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from kicad_pipeline.models.pcb import PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.review_agent import PlacementReview
@@ -738,6 +745,373 @@ def _apply_review_fixes(
     return result
 
 
+def _place_row_layout(
+    subcircuits: Sequence[DetectedSubCircuit],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+) -> dict[str, tuple[float, float, float]]:
+    """Place same-type subcircuits with layout_hint='row' in a 1xN horizontal row.
+
+    Used for relay banks — places relay anchors in a horizontal line with
+    tight spacing, then places each relay's sub-components around it.
+    """
+    min_x, min_y, max_x, max_y = bounds
+
+    # Group by circuit_type for row layout
+    type_groups: dict[str, list[DetectedSubCircuit]] = {}
+    for sc in subcircuits:
+        if sc.layout_hint != "row":
+            continue
+        type_groups.setdefault(sc.circuit_type.value, []).append(sc)
+
+    for _circuit_type, group in type_groups.items():
+        if len(group) < 2:
+            continue
+
+        # Find the current average position of anchors
+        anchor_positions = []
+        for sc in group:
+            if sc.anchor_ref in positions and sc.anchor_ref not in fixed_refs:
+                x, y, rot = positions[sc.anchor_ref]
+                anchor_positions.append((x, y, sc))
+
+        if len(anchor_positions) < 2:
+            continue
+
+        # Compute the row center and direction
+        avg_x = sum(p[0] for p in anchor_positions) / len(anchor_positions)
+        avg_y = sum(p[1] for p in anchor_positions) / len(anchor_positions)
+
+        # Sort anchors left-to-right
+        anchor_positions.sort(key=lambda p: p[0])
+
+        # Compute row spacing based on anchor widths
+        total_width = 0.0
+        for _, _, sc in anchor_positions:
+            aw, ah = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
+            total_width += aw + 1.0  # gap between relays
+
+        # Place anchors in a row centered on avg_x
+        start_x = avg_x - total_width / 2.0
+        row_grid = _PlacementGrid(bounds)
+
+        # Register all non-row components first
+        row_refs: set[str] = set()
+        for _, _, sc in anchor_positions:
+            row_refs.update(sc.refs)
+        for ref, (ox, oy, _orot) in positions.items():
+            if ref not in row_refs:
+                ow, oh = fp_sizes.get(ref, (2.0, 2.0))
+                row_grid.place(ox, oy, ow, oh)
+
+        cursor_x = start_x
+        for _, _, sc in anchor_positions:
+            anchor_ref = sc.anchor_ref
+            aw, ah = fp_sizes.get(anchor_ref, (5.0, 5.0))
+            target_x = cursor_x + aw / 2.0
+            target_y = avg_y
+            target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
+            target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+
+            fx, fy = row_grid.find_free_pos(target_x, target_y, aw, ah)
+            row_grid.place(fx, fy, aw, ah)
+            _, _, old_rot = positions.get(anchor_ref, (0, 0, 0))
+            positions[anchor_ref] = (fx, fy, old_rot)
+
+            # Place sub-components tight to anchor
+            members = [r for r in sc.refs if r != anchor_ref
+                       and r not in fixed_refs and r in positions]
+            for i, ref in enumerate(members):
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                # Place below anchor in a column
+                offset_y = ah / 2.0 + h / 2.0 + 1.0 + i * (h + 0.5)
+                mx = fx
+                my = fy + offset_y
+                mx = max(min_x + 2.0, min(max_x - 2.0, mx))
+                my = max(min_y + 2.0, min(max_y - 2.0, my))
+                fmx, fmy = row_grid.find_free_pos(mx, my, w, h)
+                row_grid.place(fmx, fmy, w, h)
+                _, _, mrot = positions[ref]
+                positions[ref] = (fmx, fmy, mrot)
+
+            cursor_x += aw + 1.0
+
+    return positions
+
+
+def _place_boundary_regulators(
+    subcircuits: Sequence[DetectedSubCircuit],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    domain_map: dict[str, VoltageDomain],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+) -> dict[str, tuple[float, float, float]]:
+    """Place regulators at the boundary between their input and output domains.
+
+    Positions the regulator at the geometric midpoint between the centroids
+    of its input domain and output domain components.
+    """
+    min_x, min_y, max_x, max_y = bounds
+
+    # Compute domain centroids
+    domain_positions: dict[VoltageDomain, list[tuple[float, float]]] = {}
+    for ref, (x, y, _rot) in positions.items():
+        d = domain_map.get(ref)
+        if d is not None and d != VoltageDomain.MIXED:
+            domain_positions.setdefault(d, []).append((x, y))
+
+    domain_centroids: dict[VoltageDomain, tuple[float, float]] = {}
+    for d, pts in domain_positions.items():
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        domain_centroids[d] = (cx, cy)
+
+    for sc in subcircuits:
+        if sc.layout_hint != "boundary":
+            continue
+        if sc.input_domain is None or sc.output_domain is None:
+            continue
+        if sc.anchor_ref in fixed_refs or sc.anchor_ref not in positions:
+            continue
+
+        in_centroid = domain_centroids.get(sc.input_domain)
+        out_centroid = domain_centroids.get(sc.output_domain)
+        if in_centroid is None or out_centroid is None:
+            continue
+
+        # Target: midpoint between domain centroids
+        target_x = (in_centroid[0] + out_centroid[0]) / 2.0
+        target_y = (in_centroid[1] + out_centroid[1]) / 2.0
+        target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
+        target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+
+        # Check if moving is actually closer to boundary
+        ax, ay, arot = positions[sc.anchor_ref]
+        aw, ah = fp_sizes.get(sc.anchor_ref, (2.0, 2.0))
+        current_dist = math.sqrt((ax - target_x) ** 2 + (ay - target_y) ** 2)
+
+        if current_dist < 3.0:
+            continue  # Already near boundary
+
+        # Build grid without this subcircuit's refs
+        move_grid = _PlacementGrid(bounds)
+        sc_refs_set = set(sc.refs)
+        for ref, (ox, oy, _orot) in positions.items():
+            if ref in sc_refs_set:
+                continue
+            ow, oh = fp_sizes.get(ref, (2.0, 2.0))
+            move_grid.place(ox, oy, ow, oh)
+
+        fx, fy = move_grid.find_free_pos(target_x, target_y, aw, ah)
+        new_dist = math.sqrt((fx - target_x) ** 2 + (fy - target_y) ** 2)
+        if new_dist < current_dist:
+            positions[sc.anchor_ref] = (fx, fy, arot)
+            move_grid.place(fx, fy, aw, ah)
+
+            # Pull sub-circuit members toward new anchor position
+            for ref in sc.refs:
+                if ref == sc.anchor_ref or ref in fixed_refs or ref not in positions:
+                    continue
+                rx, ry, rrot = positions[ref]
+                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                ideal_dist = (w + aw) / 2.0 + 1.0
+                rdist = math.sqrt((rx - fx) ** 2 + (ry - fy) ** 2)
+                if rdist <= ideal_dist + 1.0:
+                    continue
+                if rdist < 0.01:
+                    continue
+                dx = (fx - rx) / rdist
+                dy = (fy - ry) / rdist
+                tx = fx - dx * ideal_dist
+                ty = fy - dy * ideal_dist
+                tx = max(min_x + 2.0, min(max_x - 2.0, tx))
+                ty = max(min_y + 2.0, min(max_y - 2.0, ty))
+                mrx, mry = move_grid.find_free_pos(tx, ty, w, h)
+                if math.sqrt((mrx - fx) ** 2 + (mry - fy) ** 2) < rdist:
+                    move_grid.place(mrx, mry, w, h)
+                    positions[ref] = (mrx, mry, rrot)
+
+    return positions
+
+
+def _pin_rf_to_edge(
+    subcircuits: Sequence[DetectedSubCircuit],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+) -> dict[str, tuple[float, float, float]]:
+    """Pin RF antenna modules to the nearest board edge.
+
+    Sets rotation so antenna faces outward.
+    """
+    min_x, min_y, max_x, max_y = bounds
+    edge_margin = 2.0
+
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.RF_ANTENNA:
+            continue
+        if sc.anchor_ref in fixed_refs or sc.anchor_ref not in positions:
+            continue
+
+        cx, cy, rot = positions[sc.anchor_ref]
+        w, h = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
+
+        # Find nearest edge
+        dist_left = cx - min_x
+        dist_right = max_x - cx
+        dist_top = cy - min_y
+        dist_bottom = max_y - cy
+        min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+
+        # Determine target position and rotation for antenna facing outward
+        target_x, target_y = cx, cy
+        new_rot = rot
+        if dist_right == min_edge_dist or dist_right <= dist_left:
+            target_x = max_x - edge_margin - w / 2.0
+            new_rot = 90.0  # Antenna pointing right
+        elif dist_left == min_edge_dist:
+            target_x = min_x + edge_margin + w / 2.0
+            new_rot = 270.0
+        elif dist_top == min_edge_dist:
+            target_y = min_y + edge_margin + h / 2.0
+            new_rot = 180.0
+        else:
+            target_y = max_y - edge_margin - h / 2.0
+            new_rot = 0.0
+
+        # Build grid without RF module
+        move_grid = _PlacementGrid(bounds)
+        for ref, (ox, oy, _orot) in positions.items():
+            if ref == sc.anchor_ref:
+                continue
+            ow, oh = fp_sizes.get(ref, (2.0, 2.0))
+            move_grid.place(ox, oy, ow, oh)
+
+        fx, fy = move_grid.find_free_pos(target_x, target_y, w, h)
+        positions[sc.anchor_ref] = (fx, fy, new_rot)
+
+    return positions
+
+
+def _pull_mcu_peripherals(
+    subcircuits: Sequence[DetectedSubCircuit],
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+) -> dict[str, tuple[float, float, float]]:
+    """Pull MCU peripheral cluster members tight to the MCU.
+
+    Ensures switches, LEDs, and debug connectors are within the
+    MCU_PERIPHERAL_MAX_DISTANCE_MM threshold.
+    """
+    from kicad_pipeline.constants import MCU_PERIPHERAL_MAX_DISTANCE_MM
+
+    min_x, min_y, max_x, max_y = bounds
+
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.MCU_PERIPHERAL_CLUSTER:
+            continue
+        anchor = sc.anchor_ref
+        if anchor not in positions:
+            continue
+        ax, ay, _arot = positions[anchor]
+        aw, ah = fp_sizes.get(anchor, (5.0, 5.0))
+
+        for ref in sc.refs:
+            if ref == anchor or ref in fixed_refs or ref not in positions:
+                continue
+            rx, ry, rrot = positions[ref]
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            current_dist = math.sqrt((rx - ax) ** 2 + (ry - ay) ** 2)
+
+            if current_dist <= MCU_PERIPHERAL_MAX_DISTANCE_MM:
+                continue
+
+            # Target: just outside MCU body
+            ideal_dist = (w + aw) / 2.0 + 2.0
+            if current_dist < 0.01:
+                continue
+            dx = (ax - rx) / current_dist
+            dy = (ay - ry) / current_dist
+            target_x = ax - dx * ideal_dist
+            target_y = ay - dy * ideal_dist
+            target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
+            target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+
+            move_grid = _PlacementGrid(bounds)
+            for other_ref, (ox, oy, _orot) in positions.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                move_grid.place(ox, oy, ow, oh)
+
+            fx, fy = move_grid.find_free_pos(target_x, target_y, w, h)
+            new_dist = math.sqrt((fx - ax) ** 2 + (fy - ay) ** 2)
+            if new_dist < current_dist:
+                positions[ref] = (fx, fy, rrot)
+
+    return positions
+
+
+def _orient_connectors(
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+    pcb: PCBDesign,
+) -> dict[str, tuple[float, float, float]]:
+    """Orient connectors so mating face faces the nearest board edge.
+
+    Sets rotation based on which edge the connector is closest to:
+    - Left edge: 270 (facing left)
+    - Right edge: 90 (facing right)
+    - Top edge: 180 (facing up)
+    - Bottom edge: 0 (facing down)
+    """
+    min_x, min_y, max_x, max_y = bounds
+
+    for fp in pcb.footprints:
+        ref = fp.ref
+        if ref in fixed_refs or not ref.startswith("J"):
+            continue
+        if ref not in positions:
+            continue
+        cx, cy, rot = positions[ref]
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+
+        # Find nearest edge
+        dist_left = cx - min_x
+        dist_right = max_x - cx
+        dist_top = cy - min_y
+        dist_bottom = max_y - cy
+        min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+
+        if min_edge_dist > 8.0:
+            continue  # Not near an edge, skip orientation
+
+        # Determine orientation based on which edge is closest
+        # Aspect ratio determines if connector is wide or tall
+        is_wide = w > h * 1.5
+
+        if dist_left == min_edge_dist:
+            new_rot = 270.0 if is_wide else 0.0
+        elif dist_right == min_edge_dist:
+            new_rot = 90.0 if is_wide else 0.0
+        elif dist_top == min_edge_dist:
+            new_rot = 180.0 if not is_wide else 90.0
+        else:
+            new_rot = 0.0 if not is_wide else 90.0
+
+        positions[ref] = (cx, cy, new_rot)
+
+    return positions
+
+
 def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
@@ -788,6 +1162,7 @@ def optimize_placement_ee(
     _log.info("Phase 1: Detecting sub-circuits and voltage domains")
     subcircuits = detect_subcircuits(requirements)
     domain_map = classify_voltage_domains(requirements)
+    sc_list = list(subcircuits)  # mutable list for helper functions
 
     # -----------------------------------------------------------------------
     # Phase 2: Start from initial placement
@@ -875,6 +1250,34 @@ def optimize_placement_ee(
                 positions[ref] = (fx, fy, rrot)
 
     # -----------------------------------------------------------------------
+    # Phase 3.1: Row layout for relays (and other row-hint subcircuits)
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.1: Arranging row-layout subcircuits")
+    positions = _place_row_layout(sc_list, positions, fp_sizes, bounds, fixed_refs)
+
+    # -----------------------------------------------------------------------
+    # Phase 3.2: Boundary placement for regulators
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.2: Placing regulators at domain boundaries")
+    positions = _place_boundary_regulators(
+        sc_list, positions, fp_sizes, domain_map, bounds, fixed_refs,
+    )
+
+    # -----------------------------------------------------------------------
+    # Phase 3.3: RF edge pinning
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.3: Pinning RF modules to board edge")
+    positions = _pin_rf_to_edge(sc_list, positions, fp_sizes, bounds, fixed_refs)
+
+    # -----------------------------------------------------------------------
+    # Phase 3.4: MCU peripheral pulling
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.4: Pulling MCU peripherals close to MCU")
+    positions = _pull_mcu_peripherals(
+        sc_list, positions, fp_sizes, bounds, fixed_refs,
+    )
+
+    # -----------------------------------------------------------------------
     # Phase 3.5: Connector Edge Pinning (collision-aware)
     # -----------------------------------------------------------------------
     _log.info("Phase 3.5: Pinning connectors to nearest board edge")
@@ -926,6 +1329,14 @@ def optimize_placement_ee(
 
         if can_move:
             positions[ref] = (target_x, target_y, rot)
+
+    # -----------------------------------------------------------------------
+    # Phase 3.6: Connector Orientation (mating face toward edge)
+    # -----------------------------------------------------------------------
+    _log.info("Phase 3.6: Orienting connectors toward board edge")
+    positions = _orient_connectors(
+        positions, fp_sizes, bounds, fixed_refs, initial_pcb,
+    )
 
     # -----------------------------------------------------------------------
     # Phase 4: EE Review Loop

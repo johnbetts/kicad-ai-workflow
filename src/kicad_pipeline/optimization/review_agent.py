@@ -15,12 +15,17 @@ from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
     DECOUPLING_CAP_MAX_DISTANCE_MM,
+    MCU_PERIPHERAL_MAX_DISTANCE_MM,
+    REGULATOR_BOUNDARY_TOLERANCE_MM,
+    RF_EDGE_MAX_MM,
 )
 from kicad_pipeline.optimization.functional_grouper import (
     DetectedSubCircuit,
+    DomainAffinity,
     SubCircuitType,
     VoltageDomain,
     classify_voltage_domains,
+    detect_cross_domain_affinities,
     detect_subcircuits,
 )
 from kicad_pipeline.pcb.constraints import (
@@ -59,6 +64,10 @@ class PlacementRule(enum.Enum):
     THERMAL_ADJACENCY = "thermal_adjacency"
     CRYSTAL_PROXIMITY = "crystal_proximity"
     SIGNAL_FLOW = "signal_flow"
+    MCU_PERIPHERAL_PROXIMITY = "mcu_peripheral_proximity"
+    RF_EDGE_PLACEMENT = "rf_edge_placement"
+    CONNECTOR_ORIENTATION = "connector_orientation"
+    REGULATOR_BOUNDARY = "regulator_boundary"
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +280,24 @@ def _check_subcircuit_spread(
 def _check_voltage_isolation(
     pcb: PCBDesign,
     domain_map: dict[str, VoltageDomain],
+    affinities: tuple[DomainAffinity, ...] = (),
 ) -> list[PlacementViolation]:
-    """Check minimum gap between different voltage domain components."""
+    """Check minimum gap between different voltage domain components.
+
+    Components linked by cross-domain affinities (e.g. analog monitoring
+    circuits measuring relay outputs) are exempted from violations.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
     threshold = VOLTAGE_DOMAIN_MIN_GAP_MM
+
+    # Build exemption set from cross-domain affinities
+    exempt_pairs: set[tuple[str, str]] = set()
+    for aff in affinities:
+        for sr in aff.source_refs:
+            for tr in aff.target_refs:
+                pair = (min(sr, tr), max(sr, tr))
+                exempt_pairs.add(pair)
 
     # Group refs by domain (skip MIXED)
     domain_refs: dict[VoltageDomain, list[str]] = {}
@@ -298,6 +320,10 @@ def _check_voltage_isolation(
                 for r2 in domain_refs[d2]:
                     p2 = positions.get(r2)
                     if p2 is None:
+                        continue
+                    # Skip exempt pairs (cross-domain affinities)
+                    pair = (min(r1, r2), max(r1, r2))
+                    if pair in exempt_pairs:
                         continue
                     d = _dist(p1, p2)
                     if d < threshold:
@@ -502,6 +528,147 @@ def _check_thermal_adjacency(
     return violations
 
 
+def _check_mcu_peripheral_proximity(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> list[PlacementViolation]:
+    """Check that MCU peripherals are within threshold of their MCU."""
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    threshold = MCU_PERIPHERAL_MAX_DISTANCE_MM
+
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.MCU_PERIPHERAL_CLUSTER:
+            continue
+        anchor_pos = positions.get(sc.anchor_ref)
+        if anchor_pos is None:
+            continue
+
+        for ref in sc.refs:
+            if ref == sc.anchor_ref:
+                continue
+            pos = positions.get(ref)
+            if pos is None:
+                continue
+            d = _dist(anchor_pos, pos)
+            if d > threshold:
+                suggested = _point_toward(anchor_pos, pos, threshold * 0.8)
+                violations.append(PlacementViolation(
+                    rule=PlacementRule.MCU_PERIPHERAL_PROXIMITY,
+                    severity="major",
+                    refs=(ref, sc.anchor_ref),
+                    message=f"{ref} is {d:.1f}mm from MCU {sc.anchor_ref} "
+                            f"(max {threshold}mm for peripherals)",
+                    current_value=d,
+                    threshold=threshold,
+                    suggested_position=suggested,
+                ))
+
+    return violations
+
+
+def _check_rf_edge_placement(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> list[PlacementViolation]:
+    """Check that RF antenna modules are on board edge."""
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    bounds = _board_bounds(pcb)
+    min_x, min_y, max_x, max_y = bounds
+    threshold = RF_EDGE_MAX_MM
+
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.RF_ANTENNA:
+            continue
+        pos = positions.get(sc.anchor_ref)
+        if pos is None:
+            continue
+        x, y = pos
+        edge_dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
+        if edge_dist > threshold:
+            # Suggest nearest edge
+            nearest_x = min_x + 2.0 if (x - min_x) < (max_x - x) else max_x - 2.0
+            nearest_y = min_y + 2.0 if (y - min_y) < (max_y - y) else max_y - 2.0
+            if abs(x - nearest_x) < abs(y - nearest_y):
+                suggested = (nearest_x, y)
+            else:
+                suggested = (x, nearest_y)
+
+            violations.append(PlacementViolation(
+                rule=PlacementRule.RF_EDGE_PLACEMENT,
+                severity="critical",
+                refs=(sc.anchor_ref,),
+                message=f"RF module {sc.anchor_ref} is {edge_dist:.1f}mm from "
+                        f"nearest edge (max {threshold}mm for antenna)",
+                current_value=edge_dist,
+                threshold=threshold,
+                suggested_position=suggested,
+            ))
+
+    return violations
+
+
+def _check_regulator_boundary(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    domain_map: dict[str, VoltageDomain],
+) -> list[PlacementViolation]:
+    """Check that regulators are placed at domain boundaries."""
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    threshold = REGULATOR_BOUNDARY_TOLERANCE_MM
+
+    # Compute domain centroids
+    domain_positions: dict[VoltageDomain, list[tuple[float, float]]] = {}
+    for ref, ref_pos in positions.items():
+        dom = domain_map.get(ref)
+        if dom is not None and dom != VoltageDomain.MIXED:
+            domain_positions.setdefault(dom, []).append(ref_pos)
+
+    domain_centroids: dict[VoltageDomain, tuple[float, float]] = {}
+    for dom, pts in domain_positions.items():
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        domain_centroids[dom] = (cx, cy)
+
+    for sc in subcircuits:
+        if sc.circuit_type not in (
+            SubCircuitType.BUCK_CONVERTER,
+            SubCircuitType.LDO_REGULATOR,
+        ):
+            continue
+        if sc.input_domain is None or sc.output_domain is None:
+            continue
+        sc_pos = positions.get(sc.anchor_ref)
+        if sc_pos is None:
+            continue
+
+        in_c = domain_centroids.get(sc.input_domain)
+        out_c = domain_centroids.get(sc.output_domain)
+        if in_c is None or out_c is None:
+            continue
+
+        # Ideal position: midpoint between domain centroids
+        mid_x = (in_c[0] + out_c[0]) / 2.0
+        mid_y = (in_c[1] + out_c[1]) / 2.0
+        dist_to_mid = _dist(sc_pos, (mid_x, mid_y))
+
+        if dist_to_mid > threshold:
+            violations.append(PlacementViolation(
+                rule=PlacementRule.REGULATOR_BOUNDARY,
+                severity="major",
+                refs=(sc.anchor_ref,),
+                message=f"Regulator {sc.anchor_ref} is {dist_to_mid:.1f}mm from "
+                        f"domain boundary (tolerance {threshold}mm)",
+                current_value=dist_to_mid,
+                threshold=threshold,
+                suggested_position=(mid_x, mid_y),
+            ))
+
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Grading
 # ---------------------------------------------------------------------------
@@ -554,6 +721,9 @@ def review_placement(
     if domain_map is None:
         domain_map = classify_voltage_domains(requirements)
 
+    # Detect cross-domain affinities for voltage isolation exemptions
+    affinities = detect_cross_domain_affinities(requirements, domain_map)
+
     all_violations: list[PlacementViolation] = []
 
     # Run all checks
@@ -564,7 +734,7 @@ def review_placement(
         _check_subcircuit_spread(pcb, subcircuits)
     )
     all_violations.extend(
-        _check_voltage_isolation(pcb, domain_map)
+        _check_voltage_isolation(pcb, domain_map, affinities)
     )
     all_violations.extend(
         _check_connector_edge(pcb)
@@ -577,6 +747,15 @@ def review_placement(
     )
     all_violations.extend(
         _check_thermal_adjacency(pcb, requirements)
+    )
+    all_violations.extend(
+        _check_mcu_peripheral_proximity(pcb, subcircuits)
+    )
+    all_violations.extend(
+        _check_rf_edge_placement(pcb, subcircuits)
+    )
+    all_violations.extend(
+        _check_regulator_boundary(pcb, subcircuits, domain_map)
     )
 
     violations = tuple(all_violations)

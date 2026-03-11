@@ -28,12 +28,16 @@ _WEIGHT_PLACEMENT: float = 0.20
 _WEIGHT_SIGNAL_INTEGRITY: float = 0.15
 _WEIGHT_THERMAL: float = 0.10
 
-# Fast-path sub-dimension weights (EE-aligned)
-_FAST_WEIGHT_COLLISION: float = 0.25
-_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.25
-_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.20
-_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.15
-_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.15
+# Fast-path sub-dimension weights (EE-aligned, v2)
+_FAST_WEIGHT_COLLISION: float = 0.20
+_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.20
+_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.15
+_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.10
+_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.10
+_FAST_WEIGHT_MCU_PERIPHERAL: float = 0.10
+_FAST_WEIGHT_RF_EDGE: float = 0.05
+_FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.05
+_FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.05
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -578,6 +582,97 @@ def _score_decoupling_proximity(
     return score, issues
 
 
+def _score_mcu_peripheral_proximity(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score MCU peripheral proximity.
+
+    Evaluates how close switches, LEDs, and debug connectors are to their MCU.
+    """
+    from kicad_pipeline.constants import MCU_PERIPHERAL_MAX_DISTANCE_MM
+    from kicad_pipeline.optimization.functional_grouper import (
+        SubCircuitType,
+        detect_subcircuits,
+    )
+
+    subcircuits = detect_subcircuits(requirements)
+    mcu_clusters = [s for s in subcircuits
+                    if s.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER]
+    if not mcu_clusters:
+        return 1.0, []
+
+    pos = _fp_position_dict(pcb)
+    scores: list[float] = []
+    issues: list[str] = []
+    threshold = MCU_PERIPHERAL_MAX_DISTANCE_MM
+
+    for sc in mcu_clusters:
+        anchor_pos = pos.get(sc.anchor_ref)
+        if anchor_pos is None:
+            continue
+        for ref in sc.refs:
+            if ref == sc.anchor_ref or ref not in pos:
+                continue
+            d = math.sqrt(
+                (pos[ref][0] - anchor_pos[0]) ** 2 +
+                (pos[ref][1] - anchor_pos[1]) ** 2,
+            )
+            if d <= threshold:
+                scores.append(1.0)
+            else:
+                s = _clamp01(1.0 - (d - threshold) / threshold)
+                scores.append(s)
+                issues.append(f"{ref} is {d:.1f}mm from MCU {sc.anchor_ref}")
+
+    score = sum(scores) / len(scores) if scores else 1.0
+    return score, issues
+
+
+def _score_rf_edge_placement(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score RF module edge placement."""
+    from kicad_pipeline.constants import RF_EDGE_MAX_MM
+    from kicad_pipeline.optimization.functional_grouper import (
+        SubCircuitType,
+        detect_subcircuits,
+    )
+
+    subcircuits = detect_subcircuits(requirements)
+    rf_modules = [s for s in subcircuits if s.circuit_type == SubCircuitType.RF_ANTENNA]
+    if not rf_modules:
+        return 1.0, []
+
+    if not pcb.outline or not pcb.outline.polygon:
+        return 1.0, []
+
+    bxs = [p.x for p in pcb.outline.polygon]
+    bys = [p.y for p in pcb.outline.polygon]
+    min_x, max_x = min(bxs), max(bxs)
+    min_y, max_y = min(bys), max(bys)
+
+    scores: list[float] = []
+    issues: list[str] = []
+
+    for sc in rf_modules:
+        pos = _fp_position_dict(pcb).get(sc.anchor_ref)
+        if pos is None:
+            continue
+        x, y = pos
+        edge_dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
+        if edge_dist <= RF_EDGE_MAX_MM:
+            scores.append(1.0)
+        else:
+            s = _clamp01(1.0 - (edge_dist - RF_EDGE_MAX_MM) / RF_EDGE_MAX_MM)
+            scores.append(s)
+            issues.append(f"RF {sc.anchor_ref} is {edge_dist:.1f}mm from edge")
+
+    score = sum(scores) / len(scores) if scores else 1.0
+    return score, issues
+
+
 def compute_fast_placement_score(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -606,14 +701,20 @@ def compute_fast_placement_score(
     connector_score, connector_issues = _score_connector_edge(pcb)
     decoupling_score, decoupling_issues = _score_decoupling_proximity(pcb, requirements)
     boundary_score, _boundary_issues = _score_boundary(pcb)
+    mcu_periph_score, mcu_periph_issues = _score_mcu_peripheral_proximity(pcb, requirements)
+    rf_edge_score, rf_edge_issues = _score_rf_edge_placement(pcb, requirements)
 
-    # Weighted placement composite
+    # Weighted placement composite (9 dimensions)
     placement_score = (
         _FAST_WEIGHT_COLLISION * collision_score
         + _FAST_WEIGHT_SUBCIRCUIT_COHESION * cohesion_score
         + _FAST_WEIGHT_VOLTAGE_ISOLATION * isolation_score
         + _FAST_WEIGHT_CONNECTOR_EDGE * connector_score
         + _FAST_WEIGHT_DECOUPLING_PROXIMITY * decoupling_score
+        + _FAST_WEIGHT_MCU_PERIPHERAL * mcu_periph_score
+        + _FAST_WEIGHT_RF_EDGE * rf_edge_score
+        + _FAST_WEIGHT_CONNECTOR_ORIENTATION * 1.0  # orientation scored via review
+        + _FAST_WEIGHT_REGULATOR_BOUNDARY * boundary_score
     )
 
     # For fast path, other dimensions are derived from placement sub-scores
@@ -665,6 +766,18 @@ def compute_fast_placement_score(
             score=decoupling_score,
             weight=_FAST_WEIGHT_DECOUPLING_PROXIMITY,
             issues=tuple(decoupling_issues[:5]),
+        ),
+        ScoreDetail(
+            category="MCU Peripheral",
+            score=mcu_periph_score,
+            weight=_FAST_WEIGHT_MCU_PERIPHERAL,
+            issues=tuple(mcu_periph_issues[:5]),
+        ),
+        ScoreDetail(
+            category="RF Edge",
+            score=rf_edge_score,
+            weight=_FAST_WEIGHT_RF_EDGE,
+            issues=tuple(rf_edge_issues[:5]),
         ),
     )
 

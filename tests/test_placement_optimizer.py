@@ -35,9 +35,14 @@ from kicad_pipeline.optimization.placement_optimizer import (
     _extract_positions,
     _get_movable_refs,
     _is_fixed,
+    _orient_connectors,
     _perturbation_nudge,
     _perturbation_rotate,
     _perturbation_swap,
+    _pin_rf_to_edge,
+    _place_row_layout,
+    _PlacementGrid,
+    _pull_mcu_peripherals,
     optimize_placement,
     optimize_placement_ee,
     optimize_placement_sa,
@@ -646,3 +651,237 @@ def test_optimize_placement_ee_connectors_near_edge() -> None:
 def test_optimize_placement_is_alias_for_ee() -> None:
     """optimize_placement should be optimize_placement_ee."""
     assert optimize_placement is optimize_placement_ee
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: New placement strategy tests
+# ---------------------------------------------------------------------------
+
+class TestPlacementGrid:
+    def test_is_free_empty(self) -> None:
+        grid = _PlacementGrid((0.0, 0.0, 100.0, 80.0))
+        assert grid.is_free(50.0, 40.0, 5.0, 5.0)
+
+    def test_collision_detected(self) -> None:
+        grid = _PlacementGrid((0.0, 0.0, 100.0, 80.0))
+        grid.place(50.0, 40.0, 5.0, 5.0)
+        assert not grid.is_free(51.0, 41.0, 5.0, 5.0)
+
+    def test_find_free_pos_near_occupied(self) -> None:
+        grid = _PlacementGrid((0.0, 0.0, 100.0, 80.0))
+        grid.place(50.0, 40.0, 5.0, 5.0)
+        fx, fy = grid.find_free_pos(50.0, 40.0, 5.0, 5.0)
+        # Should find a different position
+        dist = math.sqrt((fx - 50.0) ** 2 + (fy - 40.0) ** 2)
+        assert dist > 2.0
+
+
+class TestRowLayout:
+    def test_two_relays_row(self) -> None:
+        """Two relay subcircuits get arranged in a horizontal row."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            DetectedSubCircuit,
+            SubCircuitType,
+            VoltageDomain,
+        )
+
+        sc1 = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RELAY_DRIVER,
+            refs=("K1", "Q1"),
+            anchor_ref="K1",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+            layout_hint="row",
+        )
+        sc2 = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RELAY_DRIVER,
+            refs=("K2", "Q2"),
+            anchor_ref="K2",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+            layout_hint="row",
+        )
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "K1": (20.0, 20.0, 0.0),
+            "Q1": (25.0, 20.0, 0.0),
+            "K2": (60.0, 60.0, 0.0),
+            "Q2": (65.0, 60.0, 0.0),
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "K1": (5.0, 5.0), "Q1": (2.0, 2.0),
+            "K2": (5.0, 5.0), "Q2": (2.0, 2.0),
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        result = _place_row_layout(
+            [sc1, sc2], positions, fp_sizes, bounds, set(),
+        )
+
+        # Both relay anchors should now be at similar Y
+        k1_y = result["K1"][1]
+        k2_y = result["K2"][1]
+        assert abs(k1_y - k2_y) < 1.0, f"K1.y={k1_y}, K2.y={k2_y} should be close"
+
+    def test_single_relay_no_row(self) -> None:
+        """Single relay subcircuit doesn't get row-arranged."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            DetectedSubCircuit,
+            SubCircuitType,
+            VoltageDomain,
+        )
+
+        sc1 = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RELAY_DRIVER,
+            refs=("K1", "Q1"),
+            anchor_ref="K1",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+            layout_hint="row",
+        )
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "K1": (20.0, 20.0, 0.0),
+            "Q1": (25.0, 20.0, 0.0),
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "K1": (5.0, 5.0), "Q1": (2.0, 2.0),
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        result = _place_row_layout(
+            [sc1], positions, fp_sizes, bounds, set(),
+        )
+        # Position should be unchanged
+        assert result["K1"][0] == 20.0
+        assert result["K1"][1] == 20.0
+
+
+class TestRFEdgePinning:
+    def test_rf_module_moves_to_edge(self) -> None:
+        """RF antenna module gets moved to nearest board edge."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            DetectedSubCircuit,
+            SubCircuitType,
+            VoltageDomain,
+        )
+
+        sc = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RF_ANTENNA,
+            refs=("U1",),
+            anchor_ref="U1",
+            net_connections=(),
+            domain=VoltageDomain.DIGITAL_3V3,
+            layout_hint="edge",
+        )
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "U1": (50.0, 40.0, 0.0),  # center of board
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "U1": (18.0, 25.5),  # ESP32 module size
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        result = _pin_rf_to_edge([sc], positions, fp_sizes, bounds, set())
+
+        # Should be near an edge now
+        x, y, rot = result["U1"]
+        min_edge = min(x, 100.0 - x, y, 80.0 - y)
+        assert min_edge < 20.0, f"RF module should be near edge, min_edge={min_edge}"
+
+
+class TestMCUPeripheralPulling:
+    def test_peripherals_pulled_close(self) -> None:
+        """MCU peripherals far from MCU get pulled closer."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            DetectedSubCircuit,
+            SubCircuitType,
+            VoltageDomain,
+        )
+
+        sc = DetectedSubCircuit(
+            circuit_type=SubCircuitType.MCU_PERIPHERAL_CLUSTER,
+            refs=("SW1", "LED1"),
+            anchor_ref="U1",
+            net_connections=(),
+            domain=VoltageDomain.DIGITAL_3V3,
+            layout_hint="cluster",
+        )
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "U1": (50.0, 40.0, 0.0),
+            "SW1": (10.0, 10.0, 0.0),  # far from MCU
+            "LED1": (90.0, 70.0, 0.0),  # far from MCU
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "U1": (10.0, 10.0), "SW1": (3.0, 3.0), "LED1": (2.0, 2.0),
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        # Save original distances
+        old_dists = {
+            ref: math.sqrt(
+                (positions[ref][0] - 50.0) ** 2 + (positions[ref][1] - 40.0) ** 2,
+            )
+            for ref in ("SW1", "LED1")
+        }
+
+        result = _pull_mcu_peripherals(
+            [sc], positions, fp_sizes, bounds, set(),
+        )
+
+        # Both peripherals should be closer to MCU now
+        for ref in ("SW1", "LED1"):
+            new_dist = math.sqrt(
+                (result[ref][0] - 50.0) ** 2 + (result[ref][1] - 40.0) ** 2,
+            )
+            assert new_dist < old_dists[ref], f"{ref} should be closer to MCU"
+
+
+class TestConnectorOrientation:
+    def test_connector_near_right_edge_faces_right(self) -> None:
+        """Connector near right edge gets rotated to face right."""
+        fp = Footprint(
+            lib_id="J:Screw_Terminal",
+            ref="J1",
+            value="Screw_Terminal",
+            position=Point(x=95.0, y=40.0),
+            rotation=0.0,
+        )
+        pcb = _make_pcb(footprints=(fp,))
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "J1": (95.0, 40.0, 0.0),
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "J1": (8.0, 4.0),  # wide connector
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        result = _orient_connectors(positions, fp_sizes, bounds, set(), pcb)
+        # Near right edge, wide connector → 90 degrees
+        assert result["J1"][2] == 90.0
+
+    def test_connector_in_center_not_rotated(self) -> None:
+        """Connector in center of board (far from edges) is not reoriented."""
+        fp = Footprint(
+            lib_id="J:Header",
+            ref="J1",
+            value="Header",
+            position=Point(x=50.0, y=40.0),
+            rotation=45.0,
+        )
+        pcb = _make_pcb(footprints=(fp,))
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "J1": (50.0, 40.0, 45.0),
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "J1": (4.0, 4.0),
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        result = _orient_connectors(positions, fp_sizes, bounds, set(), pcb)
+        # Far from edges → unchanged
+        assert result["J1"][2] == 45.0

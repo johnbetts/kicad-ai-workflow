@@ -217,6 +217,21 @@ CONNECTOR_EDGE_MAX_MM: float = 5.0
 CRYSTAL_MAX_DISTANCE_MM: float = 5.0
 """Maximum distance from a crystal to its MCU clock pins (mm)."""
 
+MCU_PERIPHERAL_MAX_DISTANCE_MM: float = 20.0
+"""Maximum distance from MCU peripherals (switches, LEDs, debug) to MCU (mm)."""
+
+RF_EDGE_MAX_MM: float = 3.0
+"""Maximum distance from an RF antenna to a board edge (mm)."""
+
+RELAY_ROW_MAX_Y_SPREAD_MM: float = 5.0
+"""Maximum Y-axis spread for relay row layout (mm)."""
+
+REGULATOR_BOUNDARY_TOLERANCE_MM: float = 5.0
+"""Tolerance for regulator placement at domain boundary (mm)."""
+
+CROSS_DOMAIN_AFFINITY_MAX_MM: float = 25.0
+"""Maximum distance for cross-domain affinity components (mm)."""
+
 # ---------------------------------------------------------------------------
 # Power budget
 # ---------------------------------------------------------------------------

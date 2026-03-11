@@ -344,3 +344,129 @@ class TestImmutability:
         r = PlacementReview(violations=(), grade="A", summary="clean")
         with pytest.raises(AttributeError):
             r.grade = "F"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: New review rules
+# ---------------------------------------------------------------------------
+
+
+class TestNewPlacementRules:
+    def test_new_rule_enum_values(self) -> None:
+        """New placement rule enum values exist."""
+        assert PlacementRule.MCU_PERIPHERAL_PROXIMITY.value == "mcu_peripheral_proximity"
+        assert PlacementRule.RF_EDGE_PLACEMENT.value == "rf_edge_placement"
+        assert PlacementRule.CONNECTOR_ORIENTATION.value == "connector_orientation"
+        assert PlacementRule.REGULATOR_BOUNDARY.value == "regulator_boundary"
+
+
+class TestMCUPeripheralProximityReview:
+    def test_peripheral_far_from_mcu(self) -> None:
+        """Peripheral far from MCU triggers violation."""
+        from kicad_pipeline.optimization.review_agent import _check_mcu_peripheral_proximity
+
+        pcb = _make_pcb([
+            _fp("U1", 50, 40),  # MCU
+            _fp("SW1", 10, 10),  # far peripheral
+        ])
+        sc = DetectedSubCircuit(
+            circuit_type=SubCircuitType.MCU_PERIPHERAL_CLUSTER,
+            refs=("SW1",),
+            anchor_ref="U1",
+            net_connections=(),
+            domain=VoltageDomain.DIGITAL_3V3,
+            layout_hint="cluster",
+        )
+        violations = _check_mcu_peripheral_proximity(pcb, (sc,))
+        assert len(violations) >= 1
+        assert violations[0].rule == PlacementRule.MCU_PERIPHERAL_PROXIMITY
+
+    def test_peripheral_close_to_mcu_ok(self) -> None:
+        """Peripheral near MCU has no violation."""
+        from kicad_pipeline.optimization.review_agent import _check_mcu_peripheral_proximity
+
+        pcb = _make_pcb([
+            _fp("U1", 50, 40),
+            _fp("SW1", 55, 42),  # close
+        ])
+        sc = DetectedSubCircuit(
+            circuit_type=SubCircuitType.MCU_PERIPHERAL_CLUSTER,
+            refs=("SW1",),
+            anchor_ref="U1",
+            net_connections=(),
+            domain=VoltageDomain.DIGITAL_3V3,
+            layout_hint="cluster",
+        )
+        violations = _check_mcu_peripheral_proximity(pcb, (sc,))
+        assert len(violations) == 0
+
+
+class TestRFEdgePlacementReview:
+    def test_rf_module_in_center(self) -> None:
+        """RF module in center of board triggers critical violation."""
+        from kicad_pipeline.optimization.review_agent import _check_rf_edge_placement
+
+        pcb = _make_pcb([_fp("U1", 50, 40)])
+        sc = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RF_ANTENNA,
+            refs=("U1",),
+            anchor_ref="U1",
+            net_connections=(),
+            domain=VoltageDomain.DIGITAL_3V3,
+            layout_hint="edge",
+        )
+        violations = _check_rf_edge_placement(pcb, (sc,))
+        assert len(violations) == 1
+        assert violations[0].severity == "critical"
+
+    def test_rf_module_on_edge_ok(self) -> None:
+        """RF module near board edge has no violation."""
+        from kicad_pipeline.optimization.review_agent import _check_rf_edge_placement
+
+        pcb = _make_pcb([_fp("U1", 98, 40)])  # near right edge
+        sc = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RF_ANTENNA,
+            refs=("U1",),
+            anchor_ref="U1",
+            net_connections=(),
+            domain=VoltageDomain.DIGITAL_3V3,
+            layout_hint="edge",
+        )
+        violations = _check_rf_edge_placement(pcb, (sc,))
+        assert len(violations) == 0
+
+
+class TestVoltageIsolationExemption:
+    def test_affinity_exempts_violation(self) -> None:
+        """Cross-domain affinity exempts pair from voltage isolation violation."""
+        from kicad_pipeline.optimization.functional_grouper import DomainAffinity
+        from kicad_pipeline.optimization.review_agent import _check_voltage_isolation
+
+        pcb = _make_pcb([
+            _fp("R1", 50, 40),  # 24V domain
+            _fp("U1", 51, 41),  # 3V3 domain — very close to R1
+        ])
+        domain_map = {
+            "R1": VoltageDomain.VIN_24V,
+            "U1": VoltageDomain.DIGITAL_3V3,
+        }
+        # Without affinity → violation
+        violations_no_exempt = _check_voltage_isolation(pcb, domain_map, ())
+        assert any(
+            "R1" in v.refs and "U1" in v.refs
+            for v in violations_no_exempt
+        )
+
+        # With affinity → no violation
+        aff = DomainAffinity(
+            source_refs=("R1",),
+            target_refs=("U1",),
+            source_domain=VoltageDomain.VIN_24V,
+            target_domain=VoltageDomain.DIGITAL_3V3,
+            reason="measurement",
+        )
+        violations_exempt = _check_voltage_isolation(pcb, domain_map, (aff,))
+        assert not any(
+            "R1" in v.refs and "U1" in v.refs
+            for v in violations_exempt
+        )

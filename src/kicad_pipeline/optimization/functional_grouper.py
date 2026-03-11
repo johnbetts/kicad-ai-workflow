@@ -40,6 +40,8 @@ class SubCircuitType(enum.Enum):
     DECOUPLING = "decoupling"
     RC_FILTER = "rc_filter"
     VOLTAGE_DIVIDER = "voltage_divider"
+    MCU_PERIPHERAL_CLUSTER = "mcu_peripheral_cluster"
+    RF_ANTENNA = "rf_antenna"
 
 
 class VoltageDomain(enum.Enum):
@@ -58,6 +60,21 @@ class VoltageDomain(enum.Enum):
 
 
 @dataclass(frozen=True)
+class SubCircuitNode:
+    """Hierarchical node within a sub-circuit.
+
+    Describes a functional role (e.g. relay body, driver, LED indicator)
+    with its component refs and optional child nodes for hierarchical
+    placement.
+    """
+
+    role: str  # "relay_body", "driver", "led_indicator", "input", "output"
+    refs: tuple[str, ...]
+    anchor_ref: str
+    children: tuple[SubCircuitNode, ...] = ()
+
+
+@dataclass(frozen=True)
 class DetectedSubCircuit:
     """A detected sub-circuit with component refs and domain."""
 
@@ -66,6 +83,26 @@ class DetectedSubCircuit:
     anchor_ref: str
     net_connections: tuple[str, ...]
     domain: VoltageDomain
+    layout_hint: str = "cluster"  # "cluster" | "row" | "linear" | "edge" | "boundary"
+    hierarchy: SubCircuitNode | None = None
+    input_domain: VoltageDomain | None = None   # for regulators
+    output_domain: VoltageDomain | None = None  # for regulators
+
+
+@dataclass(frozen=True)
+class DomainAffinity:
+    """Cross-domain component affinity for placement co-location.
+
+    Identifies components in different voltage domains that should be
+    placed near each other (e.g. analog monitoring circuits measuring
+    relay outputs).
+    """
+
+    source_refs: tuple[str, ...]
+    target_refs: tuple[str, ...]
+    source_domain: VoltageDomain
+    target_domain: VoltageDomain
+    reason: str  # "measurement", "feedback", "control"
 
 
 @dataclass(frozen=True)
@@ -255,12 +292,76 @@ def _detect_relay_drivers(
         for r in refs:
             claimed.add(r)
 
+        # Build hierarchical structure
+        driver_refs: list[str] = []
+        led_node_refs: list[str] = []
+        flyback_ref: str | None = None
+        gate_resistor_ref: str | None = None
+        led_ref: str | None = None
+        led_resistor_ref: str | None = None
+
+        for r in refs:
+            if r == relay.ref:
+                continue
+            prefix = _ref_prefix(r)
+            if prefix == "Q":
+                driver_refs.append(r)
+            elif prefix == "D":
+                comp = comp_map.get(r)
+                if comp and "LED" in (comp.value or "").upper():
+                    led_ref = r
+                else:
+                    flyback_ref = r
+            elif prefix == "LED":
+                led_ref = r
+            elif prefix == "R":
+                # Determine if gate resistor or LED resistor
+                if transistor and r in (adj.get(transistor, set())):
+                    gate_resistor_ref = r
+                else:
+                    led_resistor_ref = r
+
+        # Driver subgroup: Q + D_flyback + R_gate
+        if flyback_ref:
+            driver_refs.append(flyback_ref)
+        if gate_resistor_ref:
+            driver_refs.append(gate_resistor_ref)
+
+        # LED subgroup
+        if led_ref:
+            led_node_refs.append(led_ref)
+        if led_resistor_ref:
+            led_node_refs.append(led_resistor_ref)
+
+        children: list[SubCircuitNode] = []
+        if driver_refs:
+            children.append(SubCircuitNode(
+                role="driver",
+                refs=tuple(sorted(driver_refs)),
+                anchor_ref=transistor or driver_refs[0],
+            ))
+        if led_node_refs:
+            children.append(SubCircuitNode(
+                role="led_indicator",
+                refs=tuple(sorted(led_node_refs)),
+                anchor_ref=led_ref or led_node_refs[0],
+            ))
+
+        hierarchy = SubCircuitNode(
+            role="relay_body",
+            refs=(relay.ref,),
+            anchor_ref=relay.ref,
+            children=tuple(children),
+        )
+
         results.append(DetectedSubCircuit(
             circuit_type=SubCircuitType.RELAY_DRIVER,
             refs=tuple(sorted(refs)),
             anchor_ref=relay.ref,
             net_connections=tuple(sorted(all_nets)),
             domain=domain,
+            layout_hint="row",
+            hierarchy=hierarchy,
         ))
 
     return results
@@ -324,13 +425,32 @@ def _detect_buck_converters(
                         refs.append(r)
                         all_nets.add(pin.net)
 
-        # Determine domain from output voltage
+        # Determine input/output domains from pin nets
+        input_domain: VoltageDomain | None = None
+        output_domain: VoltageDomain | None = None
         domain = VoltageDomain.POWER_5V
-        for net_name in comp_nets:
-            v = _parse_voltage_from_net(net_name)
+
+        for pin in comp.pins:
+            if not pin.net:
+                continue
+            pname = (pin.name or "").upper()
+            v = _parse_voltage_from_net(pin.net)
             if v is not None and v > 0:
-                domain = _classify_voltage(v)
-                break
+                vd = _classify_voltage(v)
+                if any(kw in pname for kw in ("VIN", "IN")):
+                    input_domain = vd
+                elif any(kw in pname for kw in ("VOUT", "OUT")):
+                    output_domain = vd
+                    domain = vd
+
+        if input_domain is None:
+            # Fall back to highest-voltage net
+            for net_name in comp_nets:
+                v = _parse_voltage_from_net(net_name)
+                if v is not None and v > 0:
+                    d = _classify_voltage(v)
+                    if input_domain is None or (v > 0 and d == VoltageDomain.VIN_24V):
+                        input_domain = d
 
         for r in refs:
             claimed.add(r)
@@ -341,6 +461,9 @@ def _detect_buck_converters(
             anchor_ref=comp.ref,
             net_connections=tuple(sorted(all_nets)),
             domain=domain,
+            layout_hint="boundary",
+            input_domain=input_domain,
+            output_domain=output_domain,
         ))
 
     return results
@@ -387,13 +510,30 @@ def _detect_ldo_regulators(
                         refs.append(r)
                         all_nets.add(pin.net)
 
-        # Determine domain from output
+        # Determine input/output domains
+        input_domain: VoltageDomain | None = None
+        output_domain: VoltageDomain | None = None
         domain = VoltageDomain.DIGITAL_3V3
-        for net_name in comp_nets:
-            v = _parse_voltage_from_net(net_name)
+
+        for pin in comp.pins:
+            if not pin.net:
+                continue
+            pname = (pin.name or "").upper()
+            v = _parse_voltage_from_net(pin.net)
             if v is not None and v > 0:
-                domain = _classify_voltage(v)
-                break
+                vd = _classify_voltage(v)
+                if any(kw in pname for kw in ("VIN", "IN")):
+                    input_domain = vd
+                elif any(kw in pname for kw in ("VOUT", "OUT")):
+                    output_domain = vd
+                    domain = vd
+
+        if input_domain is None:
+            for net_name in comp_nets:
+                v = _parse_voltage_from_net(net_name)
+                if v is not None and v > 0:
+                    input_domain = _classify_voltage(v)
+                    break
 
         for r in refs:
             claimed.add(r)
@@ -404,6 +544,9 @@ def _detect_ldo_regulators(
             anchor_ref=comp.ref,
             net_connections=tuple(sorted(all_nets)),
             domain=domain,
+            layout_hint="boundary",
+            input_domain=input_domain,
+            output_domain=output_domain,
         ))
 
     return results
@@ -592,6 +735,218 @@ def _detect_voltage_dividers(
 
 
 # ---------------------------------------------------------------------------
+# MCU peripheral detection
+# ---------------------------------------------------------------------------
+
+_RF_MODULE_KEYWORDS: frozenset[str] = frozenset({
+    "ESP32", "ESP8266", "NRF", "CC3200", "RF", "WROOM", "WROVER",
+    "NRF52", "NRF51", "CC2640", "CC1310",
+})
+
+_MCU_KEYWORDS: frozenset[str] = frozenset({
+    "STM32", "ATMEGA", "ATTINY", "PIC", "MSP430", "RP2040", "RP2350",
+    "SAMD", "ESP32", "ESP8266", "NRF52", "NRF51", "EFM32", "GD32",
+    "CH32", "WCH",
+})
+
+
+def _find_mcu_ref(
+    requirements: ProjectRequirements,
+) -> str | None:
+    """Find the MCU reference designator.
+
+    Prefers ICs matching MCU keywords; falls back to the U* component
+    with the most pins.
+    """
+    u_comps = [c for c in requirements.components if c.ref.startswith("U")]
+    if not u_comps:
+        return None
+
+    # First: keyword match
+    for comp in u_comps:
+        val_desc = f"{comp.value} {comp.description or ''}".upper()
+        if any(kw in val_desc for kw in _MCU_KEYWORDS):
+            return comp.ref
+
+    # Fallback: largest pin count
+    best = max(u_comps, key=lambda c: len(c.pins))
+    if len(best.pins) >= 8:
+        return best.ref
+    return None
+
+
+def _detect_mcu_peripherals(
+    requirements: ProjectRequirements,
+    adj: dict[str, set[str]],
+    claimed: set[str],
+) -> list[DetectedSubCircuit]:
+    """Detect MCU peripheral cluster: switches, LEDs, debug headers near MCU.
+
+    Walks signal adjacency from the MCU to find directly-connected
+    peripherals (SW*, LED*, debug/display connectors).
+    """
+    mcu_ref = _find_mcu_ref(requirements)
+    if mcu_ref is None or mcu_ref in claimed:
+        return []
+
+    # Walk 1-hop signal adjacency from MCU
+    mcu_neighbours = adj.get(mcu_ref, set())
+    peripheral_refs: list[str] = []
+    peripheral_prefixes = {"SW", "LED", "BTN"}
+
+    for nb in mcu_neighbours:
+        if nb in claimed:
+            continue
+        prefix = _ref_prefix(nb)
+        if prefix in peripheral_prefixes:
+            peripheral_refs.append(nb)
+            continue
+        # Check for debug/display connectors
+        if prefix == "J":
+            comp = next((c for c in requirements.components if c.ref == nb), None)
+            if comp:
+                val_desc = f"{comp.value} {comp.description or ''}".upper()
+                if any(kw in val_desc for kw in ("DEBUG", "JTAG", "SWD", "DISPLAY",
+                                                   "OLED", "LCD", "UART", "SERIAL")):
+                    peripheral_refs.append(nb)
+                    continue
+        # Also pick up LEDs connected via resistor (2-hop)
+        if prefix == "R":
+            r_neighbours = adj.get(nb, set())
+            for rn in r_neighbours:
+                if rn in claimed or rn == mcu_ref:
+                    continue
+                if _ref_prefix(rn) in ("LED", "D"):
+                    comp = next(
+                        (c for c in requirements.components if c.ref == rn), None,
+                    )
+                    if comp and "LED" in (comp.value or "").upper():
+                        if nb not in peripheral_refs:
+                            peripheral_refs.append(nb)
+                        if rn not in peripheral_refs:
+                            peripheral_refs.append(rn)
+
+    if not peripheral_refs:
+        return []
+
+    for r in peripheral_refs:
+        claimed.add(r)
+
+    return [DetectedSubCircuit(
+        circuit_type=SubCircuitType.MCU_PERIPHERAL_CLUSTER,
+        refs=tuple(sorted(peripheral_refs)),
+        anchor_ref=mcu_ref,
+        net_connections=(),
+        domain=VoltageDomain.DIGITAL_3V3,
+        layout_hint="cluster",
+    )]
+
+
+def _detect_rf_antenna(
+    requirements: ProjectRequirements,
+    claimed: set[str],
+) -> list[DetectedSubCircuit]:
+    """Detect RF/WiFi modules requiring edge placement.
+
+    Finds ESP32/nRF/CC modules and creates an RF_ANTENNA subcircuit
+    with edge layout hint.
+    """
+    results: list[DetectedSubCircuit] = []
+
+    for comp in requirements.components:
+        if comp.ref in claimed:
+            continue
+        if not comp.ref.startswith("U"):
+            continue
+        val_desc = f"{comp.value} {comp.description or ''}".upper()
+        if any(kw in val_desc for kw in _RF_MODULE_KEYWORDS):
+            claimed.add(comp.ref)
+            results.append(DetectedSubCircuit(
+                circuit_type=SubCircuitType.RF_ANTENNA,
+                refs=(comp.ref,),
+                anchor_ref=comp.ref,
+                net_connections=(),
+                domain=VoltageDomain.DIGITAL_3V3,
+                layout_hint="edge",
+            ))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Cross-domain affinity detection
+# ---------------------------------------------------------------------------
+
+
+def detect_cross_domain_affinities(
+    requirements: ProjectRequirements,
+    domain_map: dict[str, VoltageDomain],
+) -> tuple[DomainAffinity, ...]:
+    """Detect cross-domain component affinities for placement co-location.
+
+    Identifies signal nets that cross voltage domain boundaries where
+    components should be placed near each other despite being in different
+    domains (e.g. ADC/analog monitoring of relay outputs).
+
+    Args:
+        requirements: Project requirements with nets.
+        domain_map: Component ref to voltage domain mapping.
+
+    Returns:
+        Tuple of detected cross-domain affinities.
+    """
+    affinities: list[DomainAffinity] = []
+
+    for net in requirements.nets:
+        net_name = net.name.upper()
+        # Skip power and ground nets
+        if _is_power_net(net.name) or _is_gnd_net(net.name):
+            continue
+
+        # Get domains of all components on this net
+        refs = [conn.ref for conn in net.connections]
+        if len(refs) < 2:
+            continue
+
+        domains_on_net: dict[VoltageDomain, list[str]] = {}
+        for ref in refs:
+            d = domain_map.get(ref, VoltageDomain.MIXED)
+            if d != VoltageDomain.MIXED:
+                domains_on_net.setdefault(d, []).append(ref)
+
+        # If net spans 2+ different domains, check for affinity
+        domain_keys = [d for d in domains_on_net if d != VoltageDomain.MIXED]
+        if len(domain_keys) < 2:
+            continue
+
+        # Classify affinity reason from net name
+        reason: str | None = None
+        if any(kw in net_name for kw in _ANALOG_KEYWORDS):
+            reason = "measurement"
+        elif any(kw in net_name for kw in ("FB", "FEEDBACK", "SENSE")):
+            reason = "feedback"
+        elif any(kw in net_name for kw in ("CTRL", "CONTROL", "EN", "ENABLE")):
+            reason = "control"
+
+        if reason is None:
+            continue
+
+        # Check each pair of domains on this net
+        for di in range(len(domain_keys)):
+            for dj in range(di + 1, len(domain_keys)):
+                d1, d2 = domain_keys[di], domain_keys[dj]
+                affinities.append(DomainAffinity(
+                    source_refs=tuple(sorted(domains_on_net[d1])),
+                    target_refs=tuple(sorted(domains_on_net[d2])),
+                    source_domain=d1,
+                    target_domain=d2,
+                    reason=reason,
+                ))
+
+    return tuple(affinities)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -650,6 +1005,14 @@ def detect_subcircuits(
         requirements, net_to_refs, ref_to_nets, claimed,
     )
     all_subcircuits.extend(decoupling)
+
+    # RF antenna detection (before MCU peripherals so RF module isn't claimed)
+    rf_antennas = _detect_rf_antenna(requirements, claimed)
+    all_subcircuits.extend(rf_antennas)
+
+    # MCU peripheral cluster detection
+    mcu_peripherals = _detect_mcu_peripherals(requirements, adj, claimed)
+    all_subcircuits.extend(mcu_peripherals)
 
     _log.info(
         "Detected %d sub-circuits: %s",
