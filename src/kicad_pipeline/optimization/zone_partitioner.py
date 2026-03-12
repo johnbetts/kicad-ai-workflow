@@ -39,12 +39,12 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # as fractions of board width/height.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
     # Non-overlapping tiled layout with top margin for screw terminals:
-    #   Top strip (0-15%):   input_connectors (screw terminals along top edge)
-    #   Upper band (15-55%): power (0-40%) | relay (40-100%)
+    #   Top strip (0-20%):   input_connectors (screw terminals along top edge)
+    #   Upper band (20-55%): power (0-40%) | relay (40-100%)
     #   Lower band (55-100%): analog (0-35%) | ethernet (35-60%) | mcu (60-100%)
-    "input_connectors": (0.00, 0.00, 0.70, 0.15),
-    "power":            (0.00, 0.15, 0.40, 0.55),
-    "relay":            (0.40, 0.15, 1.00, 0.55),
+    "input_connectors": (0.00, 0.00, 0.70, 0.20),
+    "power":            (0.00, 0.20, 0.40, 0.55),
+    "relay":            (0.40, 0.20, 1.00, 0.55),
     "analog":           (0.00, 0.55, 0.35, 1.00),
     "mcu":              (0.60, 0.55, 1.00, 1.00),
     "ethernet":         (0.35, 0.55, 0.60, 1.00),

@@ -594,7 +594,14 @@ class _PlacementGrid:
                 if self.is_free(cx, cy, w, h):
                     return (cx, cy)
 
+        # If max_radius limited the search, retry without radius limit
+        if max_radius > 0:
+            return self.find_free_pos(target_x, target_y, w, h, max_radius=0.0)
+
         # Fallback — return clamped target (will collide but won't crash)
+        _log.warning("find_free_pos: no free position found for (%.1f, %.1f) "
+                     "size (%.1f, %.1f) — returning target (will collide)",
+                     target_x, target_y, w, h)
         return (tx, ty)
 
 
