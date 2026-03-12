@@ -49,6 +49,7 @@ from kicad_pipeline.models.pcb import (
 )
 from kicad_pipeline.pcb.board_templates import get_template
 from kicad_pipeline.pcb.footprints import (
+    compute_footprint_bbox,
     estimate_footprint_size,
     footprint_for_component,
     make_mounting_hole,
@@ -1222,7 +1223,10 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 1: Board dimensions
     # ------------------------------------------------------------------
-    _explicit_dimensions = board_width_mm is not None and board_height_mm is not None
+    _explicit_dimensions = (
+        (board_width_mm is not None and board_height_mm is not None)
+        or requirements.mechanical is not None
+    )
     if board_width_mm is None:
         if requirements.mechanical is not None:
             board_width_mm = requirements.mechanical.board_width_mm
@@ -1320,6 +1324,20 @@ def build_pcb(
                 board_height_mm,
             )
 
+    # Warn if board area is too small for component footprints
+    board_area = board_width_mm * board_height_mm
+    min_area = total_area * 3.0  # rule of thumb: 3x footprint area
+    if total_area > 0.0 and board_area < min_area:
+        import math as _math
+        suggested_w = _math.sqrt(min_area * (board_width_mm / board_height_mm))
+        suggested_h = min_area / suggested_w
+        log.warning(
+            "build_pcb: board %.0fx%.0fmm (%.0f mm^2) may be too small for "
+            "%.0f mm^2 of footprints (suggest %.0fx%.0fmm)",
+            board_width_mm, board_height_mm, board_area,
+            total_area, suggested_w, suggested_h,
+        )
+
     # ------------------------------------------------------------------
     # Step 4c: Create keepouts BEFORE placement so solver can avoid them
     # ------------------------------------------------------------------
@@ -1386,6 +1404,13 @@ def build_pcb(
     keepouts.extend(corner_keepouts)
 
     # ------------------------------------------------------------------
+    # Step 4c: Compute bounding boxes from actual footprint geometry
+    # ------------------------------------------------------------------
+    fp_bboxes: dict[str, object] = {}
+    for fp in pre_footprints:
+        fp_bboxes[fp.ref] = compute_footprint_bbox(fp)
+
+    # ------------------------------------------------------------------
     # Step 5: Layout placement (with keepouts available to solver)
     # ------------------------------------------------------------------
     layout_result: LayoutResult
@@ -1404,6 +1429,7 @@ def build_pcb(
             fixed_positions=fixed_positions,
             board_template=tmpl_obj,
             keepouts=tuple(keepouts),
+            footprint_bboxes=fp_bboxes,
         )
 
     # Merge layer overrides from layout result (constraint solver)

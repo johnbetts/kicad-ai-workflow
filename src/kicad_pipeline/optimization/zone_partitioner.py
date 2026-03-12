@@ -38,13 +38,17 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # reference board analysis.  Format: (x_start, y_start, x_end, y_end)
 # as fractions of board width/height.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
-    "input_connectors": (0.25, 0.00, 0.75, 0.10),  # Top edge (input connectors)
-    "power": (0.30, 0.00, 0.60, 0.45),
-    "relay": (0.55, 0.00, 1.00, 0.55),
-    "analog": (0.00, 0.00, 0.40, 0.55),
-    "mcu": (0.55, 0.45, 1.00, 1.00),
-    "ethernet": (0.25, 0.50, 0.75, 1.00),
-    "display": (0.00, 0.55, 0.25, 1.00),
+    # Non-overlapping tiled layout with top margin for screw terminals:
+    #   Top strip (0-15%):   input_connectors (screw terminals along top edge)
+    #   Upper band (15-55%): power (0-40%) | relay (40-100%)
+    #   Lower band (55-100%): analog (0-35%) | ethernet (35-60%) | mcu (60-100%)
+    "input_connectors": (0.00, 0.00, 0.70, 0.15),
+    "power":            (0.00, 0.15, 0.40, 0.55),
+    "relay":            (0.40, 0.15, 1.00, 0.55),
+    "analog":           (0.00, 0.55, 0.35, 1.00),
+    "mcu":              (0.60, 0.55, 1.00, 1.00),
+    "ethernet":         (0.35, 0.55, 0.60, 1.00),
+    "display":          (0.00, 0.85, 0.20, 1.00),
 }
 
 # Minimum inter-zone gap (mm)
@@ -159,14 +163,9 @@ def partition_board(
 
         fx1, fy1, fx2, fy2 = fracs
 
-        # Scale zone area proportionally to component count
-        zone_frac = zone_component_count.get(zone_name, 1) / total_components
-        # Blend between default fraction size and proportional size
-        default_area = (fx2 - fx1) * (fy2 - fy1)
-        # Only expand, don't shrink below minimum
-        scale = max(1.0, (zone_frac / max(default_area, 0.01)) ** 0.3)
-        # Clamp scale to avoid absurd zones
-        scale = min(scale, 1.5)
+        # Use fixed zone fractions — scaling is disabled until proportional
+        # tiling is implemented properly (old scaling caused zone overlaps).
+        scale = 1.0
 
         # Apply scale (expand from center of default zone)
         cx = (fx1 + fx2) / 2.0

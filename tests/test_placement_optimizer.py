@@ -756,6 +756,51 @@ class TestRowLayout:
         assert result["K1"][0] == 20.0
         assert result["K1"][1] == 20.0
 
+    def test_relay_row_rotation_90(self) -> None:
+        """Relay anchors in a row must be rotated to 90 degrees."""
+        from kicad_pipeline.optimization.functional_grouper import (
+            DetectedSubCircuit,
+            SubCircuitType,
+            VoltageDomain,
+        )
+
+        sc1 = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RELAY_DRIVER,
+            refs=("K1", "Q1"),
+            anchor_ref="K1",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+            layout_hint="row",
+        )
+        sc2 = DetectedSubCircuit(
+            circuit_type=SubCircuitType.RELAY_DRIVER,
+            refs=("K2", "Q2"),
+            anchor_ref="K2",
+            net_connections=(),
+            domain=VoltageDomain.VIN_24V,
+            layout_hint="row",
+        )
+
+        positions: dict[str, tuple[float, float, float]] = {
+            "K1": (20.0, 20.0, 0.0),
+            "Q1": (25.0, 20.0, 0.0),
+            "K2": (60.0, 60.0, 0.0),
+            "Q2": (65.0, 60.0, 0.0),
+        }
+        fp_sizes: dict[str, tuple[float, float]] = {
+            "K1": (5.0, 8.0), "Q1": (2.0, 2.0),
+            "K2": (5.0, 8.0), "Q2": (2.0, 2.0),
+        }
+        bounds = (0.0, 0.0, 100.0, 80.0)
+
+        result = _place_row_layout(
+            [sc1, sc2], positions, fp_sizes, bounds, set(),
+        )
+
+        # Both K* refs must have rotation == 90.0
+        assert result["K1"][2] == 90.0, f"K1 rotation={result['K1'][2]}, expected 90"
+        assert result["K2"][2] == 90.0, f"K2 rotation={result['K2'][2]}, expected 90"
+
 
 class TestRFEdgePinning:
     def test_rf_module_moves_to_edge(self) -> None:

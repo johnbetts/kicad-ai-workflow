@@ -201,3 +201,43 @@ def test_pin_connectors_fixed_refs_unchanged() -> None:
 
     result = pin_connectors_to_edge(placed_groups, fp_sizes, board_bounds, {"J1"})
     assert result["J1"] == (50.0, 40.0)  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Group exceeds zone warning
+# ---------------------------------------------------------------------------
+
+def test_group_exceeds_zone_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """Warning is logged when a group's layout is larger than its zone."""
+    import logging
+
+    # Create a tiny zone
+    zones = [
+        BoardZone("mcu", (40.0, 40.0, 55.0, 55.0), None, ("MCU Core",)),
+    ]
+    groups = [
+        FeatureBlock(
+            name="MCU Core",
+            description="Test",
+            components=("U1", "C1", "C2"),
+            nets=(),
+            subcircuits=(),
+        ),
+    ]
+    # Internal layout much larger than zone (30mm wide)
+    internal_layouts = {
+        "MCU Core": {
+            "U1": (0.0, 0.0, 0.0),
+            "C1": (15.0, 0.0, 0.0),
+            "C2": (30.0, 0.0, 0.0),
+        },
+    }
+    fp_sizes = {"U1": (10.0, 10.0), "C1": (2.0, 2.0), "C2": (2.0, 2.0)}
+    board_bounds = (0.0, 0.0, 100.0, 80.0)
+
+    with caplog.at_level(logging.WARNING):
+        place_groups(zones, groups, internal_layouts, fp_sizes, board_bounds)
+
+    assert any("exceeds zone" in rec.message for rec in caplog.records), (
+        "Expected 'exceeds zone' warning but none was logged"
+    )

@@ -208,6 +208,14 @@ def place_groups(
         zone: BoardZone | None = zone_map.get(group.name)
         if zone is not None:
             zx1, zy1, zx2, zy2 = zone.rect
+            zone_w = zx2 - zx1
+            zone_h = zy2 - zy1
+            if gw > zone_w or gh > zone_h:
+                _log.warning(
+                    "Group '%s' (%.0fx%.0fmm) exceeds zone '%s' "
+                    "(%.0fx%.0fmm) — components may be clamped",
+                    group.name, gw, gh, zone.name, zone_w, zone_h,
+                )
             # Target center of zone
             target_x = (zx1 + zx2) / 2.0
             target_y = (zy1 + zy2) / 2.0
@@ -260,6 +268,18 @@ def place_groups(
             "  Placed group '%s' in zone '%s' at (%.1f, %.1f) [%.0fx%.0fmm]",
             group.name, zone_name, cx, cy, gw, gh,
         )
+
+    # Validate: count off-board components
+    off_board_count = 0
+    for pg in placed:
+        for ref, (px, py) in pg.positions.items():
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            if (px - w / 2 < bx1 - 0.5 or px + w / 2 > bx2 + 0.5
+                    or py - h / 2 < by1 - 0.5 or py + h / 2 > by2 + 0.5):
+                off_board_count += 1
+                _log.warning("  Off-board: %s at (%.1f, %.1f)", ref, px, py)
+    if off_board_count:
+        _log.warning("Group placement: %d components off-board", off_board_count)
 
     _log.info("Group placement complete: %d groups placed", len(placed))
     return placed

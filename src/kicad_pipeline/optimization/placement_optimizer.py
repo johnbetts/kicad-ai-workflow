@@ -945,8 +945,32 @@ def _resolve_collisions(
                 ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
                 grid.place(ox, oy, ow, oh)
 
-            # Find nearest free position to current location
-            fx, fy = grid.find_free_pos(rx, ry, w, h)
+            # If colliding with a large IC (>100mm^2), push away from its center
+            # to avoid landing right at the edge of its courtyard
+            target_x, target_y = rx, ry
+            for other_ref, (ox, oy, _orot) in result.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
+                if ow * oh < 100.0:
+                    continue  # not a large IC
+                if (abs(rx - ox) < (w + ow) / 2.0
+                        and abs(ry - oy) < (h + oh) / 2.0):
+                    # Inside large IC — push to nearest edge + margin
+                    dx = rx - ox
+                    dy = ry - oy
+                    if abs(dx) * oh > abs(dy) * ow:
+                        # Closer to left/right edge
+                        push_x = (ow / 2.0 + w / 2.0 + 2.0)
+                        target_x = ox + push_x if dx >= 0 else ox - push_x
+                    else:
+                        # Closer to top/bottom edge
+                        push_y = (oh / 2.0 + h / 2.0 + 2.0)
+                        target_y = oy + push_y if dy >= 0 else oy - push_y
+                    break
+
+            # Find nearest free position to target
+            fx, fy = grid.find_free_pos(target_x, target_y, w, h)
 
             # Clamp to group bounding box if group constraints active
             if group_bboxes is not None:
@@ -1012,10 +1036,15 @@ def _place_row_layout(
         # Sort anchors left-to-right
         anchor_positions.sort(key=lambda p: p[0])
 
-        # Compute row spacing based on anchor widths
+        # Relay rotation: 90° for vertical coil orientation
+        relay_rotation = 90.0
+
+        # Compute row spacing based on anchor widths (swapped for 90° rotation)
         total_width = 0.0
         for _, _, sc in anchor_positions:
             aw, ah = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
+            # Swap w/h because relay is rotated 90°
+            aw, ah = ah, aw
             total_width += aw + 1.0  # gap between relays
 
         # Place anchors in a row centered on avg_x
@@ -1036,13 +1065,14 @@ def _place_row_layout(
         for _, _, sc in anchor_positions:
             anchor_ref = sc.anchor_ref
             aw, ah = fp_sizes.get(anchor_ref, (5.0, 5.0))
+            # Swap w/h for 90° rotation
+            aw, ah = ah, aw
             target_x = cursor_x + aw / 2.0
             target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
             target_y = max(min_y + 2.0, min(max_y - 2.0, avg_y))
 
-            # Place relay directly at target — don't let spiral drift Y
-            _, _, old_rot = positions.get(anchor_ref, (0, 0, 0))
-            positions[anchor_ref] = (target_x, target_y, old_rot)
+            # Place relay at 90° rotation for vertical coil orientation
+            positions[anchor_ref] = (target_x, target_y, relay_rotation)
             row_grid.place(target_x, target_y, aw, ah)
 
             # Support components are placed by Level 3b — skip here to
@@ -3140,14 +3170,14 @@ def optimize_placement_ee(
         unpaired_sw = [r for r in other_passive_refs if r in positions
                        and r.startswith("SW") and r not in used_sw]
 
-        # Place SW/R cluster to the upper-left of MCU — clear of courtyard
-        sw_base_x = mcu_left - 8.0
-        sw_base_y = mcu_top - 4.0
+        # Place SW/R cluster to the right of MCU — UI cluster on right edge
+        sw_base_x = max_x - 8.0
+        sw_base_y = mcu_top + 4.0
         for i, (sw, res) in enumerate(unique_pairs):
             sw_w, sw_h = fp_sizes.get(sw, (3.5, 3.5))
             r_w, r_h = fp_sizes.get(res, (1.0, 0.5))
-            # Switch
-            tx = sw_base_x - i * (sw_w + 3.0)
+            # Switch — place side by side horizontally
+            tx = sw_base_x - i * (sw_w + 1.5)
             ty = sw_base_y
             tx = max(bounds[0] + sw_w / 2.0 + 1.0, min(bounds[2] - 2.0, tx))
             ty = max(bounds[1] + sw_h / 2.0 + 1.0, min(bounds[3] - 2.0, ty))
@@ -3183,6 +3213,28 @@ def optimize_placement_ee(
             mcu_grid.place(px, py, sw_w, sw_h)
             other_passive_refs.remove(sw)
             _log.info("    %s (switch) → (%.1f, %.1f)", sw, px, py)
+
+        # --- Step 6b: Place LED1 near SW cluster (UI grouping) ---
+        led_placed = set()
+        for led_ref in ["LED1"]:
+            if (led_ref in other_passive_refs and led_ref in positions
+                    and led_ref not in fixed_refs):
+                lw, lh = fp_sizes.get(led_ref, (2.0, 1.0))
+                # Place LED below the SW cluster
+                led_tx = sw_base_x
+                led_ty = sw_base_y + 6.0  # below switches
+                led_tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, led_tx))
+                led_ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, led_ty))
+                lpx, lpy = mcu_grid.find_free_pos(
+                    led_tx, led_ty, lw, lh, max_radius=10.0,
+                )
+                positions[led_ref] = (lpx, lpy, 0.0)
+                mcu_peripheral_refs.add(led_ref)
+                mcu_grid.place(lpx, lpy, lw, lh)
+                if led_ref in other_passive_refs:
+                    other_passive_refs.remove(led_ref)
+                led_placed.add(led_ref)
+                _log.info("    %s (status LED) → (%.1f, %.1f)", led_ref, lpx, lpy)
 
         # --- Step 7: Place remaining passives near MCU perimeter ---
         # Sort: MCU-connected refs first, then by distance
@@ -3380,10 +3432,42 @@ def optimize_placement_ee(
                     + other_caps)
             col1_bottom = _place_eth_column(col1, eth_anchor_x, eth_anchor_y)
 
-            # Column 2: PoE module + caps (branches right, like power fork)
-            if poe_ic:
-                poe_x = eth_anchor_x + 8.0  # offset right
-                _place_eth_column([poe_ic] + poe_caps, poe_x, eth_anchor_y)
+            # Column 2: PoE/PHY module — rotated 90° CCW, above J13 center
+            if poe_ic and poe_ic in positions and poe_ic not in fixed_refs:
+                poe_w, poe_h = fp_sizes.get(poe_ic, (8.0, 8.0))
+                # Rotate 90° CCW: swap w/h for spacing
+                poe_eff_w, poe_eff_h = poe_h, poe_w
+                # Place centered horizontally on eth_anchor_x, above J13
+                poe_tx = eth_anchor_x
+                # Position above where J13 will go (bottom edge area)
+                poe_ty = bounds[3] - 25.0  # ~25mm above bottom edge
+                poe_tx = max(bounds[0] + poe_eff_w / 2 + 1,
+                             min(bounds[2] - poe_eff_w / 2 - 1, poe_tx))
+                poe_ty = max(bounds[1] + poe_eff_h / 2 + 1,
+                             min(bounds[3] - poe_eff_h / 2 - 1, poe_ty))
+                ppx, ppy = eth_grid.find_free_pos(
+                    poe_tx, poe_ty, poe_eff_w, poe_eff_h, max_radius=15.0,
+                )
+                positions[poe_ic] = (ppx, ppy, 270.0)  # 270° = 90° CCW
+                eth_grid.place(ppx, ppy, poe_eff_w, poe_eff_h)
+                ethernet_fixed.add(poe_ic)
+                placed_eth.add(poe_ic)
+                _log.info("    %s (PHY) → (%.1f, %.1f) rot=270", poe_ic, ppx, ppy)
+                # Place PoE caps near the IC
+                cap_y = ppy - poe_eff_h / 2.0 - 2.0
+                for cap_ref in poe_caps:
+                    if (cap_ref not in positions or cap_ref in fixed_refs
+                            or cap_ref in placed_eth):
+                        continue
+                    cw, ch = fp_sizes.get(cap_ref, (1.0, 0.5))
+                    cpx, cpy = eth_grid.find_free_pos(
+                        ppx, cap_y, cw, ch, max_radius=8.0,
+                    )
+                    positions[cap_ref] = (cpx, cpy, 0.0)
+                    eth_grid.place(cpx, cpy, cw, ch)
+                    ethernet_fixed.add(cap_ref)
+                    placed_eth.add(cap_ref)
+                    cap_y = cpy - ch / 2.0 - 1.0
 
             # J13 (RJ45): place on bottom board edge, facing OUTWARD (180° rotation)
             # The RJ45 connector MUST be on the bottom edge for cable access.
@@ -3492,6 +3576,16 @@ def optimize_placement_ee(
         positions = _resolve_collisions(
             positions, fp_sizes, bounds, targeted_fixed,
         )
+
+    # Post-3g: Enforce ethernet connectors on bottom edge
+    for ref in ethernet_fixed:
+        if ref.startswith("J") and ref in positions and ref not in fixed_refs:
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            bottom_target = max_y - h / 2.0 - 1.0
+            rx, ry, rot = positions[ref]
+            if ry < bottom_target - 5.0:
+                _log.info("  Enforcing %s to bottom edge: y %.1f → %.1f", ref, ry, bottom_target)
+                positions[ref] = (rx, bottom_target, 180.0)
 
     # ===================================================================
     # Final: Clamp, score, review

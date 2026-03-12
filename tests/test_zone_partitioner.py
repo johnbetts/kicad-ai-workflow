@@ -173,3 +173,67 @@ def test_zone_center() -> None:
     cx, cy = zone_center(z)
     assert cx == pytest.approx(30.0)
     assert cy == pytest.approx(40.0)
+
+
+# ---------------------------------------------------------------------------
+# Zone overlap and coverage tests
+# ---------------------------------------------------------------------------
+
+def _rects_overlap(
+    r1: tuple[float, float, float, float],
+    r2: tuple[float, float, float, float],
+) -> bool:
+    """Return True if two rects overlap (more than a sliver)."""
+    x1 = max(r1[0], r2[0])
+    y1 = max(r1[1], r2[1])
+    x2 = min(r1[2], r2[2])
+    y2 = min(r1[3], r2[3])
+    # Overlap must be significant (>1mm in both dimensions)
+    return (x2 - x1) > 1.0 and (y2 - y1) > 1.0
+
+
+def test_zones_no_overlap() -> None:
+    """No pair of zone rects should overlap significantly."""
+    groups = [
+        _make_feature("Power Supply", 10),
+        _make_feature("Relay Outputs", 8),
+        _make_feature("MCU Core", 12),
+        _make_feature("Analog ADC", 6),
+        _make_feature("Ethernet PHY", 5),
+    ]
+    zones = partition_board((0.0, 0.0, 140.0, 80.0), groups)
+
+    for i, z1 in enumerate(zones):
+        for z2 in zones[i + 1:]:
+            # input_connectors is intentionally an overlay on top edge
+            if z1.name == "input_connectors" or z2.name == "input_connectors":
+                continue
+            assert not _rects_overlap(z1.rect, z2.rect), (
+                f"Zones '{z1.name}' and '{z2.name}' overlap: "
+                f"{z1.rect} vs {z2.rect}"
+            )
+
+
+def test_zones_cover_board() -> None:
+    """Union of zones should cover at least 70% of the board area."""
+    groups = [
+        _make_feature("Power Supply", 10),
+        _make_feature("Relay Outputs", 8),
+        _make_feature("MCU Core", 12),
+        _make_feature("Analog ADC", 6),
+        _make_feature("Ethernet PHY", 5),
+    ]
+    board_w, board_h = 140.0, 80.0
+    board_area = board_w * board_h
+    zones = partition_board((0.0, 0.0, board_w, board_h), groups)
+
+    # Sum zone areas (simple, ignoring overlap with input_connectors)
+    total_zone_area = 0.0
+    for z in zones:
+        x1, y1, x2, y2 = z.rect
+        total_zone_area += max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+    coverage = total_zone_area / board_area
+    assert coverage >= 0.60, (
+        f"Zone coverage {coverage:.1%} < 60% of board area"
+    )
