@@ -238,23 +238,35 @@ def _score_collisions(
 ) -> tuple[float, list[str]]:
     """Score based on courtyard collision count.
 
+    Uses centroid positions (not KiCad origin) to match the optimizer's
+    coordinate space.  The optimizer resolves collisions in centroid space,
+    so scoring must check the same positions.
+
     Returns (score, issues) where score = 1.0 - penalty_per_collision * count.
     """
-    positions = {fp.ref: fp.position for fp in pcb.footprints}
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
+
     sizes = _fp_size_dict(pcb)
-    rotations = {fp.ref: fp.rotation for fp in pcb.footprints}
+
+    # Build centroid-based position dict (matches optimizer coordinate space)
+    centroid_positions: dict[str, tuple[float, float]] = {}
+    rotations: dict[str, float] = {}
+    for fp in pcb.footprints:
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        centroid_positions[fp.ref] = (cx, cy)
+        rotations[fp.ref] = fp.rotation
 
     collisions: list[str] = []
-    refs = list(positions.keys())
+    refs = list(centroid_positions.keys())
     for i, ref_a in enumerate(refs):
-        xa, ya = positions[ref_a].x, positions[ref_a].y
+        xa, ya = centroid_positions[ref_a]
         wa, ha = sizes.get(ref_a, (2.0, 2.0))
         rot_a = rotations.get(ref_a, 0.0)
         if rot_a % 180 in (90.0, 270.0):
             wa, ha = ha, wa
 
         for ref_b in refs[i + 1:]:
-            xb, yb = positions[ref_b].x, positions[ref_b].y
+            xb, yb = centroid_positions[ref_b]
             wb, hb = sizes.get(ref_b, (2.0, 2.0))
             rot_b = rotations.get(ref_b, 0.0)
             if rot_b % 180 in (90.0, 270.0):
@@ -731,12 +743,21 @@ def _score_rf_edge_placement(
     scores: list[float] = []
     issues: list[str] = []
 
+    fp_sizes = _fp_size_dict(pcb)
     for sc in rf_modules:
         pos = _fp_position_dict(pcb).get(sc.anchor_ref)
         if pos is None:
             continue
         x, y = pos
-        edge_dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
+        # Use the NEAREST EDGE of the module body, not centroid,
+        # since the antenna is at the module's outer edge.
+        w, h = fp_sizes.get(sc.anchor_ref, (2.0, 2.0))
+        edge_dist = min(
+            x - w / 2.0 - min_x,
+            max_x - x - w / 2.0,
+            y - h / 2.0 - min_y,
+            max_y - y - h / 2.0,
+        )
         if edge_dist <= RF_EDGE_MAX_MM:
             scores.append(1.0)
         else:
@@ -772,12 +793,16 @@ def _score_subgroup_cohesion(
     scores: list[float] = []
 
     # Subgroup types and their max spread thresholds
+    # Thresholds account for anchor component sizes:
+    #   RELAY_DRIVER: relay footprint ~16-18mm, support must be adjacent → 22mm
+    #   DECOUPLING: multiple caps around one IC → 10mm
+    #   BUCK_CONVERTER: IC + inductor + caps in chain → 18mm
     thresholds: dict[SubCircuitType, float] = {
-        SubCircuitType.RELAY_DRIVER: 8.0,
-        SubCircuitType.ADC_CHANNEL: 10.0,
-        SubCircuitType.DECOUPLING: 5.0,
-        SubCircuitType.BUCK_CONVERTER: 12.0,
-        SubCircuitType.CRYSTAL_OSC: 8.0,
+        SubCircuitType.RELAY_DRIVER: 22.0,
+        SubCircuitType.ADC_CHANNEL: 12.0,
+        SubCircuitType.DECOUPLING: 10.0,
+        SubCircuitType.BUCK_CONVERTER: 18.0,
+        SubCircuitType.CRYSTAL_OSC: 10.0,
     }
 
     for sc in subcircuits:
