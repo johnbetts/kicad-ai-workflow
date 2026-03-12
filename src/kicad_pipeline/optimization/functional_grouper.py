@@ -251,11 +251,19 @@ def _detect_relay_drivers(
                 break
 
         # Find flyback diode — shares a non-GND power/signal net with relay
+        # Exclude TVS diodes and LEDs (they're not flyback protection)
         for net_name in relay_nets:
             if _is_gnd_net(net_name):
                 continue
             for r in net_to_refs.get(net_name, set()):
                 if _ref_prefix(r) == "D" and r not in claimed and r not in refs:
+                    dc = comp_map.get(r)
+                    if dc:
+                        dv = (dc.value or "").upper()
+                        dd = (dc.description or "").upper()
+                        # Skip TVS diodes and LEDs — they're not flyback
+                        if "TVS" in dv or "TVS" in dd or "LED" in dv:
+                            continue
                     refs.append(r)
                     all_nets.add(net_name)
                     break
@@ -432,21 +440,53 @@ def _detect_buck_converters(
                                     all_nets.add(ip.net)
                         break
 
-        # Find capacitors on VIN/VOUT nets
+        # Find caps/resistors on VIN/VOUT/FB nets. Skip global power rails
+        # (they connect to dozens of components) but allow the specific
+        # inductor output net and BST net even if they look like power.
+        _MAX_CAPS_PER_NET = 2
+        _MAX_FB_RESISTORS = 2
+        _buck_signal_nets: set[str] = set()
         for pin in comp.pins:
             if not pin.net:
                 continue
             pname = (pin.name or "").upper()
             if any(kw in pname for kw in ("VIN", "VOUT", "IN", "OUT", "FB")):
-                for r in net_to_refs.get(pin.net, set()):
-                    if r in refs or r in claimed:
+                # Skip global power rails — they connect to everything
+                if _is_power_net(pin.net):
+                    continue
+                _buck_signal_nets.add(pin.net)
+            elif any(kw in pname for kw in ("BST", "BOOT")):
+                _buck_signal_nets.add(pin.net)
+
+        # Also include inductor output net (even if it's a power rail name
+        # like BUCK_5V or +3V3) — but only for caps (not resistors, which
+        # are pull-ups/dividers for other purposes)
+        if inductor_output_net:
+            _buck_signal_nets.add(inductor_output_net)
+
+        for net_name in _buck_signal_nets:
+            cap_count = 0
+            fb_r_count = 0
+            # Only allow resistors on non-power feedback nets
+            allow_resistors = not _is_power_net(net_name)
+            for r in net_to_refs.get(net_name, set()):
+                if r in refs or r in claimed:
+                    continue
+                rc = comp_map.get(r)
+                is_cap = rc and _ref_prefix(r) == "C"
+                is_fb_r = rc and _ref_prefix(r) == "R" and allow_resistors
+                if is_cap:
+                    if cap_count >= _MAX_CAPS_PER_NET:
                         continue
-                    rc = comp_map.get(r)
-                    is_cap = rc and _ref_prefix(r) == "C"
-                    is_fb_r = rc and _ref_prefix(r) == "R" and "FB" in pname
-                    if is_cap or is_fb_r:
-                        refs.append(r)
-                        all_nets.add(pin.net)
+                    refs.append(r)
+                    all_nets.add(net_name)
+                    cap_count += 1
+                elif is_fb_r:
+                    if fb_r_count >= _MAX_FB_RESISTORS:
+                        continue
+                    refs.append(r)
+                    all_nets.add(net_name)
+                    fb_r_count += 1
 
         # Determine input/output domains from pin nets
         input_domain: VoltageDomain | None = None
@@ -683,6 +723,13 @@ def _detect_decoupling_pairs(
                 pnets.add(net_name)
         ic_power_nets[ic.ref] = pnets
 
+    # Build ref -> FeatureBlock group map for same-group preference
+    _ref_group: dict[str, str] = {}
+    for feat in requirements.features:
+        for comp in feat.components:
+            r = comp.ref if hasattr(comp, "ref") else comp
+            _ref_group[r] = feat.name
+
     # Collect caps per IC anchor
     ic_caps: dict[str, list[str]] = {}
     ic_shared_nets: dict[str, set[str]] = {}
@@ -692,17 +739,27 @@ def _detect_decoupling_pairs(
             continue
         cap_nets = ref_to_nets.get(cap.ref, set())
         cap_power = {n for n in cap_nets if _is_power_net(n)}
+        cap_group = _ref_group.get(cap.ref, "")
 
-        # Find the IC sharing the most power nets
+        # Find the IC sharing the most power nets, preferring same FeatureBlock
         best_ic: str | None = None
         best_overlap = 0
+        best_same_group = False
         for ic in ics:
             if ic.ref in claimed:
                 continue
             overlap = len(cap_power & ic_power_nets.get(ic.ref, set()))
-            if overlap > best_overlap:
-                best_overlap = overlap
+            if overlap <= 0:
+                continue
+            same_group = _ref_group.get(ic.ref, "") == cap_group
+            # Prefer same-group IC, then highest overlap
+            if same_group and not best_same_group:
                 best_ic = ic.ref
+                best_overlap = overlap
+                best_same_group = True
+            elif same_group == best_same_group and overlap > best_overlap:
+                best_ic = ic.ref
+                best_overlap = overlap
 
         if best_ic and best_overlap > 0:
             claimed.add(cap.ref)
@@ -710,9 +767,15 @@ def _detect_decoupling_pairs(
             shared = cap_power & ic_power_nets.get(best_ic, set())
             ic_shared_nets.setdefault(best_ic, set()).update(shared)
 
-    # Build one sub-circuit per IC with all its decoupling caps
+    # Build one sub-circuit per IC with same-group decoupling caps only.
+    # Cross-group caps stay claimed (so they aren't picked up elsewhere)
+    # but are excluded from the subcircuit to avoid inflating spread metrics.
     results: list[DetectedSubCircuit] = []
     for ic_ref, cap_refs in ic_caps.items():
+        ic_grp = _ref_group.get(ic_ref, "")
+        same_group_caps = [c for c in cap_refs if _ref_group.get(c, "") == ic_grp]
+        if not same_group_caps:
+            continue  # No same-group caps — skip this subcircuit
         shared = ic_shared_nets.get(ic_ref, set())
         domain = VoltageDomain.DIGITAL_3V3
         for net_name in shared:
@@ -722,7 +785,7 @@ def _detect_decoupling_pairs(
                     domain = _classify_voltage(v)
                     break
 
-        all_refs = tuple(sorted([ic_ref, *cap_refs]))
+        all_refs = tuple(sorted([ic_ref, *same_group_caps]))
         results.append(DetectedSubCircuit(
             circuit_type=SubCircuitType.DECOUPLING,
             refs=all_refs,
