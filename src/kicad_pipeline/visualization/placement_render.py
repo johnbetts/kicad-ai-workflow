@@ -4,7 +4,7 @@ Produces color-coded placement diagrams showing:
 - Board outline with component bounding boxes
 - FeatureBlock group coloring (or voltage domain fallback)
 - Dotted bounding box boundaries around groups
-- Signal net ratsnest (thin lines between connected components)
+- Pad-to-pad ratsnest (thin lines between connected pads on signal nets)
 - Quality score overlay
 
 Requires matplotlib (optional dependency).
@@ -15,6 +15,16 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from kicad_pipeline.visualization.ratsnest import (
+    build_net_pad_map as _build_net_pad_map_shared,
+)
+from kicad_pipeline.visualization.ratsnest import (
+    minimum_spanning_tree as _minimum_spanning_tree_shared,
+)
+from kicad_pipeline.visualization.ratsnest import (
+    rotate_point as _rotate_point_shared,
+)
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import Footprint, PCBDesign
@@ -61,22 +71,18 @@ _FALLBACK_GROUP_PALETTE: tuple[str, ...] = (
     "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#fabed4",
 )
 
-# Power net names to exclude from ratsnest
-_POWER_NETS = frozenset({
-    "GND", "VIN", "VCC", "+3V3", "+5V", "+12V", "+24V",
-    "+3.3V", "+1.8V", "VBUS", "VBAT",
-})
+# Power net names — canonical source is ratsnest.py (imported at top of file)
 
 
 def _fp_size(fp: Footprint) -> tuple[float, float]:
-    """Estimate footprint width/height from pad span."""
-    if not fp.pads:
-        return 2.0, 2.0
-    xs = [p.position.x for p in fp.pads]
-    ys = [p.position.y for p in fp.pads]
-    w = max(xs) - min(xs) + 1.5
-    h = max(ys) - min(ys) + 1.5
-    return max(w, 1.5), max(h, 1.5)
+    """Footprint size for rendering — matches optimizer collision detection.
+
+    Delegates to :func:`~kicad_pipeline.pcb.footprints.estimate_courtyard_mm`
+    so renderer bounding boxes agree with the optimizer's collision model.
+    """
+    from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
+
+    return estimate_courtyard_mm(fp)
 
 
 def _get_group_color(group_name: str, idx: int) -> str:
@@ -86,6 +92,54 @@ def _get_group_color(group_name: str, idx: int) -> str:
         if key in lower:
             return color
     return _FALLBACK_GROUP_PALETTE[idx % len(_FALLBACK_GROUP_PALETTE)]
+
+
+def _rotate_point(
+    px: float, py: float, angle_deg: float,
+) -> tuple[float, float]:
+    """Rotate a point around the origin by *angle_deg* degrees."""
+    return _rotate_point_shared(px, py, angle_deg)
+
+
+def _build_net_pad_map(
+    pcb: PCBDesign,
+) -> dict[str, list[tuple[float, float]]]:
+    """Build a mapping of net_name to list of absolute pad (x, y) positions."""
+    return _build_net_pad_map_shared(pcb)
+
+
+def _minimum_spanning_tree(
+    points: list[tuple[float, float]],
+) -> list[tuple[int, int]]:
+    """Compute MST edges for a set of 2-D points (Prim's algorithm)."""
+    return _minimum_spanning_tree_shared(points)
+
+
+def _draw_pad_ratsnest(
+    ax: object,
+    pcb: PCBDesign,
+) -> None:
+    """Draw pad-to-pad ratsnest lines for signal nets.
+
+    Uses absolute pad positions (rotation-aware) and MST to avoid
+    long crossing lines.  Gives visual clues about which pads need
+    to connect, making rotation/orientation issues immediately visible.
+    """
+    net_pads = _build_net_pad_map(pcb)
+
+    for _net_name, pads in net_pads.items():
+        if len(pads) < 2:
+            continue
+        edges = _minimum_spanning_tree(pads)
+        for i, j in edges:
+            ax.plot(  # type: ignore[attr-defined]
+                [pads[i][0], pads[j][0]],
+                [pads[i][1], pads[j][1]],
+                "-",
+                color="#4466aa",
+                alpha=0.35,
+                linewidth=0.5,
+            )
 
 
 def render_placement(
@@ -173,11 +227,13 @@ def render_placement(
         ax.plot(xs, ys, "k-", linewidth=2)
         ax.fill(xs, ys, alpha=0.05, color="green")
 
-    # Draw footprints
+    # Draw footprints — center boxes on pad centroid, not KiCad origin
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
+
     for fp in pcb.footprints:
-        x, y = fp.position.x, fp.position.y
         w, h = _fp_size(fp)
         color = ref_color.get(fp.ref, "#cccccc")
+        x, y = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
 
         rect = FancyBboxPatch(
             (x - w / 2, y - h / 2), w, h,
@@ -192,7 +248,12 @@ def render_placement(
     # Draw group bounding boxes with dotted lines
     if use_groups:
         assert group_map is not None
-        ref_pos = {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+        ref_pos = {
+            fp.ref: origin_to_centroid(
+                fp, fp.position.x, fp.position.y, fp.rotation,
+            )
+            for fp in pcb.footprints
+        }
         unique_groups = sorted(set(group_map.values()))
         group_color_map = {
             name: _get_group_color(name, i)
@@ -232,20 +293,9 @@ def render_placement(
                 fontsize=6, fontweight="bold", color=color, alpha=0.8,
             )
 
-    # Signal ratsnest
+    # Pad-to-pad ratsnest — draw lines between pads that share a signal net
     if show_ratsnest:
-        ref_pos = {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
-        for net in requirements.nets:
-            if net.name.upper() in _POWER_NETS:
-                continue
-            conns = [c.ref for c in net.connections if c.ref in ref_pos]
-            if len(conns) >= 2:
-                for i in range(len(conns) - 1):
-                    p1, p2 = ref_pos[conns[i]], ref_pos[conns[i + 1]]
-                    ax.plot(
-                        [p1[0], p2[0]], [p1[1], p2[1]],
-                        "-", color="#888888", alpha=0.2, linewidth=0.3,
-                    )
+        _draw_pad_ratsnest(ax, pcb)
 
     # Legend
     if use_groups:

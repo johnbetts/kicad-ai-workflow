@@ -28,8 +28,8 @@ _WEIGHT_PLACEMENT: float = 0.20
 _WEIGHT_SIGNAL_INTEGRITY: float = 0.15
 _WEIGHT_THERMAL: float = 0.10
 
-# Fast-path sub-dimension weights (EE-aligned, v2)
-_FAST_WEIGHT_COLLISION: float = 0.20
+# Fast-path sub-dimension weights (EE-aligned, v3 — 13 dimensions)
+_FAST_WEIGHT_COLLISION: float = 0.15
 _FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.05
 _FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.15
 _FAST_WEIGHT_CONNECTOR_EDGE: float = 0.10
@@ -41,6 +41,7 @@ _FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.05
 _FAST_WEIGHT_GROUP_COHESION: float = 0.05
 _FAST_WEIGHT_SUBGROUP_COHESION: float = 0.05
 _FAST_WEIGHT_GROUP_ISOLATION: float = 0.05
+_FAST_WEIGHT_PAD_FACING: float = 0.05
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -204,25 +205,31 @@ def _compute_placement_score_from_pcb(pcb: PCBDesign) -> tuple[float, tuple[str,
 
 
 def _fp_position_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
-    """Build ref → (x, y) lookup from PCB footprints."""
-    return {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+    """Build ref → (x, y) centroid lookup from PCB footprints.
+
+    Converts KiCad origin-based positions to pad-centroid positions
+    for accurate distance and boundary measurements.  Uses
+    pin_map.origin_to_centroid() as the single source of truth.
+    """
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
+
+    return {
+        fp.ref: origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        for fp in pcb.footprints
+    }
 
 
 def _fp_size_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
     """Build ref → (width, height) lookup from PCB footprints.
 
-    Uses pad extents + courtyard margins as a size proxy.
+    Delegates to :func:`~kicad_pipeline.pcb.footprints.estimate_courtyard_mm`
+    which accounts for component body extension beyond the pad field.
     """
+    from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
+
     sizes: dict[str, tuple[float, float]] = {}
     for fp in pcb.footprints:
-        if fp.pads:
-            xs = [p.position.x for p in fp.pads]
-            ys = [p.position.y for p in fp.pads]
-            w = max(xs) - min(xs) + 1.0  # pad span + margin
-            h = max(ys) - min(ys) + 1.0
-            sizes[fp.ref] = (max(w, 1.0), max(h, 1.0))
-        else:
-            sizes[fp.ref] = (2.0, 2.0)  # default for padless fps
+        sizes[fp.ref] = estimate_courtyard_mm(fp)
     return sizes
 
 
@@ -446,8 +453,9 @@ def _score_boundary(pcb: PCBDesign) -> tuple[float, list[str]]:
     issues: list[str] = []
     margin = 1.0  # 1mm margin
 
+    pos_dict = _fp_position_dict(pcb)
     for fp in pcb.footprints:
-        x, y = fp.position.x, fp.position.y
+        x, y = pos_dict.get(fp.ref, (fp.position.x, fp.position.y))
         if x < min_x - margin or x > max_x + margin or \
            y < min_y - margin or y > max_y + margin:
             out_count += 1
@@ -758,9 +766,7 @@ def _score_subgroup_cohesion(
     )
 
     subcircuits = detect_subcircuits(requirements)
-    fp_pos: dict[str, tuple[float, float]] = {
-        fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints
-    }
+    fp_pos = _fp_position_dict(pcb)
 
     issues: list[str] = []
     scores: list[float] = []
@@ -820,9 +826,7 @@ def _score_group_isolation(
     if not requirements.features or len(requirements.features) < 2:
         return (1.0, ())
 
-    fp_pos: dict[str, tuple[float, float]] = {
-        fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints
-    }
+    fp_pos = _fp_position_dict(pcb)
 
     # Compute bounding boxes for each group
     group_bboxes: list[tuple[str, float, float, float, float]] = []
@@ -870,6 +874,120 @@ def _score_group_isolation(
     return (sum(scores) / len(scores), tuple(issues))
 
 
+def _score_pad_facing(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, tuple[str, ...]]:
+    """Score how well connected pads face each other.
+
+    For each signal net connecting two pads on different footprints:
+    1. Compute which CardinalSide each pad is on (relative to its footprint).
+    2. Compute direction vector from footprint A center to footprint B center.
+    3. Score: pad on correct side (facing partner) = 1.0, opposite = 0.0,
+       perpendicular = 0.5.
+
+    Returns (score, issues).
+    """
+    from kicad_pipeline.pcb.pin_map import CardinalSide, compute_pin_map
+    from kicad_pipeline.visualization.ratsnest import POWER_NETS
+
+    # Build net -> list of (ref, pad_number) pairs
+    net_connections: dict[str, list[tuple[str, str]]] = {}
+    fp_map: dict[str, object] = {}
+    for fp in pcb.footprints:
+        fp_map[fp.ref] = fp
+        for pad in fp.pads:
+            if pad.net_name and pad.net_name.upper() not in POWER_NETS:
+                net_connections.setdefault(pad.net_name, []).append(
+                    (fp.ref, pad.number)
+                )
+
+    # Direction vectors for each cardinal side
+    side_vectors: dict[CardinalSide, tuple[float, float]] = {
+        CardinalSide.NORTH: (0.0, -1.0),
+        CardinalSide.SOUTH: (0.0, 1.0),
+        CardinalSide.EAST: (1.0, 0.0),
+        CardinalSide.WEST: (-1.0, 0.0),
+        CardinalSide.CENTER: (0.0, 0.0),
+    }
+
+    scores: list[float] = []
+    issues: list[str] = []
+
+    # Cache pin maps per footprint
+    pin_maps: dict[str, object] = {}
+
+    for _net_name, connections in net_connections.items():
+        # Only score nets with exactly 2 connections (point-to-point)
+        if len(connections) != 2:
+            continue
+        ref_a, pad_a = connections[0]
+        ref_b, pad_b = connections[1]
+        if ref_a == ref_b:
+            continue  # Same footprint — skip
+
+        fp_a = fp_map.get(ref_a)
+        fp_b = fp_map.get(ref_b)
+        if fp_a is None or fp_b is None:
+            continue
+
+        # Get or compute pin maps
+        if ref_a not in pin_maps:
+            pin_maps[ref_a] = compute_pin_map(fp_a, fp_a.rotation)  # type: ignore[arg-type]
+        if ref_b not in pin_maps:
+            pin_maps[ref_b] = compute_pin_map(fp_b, fp_b.rotation)  # type: ignore[arg-type]
+
+        pm_a = pin_maps[ref_a]
+        pm_b = pin_maps[ref_b]
+        side_a = pm_a.side_for_pad(pad_a)  # type: ignore[union-attr]
+        side_b = pm_b.side_for_pad(pad_b)  # type: ignore[union-attr]
+
+        if side_a is None or side_b is None:
+            continue
+        if side_a == CardinalSide.CENTER or side_b == CardinalSide.CENTER:
+            scores.append(1.0)  # Center pads are always OK
+            continue
+
+        # Direction from A to B
+        ax = fp_a.position.x  # type: ignore[union-attr]
+        ay = fp_a.position.y  # type: ignore[union-attr]
+        bx = fp_b.position.x  # type: ignore[union-attr]
+        by = fp_b.position.y  # type: ignore[union-attr]
+        dx, dy = bx - ax, by - ay
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 0.1:
+            scores.append(1.0)
+            continue
+        dx /= dist
+        dy /= dist
+
+        # Score pad A: its side vector should align with direction to B
+        va = side_vectors[side_a]
+        dot_a = va[0] * dx + va[1] * dy  # +1 = facing toward B, -1 = away
+
+        # Score pad B: its side vector should align with direction to A (opposite)
+        vb = side_vectors[side_b]
+        dot_b = vb[0] * (-dx) + vb[1] * (-dy)  # +1 = facing toward A
+
+        # Average alignment: map [-1, 1] to [0, 1]
+        score_a = (dot_a + 1.0) / 2.0
+        score_b = (dot_b + 1.0) / 2.0
+        pair_score = (score_a + score_b) / 2.0
+        scores.append(pair_score)
+
+        if pair_score < 0.4:
+            issues.append(
+                f"{ref_a}.{pad_a}({side_a.value}) -> "
+                f"{ref_b}.{pad_b}({side_b.value}): "
+                f"facing score {pair_score:.2f}"
+            )
+
+    if not scores:
+        return (1.0, ())
+
+    return (_clamp01(sum(scores) / len(scores)), tuple(issues[:10]))
+
+
 def compute_fast_placement_score(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -908,7 +1026,10 @@ def compute_fast_placement_score(
     # Group isolation
     grp_isolation_score, grp_isolation_issues = _score_group_isolation(pcb, requirements)
 
-    # Weighted placement composite (12 dimensions)
+    # Pad facing
+    pad_facing_score, pad_facing_issues = _score_pad_facing(pcb, requirements)
+
+    # Weighted placement composite (13 dimensions)
     placement_score = (
         _FAST_WEIGHT_COLLISION * collision_score
         + _FAST_WEIGHT_SUBCIRCUIT_COHESION * cohesion_score
@@ -922,6 +1043,7 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_GROUP_COHESION * group_cohesion_score
         + _FAST_WEIGHT_SUBGROUP_COHESION * subgroup_score
         + _FAST_WEIGHT_GROUP_ISOLATION * grp_isolation_score
+        + _FAST_WEIGHT_PAD_FACING * pad_facing_score
     )
 
     # For fast path, other dimensions are derived from placement sub-scores
@@ -1003,6 +1125,12 @@ def compute_fast_placement_score(
             score=grp_isolation_score,
             weight=_FAST_WEIGHT_GROUP_ISOLATION,
             issues=tuple(grp_isolation_issues[:5]),
+        ),
+        ScoreDetail(
+            category="Pad Facing",
+            score=pad_facing_score,
+            weight=_FAST_WEIGHT_PAD_FACING,
+            issues=tuple(pad_facing_issues[:5]),
         ),
     )
 

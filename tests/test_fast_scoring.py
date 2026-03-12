@@ -143,10 +143,12 @@ class TestScoreCollisions:
         assert score == 0.0
 
     def test_adjacent_no_collision(self) -> None:
-        # Components placed just far enough apart (pad span + margin = 2.0)
+        # Components placed far enough apart for courtyard-aware sizing.
+        # Each R_0805 pad extent ≈ 2.0mm + body extension + courtyard ≈ 3.0mm wide.
+        # Need center-to-center ≥ 3.0mm to avoid collision.
         pcb = _pcb(footprints=(
             _fp("R1", 10.0, 10.0),
-            _fp("R2", 12.5, 10.0),  # 2.5mm apart, each ~2mm wide
+            _fp("R2", 14.0, 10.0),  # 4.0mm apart, each ~3.0mm wide
         ))
         score, issues = _score_collisions(pcb)
         assert score == 1.0
@@ -336,7 +338,7 @@ class TestComputeFastPlacementScore:
         result = compute_fast_placement_score(pcb, req)
         assert 0.0 <= result.overall_score <= 1.0
         assert result.grade in ("A", "B", "C", "D", "F")
-        assert len(result.breakdown) == 10
+        assert len(result.breakdown) == 11
 
     def test_good_placement_scores_higher(self) -> None:
         """Components placed together near center should score higher."""

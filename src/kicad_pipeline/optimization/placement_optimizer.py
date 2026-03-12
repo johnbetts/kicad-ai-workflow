@@ -25,11 +25,16 @@ from kicad_pipeline.optimization.functional_grouper import (
     SubCircuitType,
     VoltageDomain,
 )
+from kicad_pipeline.pcb.pin_map import (
+    centroid_to_origin,
+    compute_centroid_offset,
+    origin_to_centroid,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from kicad_pipeline.models.pcb import PCBDesign
+    from kicad_pipeline.models.pcb import Footprint, PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.review_agent import PlacementReview
     from kicad_pipeline.optimization.scoring import QualityScore
@@ -75,27 +80,44 @@ class GroupBoundingBox:
 
 
 def _extract_positions(pcb: PCBDesign) -> tuple[tuple[str, float, float, float], ...]:
-    """Extract (ref, x, y, rotation) from PCB footprints."""
-    return tuple(
-        (fp.ref, fp.position.x, fp.position.y, fp.rotation)
-        for fp in pcb.footprints
-    )
+    """Extract (ref, x, y, rotation) from PCB footprints in centroid space.
+
+    Converts KiCad origin-based positions to centroid-of-pads positions
+    so the optimizer works in a consistent coordinate system.
+    """
+    result: list[tuple[str, float, float, float]] = []
+    for fp in pcb.footprints:
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        result.append((fp.ref, cx, cy, fp.rotation))
+    return tuple(result)
+
+
+# compute_centroid_offset is imported from kicad_pipeline.pcb.pin_map
+# Alias kept for backwards compatibility with test imports.
+_centroid_offset = compute_centroid_offset
 
 
 def _apply_positions(
     pcb: PCBDesign,
     positions: tuple[tuple[str, float, float, float], ...],
 ) -> PCBDesign:
-    """Return a new PCBDesign with footprints moved to given positions."""
+    """Return a new PCBDesign with footprints moved to given positions.
+
+    The optimizer works in centroid-space (x, y = center of pad bounding
+    box).  KiCad stores the footprint origin which for pin headers and
+    connectors is pin 1, not the center.  This function subtracts the
+    rotated centroid offset so the pads end up where the optimizer expects.
+    """
     pos_dict: dict[str, tuple[float, float, float]] = {
         ref: (x, y, rot) for ref, x, y, rot in positions
     }
-    from kicad_pipeline.models.pcb import Footprint as _Footprint
-    new_footprints: list[_Footprint] = []
+    new_footprints: list[Footprint] = []
     for fp in pcb.footprints:
         if fp.ref in pos_dict:
-            x, y, rot = pos_dict[fp.ref]
-            new_fp = replace(fp, position=Point(x=x, y=y), rotation=rot)
+            cx_want, cy_want, rot = pos_dict[fp.ref]
+            origin_x, origin_y = centroid_to_origin(fp, cx_want, cy_want, rot)
+            new_fp = replace(fp, position=Point(x=origin_x, y=origin_y),
+                             rotation=rot)
             new_footprints.append(new_fp)
         else:
             new_footprints.append(fp)
@@ -772,24 +794,16 @@ def _apply_review_fixes(
 
 
 def _fp_courtyard_sizes(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
-    """Build ref → (width, height) from pad extents (matching review agent).
+    """Build ref → (width, height) using accurate courtyard estimates.
 
-    Includes physical pad sizes, not just pad centers. This produces larger
-    (more accurate) bounding boxes that match the review agent's collision
-    detection.
+    Delegates to :func:`~kicad_pipeline.pcb.footprints.estimate_courtyard_mm`
+    which accounts for component body extension beyond the pad field.
     """
+    from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
+
     result: dict[str, tuple[float, float]] = {}
     for fp in pcb.footprints:
-        if not fp.pads:
-            result[fp.ref] = (3.0, 3.0)
-            continue
-        xs = ([p.position.x - p.size_x / 2 for p in fp.pads]
-              + [p.position.x + p.size_x / 2 for p in fp.pads])
-        ys = ([p.position.y - p.size_y / 2 for p in fp.pads]
-              + [p.position.y + p.size_y / 2 for p in fp.pads])
-        w = max(xs) - min(xs) + 1.0
-        h = max(ys) - min(ys) + 1.0
-        result[fp.ref] = (w, h)
+        result[fp.ref] = estimate_courtyard_mm(fp)
     return result
 
 
@@ -1198,21 +1212,24 @@ def _pin_rf_to_edge(
         dist_bottom = max_y - cy
         min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
-        # Determine target position and rotation for antenna facing outward
+        # Determine target position and rotation for antenna facing outward.
+        # ESP32-S3-WROOM-1: antenna is at the TOP of the package (opposite
+        # pin 1). KiCad rotation convention: 0°=antenna up, 90°=antenna left,
+        # 180°=antenna down, 270°=antenna right.
         target_x, target_y = cx, cy
         new_rot = rot
         if dist_right == min_edge_dist or dist_right <= dist_left:
             target_x = max_x - edge_margin - w / 2.0
-            new_rot = 90.0  # Antenna pointing right
+            new_rot = 270.0  # Antenna pointing right (toward right edge)
         elif dist_left == min_edge_dist:
             target_x = min_x + edge_margin + w / 2.0
-            new_rot = 270.0
+            new_rot = 90.0  # Antenna pointing left
         elif dist_top == min_edge_dist:
             target_y = min_y + edge_margin + h / 2.0
-            new_rot = 180.0
+            new_rot = 0.0  # Antenna pointing up (toward top edge)
         else:
             target_y = max_y - edge_margin - h / 2.0
-            new_rot = 0.0
+            new_rot = 180.0  # Antenna pointing down
 
         # Build grid without RF module
         move_grid = _PlacementGrid(bounds)
@@ -1296,15 +1313,21 @@ def _orient_connectors(
     fixed_refs: set[str],
     pcb: PCBDesign,
 ) -> dict[str, tuple[float, float, float]]:
-    """Orient connectors so mating face faces the nearest board edge.
+    """Position and orient connectors at their nearest board edge.
 
-    Sets rotation based on which edge the connector is closest to:
-    - Left edge: 270 (facing left)
-    - Right edge: 90 (facing right)
-    - Top edge: 180 (facing up)
-    - Bottom edge: 0 (facing down)
+    Uses pin_map.origin_to_centroid() and pad_extent_in_board_space() to
+    correctly handle asymmetric footprints (connectors with pin-1 origin).
+
+    Screw terminal rotation conventions (mating face outward):
+    - Top edge: rot=90° (pads run vertically, screws accessible from top)
+    - Bottom edge: rot=270° (screws accessible from bottom)
+    - Left edge: rot=0° (screws accessible from left)
+    - Right edge: rot=180° (screws accessible from right)
     """
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
     min_x, min_y, max_x, max_y = bounds
+    edge_margin = 3.0  # mm from board edge to nearest pad
 
     for fp in pcb.footprints:
         ref = fp.ref
@@ -1315,30 +1338,75 @@ def _orient_connectors(
         cx, cy, rot = positions[ref]
         w, h = fp_sizes.get(ref, (2.0, 2.0))
 
-        # Find nearest edge
+        # Find nearest edge (using centroid position)
         dist_left = cx - min_x
         dist_right = max_x - cx
         dist_top = cy - min_y
         dist_bottom = max_y - cy
         min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
-        if min_edge_dist > 8.0:
-            continue  # Not near an edge, skip orientation
+        if min_edge_dist > 20.0:
+            continue  # Too far from any edge — not a board-edge connector
 
-        # Determine orientation based on which edge is closest
-        # Aspect ratio determines if connector is wide or tall
-        is_wide = w > h * 1.5
+        # Determine target edge and rotation
+        is_wide = w > h * 1.5  # Multi-pin in a row (native, unrotated)
 
-        if dist_left == min_edge_dist:
-            new_rot = 270.0 if is_wide else 0.0
-        elif dist_right == min_edge_dist:
+        if dist_top == min_edge_dist:
+            target_edge = "top"
             new_rot = 90.0 if is_wide else 0.0
-        elif dist_top == min_edge_dist:
-            new_rot = 180.0 if not is_wide else 90.0
+        elif dist_bottom == min_edge_dist:
+            target_edge = "bottom"
+            new_rot = 270.0 if is_wide else 0.0
+        elif dist_left == min_edge_dist:
+            target_edge = "left"
+            new_rot = 0.0 if is_wide else 270.0
         else:
-            new_rot = 0.0 if not is_wide else 90.0
+            target_edge = "right"
+            new_rot = 180.0 if is_wide else 90.0
 
-        positions[ref] = (cx, cy, new_rot)
+        # Use centroid_to_origin to find where origin would be at current
+        # centroid, then compute pad extent to find how far pads extend
+        origin_x, origin_y = centroid_to_origin(fp, cx, cy, new_rot)
+
+        # Get actual pad extent at this position and rotation
+        px0, py0, px1, py1 = pad_extent_in_board_space(
+            fp, origin_x, origin_y, new_rot,
+        )
+
+        # Shift origin so pads are flush to target edge with margin
+        if target_edge == "top":
+            # Move so topmost pad is at min_y + margin
+            shift_y = (min_y + edge_margin) - py0
+            origin_y += shift_y
+        elif target_edge == "bottom":
+            # Move so bottommost pad is at max_y - margin
+            shift_y = (max_y - edge_margin) - py1
+            origin_y += shift_y
+        elif target_edge == "left":
+            shift_x = (min_x + edge_margin) - px0
+            origin_x += shift_x
+        else:  # right
+            shift_x = (max_x - edge_margin) - px1
+            origin_x += shift_x
+
+        # Clamp: verify all pads are within board after shift
+        px0, py0, px1, py1 = pad_extent_in_board_space(
+            fp, origin_x, origin_y, new_rot,
+        )
+        if px0 < min_x + 1.0:
+            origin_x += (min_x + 1.0) - px0
+        if px1 > max_x - 1.0:
+            origin_x -= px1 - (max_x - 1.0)
+        if py0 < min_y + 1.0:
+            origin_y += (min_y + 1.0) - py0
+        if py1 > max_y - 1.0:
+            origin_y -= py1 - (max_y - 1.0)
+
+        # Convert back to centroid space for the optimizer
+        new_cx, new_cy = origin_to_centroid(fp, origin_x, origin_y, new_rot)
+        positions[ref] = (new_cx, new_cy, new_rot)
+        _log.debug("  %s: edge=%s → origin(%.1f,%.1f) centroid(%.1f,%.1f) rot=%.0f",
+                   ref, target_edge, origin_x, origin_y, new_cx, new_cy, new_rot)
 
     return positions
 
@@ -1771,6 +1839,127 @@ def _optimize_placement_ee_v4(
     return initial_pcb, review
 
 
+def _apply_template_refinement(
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    requirements: ProjectRequirements,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    fixed_refs: set[str],
+) -> tuple[dict[str, tuple[float, float, float]], set[str]]:
+    """Apply subcircuit layout templates to refine component positions.
+
+    For each detected subcircuit with a matching template, maps detected
+    component refs to template slots by role matching, computes target
+    positions relative to the subcircuit anchor, and moves components
+    to template positions (respecting existing fixed refs).
+
+    Args:
+        positions: Current component positions {ref: (x, y, rot)}.
+        fp_sizes: Component courtyard sizes {ref: (w, h)}.
+        bounds: Board bounds (min_x, min_y, max_x, max_y).
+        requirements: Project requirements.
+        subcircuits: Detected subcircuit patterns.
+        fixed_refs: Refs that must not be moved.
+
+    Returns:
+        Tuple of (updated positions, set of refs placed by templates).
+    """
+    from kicad_pipeline.pcb.layout_templates import (
+        ComponentRole,
+        get_subcircuit_template_by_type,
+    )
+
+    template_fixed: set[str] = set()
+    min_x, min_y, max_x, max_y = bounds
+
+    for sc in subcircuits:
+        tmpl = get_subcircuit_template_by_type(sc.circuit_type)
+        if tmpl is None:
+            continue
+
+        # Find anchor position — the anchor_ref is the reference point
+        anchor_ref = sc.anchor_ref
+        if anchor_ref not in positions:
+            continue
+        ax, ay, arot = positions[anchor_ref]
+
+        # Simple role-based matching: map subcircuit refs to template slots
+        # For now, use positional matching (first SERIES ref -> first SERIES slot, etc.)
+        role_refs: dict[str, list[str]] = {}
+        for ref in sc.refs:
+            if ref == anchor_ref:
+                continue
+            if ref not in positions or ref in fixed_refs:
+                continue
+            # Classify by ref prefix
+            r_upper = ref.upper()
+            if r_upper.startswith("R"):
+                role_refs.setdefault("series", []).append(ref)
+            elif r_upper.startswith("C"):
+                role_refs.setdefault("shunt", []).append(ref)
+            elif r_upper.startswith("D"):
+                role_refs.setdefault("shunt_d", []).append(ref)
+            elif r_upper.startswith("Q"):
+                role_refs.setdefault("switch", []).append(ref)
+            elif r_upper.startswith("L"):
+                role_refs.setdefault("series_l", []).append(ref)
+
+        # Match slots to available refs
+        series_slots = [s for s in tmpl.slots if s.role == ComponentRole.SERIES]
+        shunt_slots = [s for s in tmpl.slots if s.role == ComponentRole.SHUNT]
+        switch_slots = [s for s in tmpl.slots if s.role == ComponentRole.SWITCH]
+
+        placed_count = 0
+
+        def _try_place(slot: object, ref: str) -> bool:
+            """Place ref at slot offset, skipping if it would collide."""
+            nx = ax + slot.offset_x  # type: ignore[union-attr]
+            ny = ay + slot.offset_y  # type: ignore[union-attr]
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            nx = max(min_x + w / 2, min(max_x - w / 2, nx))
+            ny = max(min_y + h / 2, min(max_y - h / 2, ny))
+            # Check for collisions with existing positions
+            for other_ref, (ox, oy, _orot) in positions.items():
+                if other_ref == ref:
+                    continue
+                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                gap_x = abs(nx - ox) - (w + ow) / 2
+                gap_y = abs(ny - oy) - (h + oh) / 2
+                if gap_x < 0.2 and gap_y < 0.2:
+                    return False  # Would collide — skip
+            rot = slot.rotation if slot.rotation != 0.0 else positions[ref][2]  # type: ignore[union-attr]
+            positions[ref] = (nx, ny, rot)
+            template_fixed.add(ref)
+            return True
+
+        # Place series components (R, L)
+        series_refs = role_refs.get("series", []) + role_refs.get("series_l", [])
+        for slot, ref in zip(series_slots, series_refs):
+            if _try_place(slot, ref):
+                placed_count += 1
+
+        # Place shunt components (C, D)
+        shunt_refs = role_refs.get("shunt", []) + role_refs.get("shunt_d", [])
+        for slot, ref in zip(shunt_slots, shunt_refs):
+            if _try_place(slot, ref):
+                placed_count += 1
+
+        # Place switch components (Q)
+        switch_refs = role_refs.get("switch", [])
+        for slot, ref in zip(switch_slots, switch_refs):
+            if _try_place(slot, ref):
+                placed_count += 1
+
+        if placed_count > 0:
+            _log.info(
+                "    Template %s: placed %d/%d refs around %s",
+                tmpl.name, placed_count, len(sc.refs) - 1, anchor_ref,
+            )
+
+    return positions, template_fixed
+
+
 def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
@@ -1838,11 +2027,13 @@ def optimize_placement_ee(
     # ===================================================================
     _log.info("=== Level 2: Group Placement ===")
 
-    # Extract current positions
-    positions: dict[str, tuple[float, float, float]] = {
-        fp.ref: (fp.position.x, fp.position.y, fp.rotation)
-        for fp in initial_pcb.footprints
-    }
+    # Extract current positions — convert KiCad origin → centroid space.
+    # KiCad stores footprint origin (pin 1 for connectors), but the
+    # optimizer works in centroid-of-pads coordinates.
+    positions: dict[str, tuple[float, float, float]] = {}
+    for fp in initial_pcb.footprints:
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        positions[fp.ref] = (cx, cy, fp.rotation)
 
     if has_groups and zones:
         from kicad_pipeline.optimization.group_placer import (
@@ -2613,7 +2804,61 @@ def optimize_placement_ee(
         positions, fp_sizes, bounds, fixed_refs, initial_pcb,
     )
 
+    # 3f2. Top-edge screw terminal ordering
+    # Place screw terminals along top edge in functional order:
+    # left→right: J6(spare ADC), J5(opto), J4(ladder), J3(aux power), J1(power harness)
+    # At 0° rotation, screw terminal pads are horizontal (along X axis).
+    # Place them in a row along the top edge with gap for screwdriver access.
+    _TOP_EDGE_ORDER = ["J6", "J5", "J4", "J3", "J1"]
+    _top_refs = [r for r in _TOP_EDGE_ORDER if r in positions and r not in fixed_refs]
+    if _top_refs:
+        _log.info("  3f2: Top-edge screw terminal ordering (%s)", _top_refs)
+        term_gap = 3.0  # mm gap between courtyard edges
+        # At 0° rotation, native width IS the X extent
+        term_widths: list[float] = []
+        for r in _top_refs:
+            w, _h = fp_sizes.get(r, (2.0, 2.0))
+            term_widths.append(w)
+        total_w = sum(term_widths) + term_gap * (len(_top_refs) - 1)
+        # Use full board width minus margins for mounting holes
+        margin = 8.0  # mm from board edge (clear of mounting holes)
+        avail_w = (max_x - min_x) - 2 * margin
+        if total_w < avail_w:
+            start_x = min_x + margin + (avail_w - total_w) / 2.0
+        else:
+            # Compress gap to fit
+            compressed_gap = max(1.0, (avail_w - sum(term_widths)) / max(len(_top_refs) - 1, 1))
+            term_gap = compressed_gap
+            total_w = sum(term_widths) + term_gap * (len(_top_refs) - 1)
+            start_x = min_x + margin
+        cursor_x = start_x
+        # Use origin_to_centroid() to correctly place pin 1 (origin) near
+        # the top board edge, then let the library compute centroid position.
+        origin_y_target = min_y + 3.0  # pin 1 pad 3mm from top edge
+        for i, r in enumerate(_top_refs):
+            tw = term_widths[i]
+            origin_x = cursor_x + tw / 2.0
+            # Find footprint to use origin_to_centroid
+            fp_match = None
+            for fp in initial_pcb.footprints:
+                if fp.ref == r:
+                    fp_match = fp
+                    break
+            if fp_match is not None:
+                cent_x, cent_y = origin_to_centroid(
+                    fp_match, origin_x, origin_y_target, 0.0,
+                )
+            else:
+                cent_x, cent_y = origin_x, origin_y_target
+            positions[r] = (cent_x, cent_y, 0.0)
+            cursor_x += tw + term_gap
+            _log.info("    %s → centroid(%.1f, %.1f) origin(%.1f, %.1f) rot=0",
+                      r, cent_x, cent_y, origin_x, origin_y_target)
+    top_edge_connector_refs: set[str] = set(_top_refs)
+
     # 3c3. MCU peripheral tightening — AFTER RF pinning so U3 is at final position
+    # Order: U3 → decoupling caps → connectors → USB subcircuit →
+    #        reset/boot → remaining passives
     _log.info("  3c3: MCU peripheral tightening")
     mcu_peripheral_refs: set[str] = set()
     from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref as _find_mcu
@@ -2633,35 +2878,64 @@ def optimize_placement_ee(
                 mcu_group_refs = feat_refs
                 break
 
-        # --- Step 0: Move U3 into its MCU zone if outside ---
+        # --- Step 0: Place U3 with antenna FLUSH on right board edge ---
+        # Find the MCU footprint so we can use pad_extent for accurate sizing
+        mcu_fp = None
+        for fp in initial_pcb.footprints:
+            if fp.ref == mcu_ref_c3:
+                mcu_fp = fp
+                break
         mcu_zone_rect: tuple[float, float, float, float] | None = None
         for z in zones:
             if z.name == "mcu":
                 mcu_zone_rect = z.rect
                 break
-        if mcu_zone_rect is not None:
-            zx1, zy1, zx2, zy2 = mcu_zone_rect
-            # Check if MCU center is outside zone (with margin for its size)
-            margin_x = mcu_w / 2.0 + 2.0
-            margin_y = mcu_h / 2.0 + 2.0
-            zone_cx = (zx1 + zx2) / 2.0
-            zone_cy = (zy1 + zy2) / 2.0
-            if (mcu_x < zx1 + margin_x or mcu_x > zx2 - margin_x
-                    or mcu_y < zy1 + margin_y or mcu_y > zy2 - margin_y):
-                _log.info(
-                    "    U3 at (%.1f,%.1f) outside MCU zone "
-                    "(%.0f,%.0f)-(%.0f,%.0f), moving to zone center",
-                    mcu_x, mcu_y, zx1, zy1, zx2, zy2,
-                )
-                mcu_x = zone_cx
-                mcu_y = zone_cy
-                # Clamp to board bounds
-                mcu_x = max(bounds[0] + mcu_w / 2.0 + 2.0,
-                            min(bounds[2] - mcu_w / 2.0 - 2.0, mcu_x))
-                mcu_y = max(bounds[1] + mcu_h / 2.0 + 2.0,
-                            min(bounds[3] - mcu_h / 2.0 - 2.0, mcu_y))
-                positions[mcu_ref_c3] = (mcu_x, mcu_y, 0.0)
-                _log.info("    U3 moved to (%.1f, %.1f)", mcu_x, mcu_y)
+        _mcu_rot = 270.0  # antenna pointing right
+        eff_w, eff_h = mcu_h, mcu_w  # At 270°, dimensions swap
+
+        # Place U3's ORIGIN so pads are ~2mm from right edge.
+        # Then compute centroid for positions dict.
+        if mcu_fp is not None:
+            from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space as _pad_ext
+            # Trial: place origin at board center, measure pad extent
+            _trial_ox = (bounds[0] + bounds[2]) / 2.0
+            _trial_oy = (bounds[1] + bounds[3]) / 2.0
+            _te = _pad_ext(mcu_fp, _trial_ox, _trial_oy, _mcu_rot)
+            # How far right does the pad extend from origin?
+            _pad_right = _te[2] - _trial_ox  # max_x - origin_x
+            # Place origin so rightmost pad is far enough from right edge
+            # to leave room for J14 (GPIO header) on the right edge
+            _j14_w = fp_sizes.get("J14", (2.7, 35.7))[0] if "J14" in mcu_group_refs else 0.0
+            _right_margin = 3.0 + _j14_w  # J14 width + gap
+            mcu_origin_x = bounds[2] - _pad_right - _right_margin
+            mcu_origin_y = _trial_oy
+            if mcu_zone_rect is not None:
+                _zx1, _zy1, _zx2, _zy2 = mcu_zone_rect
+                mcu_origin_y = (_zy1 + _zy2) / 2.0
+            # Clamp Y so pads stay within board
+            _pad_top = _te[1] - _trial_oy  # min_y - origin_y (negative)
+            _pad_bot = _te[3] - _trial_oy  # max_y - origin_y (positive)
+            mcu_origin_y = max(bounds[1] - _pad_top + 2.0,
+                               min(bounds[3] - _pad_bot - 2.0, mcu_origin_y))
+            # Convert to centroid for positions dict
+            mcu_x, mcu_y = origin_to_centroid(mcu_fp, mcu_origin_x,
+                                               mcu_origin_y, _mcu_rot)
+        else:
+            mcu_x = bounds[2] - eff_w / 2.0 - 1.0
+            if mcu_zone_rect is not None:
+                _zx1, _zy1, _zx2, _zy2 = mcu_zone_rect
+                mcu_y = (_zy1 + _zy2) / 2.0
+            mcu_y = max(bounds[1] + eff_h / 2.0 + 2.0,
+                        min(bounds[3] - eff_h / 2.0 - 2.0, mcu_y))
+        positions[mcu_ref_c3] = (mcu_x, mcu_y, _mcu_rot)
+        mcu_peripheral_refs.add(mcu_ref_c3)
+        _log.info("    U3 centroid at (%.1f, %.1f) rot=270° [eff_w=%.1f, eff_h=%.1f]",
+                  mcu_x, mcu_y, eff_w, eff_h)
+
+        # MCU bounding box edges (centroid-based)
+        mcu_left = mcu_x - eff_w / 2.0
+        mcu_top = mcu_y - eff_h / 2.0
+        mcu_bot = mcu_y + eff_h / 2.0
 
         # --- Step 1: Build occupancy grid WITHOUT MCU group ---
         mcu_grid = _PlacementGrid(bounds)
@@ -2670,46 +2944,9 @@ def optimize_placement_ee(
                 continue
             ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
             mcu_grid.place(ox, oy, ow, oh)
-        # Place MCU itself in the grid
-        mcu_grid.place(mcu_x, mcu_y, mcu_w, mcu_h)
+        mcu_grid.place(mcu_x, mcu_y, eff_w, eff_h)
 
-        # --- Step 2: Place MCU connectors to the RIGHT of the MCU IC ---
-        # Large direct-IO connectors (J14 TFT, J15 GPIO, J16 SD, J2 USB)
-        # go right of the MCU. Each is placed using the occupancy grid to
-        # avoid mutual collisions between connectors.
-        connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
-        if mcu_zone_rect is not None:
-            # Target: right of MCU, stacked vertically with grid-aware placement
-            conn_x = mcu_x + mcu_w / 2.0 + 3.0  # 3mm gap right of MCU
-            conn_y = mcu_y - 10.0  # Start above MCU center
-            for ref in sorted(connector_refs):
-                if ref not in positions or ref in fixed_refs:
-                    continue
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                tx = conn_x + w / 2.0
-                ty = conn_y + h / 2.0
-                tx = max(bounds[0] + 2.0, min(bounds[2] - w / 2.0 - 1.0, tx))
-                ty = max(bounds[1] + 2.0, min(bounds[3] - h / 2.0 - 1.0, ty))
-                # Use grid to find collision-free position near target
-                px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=30.0)
-                positions[ref] = (px, py, 0.0)
-                mcu_grid.place(px, py, w, h)
-                mcu_peripheral_refs.add(ref)
-                conn_y = py + h / 2.0 + 2.0
-                _log.info("    %s → right of MCU (%.1f, %.1f) [%.1fx%.1fmm]",
-                          ref, px, py, w, h)
-        else:
-            for ref in sorted(connector_refs):
-                if ref in positions:
-                    w, h = fp_sizes.get(ref, (2.0, 2.0))
-                    mcu_grid.place(*positions[ref][:2], w, h)
-                    mcu_peripheral_refs.add(ref)
-
-        # Protect the MCU ref itself from 3g collision resolution
-        mcu_peripheral_refs.add(mcu_ref_c3)
-
-        # --- Step 3: Identify MCU subcircuits for organized placement ---
-        # Build net adjacency for MCU group refs
+        # --- Step 2: Build net adjacency for MCU group ---
         ref_nets: dict[str, set[str]] = {}
         for net in requirements.nets:
             net_refs = set()
@@ -2721,8 +2958,8 @@ def optimize_placement_ee(
                         net_refs & mcu_group_refs,
                     )
 
-        # Classify MCU passives into functional subcircuits
-        # Place decoupling caps first (closest to MCU), then others
+        # Classify MCU passives
+        connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
         decoupling_refs: list[str] = []
         other_passive_refs: list[str] = []
         for ref in sorted(mcu_group_refs):
@@ -2730,65 +2967,279 @@ def optimize_placement_ee(
                 continue
             if ref not in positions:
                 continue
-            # Decoupling caps: C refs directly connected to MCU
             if ref.startswith("C") and mcu_ref_c3 in ref_nets.get(ref, set()):
                 decoupling_refs.append(ref)
             else:
                 other_passive_refs.append(ref)
 
-        # --- Step 4: Place decoupling caps tight against MCU perimeter ---
-        _DECOUP_GAP = 1.5  # edge-to-edge gap for decoupling
-        # Place decoupling on the side with most board space (away from edges)
-        decoup_side_y = mcu_y - mcu_h / 2.0 - _DECOUP_GAP  # default: above
-        if decoup_side_y < bounds[1] + 3.0:
-            decoup_side_y = mcu_y + mcu_h / 2.0 + _DECOUP_GAP  # below
-
-        decoup_x = mcu_x - mcu_w / 4.0  # Start from left quarter of MCU
+        # --- Step 3: Place decoupling caps FIRST — tight against MCU ---
+        # At 270° rotation, U3's left edge (non-antenna) has power pins.
+        # Place decoupling column with enough gap to clear the MCU courtyard
+        # (module body extends well beyond pad field).
+        _DECOUP_GAP = 3.5
+        # mcu_left is already U3's left edge in centroid space
+        # Place caps so their RIGHT edge is _DECOUP_GAP from mcu_left
+        max_cap_w = max((fp_sizes.get(r, (2.5, 1.5))[0] for r in decoupling_refs),
+                        default=2.5)
+        decoup_col_x = mcu_left - _DECOUP_GAP - max_cap_w / 2.0
+        decoup_y_start = mcu_y - eff_h / 4.0
+        decoup_y = decoup_y_start
+        decoup_y_max = mcu_bot - 1.0
         for ref in decoupling_refs:
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
-            tx = decoup_x
-            ty = decoup_side_y
+            w, h = fp_sizes.get(ref, (1.0, 0.5))
+            tx = decoup_col_x
+            ty = decoup_y
+            if ty + h / 2.0 > decoup_y_max:
+                # New column further left
+                decoup_col_x -= (w + 2.0)
+                tx = decoup_col_x
+                ty = decoup_y_start
+                decoup_y = ty
             tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
-            px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=15.0)
+            px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=8.0)
             positions[ref] = (px, py, 0.0)
             mcu_peripheral_refs.add(ref)
             mcu_grid.place(px, py, w, h)
-            decoup_x += w + 1.0
-            _log.info("    %s (decoupling): →(%.1f,%.1f)", ref, px, py)
+            decoup_y += h + 1.5
+            _log.info("    %s (decoupling): →(%.1f,%.1f) [%.1fmm from U3]",
+                      ref, px, py, mcu_left - px - w / 2.0)
 
-        # --- Step 5: Place remaining passives around MCU perimeter ---
-        _MCU_TARGET_GAP = 2.0
-        # Sort by signal chain proximity — refs connected to MCU first
-        def _mcu_distance_key(ref: str) -> float:
-            connected_to_mcu = mcu_ref_c3 in ref_nets.get(ref, set())
+        # --- Step 4: Place connectors ---
+        # MCU connectors go on the RIGHT board edge (accessible for cables).
+        # J14 (1x14 GPIO header): right edge, vertically centered on U3
+        # J15 (2x5 header): right edge, above J14
+        # J16 (SD card): above U3
+        # J2 (USB-C): bottom edge, below U3
+        right_edge_x = bounds[2] - 2.0  # 2mm from right board edge
+
+        if "J14" in connector_refs and "J14" in positions and "J14" not in fixed_refs:
+            w14, h14 = fp_sizes.get("J14", (2.7, 35.7))
+            # Place to the RIGHT of U3, on the board edge
+            # Use enough gap to clear U3's full courtyard (module body
+            # extends well beyond pads, especially antenna area)
+            mcu_right_edge = mcu_x + eff_w / 2.0
+            tx = mcu_right_edge + w14 / 2.0 + 3.0  # 3mm gap from U3 courtyard
+            tx = max(bounds[0] + w14 / 2.0 + 1.0,
+                     min(bounds[2] - w14 / 2.0 - 1.0, tx))
+            ty = mcu_y  # vertically centered on U3
+            ty = max(bounds[1] + h14 / 2.0 + 1.0,
+                     min(bounds[3] - h14 / 2.0 - 1.0, ty))
+            positions["J14"] = (tx, ty, 0.0)
+            mcu_grid.place(tx, ty, w14, h14)
+            mcu_peripheral_refs.add("J14")
+            _log.info("    J14 → right of U3 (%.1f, %.1f)", tx, ty)
+
+        if "J15" in connector_refs and "J15" in positions and "J15" not in fixed_refs:
+            w15, h15 = fp_sizes.get("J15", (5.2, 12.9))
+            j14_pos = positions.get("J14")
+            if j14_pos:
+                # Above J14 on right edge
+                j14_top = j14_pos[1] - fp_sizes.get("J14", (2.7, 35.7))[1] / 2.0
+                tx = right_edge_x - w15 / 2.0
+                ty = j14_top - h15 / 2.0 - 2.0
+            else:
+                tx = right_edge_x - w15 / 2.0
+                ty = mcu_top - h15 / 2.0 - 2.0
+            ty = max(bounds[1] + h15 / 2.0 + 1.0,
+                     min(bounds[3] - h15 / 2.0 - 1.0, ty))
+            positions["J15"] = (tx, ty, 0.0)
+            mcu_grid.place(tx, ty, w15, h15)
+            mcu_peripheral_refs.add("J15")
+            _log.info("    J15 → right edge (%.1f, %.1f)", tx, ty)
+
+        # J16 (SD card slot): above U3, left of J14
+        if "J16" in connector_refs and "J16" in positions and "J16" not in fixed_refs:
+            w16, h16 = fp_sizes.get("J16", (16.2, 6.9))
+            tx = mcu_x - 5.0  # left of U3 center, clear of antenna
+            ty = mcu_top - h16 / 2.0 - 2.0
+            tx = max(bounds[0] + w16 / 2.0 + 1.0,
+                     min(bounds[2] - w16 / 2.0 - 1.0, tx))
+            ty = max(bounds[1] + h16 / 2.0 + 1.0, min(bounds[3] - 2.0, ty))
+            px, py = mcu_grid.find_free_pos(tx, ty, w16, h16, max_radius=20.0)
+            positions["J16"] = (px, py, 0.0)
+            mcu_grid.place(px, py, w16, h16)
+            mcu_peripheral_refs.add("J16")
+            _log.info("    J16 → above U3 (%.1f, %.1f)", px, py)
+
+        # J2 (USB-C): bottom edge, below U3, facing outward (180°)
+        # Place well below MCU courtyard to avoid overlap
+        if "J2" in connector_refs and "J2" in positions and "J2" not in fixed_refs:
+            w2, h2 = fp_sizes.get("J2", (9.6, 7.6))
+            tx = mcu_x - 8.0  # left of U3 center, clear of courtyard
+            ty = max(mcu_bot + h2 / 2.0 + 3.0,
+                     bounds[3] - h2 / 2.0 - 2.0)  # near bottom edge but clear of U3
+            tx = max(bounds[0] + w2 / 2.0 + 1.0,
+                     min(bounds[2] - w2 / 2.0 - 1.0, tx))
+            px, py = mcu_grid.find_free_pos(tx, ty, w2, h2, max_radius=20.0)
+            positions["J2"] = (px, py, 180.0)
+            mcu_grid.place(px, py, w2, h2)
+            mcu_peripheral_refs.add("J2")
+            _log.info("    J2 → bottom edge (%.1f, %.1f)", px, py)
+
+        # --- Step 5: USB subcircuit (U9 + R6 + R7) near J2 ---
+        j2_pos = positions.get("J2")
+        if "U9" in other_passive_refs and "U9" in positions and j2_pos:
+            j2x, j2y, _j2r = j2_pos
+            u9w, u9h = fp_sizes.get("U9", (3.0, 3.0))
+            # U9 between J2 and U3 (above J2, below U3)
+            u9_tx = j2x + 2.0
+            u9_ty = (j2y + mcu_bot) / 2.0  # halfway between J2 and U3 bottom
+            u9_tx = max(bounds[0] + 2.0, min(bounds[2] - u9w / 2.0 - 1.0, u9_tx))
+            u9_ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, u9_ty))
+            u9x, u9y = mcu_grid.find_free_pos(u9_tx, u9_ty, u9w, u9h,
+                                               max_radius=15.0)
+            positions["U9"] = (u9x, u9y, 0.0)
+            mcu_peripheral_refs.add("U9")
+            mcu_grid.place(u9x, u9y, u9w, u9h)
+            other_passive_refs.remove("U9")
+            _log.info("    U9 (ESD) → between J2 and U3 at (%.1f, %.1f)",
+                      u9x, u9y)
+
+        # R6, R7 (USB resistors) near U9/J2
+        usb_r_refs = [r for r in ("R6", "R7") if r in other_passive_refs
+                      and r in positions]
+        if usb_r_refs and j2_pos:
+            u9_pos = positions.get("U9", j2_pos)
+            u9x_r, u9y_r, _ = u9_pos
+            u9w_r = fp_sizes.get("U9", (3.0, 3.0))[0]
+            u9h_r = fp_sizes.get("U9", (3.0, 3.0))[1]
+            for i, ref in enumerate(usb_r_refs):
+                w, h = fp_sizes.get(ref, (1.0, 0.5))
+                # Place resistors to the LEFT of U9, stacked vertically
+                tx = u9x_r - u9w_r / 2.0 - w / 2.0 - 1.0
+                ty = u9y_r + (i - 0.5) * (h + 1.5)
+                tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=10.0)
+                positions[ref] = (px, py, 0.0)
+                mcu_peripheral_refs.add(ref)
+                mcu_grid.place(px, py, w, h)
+                other_passive_refs.remove(ref)
+                _log.info("    %s (USB R) → (%.1f, %.1f)", ref, px, py)
+
+        # --- Step 6: Reset/Boot subcircuit (SW1+R4, SW2+R5) ---
+        # Place as a compact cluster above-left of U3
+        sw_pairs: list[tuple[str, str]] = []  # (switch, resistor)
+        for sw, res in [("SW1", "R4"), ("SW2", "R5"), ("SW1", "R5"), ("SW2", "R4")]:
+            if (sw in other_passive_refs and sw in positions
+                    and res in other_passive_refs and res in positions):
+                # Check if they share a net (connected)
+                sw_nets = ref_nets.get(sw, set())
+                if res in sw_nets:
+                    sw_pairs.append((sw, res))
+        # Deduplicate: each ref should appear in at most one pair
+        used_sw: set[str] = set()
+        unique_pairs: list[tuple[str, str]] = []
+        for sw, res in sw_pairs:
+            if sw not in used_sw and res not in used_sw:
+                unique_pairs.append((sw, res))
+                used_sw.add(sw)
+                used_sw.add(res)
+        # Also handle unpaired SW/R refs
+        unpaired_sw = [r for r in other_passive_refs if r in positions
+                       and r.startswith("SW") and r not in used_sw]
+
+        # Place SW/R cluster to the upper-left of MCU — clear of courtyard
+        sw_base_x = mcu_left - 8.0
+        sw_base_y = mcu_top - 4.0
+        for i, (sw, res) in enumerate(unique_pairs):
+            sw_w, sw_h = fp_sizes.get(sw, (3.5, 3.5))
+            r_w, r_h = fp_sizes.get(res, (1.0, 0.5))
+            # Switch
+            tx = sw_base_x - i * (sw_w + 3.0)
+            ty = sw_base_y
+            tx = max(bounds[0] + sw_w / 2.0 + 1.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + sw_h / 2.0 + 1.0, min(bounds[3] - 2.0, ty))
+            px, py = mcu_grid.find_free_pos(tx, ty, sw_w, sw_h, max_radius=15.0)
+            positions[sw] = (px, py, 0.0)
+            mcu_peripheral_refs.add(sw)
+            mcu_grid.place(px, py, sw_w, sw_h)
+            other_passive_refs.remove(sw)
+            # Resistor adjacent to switch
+            r_tx = px
+            r_ty = py - sw_h / 2.0 - r_h / 2.0 - 0.5
+            r_tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, r_tx))
+            r_ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, r_ty))
+            rpx, rpy = mcu_grid.find_free_pos(r_tx, r_ty, r_w, r_h,
+                                               max_radius=8.0)
+            positions[res] = (rpx, rpy, 0.0)
+            mcu_peripheral_refs.add(res)
+            mcu_grid.place(rpx, rpy, r_w, r_h)
+            other_passive_refs.remove(res)
+            _log.info("    %s+%s (reset/boot) → (%.1f,%.1f) / (%.1f,%.1f)",
+                      sw, res, px, py, rpx, rpy)
+
+        # Unpaired switches
+        for sw in unpaired_sw:
+            sw_w, sw_h = fp_sizes.get(sw, (3.5, 3.5))
+            tx = sw_base_x - len(unique_pairs) * (sw_w + 3.0)
+            ty = sw_base_y
+            tx = max(bounds[0] + sw_w / 2.0 + 1.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + sw_h / 2.0 + 1.0, min(bounds[3] - 2.0, ty))
+            px, py = mcu_grid.find_free_pos(tx, ty, sw_w, sw_h, max_radius=15.0)
+            positions[sw] = (px, py, 0.0)
+            mcu_peripheral_refs.add(sw)
+            mcu_grid.place(px, py, sw_w, sw_h)
+            other_passive_refs.remove(sw)
+            _log.info("    %s (switch) → (%.1f, %.1f)", sw, px, py)
+
+        # --- Step 7: Place remaining passives near MCU perimeter ---
+        # Sort: MCU-connected refs first, then by distance
+        def _mcu_prox_key(ref: str) -> tuple[int, float]:
+            connected = mcu_ref_c3 in ref_nets.get(ref, set())
             rx, ry, _ = positions[ref]
             dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
-            return (0 if connected_to_mcu else 1, dist)
+            return (0 if connected else 1, dist)
 
-        other_sorted = sorted(other_passive_refs, key=_mcu_distance_key)
+        remaining = [r for r in other_passive_refs if r in positions]
+        remaining.sort(key=_mcu_prox_key)
 
-        for ref in other_sorted:
-            rx, ry, rrot = positions[ref]
+        _MCU_TARGET_GAP = 4.0
+        # Place remaining passives in a ring around MCU, left side preferred
+        # Use quadrant-based placement: upper-left, lower-left, then above/below
+        # Gap must clear the full MCU courtyard (module body extends beyond pads)
+        ring_slots: list[tuple[float, float]] = []
+        # Upper-left quadrant — well clear of MCU courtyard
+        for dy_off in range(-3, 4):
+            ring_slots.append((mcu_left - 6.0, mcu_y + dy_off * 3.0))
+        # Below MCU, left of J2
+        for dx_off in range(-2, 3):
+            ring_slots.append((mcu_x + dx_off * 3.0 - 8.0, mcu_bot + 4.0))
+        # Above MCU, left of J16
+        for dx_off in range(-2, 3):
+            ring_slots.append((mcu_x + dx_off * 3.0 - 8.0, mcu_top - 4.0))
+
+        slot_idx = 0
+        for ref in remaining:
             w, h = fp_sizes.get(ref, (2.0, 2.0))
+            rrot = positions[ref][2]
 
-            # Target: MCU perimeter + gap, preserving direction
-            dx = rx - mcu_x
-            dy = ry - mcu_y
-            d = max(0.1, math.sqrt(dx * dx + dy * dy))
-            target_dist = (max(mcu_w, mcu_h) / 2.0
-                           + max(w, h) / 2.0 + _MCU_TARGET_GAP)
-            tx = mcu_x + dx / d * target_dist
-            ty = mcu_y + dy / d * target_dist
-            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
-            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+            # Try ring slots first, then fallback to perimeter projection
+            placed = False
+            while slot_idx < len(ring_slots):
+                sx, sy = ring_slots[slot_idx]
+                slot_idx += 1
+                sx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, sx))
+                sy = max(bounds[1] + 2.0, min(bounds[3] - 2.0, sy))
+                if mcu_grid.is_free(sx, sy, w, h):
+                    positions[ref] = (sx, sy, rrot)
+                    mcu_peripheral_refs.add(ref)
+                    mcu_grid.place(sx, sy, w, h)
+                    placed = True
+                    break
 
-            search_radius = max(d, 30.0)
-            px, py = mcu_grid.find_free_pos(tx, ty, w, h,
-                                            max_radius=search_radius)
-            positions[ref] = (px, py, rrot)
-            mcu_peripheral_refs.add(ref)
-            mcu_grid.place(px, py, w, h)
+            if not placed:
+                # Fallback: find_free_pos near MCU left side
+                tx = mcu_left - _MCU_TARGET_GAP - w / 2.0
+                ty = mcu_y
+                tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                px, py = mcu_grid.find_free_pos(tx, ty, w, h,
+                                                max_radius=25.0)
+                positions[ref] = (px, py, rrot)
+                mcu_peripheral_refs.add(ref)
+                mcu_grid.place(px, py, w, h)
 
         _log.info(
             "    3c3: organized %d peripherals around %s at (%.1f, %.1f)",
@@ -2934,19 +3385,48 @@ def optimize_placement_ee(
                 poe_x = eth_anchor_x + 8.0  # offset right
                 _place_eth_column([poe_ic] + poe_caps, poe_x, eth_anchor_y)
 
-            # J13 (RJ45): place on bottom edge, facing OUTWARD (180° rotation)
+            # J13 (RJ45): place on bottom board edge, facing OUTWARD (180° rotation)
+            # The RJ45 connector MUST be on the bottom edge for cable access.
+            from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
             for ref in eth_connectors:
                 if ref not in positions or ref in fixed_refs:
                     continue
+                fp_match = None
+                for fp in initial_pcb.footprints:
+                    if fp.ref == ref:
+                        fp_match = fp
+                        break
                 w, h = fp_sizes.get(ref, (2.0, 2.0))
-                tx = eth_anchor_x
-                ty = bounds[3] - h / 2.0 - 1.0  # bottom edge
-                px, py = eth_grid.find_free_pos(tx, ty, w, h,
-                                                max_radius=25.0)
-                # 180° rotation so connector faces outward from bottom edge
+                # Place centroid so bottom edge of courtyard touches bottom
+                # board edge with 1mm margin.
+                cent_y = bounds[3] - h / 2.0 - 1.0
+                cent_x = eth_anchor_x
+                if fp_match is not None:
+                    # Use pad extent for accurate edge placement
+                    trial_origin_x = eth_anchor_x
+                    trial_origin_y = bounds[3] - 3.0
+                    _, _, _, pad_max_y = pad_extent_in_board_space(
+                        fp_match, trial_origin_x, trial_origin_y, 180.0,
+                    )
+                    if pad_max_y > bounds[3] - 1.0:
+                        trial_origin_y -= (pad_max_y - bounds[3] + 1.0)
+                    cent_x, cent_y = origin_to_centroid(
+                        fp_match, trial_origin_x, trial_origin_y, 180.0,
+                    )
+                # Use tight max_radius so J13 stays near the bottom edge
+                px, py = eth_grid.find_free_pos(cent_x, cent_y, w, h,
+                                                max_radius=10.0)
+                # Enforce bottom edge: never let centroid move more than
+                # h/2 + 3mm above the bottom edge
+                max_y = bounds[3] - h / 2.0 - 1.0
+                if py < max_y - 5.0:
+                    # find_free_pos pushed it too far up; force bottom edge
+                    py = max_y
                 positions[ref] = (px, py, 180.0)
                 ethernet_fixed.add(ref)
                 placed_eth.add(ref)
+                _log.info("    %s (RJ45) → bottom edge (%.1f, %.1f)",
+                          ref, px, py)
 
             # Any remaining eth refs
             remaining_eth = sorted(
@@ -2963,13 +3443,24 @@ def optimize_placement_ee(
                 len(ethernet_fixed),
             )
 
+    # 3h. Template-guided refinement — apply subcircuit layout templates
+    _log.info("  3h: Template-guided refinement")
+    # Protect all refs already placed by earlier phases from template moves
+    template_protected = (fixed_refs | relay_support_refs | adc_channel_refs
+                          | mcu_peripheral_refs | power_group_fixed
+                          | ethernet_fixed | top_edge_connector_refs)
+    positions, template_fixed = _apply_template_refinement(
+        positions, fp_sizes, bounds, requirements, subcircuits, template_protected,
+    )
+
     # 3g. Collision resolution (group-constrained, then unconstrained final pass)
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(requirements, positions, fp_sizes)
     # Protect relay sub-circuit, ADC channel, and MCU peripheral positions
     subcircuit_fixed = (relay_support_refs | adc_channel_refs
                         | mcu_peripheral_refs | power_group_fixed
-                        | ethernet_fixed)
+                        | ethernet_fixed | template_fixed
+                        | top_edge_connector_refs)
     relay_fixed = fixed_refs | subcircuit_fixed | {
         r for r in positions if r.startswith("K")
     }
@@ -2980,15 +3471,24 @@ def optimize_placement_ee(
     remaining_collisions = _count_collisions(positions, fp_sizes)
     if remaining_collisions:
         _log.info("  3g: %d remaining — targeted pass", len(remaining_collisions))
-        # Only unprotect subcircuit refs that are involved in collisions
+        # Only unprotect subcircuit refs that are involved in collisions,
+        # BUT keep MCU peripheral refs and connector refs always protected
+        # (they were placed intentionally by pin-side-aware logic)
         colliding_refs = set()
         for a, b in remaining_collisions:
             colliding_refs.add(a)
             colliding_refs.add(b)
-        # Keep protection on subcircuit refs NOT involved in collisions
-        targeted_fixed = fixed_refs | (subcircuit_fixed - colliding_refs) | {
+        # Never unprotect the MCU IC itself, relays, or edge connectors.
+        # MCU passives (caps, resistors, LEDs) CAN be moved if they collide,
+        # since accurate courtyard sizes may reveal overlaps the placement
+        # phase didn't account for.
+        mcu_ic_refs = {r for r in mcu_peripheral_refs
+                       if r.startswith("U") or r.startswith("J")}
+        always_fixed = mcu_ic_refs | top_edge_connector_refs | {
             r for r in positions if r.startswith("K")
         }
+        # Keep protection on subcircuit refs NOT involved in collisions
+        targeted_fixed = fixed_refs | (subcircuit_fixed - colliding_refs) | always_fixed
         positions = _resolve_collisions(
             positions, fp_sizes, bounds, targeted_fixed,
         )
@@ -2998,15 +3498,41 @@ def optimize_placement_ee(
     # ===================================================================
     _log.info("=== Final: Clamping and review ===")
 
-    # Clamp off-board components
-    for ref, (rx, ry, rot) in positions.items():
+    # Clamp off-board components using actual pad extent for connectors,
+    # rotation-aware fp_sizes for everything else.
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+    fp_lookup = {fp.ref: fp for fp in initial_pcb.footprints}
+    for ref, (rx, ry, rot) in list(positions.items()):
         if ref in fixed_refs:
             continue
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
-        clamped_x = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, rx))
-        clamped_y = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, ry))
-        if clamped_x != rx or clamped_y != ry:
-            positions[ref] = (clamped_x, clamped_y, rot)
+        fp_obj = fp_lookup.get(ref)
+        if fp_obj is not None and ref.startswith("J"):
+            # Use actual pad extent for connectors (asymmetric origins)
+            ori_x, ori_y = centroid_to_origin(fp_obj, rx, ry, rot)
+            px0, py0, px1, py1 = pad_extent_in_board_space(
+                fp_obj, ori_x, ori_y, rot,
+            )
+            shift_x = shift_y = 0.0
+            if px0 < min_x + 1.0:
+                shift_x = (min_x + 1.0) - px0
+            elif px1 > max_x - 1.0:
+                shift_x = (max_x - 1.0) - px1
+            if py0 < min_y + 1.0:
+                shift_y = (min_y + 1.0) - py0
+            elif py1 > max_y - 1.0:
+                shift_y = (max_y - 1.0) - py1
+            if shift_x != 0.0 or shift_y != 0.0:
+                new_cx, new_cy = origin_to_centroid(
+                    fp_obj, ori_x + shift_x, ori_y + shift_y, rot,
+                )
+                positions[ref] = (new_cx, new_cy, rot)
+        else:
+            # Symmetric footprints — use rotation-aware size
+            w, h = _rotation_aware_size(ref, positions, fp_sizes)
+            clamped_x = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, rx))
+            clamped_y = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, ry))
+            if clamped_x != rx or clamped_y != ry:
+                positions[ref] = (clamped_x, clamped_y, rot)
 
     # Post-clamp collision resolution — protect relay sub-circuits
     post_clamp_collisions = len(_count_collisions(positions, fp_sizes))

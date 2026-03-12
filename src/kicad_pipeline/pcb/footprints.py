@@ -33,8 +33,10 @@ from kicad_pipeline.exceptions import ConfigurationError, PCBError
 from kicad_pipeline.models.pcb import (
     Footprint,
     Footprint3DModel,
+    FootprintBBox,
     FootprintLine,
     FootprintText,
+    OriginType,
     Pad,
     Point,
 )
@@ -2377,6 +2379,251 @@ def apply_rotation_offset(
 
 
 # ---------------------------------------------------------------------------
+# Footprint bounding box + origin detection
+# ---------------------------------------------------------------------------
+
+
+def compute_footprint_bbox(fp: Footprint) -> FootprintBBox:
+    """Compute the axis-aligned bounding box of a footprint from pad geometry.
+
+    Uses the actual pad positions and sizes to determine the physical extent
+    relative to the footprint origin.  Falls back to
+    :func:`estimate_footprint_size` when no pad data is available.
+
+    Args:
+        fp: A :class:`Footprint` with pad and/or graphic data.
+
+    Returns:
+        A :class:`FootprintBBox` relative to the footprint origin.
+    """
+    if not fp.pads:
+        # Fallback: estimate from footprint ID and center the box
+        w, h = estimate_footprint_size(fp.lib_id)
+        return FootprintBBox(
+            min_x=-w / 2.0,
+            min_y=-h / 2.0,
+            max_x=w / 2.0,
+            max_y=h / 2.0,
+        )
+
+    min_x = float("inf")
+    min_y = float("inf")
+    max_x = float("-inf")
+    max_y = float("-inf")
+
+    for pad in fp.pads:
+        half_x = pad.size_x / 2.0
+        half_y = pad.size_y / 2.0
+        px, py = pad.position.x, pad.position.y
+        min_x = min(min_x, px - half_x)
+        min_y = min(min_y, py - half_y)
+        max_x = max(max_x, px + half_x)
+        max_y = max(max_y, py + half_y)
+
+    # Add courtyard clearance
+    min_x -= PCB_COURTYARD_CLEARANCE_MM
+    min_y -= PCB_COURTYARD_CLEARANCE_MM
+    max_x += PCB_COURTYARD_CLEARANCE_MM
+    max_y += PCB_COURTYARD_CLEARANCE_MM
+
+    return FootprintBBox(min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y)
+
+
+# ---------------------------------------------------------------------------
+# Body extension factors — how much the physical component body extends
+# beyond the pad field on each side, by package type.
+# ---------------------------------------------------------------------------
+
+_BODY_EXTENSION: dict[str, tuple[float, float]] = {
+    # (extra_width_per_side, extra_height_per_side)
+    "module": (0.5, 4.0),       # ESP32/W5500 — antenna/shield extends well beyond pads
+    "qfn": (0.25, 0.25),        # QFN/QFP/BGA — body ≈ pad field
+    "qfp": (0.25, 0.25),
+    "bga": (0.25, 0.25),
+    "sot": (0.75, 0.75),        # SOT-23/223 — body wider than pads
+    "passive": (0.25, 0.25),    # 0402/0603/0805 — body fits between pads
+    "connector": (0.5, 0.5),    # THT connectors
+    "relay": (1.0, 1.0),        # Relay modules
+    "switch": (1.0, 1.0),       # Tactile switches
+    "default": (0.5, 0.5),      # Catch-all
+}
+
+_COURTYARD_CLEARANCE: float = 0.25  # KiCad standard courtyard clearance per side
+
+
+def _classify_package(fp: Footprint) -> str:
+    """Classify a footprint's package type for body extension lookup."""
+    lib_upper = fp.lib_id.upper()
+    # Module detection (must be before IC detection)
+    if any(kw in lib_upper for kw in ("WROOM", "W5500", "LAN8720", "ESP32", "MODULE")):
+        return "module"
+    if any(kw in lib_upper for kw in ("QFN", "DFN")):
+        return "qfn"
+    if any(kw in lib_upper for kw in ("QFP", "LQFP", "TQFP")):
+        return "qfp"
+    if "BGA" in lib_upper:
+        return "bga"
+    if any(kw in lib_upper for kw in ("SOT-23", "SOT-223", "TSOT", "SOT-")):
+        return "sot"
+    if any(kw in lib_upper for kw in ("0402", "0603", "0805", "1206", "1210",
+                                       "R_", "C_", "L_", "LED_")):
+        return "passive"
+    if any(kw in lib_upper for kw in ("PINHEADER", "PINSOCKET", "CONN_",
+                                       "TERMINALBLOCK", "TB_", "MOLEX",
+                                       "RJ45", "USB")):
+        return "connector"
+    if "RELAY" in lib_upper:
+        return "relay"
+    if "SW_" in lib_upper:
+        return "switch"
+    return "default"
+
+
+def estimate_courtyard_mm(fp: Footprint) -> tuple[float, float]:
+    """Estimate courtyard (width, height) from footprint geometry.
+
+    Uses pad edges (not centers) plus a body extension factor that accounts
+    for the physical component body extending beyond the pad field.  The
+    body extension varies by package type — modules like ESP32 have large
+    antenna/shield areas, while passives are close to pad extent.
+
+    Args:
+        fp: A :class:`Footprint` with pad data.
+
+    Returns:
+        ``(width_mm, height_mm)`` courtyard estimate.
+    """
+    if not fp.pads:
+        return estimate_footprint_size(fp.lib_id)
+
+    # Compute pad-edge extents
+    min_x = min(p.position.x - p.size_x / 2.0 for p in fp.pads)
+    max_x = max(p.position.x + p.size_x / 2.0 for p in fp.pads)
+    min_y = min(p.position.y - p.size_y / 2.0 for p in fp.pads)
+    max_y = max(p.position.y + p.size_y / 2.0 for p in fp.pads)
+
+    pad_w = max_x - min_x
+    pad_h = max_y - min_y
+
+    # Apply body extension per package type
+    pkg = _classify_package(fp)
+    ext_w, ext_h = _BODY_EXTENSION.get(pkg, _BODY_EXTENSION["default"])
+
+    w = pad_w + 2.0 * ext_w + 2.0 * _COURTYARD_CLEARANCE
+    h = pad_h + 2.0 * ext_h + 2.0 * _COURTYARD_CLEARANCE
+
+    return (max(w, 1.0), max(h, 1.0))
+
+
+def detect_origin_type(fp: Footprint) -> OriginType:
+    """Detect whether a footprint uses center or pin-1 origin convention.
+
+    THT connectors (pin headers, terminal blocks) typically have the origin
+    at pad 1.  SMD parts have the origin at the geometric center.
+
+    Args:
+        fp: A :class:`Footprint` to inspect.
+
+    Returns:
+        :attr:`OriginType.PIN1` if pad "1" is near ``(0, 0)`` and the
+        geometric center is significantly offset; :attr:`OriginType.CENTER`
+        otherwise.
+    """
+    if not fp.pads:
+        return OriginType.CENTER
+
+    # Find pad "1"
+    pad1 = None
+    for pad in fp.pads:
+        if pad.number == "1":
+            pad1 = pad
+            break
+
+    if pad1 is None:
+        return OriginType.CENTER
+
+    # Check if pad 1 is near the origin
+    pad1_dist = math.hypot(pad1.position.x, pad1.position.y)
+
+    # Compute geometric center of all pads
+    cx = sum(p.position.x for p in fp.pads) / len(fp.pads)
+    cy = sum(p.position.y for p in fp.pads) / len(fp.pads)
+    center_dist = math.hypot(cx, cy)
+
+    # PIN1 origin: pad 1 is near (0,0) AND center is significantly offset
+    if pad1_dist < 1.0 and center_dist > 2.0:
+        return OriginType.PIN1
+
+    return OriginType.CENTER
+
+
+# ---------------------------------------------------------------------------
+# 3D model alignment verification
+# ---------------------------------------------------------------------------
+
+# Valid Z-rotation deltas for 3D models (multiples of 90°)
+_VALID_Z_ROTATIONS: frozenset[float] = frozenset({0.0, 90.0, 180.0, 270.0})
+
+
+def validate_3d_model_orientation(fp: Footprint) -> tuple[str, ...]:
+    """Check 3D model rotation/offset vs package conventions.
+
+    Returns warning strings for:
+    - Missing 3D model on non-trivial footprints
+    - Z-rotation not a multiple of 90°
+    - Known package conventions violated (terminal blocks need 180° Z,
+      DIP switches need 90° Z)
+
+    Args:
+        fp: A placed :class:`Footprint` to validate.
+
+    Returns:
+        Tuple of warning description strings (empty if all OK).
+    """
+    warnings: list[str] = []
+    upper = fp.lib_id.upper()
+
+    # Skip trivial footprints (mounting holes, test points)
+    if any(t in upper for t in ("MOUNTING", "TESTPOINT", "FIDUCIAL")):
+        return ()
+
+    if not fp.models:
+        if fp.pads:
+            warnings.append(
+                f"{fp.ref}: missing 3D model for footprint {fp.lib_id}"
+            )
+        return tuple(warnings)
+
+    for model in fp.models:
+        z_rot = model.rotate[2] % 360.0
+        # Round to avoid floating point issues
+        z_rot_rounded = round(z_rot, 1)
+
+        # Check Z-rotation is a valid multiple of 90°
+        if z_rot_rounded not in _VALID_Z_ROTATIONS:
+            warnings.append(
+                f"{fp.ref}: 3D model Z-rotation {z_rot_rounded}° is not a"
+                " multiple of 90°"
+            )
+
+        # Terminal blocks should have 180° Z rotation
+        if ("TERMINALBLOCK" in upper or "MKDS" in upper) and z_rot_rounded != 180.0:
+            warnings.append(
+                f"{fp.ref}: terminal block 3D model should have"
+                f" Z-rotation 180° (has {z_rot_rounded}°)"
+            )
+
+        # DIP switches should have 90° Z rotation
+        if ("SW_DIP" in upper) and z_rot_rounded != 90.0:
+            warnings.append(
+                f"{fp.ref}: DIP switch 3D model should have"
+                f" Z-rotation 90° (has {z_rot_rounded}°)"
+            )
+
+    return tuple(warnings)
+
+
+# ---------------------------------------------------------------------------
 # Footprint size estimation
 # ---------------------------------------------------------------------------
 
@@ -2439,13 +2686,17 @@ def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
         return (17.0, 23.0)
 
     # Pin headers/sockets/connectors (Conn_01x02, Conn_02x20_Stacking, etc.)
+    # Layout convention: pins run vertically (Y axis), dual-row spans X axis.
+    # So "2x20" means 2 columns (X) of 20 rows (Y).
     if upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
         pin_count = _parse_pin_count(fid)
         pitch = _parse_pitch(fid)
-        rows = 2 if "2X" in upper or "2x" in fid else 1
-        cols = pin_count // max(rows, 1)
-        w = (cols - 1) * pitch + 2.5
-        h = (rows - 1) * pitch + 2.5 if rows > 1 else 2.5
+        num_cols = 2 if "2X" in upper or "2x" in fid else 1
+        pins_per_col = pin_count // max(num_cols, 1)
+        # Pad width (1.7mm typical for 2.54mm pitch THT) + courtyard margin
+        pad_margin = 3.5 if pitch >= 2.0 else 2.5
+        w = (num_cols - 1) * pitch + pad_margin  # across columns (X)
+        h = (pins_per_col - 1) * pitch + pad_margin  # along columns (Y)
         return (w, h)
 
     # Terminal blocks

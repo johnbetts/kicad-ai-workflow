@@ -860,8 +860,8 @@ class TestConnectorOrientation:
         bounds = (0.0, 0.0, 100.0, 80.0)
 
         result = _orient_connectors(positions, fp_sizes, bounds, set(), pcb)
-        # Near right edge, wide connector → 90 degrees
-        assert result["J1"][2] == 90.0
+        # Near right edge, wide connector → 180° (screws accessible from right)
+        assert result["J1"][2] == 180.0
 
     def test_connector_in_center_not_rotated(self) -> None:
         """Connector in center of board (far from edges) is not reoriented."""
