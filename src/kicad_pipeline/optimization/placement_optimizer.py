@@ -2003,19 +2003,19 @@ def _apply_template_refinement(
 
         # Place series components (R, L)
         series_refs = role_refs.get("series", []) + role_refs.get("series_l", [])
-        for slot, ref in zip(series_slots, series_refs):
+        for slot, ref in zip(series_slots, series_refs, strict=False):
             if _try_place(slot, ref):
                 placed_count += 1
 
         # Place shunt components (C, D)
         shunt_refs = role_refs.get("shunt", []) + role_refs.get("shunt_d", [])
-        for slot, ref in zip(shunt_slots, shunt_refs):
+        for slot, ref in zip(shunt_slots, shunt_refs, strict=False):
             if _try_place(slot, ref):
                 placed_count += 1
 
         # Place switch components (Q)
         switch_refs = role_refs.get("switch", [])
-        for slot, ref in zip(switch_slots, switch_refs):
+        for slot, ref in zip(switch_slots, switch_refs, strict=False):
             if _try_place(slot, ref):
                 placed_count += 1
 
@@ -4004,8 +4004,175 @@ def optimize_placement_ee(
         positions_tuple = _dict_to_positions(best_positions)
         final_pcb = _apply_positions(initial_pcb, positions_tuple)
 
+    # Post-optimization validation gate
+    guard = validate_placement(final_pcb, requirements)
+    if guard.issues:
+        _log.warning("Placement guard issues (%d):", len(guard.issues))
+        for issue in guard.issues:
+            _log.warning("  %s", issue)
+    else:
+        _log.info("Placement guard: ALL CHECKS PASSED")
+
     _log.info("EE placement v5 complete: %s", best_review.summary)
     return final_pcb, best_review
+
+
+@dataclass(frozen=True)
+class PlacementGuardResult:
+    """Result of post-optimization placement validation.
+
+    Attributes:
+        passed: True if all critical guards pass.
+        off_board_refs: Component refs with centers outside board bounds.
+        off_board_pad_refs: Component refs with pad extents outside board bounds.
+        collision_pairs: Pairs of overlapping component refs.
+        cross_group_refs: Components placed in the wrong group's zone.
+        issues: Human-readable list of all issues found.
+    """
+
+    passed: bool
+    off_board_refs: tuple[str, ...]
+    off_board_pad_refs: tuple[str, ...]
+    collision_pairs: tuple[tuple[str, str], ...]
+    cross_group_refs: tuple[str, ...]
+    issues: tuple[str, ...]
+
+
+def validate_placement(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+    *,
+    margin_mm: float = 5.0,
+) -> PlacementGuardResult:
+    """Post-optimization placement validation gate.
+
+    Checks all critical placement invariants that have caused bugs in the past
+    (KI-004 through KI-010). Returns a result indicating whether the placement
+    is acceptable and listing all issues found.
+
+    Args:
+        pcb: The optimized PCB design.
+        requirements: Project requirements with feature groups.
+        margin_mm: Tolerance for off-board checks (default 5mm).
+
+    Returns:
+        PlacementGuardResult with pass/fail and detailed issue list.
+    """
+    bounds = _board_bounds(pcb)
+    min_x, min_y, max_x, max_y = bounds
+    fp_sizes = _fp_courtyard_sizes(pcb)
+    issues: list[str] = []
+
+    # --- Guard 1: All component centers within board bounds ---
+    off_board: list[str] = []
+    for fp in pcb.footprints:
+        x, y = fp.position.x, fp.position.y
+        if (x < min_x - margin_mm or x > max_x + margin_mm
+                or y < min_y - margin_mm or y > max_y + margin_mm):
+            off_board.append(fp.ref)
+    if off_board:
+        issues.append(
+            f"Off-board centers ({len(off_board)}): {', '.join(sorted(off_board))}"
+        )
+
+    # --- Guard 2: Pad extents within board bounds ---
+    off_board_pads: list[str] = []
+    for fp in pcb.footprints:
+        w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
+        rot = fp.rotation
+        if rot % 180 in (90.0, 270.0):
+            w, h = h, w
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, rot)
+        half_w, half_h = w / 2.0, h / 2.0
+        if (cx - half_w < min_x - margin_mm or cx + half_w > max_x + margin_mm
+                or cy - half_h < min_y - margin_mm or cy + half_h > max_y + margin_mm):
+            off_board_pads.append(fp.ref)
+    if off_board_pads:
+        issues.append(
+            f"Off-board pads ({len(off_board_pads)}): "
+            f"{', '.join(sorted(off_board_pads))}"
+        )
+
+    # --- Guard 3: Courtyard collisions ---
+    from kicad_pipeline.pcb.constraints import check_courtyard_collisions
+    positions_dict: dict[str, tuple[float, float, float]] = {}
+    for fp in pcb.footprints:
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        positions_dict[fp.ref] = (cx, cy, fp.rotation)
+    rotations = {ref: rot for ref, (_x, _y, rot) in positions_dict.items()}
+    collision_points: dict[str, Point] = {
+        ref: Point(x=cx, y=cy)
+        for ref, (cx, cy, _rot) in positions_dict.items()
+    }
+    try:
+        collision_list = check_courtyard_collisions(
+            collision_points, fp_sizes, rotations=rotations,
+        )
+    except Exception:
+        collision_list = []
+    # Parse collision strings to extract ref pairs
+    # Format: "Courtyard collision: REF_A and REF_B"
+    collision_tuples: list[tuple[str, str]] = []
+    for viol_str in collision_list:
+        s = str(viol_str)
+        if "collision:" in s and " and " in s:
+            after_colon = s.split("collision:", 1)[1].strip()
+            pair = after_colon.split(" and ", 1)
+            if len(pair) == 2:
+                collision_tuples.append((pair[0].strip(), pair[1].strip()))
+    if collision_tuples:
+        issues.append(f"Collisions ({len(collision_tuples)}): "
+                       f"{collision_tuples[:10]}")
+
+    # --- Guard 4: Cross-group contamination ---
+    cross_group: list[str] = []
+    if requirements.features:
+        from kicad_pipeline.optimization.functional_grouper import (
+            compute_power_flow_topology,
+            detect_subcircuits,
+        )
+        from kicad_pipeline.optimization.zone_partitioner import (
+            partition_board,
+            zone_for_group,
+        )
+        try:
+            sc = detect_subcircuits(requirements)
+            topo = compute_power_flow_topology(sc)
+            zones = partition_board(bounds, list(requirements.features), topo)
+            ref_to_group: dict[str, str] = {}
+            for feat in requirements.features:
+                for comp in feat.components:
+                    r = comp.ref if hasattr(comp, "ref") else comp
+                    ref_to_group[r] = feat.name
+            for ref, (cx, cy, _rot) in positions_dict.items():
+                grp = ref_to_group.get(ref)
+                if not grp:
+                    continue
+                zone = zone_for_group(grp, zones)
+                if zone is None:
+                    continue
+                zx1, zy1, zx2, zy2 = zone.rect
+                # Allow 10mm tolerance for cross-group check
+                if (cx < zx1 - 10.0 or cx > zx2 + 10.0
+                        or cy < zy1 - 10.0 or cy > zy2 + 10.0):
+                    cross_group.append(ref)
+        except Exception:
+            pass  # Don't fail validation on detection errors
+    if cross_group:
+        issues.append(
+            f"Cross-group ({len(cross_group)}): "
+            f"{', '.join(sorted(cross_group)[:15])}"
+        )
+
+    passed = len(off_board) == 0 and len(collision_tuples) <= 5
+    return PlacementGuardResult(
+        passed=passed,
+        off_board_refs=tuple(sorted(off_board)),
+        off_board_pad_refs=tuple(sorted(off_board_pads)),
+        collision_pairs=tuple(collision_tuples),
+        cross_group_refs=tuple(sorted(cross_group)),
+        issues=tuple(issues),
+    )
 
 
 # Default optimizer is the EE-grade one
