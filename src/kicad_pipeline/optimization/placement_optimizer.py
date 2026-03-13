@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import Footprint, PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.review_agent import PlacementReview
+    from kicad_pipeline.optimization.zone_partitioner import BoardZone
     from kicad_pipeline.optimization.scoring import QualityScore
 
 _log = logging.getLogger(__name__)
@@ -1012,6 +1013,7 @@ def _place_row_layout(
     fp_sizes: dict[str, tuple[float, float]],
     bounds: tuple[float, float, float, float],
     fixed_refs: set[str],
+    zones: Sequence[BoardZone] | None = None,
 ) -> dict[str, tuple[float, float, float]]:
     """Place same-type subcircuits with layout_hint='row' in a 1xN horizontal row.
 
@@ -1057,10 +1059,24 @@ def _place_row_layout(
             aw, ah = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
             # Swap w/h because relay is rotated 90°
             aw, ah = ah, aw
-            total_width += aw + 4.0  # gap between relays (room for support components)
+            total_width += aw + 2.0  # gap between relays
 
-        # Place anchors in a row centered on avg_x
-        start_x = avg_x - total_width / 2.0
+        # Place anchors in a row, constrained to relay zone if available
+        relay_zone_x1 = min_x + 2.0
+        relay_zone_x2 = max_x - 15.0  # leave room for edge connectors
+        if zones:
+            for z in zones:
+                if z.name == "relay":
+                    relay_zone_x1 = z.rect[0]
+                    relay_zone_x2 = z.rect[2] - 5.0  # 5mm from zone right
+                    break
+        # Center the row within the available zone X range
+        zone_center_x = (relay_zone_x1 + relay_zone_x2) / 2.0
+        start_x = zone_center_x - total_width / 2.0
+        # Clamp to zone bounds
+        start_x = max(relay_zone_x1, start_x)
+        if start_x + total_width > relay_zone_x2:
+            start_x = relay_zone_x2 - total_width
         row_grid = _PlacementGrid(bounds)
 
         # Register all non-row components first
@@ -1096,6 +1112,8 @@ def _place_row_layout(
                 if obstacle_bot < avg_y:  # obstacle is above relay row
                     top_obstacle_y = max(top_obstacle_y, obstacle_bot)
         min_relay_y = top_obstacle_y + max_relay_h / 2.0 + 2.0
+        # Also enforce minimum 25mm from top edge (below screw terminal zone)
+        min_relay_y = max(min_relay_y, min_y + max_relay_h / 2.0 + 15.0)
         row_y = max(min_relay_y, avg_y)
 
         cursor_x = start_x
@@ -1116,7 +1134,7 @@ def _place_row_layout(
             # Support components are placed by Level 3b — skip here to
             # avoid double-placement and congestion.
 
-            cursor_x += aw + 4.0
+            cursor_x += aw + 2.0
 
     return positions
 
@@ -2160,7 +2178,8 @@ def optimize_placement_ee(
 
     # 3a. Relay row formation — arrange relays in 1xN horizontal row
     _log.info("  3a: Relay row formation")
-    positions = _place_row_layout(sc_list, positions, fp_sizes, bounds, fixed_refs)
+    positions = _place_row_layout(sc_list, positions, fp_sizes, bounds, fixed_refs,
+                                   zones=zones)
 
     # 3b. Relay driver subgroup tightening — Q+D+R within 8mm of K
     # Place support directly below relay in tight grid. Protected during 3g
@@ -3041,8 +3060,8 @@ def optimize_placement_ee(
                 mcu_group_refs = feat_refs
                 break
 
-        # --- Step 0: Place U3 with antenna FLUSH on right board edge ---
-        # Find the MCU footprint so we can use pad_extent for accurate sizing
+        # --- Step 0: Place U3 with antenna on BOTTOM board edge ---
+        # WiFi antenna points down (180° rotation).
         mcu_fp = None
         for fp in initial_pcb.footprints:
             if fp.ref == mcu_ref_c3:
@@ -3053,46 +3072,43 @@ def optimize_placement_ee(
             if z.name == "mcu":
                 mcu_zone_rect = z.rect
                 break
-        _mcu_rot = 270.0  # antenna pointing right
-        eff_w, eff_h = mcu_h, mcu_w  # At 270°, dimensions swap
+        _mcu_rot = 180.0  # antenna pointing down (toward bottom edge)
+        eff_w, eff_h = mcu_w, mcu_h  # At 180°, dimensions don't swap
 
-        # Place U3's ORIGIN so pads are ~2mm from right edge.
-        # Then compute centroid for positions dict.
         if mcu_fp is not None:
             from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space as _pad_ext
-            # Trial: place origin at board center, measure pad extent
             _trial_ox = (bounds[0] + bounds[2]) / 2.0
             _trial_oy = (bounds[1] + bounds[3]) / 2.0
             _te = _pad_ext(mcu_fp, _trial_ox, _trial_oy, _mcu_rot)
-            # How far right does the pad extend from origin?
-            _pad_right = _te[2] - _trial_ox  # max_x - origin_x
-            # Place origin so rightmost pad is far enough from right edge
-            # to leave room for J14 (GPIO header) on the right edge
-            _j14_w = fp_sizes.get("J14", (2.7, 35.7))[0] if "J14" in mcu_group_refs else 0.0
-            _right_margin = 3.0 + _j14_w  # J14 width + gap
-            mcu_origin_x = bounds[2] - _pad_right - _right_margin
-            mcu_origin_y = _trial_oy
+            # How far down does the pad extend from origin?
+            _pad_bot = _te[3] - _trial_oy
+            # Place origin so bottom pads are 2mm from bottom edge
+            mcu_origin_y = bounds[3] - _pad_bot - 2.0
+            # Center X in MCU zone (right side of board)
             if mcu_zone_rect is not None:
                 _zx1, _zy1, _zx2, _zy2 = mcu_zone_rect
-                mcu_origin_y = (_zy1 + _zy2) / 2.0
-            # Clamp Y so pads stay within board
-            _pad_top = _te[1] - _trial_oy  # min_y - origin_y (negative)
-            _pad_bot = _te[3] - _trial_oy  # max_y - origin_y (positive)
-            mcu_origin_y = max(bounds[1] - _pad_top + 2.0,
-                               min(bounds[3] - _pad_bot - 2.0, mcu_origin_y))
-            # Convert to centroid for positions dict
+                # Leave room for J14 on right edge
+                _j14_w = fp_sizes.get("J14", (2.7, 35.7))[0] if "J14" in mcu_group_refs else 0.0
+                mcu_origin_x = (_zx1 + _zx2 - _j14_w) / 2.0
+            else:
+                mcu_origin_x = bounds[2] - eff_w / 2.0 - 10.0
+            # Clamp X so pads stay within board
+            _pad_left = _te[0] - _trial_ox
+            _pad_right = _te[2] - _trial_ox
+            mcu_origin_x = max(bounds[0] - _pad_left + 2.0,
+                               min(bounds[2] - _pad_right - 2.0, mcu_origin_x))
             mcu_x, mcu_y = origin_to_centroid(mcu_fp, mcu_origin_x,
                                                mcu_origin_y, _mcu_rot)
         else:
-            mcu_x = bounds[2] - eff_w / 2.0 - 1.0
             if mcu_zone_rect is not None:
                 _zx1, _zy1, _zx2, _zy2 = mcu_zone_rect
-                mcu_y = (_zy1 + _zy2) / 2.0
-            mcu_y = max(bounds[1] + eff_h / 2.0 + 2.0,
-                        min(bounds[3] - eff_h / 2.0 - 2.0, mcu_y))
+                mcu_x = (_zx1 + _zx2) / 2.0
+            else:
+                mcu_x = bounds[2] - eff_w / 2.0 - 10.0
+            mcu_y = bounds[3] - eff_h / 2.0 - 2.0
         positions[mcu_ref_c3] = (mcu_x, mcu_y, _mcu_rot)
         mcu_peripheral_refs.add(mcu_ref_c3)
-        _log.info("    U3 centroid at (%.1f, %.1f) rot=270° [eff_w=%.1f, eff_h=%.1f]",
+        _log.info("    U3 centroid at (%.1f, %.1f) rot=180° [eff_w=%.1f, eff_h=%.1f]",
                   mcu_x, mcu_y, eff_w, eff_h)
 
         # MCU bounding box edges (centroid-based)
@@ -3136,37 +3152,37 @@ def optimize_placement_ee(
                 other_passive_refs.append(ref)
 
         # --- Step 3: Place decoupling caps FIRST — tight against MCU ---
-        # At 270° rotation, U3's left edge (non-antenna) has power pins.
-        # Place decoupling column with enough gap to clear the MCU courtyard
-        # (module body extends well beyond pad field).
+        # At 180° rotation, U3's top edge (non-antenna) has power pins.
+        # Place decoupling row above MCU.
         _DECOUP_GAP = 3.5
-        # mcu_left is already U3's left edge in centroid space
-        # Place caps so their RIGHT edge is _DECOUP_GAP from mcu_left
-        max_cap_w = max((fp_sizes.get(r, (2.5, 1.5))[0] for r in decoupling_refs),
-                        default=2.5)
-        decoup_col_x = mcu_left - _DECOUP_GAP - max_cap_w / 2.0
-        decoup_y_start = mcu_y - eff_h / 4.0
+        mcu_right = mcu_x + eff_w / 2.0
+        # Place caps above MCU top edge
+        max_cap_h = max((fp_sizes.get(r, (2.5, 1.5))[1] for r in decoupling_refs),
+                        default=1.5)
+        decoup_col_x = mcu_x - eff_w / 4.0  # start from left side of MCU
+        decoup_y_start = mcu_top - _DECOUP_GAP - max_cap_h / 2.0
         decoup_y = decoup_y_start
         decoup_y_max = mcu_bot - 1.0
+        decoup_x = decoup_col_x
         for ref in decoupling_refs:
             w, h = fp_sizes.get(ref, (1.0, 0.5))
-            tx = decoup_col_x
-            ty = decoup_y
-            if ty + h / 2.0 > decoup_y_max:
-                # New column further left
-                decoup_col_x -= (w + 2.0)
-                tx = decoup_col_x
+            tx = decoup_x
+            ty = decoup_y_start
+            # Overflow to next row above
+            if tx + w / 2.0 > mcu_right:
+                decoup_x = mcu_x - eff_w / 4.0
+                decoup_y_start -= (h + 2.0)
+                tx = decoup_x
                 ty = decoup_y_start
-                decoup_y = ty
             tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
             px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=8.0)
             positions[ref] = (px, py, 0.0)
             mcu_peripheral_refs.add(ref)
             mcu_grid.place(px, py, w, h)
-            decoup_y += h + 2.0  # vertical gap between caps
-            _log.info("    %s (decoupling): →(%.1f,%.1f) [%.1fmm from U3]",
-                      ref, px, py, mcu_left - px - w / 2.0)
+            decoup_x += w + 2.0  # horizontal gap between caps
+            _log.info("    %s (decoupling): →(%.1f,%.1f) [%.1fmm from U3 top]",
+                      ref, px, py, mcu_top - py - h / 2.0)
 
         # --- Step 4: Place connectors ---
         # MCU connectors go on the RIGHT board edge (accessible for cables).
@@ -3178,12 +3194,9 @@ def optimize_placement_ee(
 
         if "J14" in connector_refs and "J14" in positions and "J14" not in fixed_refs:
             w14, h14 = fp_sizes.get("J14", (2.7, 35.7))
-            # Place J14 on the RIGHT board edge, shifted down toward bottom
-            # of MCU zone (user feedback: "J14 and J15 should come down").
+            # J14 on RIGHT board edge, vertically centered on U3.
             tx = bounds[2] - w14 / 2.0 - 1.0  # against right edge
-            # Place lower in MCU zone — 60% down from U3 toward board bottom
-            zone_bottom = bounds[3] - h14 / 2.0 - 1.0
-            ty = mcu_y + (zone_bottom - mcu_y) * 0.4
+            ty = mcu_y
             ty = max(bounds[1] + h14 / 2.0 + 1.0,
                      min(bounds[3] - h14 / 2.0 - 1.0, ty))
             px14, py14 = mcu_grid.find_free_pos(tx, ty, w14, h14,
@@ -3191,13 +3204,13 @@ def optimize_placement_ee(
             positions["J14"] = (px14, py14, 0.0)
             mcu_grid.place(px14, py14, w14, h14)
             mcu_peripheral_refs.add("J14")
-            _log.info("    J14 → right edge, low (%.1f, %.1f)", px14, py14)
+            _log.info("    J14 → right edge (%.1f, %.1f)", px14, py14)
 
         if "J15" in connector_refs and "J15" in positions and "J15" not in fixed_refs:
             w15, h15 = fp_sizes.get("J15", (5.2, 12.9))
             j14_pos = positions.get("J14")
             if j14_pos:
-                # Below J14 on right edge (user: "come down")
+                # Below J14 on right edge
                 j14_bottom = j14_pos[1] + fp_sizes.get("J14", (2.7, 35.7))[1] / 2.0
                 tx = right_edge_x - w15 / 2.0
                 ty = j14_bottom + h15 / 2.0 + 2.0
@@ -3212,20 +3225,19 @@ def optimize_placement_ee(
             mcu_peripheral_refs.add("J15")
             _log.info("    J15 → right edge, below J14 (%.1f, %.1f)", px15, py15)
 
-        # J16 (SD card slot): LEFT of U3, above MCU zone bottom
-        # Can't go above U3 because J14 (35.7mm tall) covers the entire right side.
+        # J16 (SD card slot): LEFT of U3 on BOTTOM edge, facing outward (180°)
         if "J16" in connector_refs and "J16" in positions and "J16" not in fixed_refs:
             w16, h16 = fp_sizes.get("J16", (16.2, 6.9))
-            tx = mcu_left - w16 / 2.0 - 3.0  # left of U3 courtyard
-            ty = mcu_top + h16 / 2.0  # aligned with U3 top
+            # Place left of U3 on bottom edge
+            tx = mcu_left - w16 / 2.0 - 3.0
+            ty = bounds[3] - h16 / 2.0 - 1.0  # on bottom edge
             tx = max(bounds[0] + w16 / 2.0 + 1.0,
                      min(bounds[2] - w16 / 2.0 - 1.0, tx))
-            ty = max(bounds[1] + h16 / 2.0 + 1.0, min(bounds[3] - 2.0, ty))
             px, py = mcu_grid.find_free_pos(tx, ty, w16, h16, max_radius=20.0)
-            positions["J16"] = (px, py, 0.0)
+            positions["J16"] = (px, py, 180.0)  # connection side outward
             mcu_grid.place(px, py, w16, h16)
             mcu_peripheral_refs.add("J16")
-            _log.info("    J16 → left of U3 (%.1f, %.1f)", px, py)
+            _log.info("    J16 → bottom edge, left of U3 (%.1f, %.1f)", px, py)
 
         # J2 (USB-C): bottom edge, LEFT of U3, facing outward (180°)
         # U3's courtyard extends to mcu_bot ≈ 72.7mm on an 80mm board, leaving
@@ -3311,9 +3323,8 @@ def optimize_placement_ee(
         unpaired_sw = [r for r in other_passive_refs if r in positions
                        and r.startswith("SW") and r not in used_sw]
 
-        # Place SW/R cluster above MCU, left of right-edge connectors
-        # Avoid J14/J15 area on the right edge
-        sw_base_x = mcu_x - eff_w / 4.0
+        # Place SW/R cluster above MCU, left side
+        sw_base_x = mcu_left + eff_w / 4.0
         sw_base_y = mcu_top - 8.0
         for i, (sw, res) in enumerate(unique_pairs):
             sw_w, sw_h = fp_sizes.get(sw, (3.5, 3.5))
@@ -3390,28 +3401,29 @@ def optimize_placement_ee(
         remaining.sort(key=_mcu_prox_key)
 
         _MCU_TARGET_GAP = 4.0
-        # Place remaining passives in a ring around MCU, left side preferred
-        # Gap must clear the full MCU courtyard (module body extends beyond pads)
+        # Place remaining passives in a ring around MCU
+        # At 180° rotation, MCU is horizontal with antenna down.
+        # Primary slots: above MCU, then left side, then right side.
         ring_slots: list[tuple[float, float]] = []
         _MCU_CLEAR = 3.0  # minimum clearance from courtyard edge
 
-        # Left column — primary slot area (most board space is to MCU's left)
-        slot_x_left = mcu_left - _MCU_CLEAR - 2.0
-        for dy_off in range(-4, 5):
-            ring_slots.append((slot_x_left, mcu_y + dy_off * 3.5))
-        # Second left column (further left) for overflow
-        for dy_off in range(-3, 4):
-            ring_slots.append((slot_x_left - 5.0, mcu_y + dy_off * 3.5))
-        # Above MCU — only if there's board space (mcu_top > bounds[1] + 10)
+        # Above MCU — primary slot area (most board space above)
         if mcu_top > bounds[1] + 10.0:
-            for dx_off in range(-3, 4):
-                ring_slots.append((mcu_x + dx_off * 4.0 - 8.0,
+            for dx_off in range(-4, 5):
+                ring_slots.append((mcu_x + dx_off * 4.0,
                                    mcu_top - _MCU_CLEAR - 3.0))
-        # Below MCU — only if there's board space (mcu_bot < bounds[3] - 8)
-        if mcu_bot < bounds[3] - 8.0:
+            # Second row above for overflow
             for dx_off in range(-3, 4):
-                ring_slots.append((mcu_x + dx_off * 4.0 - 8.0,
-                                   mcu_bot + _MCU_CLEAR + 3.0))
+                ring_slots.append((mcu_x + dx_off * 4.0,
+                                   mcu_top - _MCU_CLEAR - 7.0))
+        # Left side of MCU
+        slot_x_left = mcu_left - _MCU_CLEAR - 2.0
+        for dy_off in range(-3, 4):
+            ring_slots.append((slot_x_left, mcu_y + dy_off * 3.5))
+        # Right side (between MCU and J14)
+        slot_x_right = mcu_right + _MCU_CLEAR + 2.0
+        for dy_off in range(-3, 4):
+            ring_slots.append((slot_x_right, mcu_y + dy_off * 3.5))
 
         slot_idx = 0
         for ref in remaining:

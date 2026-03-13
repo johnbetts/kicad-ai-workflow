@@ -42,12 +42,12 @@ _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
     #   Top strip (0-100% x, 0-12% y): input_connectors (screw terminals)
     #   Upper-left (0-40% x, 12-75% y): analog (2/3 up, tight)
     #   Center strip (35-55% x, 12-50% y): power (down the middle)
-    #   Right side (60-100% x, 12-50% y): relay (below screw terminals, right edge)
+    #   Right side (40-100% x, 12-50% y): relay (below screw terminals, wide)
     #   Bottom-right (60-100% x, 50-100% y): mcu
     #   Bottom-center (35-60% x, 50-100% y): ethernet
     "input_connectors": (0.00, 0.00, 1.00, 0.12),
     "power":            (0.35, 0.12, 0.55, 0.50),
-    "relay":            (0.60, 0.12, 1.00, 0.50),
+    "relay":            (0.40, 0.12, 1.00, 0.50),
     "analog":           (0.00, 0.12, 0.40, 0.75),
     "mcu":              (0.60, 0.50, 1.00, 1.00),
     "ethernet":         (0.35, 0.50, 0.60, 1.00),
