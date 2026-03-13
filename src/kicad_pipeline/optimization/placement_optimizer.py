@@ -1057,7 +1057,7 @@ def _place_row_layout(
             aw, ah = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
             # Swap w/h because relay is rotated 90°
             aw, ah = ah, aw
-            total_width += aw + 1.0  # gap between relays
+            total_width += aw + 4.0  # gap between relays (room for support components)
 
         # Place anchors in a row centered on avg_x
         start_x = avg_x - total_width / 2.0
@@ -1116,7 +1116,7 @@ def _place_row_layout(
             # Support components are placed by Level 3b — skip here to
             # avoid double-placement and congestion.
 
-            cursor_x += aw + 1.0
+            cursor_x += aw + 4.0
 
     return positions
 
@@ -3178,12 +3178,12 @@ def optimize_placement_ee(
 
         if "J14" in connector_refs and "J14" in positions and "J14" not in fixed_refs:
             w14, h14 = fp_sizes.get("J14", (2.7, 35.7))
-            # Place J14 on the RIGHT board edge, vertically centered on U3.
-            # On tight boards J14 may not fit purely right of U3 — use
-            # find_free_pos to avoid collisions.
-            mcu_right_edge = mcu_x + eff_w / 2.0
+            # Place J14 on the RIGHT board edge, shifted down toward bottom
+            # of MCU zone (user feedback: "J14 and J15 should come down").
             tx = bounds[2] - w14 / 2.0 - 1.0  # against right edge
-            ty = mcu_y
+            # Place lower in MCU zone — 60% down from U3 toward board bottom
+            zone_bottom = bounds[3] - h14 / 2.0 - 1.0
+            ty = mcu_y + (zone_bottom - mcu_y) * 0.4
             ty = max(bounds[1] + h14 / 2.0 + 1.0,
                      min(bounds[3] - h14 / 2.0 - 1.0, ty))
             px14, py14 = mcu_grid.find_free_pos(tx, ty, w14, h14,
@@ -3191,26 +3191,26 @@ def optimize_placement_ee(
             positions["J14"] = (px14, py14, 0.0)
             mcu_grid.place(px14, py14, w14, h14)
             mcu_peripheral_refs.add("J14")
-            _log.info("    J14 → right edge (%.1f, %.1f)", px14, py14)
+            _log.info("    J14 → right edge, low (%.1f, %.1f)", px14, py14)
 
         if "J15" in connector_refs and "J15" in positions and "J15" not in fixed_refs:
             w15, h15 = fp_sizes.get("J15", (5.2, 12.9))
             j14_pos = positions.get("J14")
             if j14_pos:
-                # Above J14 on right edge
-                j14_top = j14_pos[1] - fp_sizes.get("J14", (2.7, 35.7))[1] / 2.0
+                # Below J14 on right edge (user: "come down")
+                j14_bottom = j14_pos[1] + fp_sizes.get("J14", (2.7, 35.7))[1] / 2.0
                 tx = right_edge_x - w15 / 2.0
-                ty = j14_top - h15 / 2.0 - 2.0
+                ty = j14_bottom + h15 / 2.0 + 2.0
             else:
                 tx = right_edge_x - w15 / 2.0
-                ty = mcu_top - h15 / 2.0 - 2.0
+                ty = mcu_y + 10.0
             ty = max(bounds[1] + h15 / 2.0 + 1.0,
                      min(bounds[3] - h15 / 2.0 - 1.0, ty))
             px15, py15 = mcu_grid.find_free_pos(tx, ty, w15, h15, max_radius=25.0)
             positions["J15"] = (px15, py15, 0.0)
             mcu_grid.place(px15, py15, w15, h15)
             mcu_peripheral_refs.add("J15")
-            _log.info("    J15 → right edge (%.1f, %.1f)", px15, py15)
+            _log.info("    J15 → right edge, below J14 (%.1f, %.1f)", px15, py15)
 
         # J16 (SD card slot): LEFT of U3, above MCU zone bottom
         # Can't go above U3 because J14 (35.7mm tall) covers the entire right side.
