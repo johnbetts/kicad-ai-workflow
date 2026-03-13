@@ -411,6 +411,13 @@ def _detect_buck_converters(
     buck_keywords = {"BUCK", "TPS54", "TPS56", "MP1584", "LM2596", "AP63",
                      "SY8089", "MT3608", "XL1509"}
 
+    # Build ref→FeatureBlock map to avoid cross-group cap claiming
+    _ref_group: dict[str, str] = {}
+    for feat in requirements.features:
+        for fc in feat.components:
+            r = fc.ref if hasattr(fc, "ref") else fc
+            _ref_group[r] = feat.name
+
     for comp in requirements.components:
         if comp.ref in claimed:
             continue
@@ -486,6 +493,7 @@ def _detect_buck_converters(
             max_caps = 1 if (
                 net_name == inductor_output_net and _output_net_is_power
             ) else _MAX_CAPS_PER_NET
+            buck_group = _ref_group.get(comp.ref, "")
             for r in sorted(net_to_refs.get(net_name, set())):
                 if r in refs or r in claimed:
                     continue
@@ -495,6 +503,12 @@ def _detect_buck_converters(
                 if is_cap:
                     if cap_count >= max_caps:
                         continue
+                    # On power rail output nets, only claim caps from same
+                    # FeatureBlock to avoid stealing downstream IC decoupling
+                    if _output_net_is_power and net_name == inductor_output_net:
+                        cap_group = _ref_group.get(r, "")
+                        if cap_group and buck_group and cap_group != buck_group:
+                            continue
                     refs.append(r)
                     all_nets.add(net_name)
                     cap_count += 1

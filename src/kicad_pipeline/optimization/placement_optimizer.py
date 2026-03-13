@@ -3337,6 +3337,11 @@ def optimize_placement_ee(
             ty = max(bounds[1] + h16 / 2.0 + 1.0,
                      min(bounds[3] - h16 / 2.0 - 1.0, ty))
             px, py = mcu_grid.find_free_pos(tx, ty, w16, h16, max_radius=10.0)
+            # Clamp: keep pad extent inside board with 2.0mm margin
+            px = max(bounds[0] + w16 / 2.0 + 2.0,
+                     min(bounds[2] - w16 / 2.0 - 2.0, px))
+            py = max(bounds[1] + h16 / 2.0 + 2.0,
+                     min(bounds[3] - h16 / 2.0 - 2.0, py))
             positions["J16"] = (px, py, 0.0)  # near right edge
             mcu_grid.place(px, py, w16, h16)
             mcu_peripheral_refs.add("J16")
@@ -4151,14 +4156,15 @@ def optimize_placement_ee(
                 fp_obj, ori_x, ori_y, rot,
             )
             shift_x = shift_y = 0.0
-            if px0 < min_x + 1.0:
-                shift_x = (min_x + 1.0) - px0
-            elif px1 > max_x - 1.0:
-                shift_x = (max_x - 1.0) - px1
-            if py0 < min_y + 1.0:
-                shift_y = (min_y + 1.0) - py0
-            elif py1 > max_y - 1.0:
-                shift_y = (max_y - 1.0) - py1
+            _edge_m = 1.5  # pad-to-board-edge margin (mm)
+            if px0 < min_x + _edge_m:
+                shift_x = (min_x + _edge_m) - px0
+            elif px1 > max_x - _edge_m:
+                shift_x = (max_x - _edge_m) - px1
+            if py0 < min_y + _edge_m:
+                shift_y = (min_y + _edge_m) - py0
+            elif py1 > max_y - _edge_m:
+                shift_y = (max_y - _edge_m) - py1
             if shift_x != 0.0 or shift_y != 0.0:
                 new_cx, new_cy = origin_to_centroid(
                     fp_obj, ori_x + shift_x, ori_y + shift_y, rot,
@@ -4167,8 +4173,8 @@ def optimize_placement_ee(
         else:
             # Symmetric footprints — use rotation-aware size
             w, h = _rotation_aware_size(ref, positions, fp_sizes)
-            clamped_x = max(min_x + w / 2 + 1, min(max_x - w / 2 - 1, rx))
-            clamped_y = max(min_y + h / 2 + 1, min(max_y - h / 2 - 1, ry))
+            clamped_x = max(min_x + w / 2 + 1.5, min(max_x - w / 2 - 1.5, rx))
+            clamped_y = max(min_y + h / 2 + 1.5, min(max_y - h / 2 - 1.5, ry))
             if clamped_x != rx or clamped_y != ry:
                 positions[ref] = (clamped_x, clamped_y, rot)
 
@@ -4528,6 +4534,36 @@ def optimize_placement_ee(
             best_positions = _resolve_collisions(
                 best_positions, fp_sizes, bounds, _relay_fixed,
             )
+
+    # Final edge clamp — ensure ALL components are inside board after late phases
+    for ref, (rx, ry, rot) in list(best_positions.items()):
+        fp_obj = fp_lookup.get(ref)
+        if fp_obj is not None and ref.startswith("J"):
+            ori_x, ori_y = centroid_to_origin(fp_obj, rx, ry, rot)
+            px0, py0, px1, py1 = pad_extent_in_board_space(
+                fp_obj, ori_x, ori_y, rot,
+            )
+            shift_x = shift_y = 0.0
+            _fm = 1.5
+            if px0 < min_x + _fm:
+                shift_x = (min_x + _fm) - px0
+            elif px1 > max_x - _fm:
+                shift_x = (max_x - _fm) - px1
+            if py0 < min_y + _fm:
+                shift_y = (min_y + _fm) - py0
+            elif py1 > max_y - _fm:
+                shift_y = (max_y - _fm) - py1
+            if shift_x != 0.0 or shift_y != 0.0:
+                new_cx, new_cy = origin_to_centroid(
+                    fp_obj, ori_x + shift_x, ori_y + shift_y, rot,
+                )
+                best_positions[ref] = (new_cx, new_cy, rot)
+        else:
+            w, h = _rotation_aware_size(ref, best_positions, fp_sizes)
+            clamped_x = max(min_x + w / 2 + 1.5, min(max_x - w / 2 - 1.5, rx))
+            clamped_y = max(min_y + h / 2 + 1.5, min(max_y - h / 2 - 1.5, ry))
+            if clamped_x != rx or clamped_y != ry:
+                best_positions[ref] = (clamped_x, clamped_y, rot)
 
     # Build final PCB
     if best_review is None:
