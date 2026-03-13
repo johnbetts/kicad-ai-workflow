@@ -2270,12 +2270,14 @@ def optimize_placement_ee(
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
             positions[cap_ref] = (tx, ty, crot)
 
-    # 3c1. Power group organization — vertical signal-chain columns
-    # Two parallel vertical columns (one per buck converter), flowing top→bottom:
-    #   Column 1 (Buck #1): VIN → D5(TVS) → C1(in) → U1 → C2(BST) → L1 → R1/R2(FB) → C3(out)
-    #   Bridge: D1(OR) → C4(bulk) → D2/D3(OR) (connects buck1 output to +5V rail)
-    #   Column 2 (Buck #2): C5(in) → U2 → C17(BST) → L2 → C6/C7(out)
-    #   Tail: R3/D4(LED), L3-L6/C27/C35 (ferrites/misc)
+    # 3c1. Power group organization — IC-anchored fork/branch layout
+    # Components anchor at IC pin positions (not zone top-left) to minimize
+    # hot-loop area for EMI.  VIN-side passives ABOVE U1, output-side BELOW.
+    # U2 (3.3V buck) branches RIGHT from the +5V output rail of U1.
+    #   Column 1: VIN passives → U1 → BST/SW → L1 → FB → output cap
+    #   Bridge: OR diodes + bulk cap (at fork point)
+    #   Column 2 (RIGHT): U2 + BST2/SW2 → L2 → 3.3V caps
+    #   Tail: LED, ferrites, misc — below both columns
     _log.info("  3c1: Power group organization")
     power_group_fixed: set[str] = set()
 
@@ -2319,12 +2321,13 @@ def optimize_placement_ee(
         if power_ics and power_zone_rect is not None:
             zx1, zy1, zx2, zy2 = power_zone_rect
 
-            _STRIP_GAP = 1.0   # vertical gap — trade-off: too small = collisions, too large = overflow
-            _COL_SPACING = 7.0  # horizontal gap between columns (needs >4.6+gap)
+            _STRIP_GAP = 1.0   # vertical gap between components
+            _COL_SPACING = 7.0  # horizontal gap between fork columns
+            _IC_MARGIN = 5.0    # max distance from IC for its passives
 
             placed_in_col: set[str] = set()  # prevent double-placement
 
-            # Define the two buck converter signal chains (top→bottom order)
+            # Define the two buck converter signal chains
             buck1_ic = power_ics[0] if power_ics else ""
             buck2_ic = power_ics[1] if len(power_ics) > 1 else ""
 
@@ -2339,8 +2342,6 @@ def optimize_placement_ee(
             )
 
             # Buck #1 column: VIN input → 5V output
-            # Signal order: D5(TVS) → C1(input cap) → U1(buck IC) → C2(BST cap)
-            #               → L1(inductor) → R1(FB top) → R2(FB bot) → C3(output cap)
             vin_passives = sorted(
                 net_to_pwr_refs.get("VIN", set())
                 - set(power_ics) - set(power_connectors),
@@ -2350,7 +2351,6 @@ def optimize_placement_ee(
                  | net_to_pwr_refs.get("SW", set()))
                 - {buck1_ic} - set(power_connectors),
             )
-            # Non-ferrite inductors on SW net (L1)
             l1_refs = sorted(
                 [r for r in power_group_refs
                  if r.startswith("L") and r in positions
@@ -2367,13 +2367,13 @@ def optimize_placement_ee(
                 - set(fb_refs) - set(l1_refs),
             )
 
-            buck1_column: list[str] = (
-                vin_passives       # D5, C1 (VIN side)
-                + [buck1_ic]       # U1
-                + bst1_passives    # C2 (BST/SW)
-                + l1_refs          # L1 (inductor)
-                + fb_refs          # R1, R2 (feedback divider)
-                + buck5v_caps      # C3 (output cap)
+            # VIN-side components go ABOVE U1; output-side BELOW
+            vin_above: list[str] = vin_passives  # D5, C1 (input side)
+            output_below: list[str] = (
+                bst1_passives    # C2 (BST/SW)
+                + l1_refs        # L1 (inductor)
+                + fb_refs        # R1, R2 (feedback divider)
+                + buck5v_caps    # C3 (output cap)
             )
 
             # Bridge: OR'ing diodes + 5V bulk cap
@@ -2387,7 +2387,6 @@ def optimize_placement_ee(
                 - set(power_ics) - set(power_connectors)
                 - set(or_diode_refs),
             )
-
             bridge_column: list[str] = or_diode_refs + v5_rail_refs
 
             # Buck #2 column: +5V input → 3.3V output
@@ -2428,7 +2427,8 @@ def optimize_placement_ee(
             )
 
             all_classified = (
-                set(buck1_column) | set(bridge_column) | set(buck2_column)
+                set(vin_above) | {buck1_ic} | set(output_below)
+                | set(bridge_column) | set(buck2_column)
                 | set(led_refs) | set(ferrite_refs) | set(power_connectors)
             )
             remaining_refs = sorted(
@@ -2436,11 +2436,16 @@ def optimize_placement_ee(
             )
             tail_column: list[str] = led_refs + ferrite_refs + remaining_refs
 
-            # Place columns vertically, like ADC channel strips
-            # All columns share the same X anchor; each column starts below
-            # the previous column's last component.
-            anchor_x = zx1 + 5.0
-            anchor_y = zy1 + 3.0
+            # --- IC-anchored placement ---
+            # Anchor at U1's current (or zone-centered) position.
+            # U1 stays at its position; VIN passives stack ABOVE,
+            # output passives stack BELOW.
+            u1_x, u1_y, _u1_rot = positions.get(
+                buck1_ic, (zx1 + 5.0, zy1 + 15.0, 0.0),
+            )
+            u1_w, u1_h = fp_sizes.get(buck1_ic, (5.0, 5.0))
+            # Clamp anchor X within power zone
+            anchor_x = max(zx1 + 3.0, min(zx2 - 3.0, u1_x))
 
             # Build occupancy grid of non-power components so power
             # columns don't overlap with other groups' components.
@@ -2469,7 +2474,7 @@ def optimize_placement_ee(
                     ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
                     # Use grid to avoid collisions with other groups
                     px, py = _pwr_grid.find_free_pos(tx, ty, w, h,
-                                                      max_radius=10.0)
+                                                      max_radius=_IC_MARGIN)
                     positions[ref] = (px, py, 0.0)
                     _pwr_grid.place(px, py, w, h)
                     power_group_fixed.add(ref)
@@ -2477,31 +2482,69 @@ def optimize_placement_ee(
                     cy = py + h / 2.0 + _STRIP_GAP
                 return cy
 
+            def _place_column_upward(
+                refs: list[str],
+                col_x: float,
+                start_y: float,
+            ) -> float:
+                """Place refs in a vertical column going UP. Returns top Y."""
+                cy = start_y
+                for ref in refs:
+                    if (ref not in positions or ref in fixed_refs
+                            or ref in placed_in_col or ref == ""):
+                        continue
+                    w, h = fp_sizes.get(ref, (2.0, 2.0))
+                    tx = col_x
+                    ty = cy - h / 2.0
+                    tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                    ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                    px, py = _pwr_grid.find_free_pos(tx, ty, w, h,
+                                                      max_radius=_IC_MARGIN)
+                    positions[ref] = (px, py, 0.0)
+                    _pwr_grid.place(px, py, w, h)
+                    power_group_fixed.add(ref)
+                    placed_in_col.add(ref)
+                    cy = py - h / 2.0 - _STRIP_GAP
+                return cy
+
             # Register connectors (don't move them)
             for ref in power_connectors:
                 power_group_fixed.add(ref)
 
-            # Column 1: Buck #1 chain (VIN → 5V)
-            col1_bottom = _place_column(buck1_column, anchor_x, anchor_y)
+            # Place U1 at its anchor position
+            if buck1_ic and buck1_ic not in fixed_refs:
+                px, py = _pwr_grid.find_free_pos(
+                    anchor_x, u1_y, u1_w, u1_h, max_radius=_IC_MARGIN,
+                )
+                positions[buck1_ic] = (px, py, 0.0)
+                _pwr_grid.place(px, py, u1_w, u1_h)
+                power_group_fixed.add(buck1_ic)
+                placed_in_col.add(buck1_ic)
+                u1_x, u1_y = px, py
 
-            # Bridge: OR diodes + 5V bulk (continue column 1)
-            bridge_y = col1_bottom
-            col1_bottom = _place_column(bridge_column, anchor_x, bridge_y)
+            # VIN passives ABOVE U1 (stacking upward)
+            vin_top = u1_y - u1_h / 2.0 - _STRIP_GAP
+            _place_column_upward(vin_above, anchor_x, vin_top)
 
-            # Column 2: Buck #2 chain (5V → 3.3V) — branches RIGHT at the
-            # +5V output point (where bridge starts), not below column 1.
-            # This shows the power tree fork: 24V→5V flows down, 5V→3.3V
-            # branches right at the 5V rail.
+            # Output passives BELOW U1 (stacking downward)
+            output_top = u1_y + u1_h / 2.0 + _STRIP_GAP
+            fork_y = _place_column(output_below, anchor_x, output_top)
+
+            # Bridge: OR diodes + 5V bulk — continues below output passives
+            # This is the fork point where +5V rail begins
+            fork_y = _place_column(bridge_column, anchor_x, fork_y)
+
+            # Column 2: Buck #2 (5V → 3.3V) — branches RIGHT at fork point
             col2_x = anchor_x + _COL_SPACING
-            col2_bottom = _place_column(buck2_column, col2_x, bridge_y)
+            col2_bottom = _place_column(buck2_column, col2_x, output_top)
 
-            # Tail: LED + ferrites + misc — below whichever column is shorter
-            tail_y = max(col1_bottom, col2_bottom)
+            # Tail: LED + ferrites + misc — below whichever column is longer
+            tail_y = max(fork_y, col2_bottom)
             _place_column(tail_column, anchor_x, tail_y)
 
             _log.info(
-                "    3c1: organized %d power components in vertical signal chain",
-                len(power_group_fixed),
+                "    3c1: organized %d power components anchored at %s (%.1f, %.1f)",
+                len(power_group_fixed), buck1_ic, u1_x, u1_y,
             )
 
     # 3c2. ADC channel formation — repeatable channel strips near ADC ICs
@@ -2581,21 +2624,21 @@ def optimize_placement_ee(
         if z.name == "analog":
             analog_zone = z
             break
+    def _ic_avg_connector_x(ic: str) -> float:
+        """Average X of connectors feeding this IC's channels."""
+        xs: list[float] = []
+        for _pin, passives in ic_channels.get(ic, []):
+            for r in passives:
+                if r.startswith("R") and r in _r_top_connector_x:
+                    xs.append(_r_top_connector_x[r])
+        return sum(xs) / len(xs) if xs else 999.0
+
     if analog_zone and adc_ic_refs:
         az_x1, az_y1, az_x2, az_y2 = analog_zone.rect
         # Place ICs in the lower third of the analog zone so channels
         # extend upward (toward connectors at top edge) with room to spread.
         # Sort ICs by average connector X of their channels so that ICs
         # feeding leftmost connectors are placed leftmost.
-        def _ic_avg_connector_x(ic: str) -> float:
-            """Average X of connectors feeding this IC's channels."""
-            xs: list[float] = []
-            for _pin, passives in ic_channels.get(ic, []):
-                for r in passives:
-                    if r.startswith("R") and r in _r_top_connector_x:
-                        xs.append(_r_top_connector_x[r])
-            return sum(xs) / len(xs) if xs else 999.0
-
         ic_list = sorted(adc_ic_refs, key=_ic_avg_connector_x)
         n_ics = len(ic_list)
         ic_spacing = (az_x2 - az_x1) / (n_ics + 1)
@@ -2935,46 +2978,87 @@ def optimize_placement_ee(
                     len(outlier_refs),
                 )
 
-    # 3d. Crystal-MCU proximity — within 10mm
-    _log.info("  3d: Crystal-MCU proximity")
-    from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref
-    mcu_ref = _find_mcu_ref(requirements)
-    if mcu_ref and mcu_ref in positions:
-        mcu_x, mcu_y, _mcu_rot = positions[mcu_ref]
-        mcu_w, mcu_h = fp_sizes.get(mcu_ref, (5.0, 5.0))
-        for sc in sc_list:
-            if sc.circuit_type != SubCircuitType.CRYSTAL_OSC:
+    # 3d. Crystal-IC proximity — within 10mm of connected IC
+    # Traces nets from crystal pins to find the IC it serves (MCU, W5500,
+    # LAN8720A, etc.), not just the MCU.  Critical for Ethernet crystals.
+    _log.info("  3d: Crystal-IC proximity")
+    # Build crystal→IC map via net connectivity
+    _crystal_ref_to_nets: dict[str, set[str]] = {}
+    _net_to_components: dict[str, set[str]] = {}
+    for net in requirements.nets:
+        refs_in_net: set[str] = set()
+        for conn in net.connections:
+            refs_in_net.add(conn.ref)
+        _net_to_components[net.name] = refs_in_net
+        for conn in net.connections:
+            if conn.ref.startswith("Y"):
+                _crystal_ref_to_nets.setdefault(conn.ref, set()).add(net.name)
+
+    for sc in sc_list:
+        if sc.circuit_type != SubCircuitType.CRYSTAL_OSC:
+            continue
+        # Find connected IC via crystal's non-GND nets
+        crystal_ref = sc.anchor_ref
+        target_ic: str | None = None
+        crystal_nets = _crystal_ref_to_nets.get(crystal_ref, set())
+        for net_name in crystal_nets:
+            _nl = net_name.upper()
+            if _nl in ("GND", "AGND", "DGND", "PGND", "VSS", "AVSS"):
                 continue
-            for ref in sc.refs:
-                if ref in fixed_refs or ref not in positions:
-                    continue
-                rx, ry, rrot = positions[ref]
-                dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
-                if dist <= 10.0:
-                    continue
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
-                gap = 1.0
-                candidates = [
-                    (mcu_x + (mcu_w + w) / 2.0 + gap, mcu_y),
-                    (mcu_x - (mcu_w + w) / 2.0 - gap, mcu_y),
-                    (mcu_x, mcu_y + (mcu_h + h) / 2.0 + gap),
-                    (mcu_x, mcu_y - (mcu_h + h) / 2.0 - gap),
-                ]
-                pull_grid = _PlacementGrid(bounds)
-                for oref, (ox, oy, _or) in positions.items():
-                    if oref != ref:
-                        ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
-                        pull_grid.place(ox, oy, ow, oh)
-                best_pos: tuple[float, float] | None = None
-                best_dist = dist
-                for txx, tyy in candidates:
-                    fx, fy = pull_grid.find_free_pos(txx, tyy, w, h)
-                    new_d = math.sqrt((fx - mcu_x) ** 2 + (fy - mcu_y) ** 2)
-                    if new_d < best_dist:
-                        best_dist = new_d
-                        best_pos = (fx, fy)
-                if best_pos is not None:
-                    positions[ref] = (best_pos[0], best_pos[1], rrot)
+            for r in _net_to_components.get(net_name, set()):
+                if r.startswith("U") and r in positions and r != crystal_ref:
+                    target_ic = r
+                    break
+            if target_ic:
+                break
+
+        if not target_ic:
+            # Fallback: use MCU
+            from kicad_pipeline.optimization.functional_grouper import (
+                _find_mcu_ref,
+            )
+            target_ic = _find_mcu_ref(requirements)
+        if not target_ic or target_ic not in positions:
+            continue
+
+        ic_x, ic_y, _ic_rot = positions[target_ic]
+        ic_w, ic_h = fp_sizes.get(target_ic, (5.0, 5.0))
+        _log.info("    Crystal %s → IC %s (%.1f, %.1f)",
+                  crystal_ref, target_ic, ic_x, ic_y)
+
+        for ref in sc.refs:
+            if ref in fixed_refs or ref not in positions:
+                continue
+            rx, ry, rrot = positions[ref]
+            dist = math.sqrt((rx - ic_x) ** 2 + (ry - ic_y) ** 2)
+            if dist <= 10.0:
+                continue
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            gap = 1.0
+            candidates = [
+                (ic_x + (ic_w + w) / 2.0 + gap, ic_y),
+                (ic_x - (ic_w + w) / 2.0 - gap, ic_y),
+                (ic_x, ic_y + (ic_h + h) / 2.0 + gap),
+                (ic_x, ic_y - (ic_h + h) / 2.0 - gap),
+            ]
+            pull_grid = _PlacementGrid(bounds)
+            for oref, (ox, oy, _or) in positions.items():
+                if oref != ref:
+                    ow, oh = _rotation_aware_size(oref, positions, fp_sizes)
+                    pull_grid.place(ox, oy, ow, oh)
+            best_pos: tuple[float, float] | None = None
+            best_dist = dist
+            for txx, tyy in candidates:
+                fx, fy = pull_grid.find_free_pos(txx, tyy, w, h)
+                new_d = math.sqrt((fx - ic_x) ** 2 + (fy - ic_y) ** 2)
+                if new_d < best_dist:
+                    best_dist = new_d
+                    best_pos = (fx, fy)
+            if best_pos is not None:
+                positions[ref] = (best_pos[0], best_pos[1], rrot)
+                _log.info("    %s pulled to (%.1f, %.1f) dist=%.1f→%.1f from %s",
+                          ref, best_pos[0], best_pos[1], dist, best_dist,
+                          target_ic)
 
     # 3e. RF edge pinning — pin RF modules to board edge
     _log.info("  3e: RF edge pinning")
@@ -3323,9 +3407,9 @@ def optimize_placement_ee(
         unpaired_sw = [r for r in other_passive_refs if r in positions
                        and r.startswith("SW") and r not in used_sw]
 
-        # Place SW/R cluster above MCU, left side
+        # Place SW/R cluster above MCU, left side — close to MCU (within 5mm)
         sw_base_x = mcu_left + eff_w / 4.0
-        sw_base_y = mcu_top - 8.0
+        sw_base_y = mcu_top - 4.0  # 4mm above MCU top edge
         for i, (sw, res) in enumerate(unique_pairs):
             sw_w, sw_h = fp_sizes.get(sw, (3.5, 3.5))
             r_w, r_h = fp_sizes.get(res, (1.0, 0.5))
@@ -3723,9 +3807,9 @@ def optimize_placement_ee(
                 px, py = eth_grid.find_free_pos(cent_x, cent_y, w, h,
                                                 max_radius=10.0)
                 # Enforce bottom edge: never let centroid move more than
-                # h/2 + 3mm above the bottom edge
+                # h/2 + 1mm above the bottom edge (≤5mm from edge)
                 max_y = bounds[3] - h / 2.0 - 1.0
-                if py < max_y - 5.0:
+                if py < max_y - 3.0:
                     # find_free_pos pushed it too far up; force bottom edge
                     py = max_y
                 positions[ref] = (px, py, 180.0)

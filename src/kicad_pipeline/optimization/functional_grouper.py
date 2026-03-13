@@ -252,21 +252,29 @@ def _detect_relay_drivers(
 
         # Find flyback diode — shares a non-GND power/signal net with relay
         # Exclude TVS diodes and LEDs (they're not flyback protection)
-        for net_name in relay_nets:
+        # Prefer diode with MOST shared nets with relay (deterministic)
+        _flyback_candidates: list[tuple[int, str, str]] = []
+        for net_name in sorted(relay_nets):
             if _is_gnd_net(net_name):
                 continue
-            for r in net_to_refs.get(net_name, set()):
+            for r in sorted(net_to_refs.get(net_name, set())):
                 if _ref_prefix(r) == "D" and r not in claimed and r not in refs:
                     dc = comp_map.get(r)
                     if dc:
                         dv = (dc.value or "").upper()
                         dd = (dc.description or "").upper()
-                        # Skip TVS diodes and LEDs — they're not flyback
                         if "TVS" in dv or "TVS" in dd or "LED" in dv:
                             continue
-                    refs.append(r)
-                    all_nets.add(net_name)
-                    break
+                    # Count shared nets between this diode and the relay
+                    d_nets = ref_to_nets.get(r, set())
+                    shared = len(d_nets & relay_nets)
+                    _flyback_candidates.append((shared, r, net_name))
+        if _flyback_candidates:
+            # Pick diode with most shared nets, break ties by ref name
+            _flyback_candidates.sort(key=lambda t: (-t[0], t[1]))
+            _, best_d, best_net = _flyback_candidates[0]
+            refs.append(best_d)
+            all_nets.add(best_net)
 
         # Find gate resistor — connected to transistor
         if transistor:

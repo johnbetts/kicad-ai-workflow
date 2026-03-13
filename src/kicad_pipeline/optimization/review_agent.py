@@ -70,6 +70,8 @@ class PlacementRule(enum.Enum):
     CONNECTOR_ORIENTATION = "connector_orientation"
     REGULATOR_BOUNDARY = "regulator_boundary"
     CONNECTOR_FUNCTIONAL_PROXIMITY = "connector_functional_proximity"
+    BOARD_EDGE_CLEARANCE = "board_edge_clearance"
+    DIODE_ORIENTATION_CONSISTENCY = "diode_orientation_consistency"
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +135,18 @@ def _edge_dist(
 
 
 def _fp_positions(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
-    """Extract footprint ref → (x, y) position map."""
-    return {fp.ref: (fp.position.x, fp.position.y) for fp in pcb.footprints}
+    """Extract footprint ref → (x, y) centroid position map.
+
+    Converts KiCad origin-based positions to pad-centroid positions
+    for accurate distance measurements.  Uses pin_map.origin_to_centroid()
+    as the single source of truth for origin ↔ centroid conversion.
+    """
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
+
+    return {
+        fp.ref: origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        for fp in pcb.footprints
+    }
 
 
 def _fp_size_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
@@ -406,7 +418,8 @@ def _check_collisions(
 
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
-    pcb_positions = {fp.ref: PcbPoint(fp.position.x, fp.position.y) for fp in pcb.footprints}
+    # Use centroid positions for collision detection too
+    pcb_positions = {ref: PcbPoint(x, y) for ref, (x, y) in positions.items()}
     fp_sizes = _fp_size_dict(pcb)
     fp_rotations = {fp.ref: fp.rotation for fp in pcb.footprints}
 
@@ -464,52 +477,58 @@ def _check_crystal_proximity(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
 ) -> list[PlacementViolation]:
-    """Check that crystals are within threshold of their MCU."""
+    """Check that crystals are within threshold of their connected IC.
+
+    Traces nets from each crystal to find the specific IC it serves
+    (MCU, W5500, LAN8720A, etc.), not just the MCU.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
     threshold = CRYSTAL_MAX_DISTANCE_MM
 
     crystals = [fp for fp in pcb.footprints if _ref_prefix(fp.ref) == "Y"]
-    mcus = [fp for fp in pcb.footprints if _ref_prefix(fp.ref) == "U"]
-
-    if not crystals or not mcus:
+    if not crystals:
         return violations
 
-    # Find MCU with clock pins connected to crystal
-    crystal_nets: set[str] = set()
-    for net in requirements.nets:
-        for conn in net.connections:
-            if _ref_prefix(conn.ref) == "Y":
-                crystal_nets.add(net.name)
-
-    # Find which MCU connects to crystal nets
-    mcu_ref: str | None = None
-    for net in requirements.nets:
-        if net.name not in crystal_nets:
-            continue
-        for conn in net.connections:
-            if conn.ref.startswith("U"):
-                mcu_ref = conn.ref
+    # Build crystal→IC map via net connectivity
+    # Each crystal connects to a specific IC via its oscillator pins
+    crystal_to_ic: dict[str, str] = {}
+    for crystal in crystals:
+        crystal_nets: set[str] = set()
+        for net in requirements.nets:
+            for conn in net.connections:
+                if conn.ref == crystal.ref:
+                    crystal_nets.add(net.name)
+        # Find connected IC on crystal's non-GND nets
+        for net in requirements.nets:
+            if net.name not in crystal_nets:
+                continue
+            _nl = net.name.upper()
+            if _nl in ("GND", "AGND", "DGND", "PGND", "VSS", "AVSS"):
+                continue
+            for conn in net.connections:
+                if conn.ref.startswith("U") and conn.ref in positions:
+                    crystal_to_ic[crystal.ref] = conn.ref
+                    break
+            if crystal.ref in crystal_to_ic:
                 break
-        if mcu_ref:
-            break
 
-    if not mcu_ref or mcu_ref not in positions:
-        return violations
-
-    mcu_pos = positions[mcu_ref]
     for crystal in crystals:
         if crystal.ref not in positions:
             continue
+        ic_ref = crystal_to_ic.get(crystal.ref)
+        if not ic_ref or ic_ref not in positions:
+            continue
         crystal_pos = positions[crystal.ref]
-        d = _dist(mcu_pos, crystal_pos)
+        ic_pos = positions[ic_ref]
+        d = _dist(ic_pos, crystal_pos)
         if d > threshold:
-            suggested = _point_toward(mcu_pos, crystal_pos, threshold * 0.8)
+            suggested = _point_toward(ic_pos, crystal_pos, threshold * 0.8)
             violations.append(PlacementViolation(
                 rule=PlacementRule.CRYSTAL_PROXIMITY,
                 severity="major",
-                refs=(crystal.ref, mcu_ref),
-                message=f"{crystal.ref} is {d:.1f}mm from MCU {mcu_ref} "
+                refs=(crystal.ref, ic_ref),
+                message=f"{crystal.ref} is {d:.1f}mm from IC {ic_ref} "
                         f"(max {threshold}mm for crystals)",
                 current_value=d,
                 threshold=threshold,
@@ -754,6 +773,133 @@ def _check_regulator_boundary(
     return violations
 
 
+def _check_board_edge_clearance(
+    pcb: PCBDesign,
+) -> list[PlacementViolation]:
+    """Check that all components have ≥1mm clearance from board edges.
+
+    Uses rotation-aware bounding box to detect components whose body
+    extends within the warning threshold (1mm) or critical threshold (0.3mm).
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    fp_sizes = _fp_size_dict(pcb)
+
+    bx1, by1, bx2, by2 = _board_bounds(pcb)
+    warn_margin = 1.0
+    crit_margin = 0.3
+
+    for fp in pcb.footprints:
+        ref = fp.ref
+        if ref not in positions:
+            continue
+        x, y = positions[ref]
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        rot = 0.0
+        for fpp in pcb.footprints:
+            if fpp.ref == ref:
+                rot = fpp.rotation
+                break
+        if rot % 180 in (90.0, 270.0):
+            w, h = h, w
+
+        # Check each edge
+        left_gap = (x - w / 2.0) - bx1
+        right_gap = bx2 - (x + w / 2.0)
+        top_gap = (y - h / 2.0) - by1
+        bottom_gap = by2 - (y + h / 2.0)
+        min_gap = min(left_gap, right_gap, top_gap, bottom_gap)
+
+        if min_gap < crit_margin:
+            # Suggest moving inward
+            sx, sy = x, y
+            if left_gap == min_gap:
+                sx = bx1 + w / 2.0 + warn_margin
+            elif right_gap == min_gap:
+                sx = bx2 - w / 2.0 - warn_margin
+            elif top_gap == min_gap:
+                sy = by1 + h / 2.0 + warn_margin
+            else:
+                sy = by2 - h / 2.0 - warn_margin
+            violations.append(PlacementViolation(
+                rule=PlacementRule.BOARD_EDGE_CLEARANCE,
+                severity="critical",
+                refs=(ref,),
+                message=f"{ref} is {min_gap:.1f}mm from board edge "
+                        f"(min {crit_margin}mm)",
+                current_value=min_gap,
+                threshold=crit_margin,
+                suggested_position=(sx, sy),
+            ))
+        elif min_gap < warn_margin:
+            violations.append(PlacementViolation(
+                rule=PlacementRule.BOARD_EDGE_CLEARANCE,
+                severity="minor",
+                refs=(ref,),
+                message=f"{ref} is {min_gap:.1f}mm from board edge "
+                        f"(recommended ≥{warn_margin}mm)",
+                current_value=min_gap,
+                threshold=warn_margin,
+                suggested_position=None,
+            ))
+
+    return violations
+
+
+def _check_diode_orientation_consistency(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> list[PlacementViolation]:
+    """Check that diodes in repeating subcircuits have consistent orientation.
+
+    For subcircuit types that repeat (e.g., ADC channels), all diodes within
+    instances should have the same rotation to maintain consistent cathode
+    direction for manufacturing clarity.
+    """
+    violations: list[PlacementViolation] = []
+
+    # Group subcircuits by type
+    sc_by_type: dict[str, list[DetectedSubCircuit]] = {}
+    for sc in subcircuits:
+        sc_by_type.setdefault(sc.circuit_type.value, []).append(sc)
+
+    # Check types with multiple instances
+    for sc_type, instances in sc_by_type.items():
+        if len(instances) < 2:
+            continue
+
+        # Collect diode rotations per instance
+        diode_rots: dict[str, float] = {}
+        for sc in instances:
+            for ref in sc.refs:
+                if ref.startswith("D"):
+                    for fp in pcb.footprints:
+                        if fp.ref == ref:
+                            diode_rots[ref] = fp.rotation
+                            break
+
+        if len(diode_rots) < 2:
+            continue
+
+        # Check consistency — all should have same rotation
+        rot_values = list(diode_rots.values())
+        majority_rot = max(set(rot_values), key=rot_values.count)
+        for ref, rot in diode_rots.items():
+            if rot != majority_rot:
+                violations.append(PlacementViolation(
+                    rule=PlacementRule.DIODE_ORIENTATION_CONSISTENCY,
+                    severity="minor",
+                    refs=(ref,),
+                    message=f"{ref} rotation {rot}° differs from majority "
+                            f"{majority_rot}° in {sc_type} subcircuits",
+                    current_value=rot,
+                    threshold=majority_rot,
+                    suggested_position=None,
+                ))
+
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Grading
 # ---------------------------------------------------------------------------
@@ -844,6 +990,12 @@ def review_placement(
     )
     all_violations.extend(
         _check_connector_functional_proximity(pcb, subcircuits)
+    )
+    all_violations.extend(
+        _check_board_edge_clearance(pcb)
+    )
+    all_violations.extend(
+        _check_diode_orientation_consistency(pcb, subcircuits)
     )
 
     violations = tuple(all_violations)
