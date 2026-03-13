@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
+    CONNECTOR_EDGE_MAX_MM,
     CONNECTOR_FUNCTIONAL_PROXIMITY_MAX_MM,
     DECOUPLING_CAP_MAX_DISTANCE_MM,
     MCU_PERIPHERAL_MAX_DISTANCE_MM,
@@ -45,7 +46,6 @@ _log = logging.getLogger(__name__)
 
 SUBCIRCUIT_MAX_SPREAD_MM = 20.0
 VOLTAGE_DOMAIN_MIN_GAP_MM = 2.0
-CONNECTOR_EDGE_MAX_MM = 5.0
 CRYSTAL_MAX_DISTANCE_MM = 10.0
 
 

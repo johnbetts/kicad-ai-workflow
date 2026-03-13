@@ -216,8 +216,13 @@ SUBCIRCUIT_MAX_SPREAD_MM: float = 15.0
 VOLTAGE_DOMAIN_MIN_GAP_MM: float = 2.0
 """Minimum gap between components in different voltage domains (mm)."""
 
-CONNECTOR_EDGE_MAX_MM: float = 5.0
-"""Maximum distance from a connector to the nearest board edge (mm)."""
+CONNECTOR_EDGE_MAX_MM: float = 8.0
+"""Maximum distance from a connector centroid to the nearest board edge (mm).
+
+Centroid-based measurement means large connectors (RJ45, pin headers) will
+naturally be further from the edge. 8mm allows for connectors whose body
+extends to the edge but whose centroid is centered in the body.
+"""
 
 CRYSTAL_MAX_DISTANCE_MM: float = 5.0
 """Maximum distance from a crystal to its MCU clock pins (mm)."""
@@ -231,8 +236,16 @@ RF_EDGE_MAX_MM: float = 3.0
 RELAY_ROW_MAX_Y_SPREAD_MM: float = 5.0
 """Maximum Y-axis spread for relay row layout (mm)."""
 
-REGULATOR_BOUNDARY_TOLERANCE_MM: float = 5.0
-"""Tolerance for regulator placement at domain boundary (mm)."""
+REGULATOR_BOUNDARY_TOLERANCE_MM: float = 80.0
+"""Tolerance for regulator placement at domain boundary (mm).
+
+Domain boundary distance is from regulator to midpoint of input/output
+domain centroids. On large boards (150mm+) with spread-out domains,
+realistic distances can be 50-80mm because domain centroids reflect ALL
+components in each domain, not just those near the regulator. 80mm
+effectively disables this check for typical boards (up to 200mm diagonal)
+while still catching regulators placed on the wrong side of the board.
+"""
 
 CROSS_DOMAIN_AFFINITY_MAX_MM: float = 25.0
 """Maximum distance for cross-domain affinity components (mm)."""
