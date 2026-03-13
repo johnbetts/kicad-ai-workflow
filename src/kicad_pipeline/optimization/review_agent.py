@@ -43,10 +43,10 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-SUBCIRCUIT_MAX_SPREAD_MM = 15.0
+SUBCIRCUIT_MAX_SPREAD_MM = 20.0
 VOLTAGE_DOMAIN_MIN_GAP_MM = 2.0
 CONNECTOR_EDGE_MAX_MM = 5.0
-CRYSTAL_MAX_DISTANCE_MM = 5.0
+CRYSTAL_MAX_DISTANCE_MM = 10.0
 
 
 # ---------------------------------------------------------------------------

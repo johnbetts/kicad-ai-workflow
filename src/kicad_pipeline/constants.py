@@ -196,8 +196,13 @@ PCB_SILKSCREEN_LINE_WIDTH_MM: float = 0.153
 PCB_EDGE_CUTS_WIDTH_MM: float = 0.05
 """Line width used for the board-outline Edge.Cuts layer (mm)."""
 
-DECOUPLING_CAP_MAX_DISTANCE_MM: float = 3.0
-"""Maximum allowed distance from a decoupling capacitor to its IC supply pin (mm)."""
+DECOUPLING_CAP_MAX_DISTANCE_MM: float = 5.0
+"""Maximum allowed distance from a decoupling capacitor to its IC supply pin (mm).
+
+Industry standard is 3-5mm depending on package size and frequency.
+5mm allows for larger ICs (LQFP-48, ESP32 modules) where centroid-based
+measurements inherently add half the IC body width.
+"""
 
 DECOUPLING_CAP_MIN_DISTANCE_MM: float = 1.0
 """Minimum distance from a decoupling capacitor to its IC (mm)."""
