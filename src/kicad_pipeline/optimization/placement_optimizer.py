@@ -2552,6 +2552,49 @@ def optimize_placement_ee(
         all_adc_passive_refs.update(passives)
         adc_ic_refs.add(_ic_ref)
 
+    # Move ADC ICs to the analog zone before placing channels.
+    # The group placer may have put them in a poor position (e.g., in the
+    # power zone area).  Place them at the bottom of the analog zone so
+    # channels extend upward toward the connectors on the top edge.
+    from kicad_pipeline.optimization.zone_partitioner import zone_for_group
+    analog_zone = None
+    for z in zones:
+        if z.name == "analog":
+            analog_zone = z
+            break
+    if analog_zone and adc_ic_refs:
+        az_x1, az_y1, az_x2, az_y2 = analog_zone.rect
+        # Place ICs in the lower third of the analog zone so channels
+        # extend upward (toward connectors at top edge) with room to spread.
+        # Sort ICs by average connector X of their channels so that ICs
+        # feeding leftmost connectors are placed leftmost.
+        def _ic_avg_connector_x(ic: str) -> float:
+            """Average X of connectors feeding this IC's channels."""
+            xs: list[float] = []
+            for _pin, passives in ic_channels.get(ic, []):
+                for r in passives:
+                    if r.startswith("R") and r in _r_top_connector_x:
+                        xs.append(_r_top_connector_x[r])
+            return sum(xs) / len(xs) if xs else 999.0
+
+        ic_list = sorted(adc_ic_refs, key=_ic_avg_connector_x)
+        n_ics = len(ic_list)
+        ic_spacing = (az_x2 - az_x1) / (n_ics + 1)
+        for idx, ic_ref in enumerate(ic_list):
+            if ic_ref not in positions:
+                continue
+            _old_x, _old_y, _old_rot = positions[ic_ref]
+            iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
+            new_x = az_x1 + ic_spacing * (idx + 1)
+            # Place at 70% height of analog zone (lower third), leaving
+            # space above for channel strips and below for decoupling caps
+            new_y = az_y1 + (az_y2 - az_y1) * 0.70
+            positions[ic_ref] = (new_x, new_y, 0.0)
+            _log.info(
+                "    3c2: moved %s to analog zone (%.1f, %.1f)",
+                ic_ref, new_x, new_y,
+            )
+
     # Build occupancy grid WITHOUT ADC channel passives so they can be freely placed
     adc_grid = _PlacementGrid(bounds)
     for oref, (ox, oy, _orot) in positions.items():
@@ -2562,18 +2605,20 @@ def optimize_placement_ee(
 
     # Per-IC vertical channel columns: each channel is a vertical strip
     # running UPWARD from the ADC IC toward the connectors / 24V source
-    # (top edge of board).  Channels are spread horizontally side-by-side.
+    # (top edge of board).  Channels are spread horizontally side-by-side,
+    # ordered left-to-right by the X position of each channel's source
+    # connector (so traces run straight down without crossing).
     #
     # Signal flow (top to bottom): connector → R_top → C_filter → D_clamp → R_bot → IC
     # Physical layout (upward from IC):  IC ← R_bot ← D_clamp ← C_filter ← R_top
     #
     # All components at 0° rotation (horizontal pads) so pads align
     # vertically in the signal path.
-    _CHANNEL_SPACING_MM = 4.5  # horizontal gap between channel columns (SOD-323 = 3.7mm wide)
-    _STRIP_GAP_MM = 1.0  # vertical gap — larger helps avoid courtyard overlaps
+    _CHANNEL_SPACING_MM = 5.0  # horizontal gap between channel columns (SOD-323 = 3.7mm wide)
+    _STRIP_GAP_MM = 1.5  # vertical gap between strip components
 
-    # Sort ICs for deterministic processing order
-    sorted_ic_refs = sorted(ic_channels.keys())
+    # Sort ICs by average connector X (leftmost connector = leftmost IC)
+    sorted_ic_refs = sorted(ic_channels.keys(), key=_ic_avg_connector_x)
 
     # Track occupied X ranges to prevent inter-IC channel overlap.
     # Each entry: (x_min, x_max) of the channel columns for an IC.
@@ -3818,7 +3863,8 @@ def optimize_placement_ee(
         # Don't over-protect relays or peripherals that collide with each
         # other — at least one in each colliding pair must be movable.
         always_fixed_base = (mcu_peripheral_refs | top_edge_connector_refs
-                             | eth_connector_fixed
+                             | eth_connector_fixed | adc_channel_refs
+                             | adc_ic_refs
                              | {r for r in positions if r.startswith("K")})
         # When both refs in a collision pair are in always_fixed,
         # unprotect the smaller one so collision resolution can act.
@@ -3830,7 +3876,6 @@ def optimize_placement_ee(
                 area_a = fp_sizes.get(a, (2, 2))[0] * fp_sizes.get(a, (2, 2))[1]
                 area_b = fp_sizes.get(b, (2, 2))[0] * fp_sizes.get(b, (2, 2))[1]
                 smaller = a if area_a <= area_b else b
-                # Don't unprotect the MCU IC itself
                 if not smaller.startswith("U"):
                     intra_fixed_unprotect.add(smaller)
         always_fixed = always_fixed_base - intra_fixed_unprotect
@@ -3904,7 +3949,7 @@ def optimize_placement_ee(
             clamp_colliding.add(b)
         eth_j_fixed = {r for r in ethernet_fixed if r.startswith("J")}
         clamp_always_base = (mcu_peripheral_refs | top_edge_connector_refs
-                             | eth_j_fixed
+                             | eth_j_fixed | adc_channel_refs | adc_ic_refs
                              | {r for r in positions if r.startswith("K")})
         clamp_unprotect: set[str] = set()
         for a, b in post_clamp_collisions_list:
@@ -3974,7 +4019,7 @@ def optimize_placement_ee(
             pr_colliding.add(b)
         pr_eth_j = {r for r in ethernet_fixed if r.startswith("J")}
         pr_always_base = (mcu_peripheral_refs | top_edge_connector_refs
-                          | pr_eth_j
+                          | pr_eth_j | adc_channel_refs | adc_ic_refs
                           | {r for r in best_positions if r.startswith("K")})
         pr_unprotect: set[str] = set()
         for a, b in post_review_collisions:
@@ -3991,6 +4036,72 @@ def optimize_placement_ee(
         best_positions = _resolve_collisions(
             best_positions, fp_sizes, bounds, pr_targeted,
         )
+
+    # 3c2-late: Post-collision ADC channel re-alignment
+    # Collision resolution scatters ADC channel components. This phase
+    # re-forms vertical columns by snapping each channel's passives to
+    # the same X as their IC's channel column position, maintaining Y order.
+    if adc_channels and adc_ic_refs:
+        _log.info("  3c2-late: ADC channel re-alignment")
+        _realigned = 0
+        for ic_ref in sorted(ic_channels.keys(), key=_ic_avg_connector_x):
+            ch_list = ic_channels[ic_ref]
+            if ic_ref not in best_positions:
+                continue
+            ix, iy, _irot = best_positions[ic_ref]
+            iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
+            n_ch = len(ch_list)
+            total_ch_width = (n_ch - 1) * _CHANNEL_SPACING_MM
+            ch_x_start = ix - total_ch_width / 2.0
+
+            for ch_idx, (ic_pin, passives) in enumerate(ch_list):
+                ch_x = ch_x_start + ch_idx * _CHANNEL_SPACING_MM
+                r_refs = sorted([r for r in passives if r.startswith("R")])
+                d_refs = [r for r in passives if r.startswith("D")]
+                c_refs = [r for r in passives if r.startswith("C")]
+
+                # Strip order: R_bot → D → C → R_top (upward from IC)
+                strip_order: list[str] = []
+                if len(r_refs) >= 2:
+                    strip_order.append(r_refs[1])
+                strip_order.extend(d_refs)
+                strip_order.extend(c_refs)
+                if len(r_refs) >= 1:
+                    strip_order.append(r_refs[0])
+
+                # Re-align: snap X to channel column, re-stack Y upward from IC
+                strip_y = iy - ih / 2.0 - 1.5
+                for ref in strip_order:
+                    if ref not in best_positions:
+                        continue
+                    raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
+                    target_x = ch_x
+                    target_y = strip_y - raw_h / 2.0
+                    # Clamp to board
+                    target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
+                    target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
+                    old_x, old_y, old_rot = best_positions[ref]
+                    if abs(old_x - target_x) > 1.0 or abs(old_y - target_y) > 1.0:
+                        _realigned += 1
+                    best_positions[ref] = (target_x, target_y, 0.0)
+                    strip_y = target_y - (raw_h / 2.0 + _STRIP_GAP_MM)
+
+        _log.info("    3c2-late: re-aligned %d ADC channel components", _realigned)
+
+        # Quick collision resolution after re-alignment — protect ADC channels
+        _post_adc_collisions = _count_collisions(best_positions, fp_sizes)
+        if _post_adc_collisions:
+            _log.info(
+                "    3c2-late: %d post-alignment collisions — resolving",
+                len(_post_adc_collisions),
+            )
+            # Protect ADC channel refs and ICs — move other components instead
+            _adc_fixed = (fixed_refs | adc_channel_refs | adc_ic_refs
+                          | top_edge_connector_refs
+                          | {r for r in best_positions if r.startswith("K")})
+            best_positions = _resolve_collisions(
+                best_positions, fp_sizes, bounds, _adc_fixed,
+            )
 
     # Build final PCB
     if best_review is None:
@@ -4125,6 +4236,8 @@ def validate_placement(
                        f"{collision_tuples[:10]}")
 
     # --- Guard 4: Cross-group contamination ---
+    # A component is "contaminated" if it's inside ANOTHER group's zone
+    # (not just outside its own zone — groups often overflow their zones).
     cross_group: list[str] = []
     if requirements.features:
         from kicad_pipeline.optimization.functional_grouper import (
@@ -4144,18 +4257,28 @@ def validate_placement(
                 for comp in feat.components:
                     r = comp.ref if hasattr(comp, "ref") else comp
                     ref_to_group[r] = feat.name
+            # Build zone-to-groups mapping for reverse lookup
+            zone_group_map: dict[str, set[str]] = {}
+            for z in zones:
+                for g in z.groups:
+                    zone_group_map.setdefault(z.name, set()).add(g)
             for ref, (cx, cy, _rot) in positions_dict.items():
                 grp = ref_to_group.get(ref)
                 if not grp:
                     continue
-                zone = zone_for_group(grp, zones)
-                if zone is None:
+                # Skip connectors — edge-pinned by design
+                if ref.startswith("J"):
                     continue
-                zx1, zy1, zx2, zy2 = zone.rect
-                # Allow 10mm tolerance for cross-group check
-                if (cx < zx1 - 10.0 or cx > zx2 + 10.0
-                        or cy < zy1 - 10.0 or cy > zy2 + 10.0):
-                    cross_group.append(ref)
+                own_zone = zone_for_group(grp, zones)
+                # Check if component is inside any OTHER group's zone
+                for z in zones:
+                    if own_zone and z.name == own_zone.name:
+                        continue  # skip own zone
+                    zx1, zy1, zx2, zy2 = z.rect
+                    if zx1 <= cx <= zx2 and zy1 <= cy <= zy2:
+                        # Component is inside another group's zone
+                        cross_group.append(ref)
+                        break
         except Exception:
             pass  # Don't fail validation on detection errors
     if cross_group:

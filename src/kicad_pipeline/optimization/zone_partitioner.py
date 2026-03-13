@@ -38,16 +38,19 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # reference board analysis.  Format: (x_start, y_start, x_end, y_end)
 # as fractions of board width/height.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
-    # Non-overlapping tiled layout with top margin for screw terminals:
-    #   Top strip (0-20%):   input_connectors (screw terminals along top edge)
-    #   Upper band (20-55%): power (0-40%) | relay (40-100%)
-    #   Lower band (55-100%): analog (0-35%) | ethernet (35-60%) | mcu (60-100%)
-    "input_connectors": (0.00, 0.00, 0.70, 0.20),
-    "power":            (0.00, 0.20, 0.40, 0.55),
-    "relay":            (0.40, 0.20, 1.00, 0.55),
-    "analog":           (0.00, 0.55, 0.35, 1.00),
-    "mcu":              (0.60, 0.55, 1.00, 1.00),
-    "ethernet":         (0.35, 0.55, 0.60, 1.00),
+    # Non-overlapping tiled layout (140x80mm reference board):
+    #   Top strip (0-70% x, 0-15% y): input_connectors (screw terminals)
+    #   Upper-left (0-20% x, 15-50% y): power (vertical signal chain)
+    #   Upper-right (20-100% x, 15-50% y): relay
+    #   Bottom-left (0-45% x, 50-100% y): analog (wide for horizontal ADC strips)
+    #   Bottom-center (45-65% x, 50-100% y): ethernet
+    #   Bottom-right (65-100% x, 50-100% y): mcu
+    "input_connectors": (0.00, 0.00, 0.70, 0.15),
+    "power":            (0.00, 0.15, 0.20, 0.50),
+    "relay":            (0.20, 0.15, 1.00, 0.50),
+    "analog":           (0.00, 0.50, 0.45, 1.00),
+    "mcu":              (0.65, 0.50, 1.00, 1.00),
+    "ethernet":         (0.45, 0.50, 0.65, 1.00),
     "display":          (0.00, 0.85, 0.20, 1.00),
 }
 
