@@ -3864,7 +3864,7 @@ def optimize_placement_ee(
         # other — at least one in each colliding pair must be movable.
         always_fixed_base = (mcu_peripheral_refs | top_edge_connector_refs
                              | eth_connector_fixed | adc_channel_refs
-                             | adc_ic_refs
+                             | adc_ic_refs | relay_support_refs
                              | {r for r in positions if r.startswith("K")})
         # When both refs in a collision pair are in always_fixed,
         # unprotect the smaller one so collision resolution can act.
@@ -3950,6 +3950,7 @@ def optimize_placement_ee(
         eth_j_fixed = {r for r in ethernet_fixed if r.startswith("J")}
         clamp_always_base = (mcu_peripheral_refs | top_edge_connector_refs
                              | eth_j_fixed | adc_channel_refs | adc_ic_refs
+                             | relay_support_refs
                              | {r for r in positions if r.startswith("K")})
         clamp_unprotect: set[str] = set()
         for a, b in post_clamp_collisions_list:
@@ -4020,6 +4021,7 @@ def optimize_placement_ee(
         pr_eth_j = {r for r in ethernet_fixed if r.startswith("J")}
         pr_always_base = (mcu_peripheral_refs | top_edge_connector_refs
                           | pr_eth_j | adc_channel_refs | adc_ic_refs
+                          | relay_support_refs
                           | {r for r in best_positions if r.startswith("K")})
         pr_unprotect: set[str] = set()
         for a, b in post_review_collisions:
@@ -4160,12 +4162,77 @@ def optimize_placement_ee(
                 "    3c2-late: %d post-alignment collisions — resolving",
                 len(_post_adc_collisions),
             )
-            # Protect ADC channel refs and ICs — move other components instead
+            # Protect ADC channel refs, ICs, and relay support
             _adc_fixed = (fixed_refs | adc_channel_refs | adc_ic_refs
-                          | top_edge_connector_refs
+                          | top_edge_connector_refs | relay_support_refs
                           | {r for r in best_positions if r.startswith("K")})
             best_positions = _resolve_collisions(
                 best_positions, fp_sizes, bounds, _adc_fixed,
+            )
+
+    # 3b-late: Post-collision relay driver re-alignment
+    # Runs LAST — after all other late phases and their collision resolution.
+    # Re-snaps each relay's support (Q, D, R, LED) back into a tight
+    # 2-column grid directly below the relay.
+    _log.info("  3b-late: Relay driver re-alignment")
+    _relay_realigned = 0
+    for sc in sc_list:
+        if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
+            continue
+        anchor = sc.anchor_ref
+        if anchor not in best_positions:
+            continue
+        kx, ky, krot = best_positions[anchor]
+        kw, kh = fp_sizes.get(anchor, (18.0, 16.0))
+        if krot % 180 in (90.0, 270.0):
+            kw, kh = kh, kw
+
+        support_members = [
+            r for r in sc.refs
+            if r != anchor and r in best_positions
+        ]
+        support_members.sort(key=lambda r: (
+            0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
+        ))
+
+        target_y_base = ky + kh / 2.0 + 1.0
+        col = 0
+        row_y = target_y_base
+        row_max_h = 0.0
+        cols_per_row = 2
+
+        for ref in support_members:
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
+            py = row_y + h / 2.0
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            old_x, old_y, old_rot = best_positions[ref]
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            best_positions[ref] = (px, py, old_rot)
+            row_max_h = max(row_max_h, h)
+            col += 1
+            if col >= cols_per_row:
+                col = 0
+                row_y += row_max_h + 0.5
+                row_max_h = 0.0
+
+    if _relay_realigned:
+        _log.info("    3b-late: re-aligned %d relay support components", _relay_realigned)
+        # Resolve collisions protecting BOTH relay and ADC channel refs
+        _post_relay_collisions = _count_collisions(best_positions, fp_sizes)
+        if _post_relay_collisions:
+            _log.info(
+                "    3b-late: %d post-alignment collisions — resolving",
+                len(_post_relay_collisions),
+            )
+            _relay_fixed = (fixed_refs | relay_support_refs
+                            | {r for r in best_positions if r.startswith("K")}
+                            | top_edge_connector_refs
+                            | adc_channel_refs | adc_ic_refs)
+            best_positions = _resolve_collisions(
+                best_positions, fp_sizes, bounds, _relay_fixed,
             )
 
     # Build final PCB
