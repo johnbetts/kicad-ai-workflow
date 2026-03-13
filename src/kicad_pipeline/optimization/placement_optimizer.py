@@ -2614,7 +2614,7 @@ def optimize_placement_ee(
     #
     # All components at 0° rotation (horizontal pads) so pads align
     # vertically in the signal path.
-    _CHANNEL_SPACING_MM = 5.0  # horizontal gap between channel columns (SOD-323 = 3.7mm wide)
+    _CHANNEL_SPACING_MM = 8.0  # horizontal gap between channel columns — wide enough to be visually distinct
     _STRIP_GAP_MM = 1.5  # vertical gap between strip components
 
     # Sort ICs by average connector X (leftmost connector = leftmost IC)
@@ -4038,53 +4038,118 @@ def optimize_placement_ee(
         )
 
     # 3c2-late: Post-collision ADC channel re-alignment
-    # Collision resolution scatters ADC channel components. This phase
-    # re-forms vertical columns by snapping each channel's passives to
-    # the same X as their IC's channel column position, maintaining Y order.
+    # Re-form vertical columns using FINAL connector positions to determine
+    # left-to-right order.  All channels are placed in the analog zone,
+    # sorted so the channel fed by the leftmost connector is leftmost.
     if adc_channels and adc_ic_refs:
-        _log.info("  3c2-late: ADC channel re-alignment")
+        _log.info("  3c2-late: ADC channel re-alignment (connector-ordered)")
         _realigned = 0
-        for ic_ref in sorted(ic_channels.keys(), key=_ic_avg_connector_x):
-            ch_list = ic_channels[ic_ref]
+
+        # Build R_top → connector X mapping using FINAL positions
+        _late_r_top_x: dict[str, float] = {}
+        for net in requirements.nets:
+            j_conns = [c for c in net.connections if c.ref.startswith("J")]
+            r_conns = [c for c in net.connections
+                       if c.ref.startswith("R") and c.ref in best_positions]
+            if j_conns and r_conns:
+                for j_conn in j_conns:
+                    j_pos = best_positions.get(j_conn.ref)
+                    if j_pos:
+                        for r_conn in r_conns:
+                            _late_r_top_x[r_conn.ref] = j_pos[0]
+
+        # Build flat list of all channels with their connector X for sorting
+        _all_ch_with_x: list[tuple[float, str, str, list[str]]] = []
+        for ic_ref, ic_pin, passives in adc_channels:
+            conn_x = 999.0
+            r_refs_ch = sorted(r for r in passives if r.startswith("R"))
+            for r in r_refs_ch:
+                if r in _late_r_top_x:
+                    conn_x = _late_r_top_x[r]
+                    break
+            _all_ch_with_x.append((conn_x, ic_ref, ic_pin, passives))
+
+        # Sort ALL channels globally by connector X (leftmost connector → leftmost column)
+        _all_ch_with_x.sort(key=lambda t: t[0])
+
+        # Find the analog zone for X bounds
+        _az = None
+        for z in zones:
+            if z.name == "analog":
+                _az = z
+                break
+        if _az:
+            az_x1, az_y1, az_x2, az_y2 = _az.rect
+        else:
+            az_x1, az_y1, az_x2, az_y2 = bounds
+
+        # Spread channels evenly across the analog zone width
+        n_total_ch = len(_all_ch_with_x)
+        ch_zone_width = az_x2 - az_x1 - 4.0  # 2mm margin each side
+        ch_spacing = min(_CHANNEL_SPACING_MM,
+                         ch_zone_width / max(n_total_ch - 1, 1))
+        total_ch_width = (n_total_ch - 1) * ch_spacing
+        ch_x_start = az_x1 + 2.0 + (ch_zone_width - total_ch_width) / 2.0
+
+        # Place channel strips — vertical columns running downward from top
+        _ch_y_top = az_y1 + 2.0  # near top of analog zone
+
+        # Track which IC's channels are at which X for IC repositioning
+        _ic_ch_xs: dict[str, list[float]] = {}
+
+        for ch_idx, (conn_x, ic_ref, ic_pin, passives) in enumerate(_all_ch_with_x):
+            ch_x = ch_x_start + ch_idx * ch_spacing
+
+            _ic_ch_xs.setdefault(ic_ref, []).append(ch_x)
+
+            r_refs = sorted([r for r in passives if r.startswith("R")])
+            d_refs = [r for r in passives if r.startswith("D")]
+            c_refs = [r for r in passives if r.startswith("C")]
+
+            # Strip order top→bottom: R_top → C_filter → D_clamp → R_bot → (IC below)
+            strip_order: list[str] = []
+            if len(r_refs) >= 1:
+                strip_order.append(r_refs[0])   # R_top (near connector)
+            strip_order.extend(c_refs)           # C_filter
+            strip_order.extend(d_refs)           # D_clamp
+            if len(r_refs) >= 2:
+                strip_order.append(r_refs[1])   # R_bot (near IC)
+
+            strip_y = _ch_y_top
+            for ref in strip_order:
+                if ref not in best_positions:
+                    continue
+                raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
+                target_x = ch_x
+                target_y = strip_y + raw_h / 2.0
+                target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
+                target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
+                old_x, old_y, _old_rot = best_positions[ref]
+                if abs(old_x - target_x) > 1.0 or abs(old_y - target_y) > 1.0:
+                    _realigned += 1
+                best_positions[ref] = (target_x, target_y, 0.0)
+                strip_y = target_y + raw_h / 2.0 + _STRIP_GAP_MM
+
+            _log.info(
+                "    3c2-late: ch%d (%s.%s) → x=%.1f (conn_x=%.1f)",
+                ch_idx, ic_ref, ic_pin, ch_x, conn_x,
+            )
+
+        # Reposition ADC ICs below their channel groups
+        for ic_ref, ch_xs in _ic_ch_xs.items():
             if ic_ref not in best_positions:
                 continue
-            ix, iy, _irot = best_positions[ic_ref]
+            ic_new_x = sum(ch_xs) / len(ch_xs)
+            # Place IC below the strips (4 components × ~3.5mm each + gaps ≈ 20mm)
+            ic_new_y = _ch_y_top + 22.0
             iw, ih = fp_sizes.get(ic_ref, (5.0, 5.0))
-            n_ch = len(ch_list)
-            total_ch_width = (n_ch - 1) * _CHANNEL_SPACING_MM
-            ch_x_start = ix - total_ch_width / 2.0
-
-            for ch_idx, (ic_pin, passives) in enumerate(ch_list):
-                ch_x = ch_x_start + ch_idx * _CHANNEL_SPACING_MM
-                r_refs = sorted([r for r in passives if r.startswith("R")])
-                d_refs = [r for r in passives if r.startswith("D")]
-                c_refs = [r for r in passives if r.startswith("C")]
-
-                # Strip order: R_bot → D → C → R_top (upward from IC)
-                strip_order: list[str] = []
-                if len(r_refs) >= 2:
-                    strip_order.append(r_refs[1])
-                strip_order.extend(d_refs)
-                strip_order.extend(c_refs)
-                if len(r_refs) >= 1:
-                    strip_order.append(r_refs[0])
-
-                # Re-align: snap X to channel column, re-stack Y upward from IC
-                strip_y = iy - ih / 2.0 - 1.5
-                for ref in strip_order:
-                    if ref not in best_positions:
-                        continue
-                    raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
-                    target_x = ch_x
-                    target_y = strip_y - raw_h / 2.0
-                    # Clamp to board
-                    target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
-                    target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
-                    old_x, old_y, old_rot = best_positions[ref]
-                    if abs(old_x - target_x) > 1.0 or abs(old_y - target_y) > 1.0:
-                        _realigned += 1
-                    best_positions[ref] = (target_x, target_y, 0.0)
-                    strip_y = target_y - (raw_h / 2.0 + _STRIP_GAP_MM)
+            ic_new_x = max(bounds[0] + iw / 2, min(bounds[2] - iw / 2, ic_new_x))
+            ic_new_y = max(bounds[1] + ih / 2, min(bounds[3] - ih / 2, ic_new_y))
+            best_positions[ic_ref] = (ic_new_x, ic_new_y, 0.0)
+            _log.info(
+                "    3c2-late: %s → (%.1f, %.1f) center of %d channels",
+                ic_ref, ic_new_x, ic_new_y, len(ch_xs),
+            )
 
         _log.info("    3c2-late: re-aligned %d ADC channel components", _realigned)
 
