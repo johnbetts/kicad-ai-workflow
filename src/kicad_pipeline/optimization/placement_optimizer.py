@@ -4565,7 +4565,8 @@ def optimize_placement_ee(
             if clamped_x != rx or clamped_y != ry:
                 best_positions[ref] = (clamped_x, clamped_y, rot)
 
-    # Build final PCB
+    # Build final PCB — use best_review from the main review loop
+    # (which ran before late-phase re-alignments that may scatter components)
     if best_review is None:
         positions_tuple = _dict_to_positions(best_positions)
         final_pcb = _apply_positions(initial_pcb, positions_tuple)
