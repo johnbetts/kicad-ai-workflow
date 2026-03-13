@@ -2206,11 +2206,11 @@ def optimize_placement_ee(
             0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
         ))
 
-        target_y_base = ky + kh / 2.0 + 1.0
+        target_y_base = ky + kh / 2.0 + 0.5
         col = 0
         row_y = target_y_base
         row_max_h = 0.0
-        cols_per_row = 2  # tight 2-column grid under each relay
+        cols_per_row = 3  # 3-column single row for Q+D+R
 
         for ref in support_members:
             w, h = fp_sizes.get(ref, (2.0, 2.0))
@@ -3312,9 +3312,15 @@ def optimize_placement_ee(
             else:
                 tx = right_edge_x - w15 / 2.0
                 ty = mcu_y + 10.0
-            ty = max(bounds[1] + h15 / 2.0 + 1.0,
-                     min(bounds[3] - h15 / 2.0 - 1.0, ty))
+            # Clamp with 1.5mm margin from edges (review agent adds 1.0mm to
+            # pad extents, so we need extra clearance)
+            ty = max(bounds[1] + h15 / 2.0 + 1.5,
+                     min(bounds[3] - h15 / 2.0 - 1.5, ty))
+            tx = min(tx, bounds[2] - w15 / 2.0 - 1.5)
             px15, py15 = mcu_grid.find_free_pos(tx, ty, w15, h15, max_radius=25.0)
+            # Ensure grid search didn't push past edge
+            px15 = min(px15, bounds[2] - w15 / 2.0 - 1.5)
+            py15 = min(py15, bounds[3] - h15 / 2.0 - 1.5)
             positions["J15"] = (px15, py15, 0.0)
             mcu_grid.place(px15, py15, w15, h15)
             mcu_peripheral_refs.add("J15")
@@ -3431,9 +3437,13 @@ def optimize_placement_ee(
             # Switch — place side by side horizontally
             tx = sw_base_x - i * (sw_w + 1.5)
             ty = sw_base_y
-            tx = max(bounds[0] + sw_w / 2.0 + 1.0, min(bounds[2] - 2.0, tx))
-            ty = max(bounds[1] + sw_h / 2.0 + 1.0, min(bounds[3] - 2.0, ty))
-            px, py = mcu_grid.find_free_pos(tx, ty, sw_w, sw_h, max_radius=15.0)
+            tx = max(bounds[0] + sw_w / 2.0 + 2.0, min(bounds[2] - sw_w / 2.0 - 2.0, tx))
+            ty = max(bounds[1] + sw_h / 2.0 + 2.0, min(bounds[3] - sw_h / 2.0 - 2.0, ty))
+            px, py = mcu_grid.find_free_pos(tx, ty, sw_w, sw_h, max_radius=10.0)
+            # Clamp: stay within 20mm of MCU (both X and Y) and 2mm inside board
+            px = max(mcu_x - 20.0, min(mcu_x + 20.0, px))
+            py = max(max(mcu_y - 20.0, bounds[1] + sw_h / 2.0 + 2.0),
+                     min(bounds[3] - sw_h / 2.0 - 2.0, py))
             positions[sw] = (px, py, 0.0)
             mcu_peripheral_refs.add(sw)
             mcu_grid.place(px, py, sw_w, sw_h)
@@ -3766,11 +3776,11 @@ def optimize_placement_ee(
                 return cy
 
             # Crystal + load caps: force-place directly above U6 (≤5mm)
-            # Crystal XTAL pins are typically on the top side of LQFP-48.
-            # Place crystal above IC with sufficient clearance.
+            # Place crystal edge-to-edge with IC, above it.
             y_crystal_h = fp_sizes.get(
                 crystal_refs[0], (3.2, 1.5))[1] if crystal_refs else 1.5
-            crystal_y = ic_cy - ic_h / 2.0 - y_crystal_h / 2.0 - 1.5
+            # Target: crystal just above IC courtyard with 0.5mm clearance
+            crystal_y = ic_cy - ic_h / 2.0 - y_crystal_h / 2.0 - 0.5
             crystal_x = ic_cx  # centered on IC
 
             for ref in crystal_refs:
@@ -3780,8 +3790,10 @@ def optimize_placement_ee(
                 w, h = fp_sizes.get(ref, (3.2, 1.5))
                 tx = crystal_x
                 ty = crystal_y  # crystal_y is already the centroid
-                tx = max(ezx1 + 2.0, min(ezx2 - 2.0, tx))
-                ty = max(ezy1 + 2.0, min(ezy2 - 2.0, ty))
+                # Crystal MUST be close to IC — relax zone clamping
+                # Only clamp to board bounds, not zone bounds
+                tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
                 # Force-place — don't use find_free_pos for crystal
                 positions[ref] = (tx, ty, 0.0)
                 eth_grid.place(tx, ty, w, h)
@@ -3900,8 +3912,11 @@ def optimize_placement_ee(
                     _, _, _, pad_max_y = pad_extent_in_board_space(
                         fp_match, trial_origin_x, trial_origin_y, 180.0,
                     )
-                    if pad_max_y > bounds[3] - 1.0:
-                        trial_origin_y -= (pad_max_y - bounds[3] + 1.0)
+                    # Keep pad extent + 2.0mm margin from board edge
+                    # (review agent adds 1.0mm to pad extents for courtyard)
+                    edge_margin = 2.0
+                    if pad_max_y > bounds[3] - edge_margin:
+                        trial_origin_y -= (pad_max_y - bounds[3] + edge_margin)
                     cent_x, cent_y = origin_to_centroid(
                         fp_match, trial_origin_x, trial_origin_y, 180.0,
                     )

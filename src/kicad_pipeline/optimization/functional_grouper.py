@@ -468,23 +468,32 @@ def _detect_buck_converters(
 
         # Also include inductor output net (even if it's a power rail name
         # like BUCK_5V or +3V3) — but only for caps (not resistors, which
-        # are pull-ups/dividers for other purposes)
+        # are pull-ups/dividers for other purposes).
+        # For power rails (+3V3, +5V etc), limit to 1 cap to avoid grabbing
+        # decoupling caps that belong to downstream ICs.
+        _output_net_is_power = False
         if inductor_output_net:
             _buck_signal_nets.add(inductor_output_net)
+            _output_net_is_power = _is_power_net(inductor_output_net)
 
-        for net_name in _buck_signal_nets:
+        for net_name in sorted(_buck_signal_nets):
             cap_count = 0
             fb_r_count = 0
             # Only allow resistors on non-power feedback nets
             allow_resistors = not _is_power_net(net_name)
-            for r in net_to_refs.get(net_name, set()):
+            # For the inductor output net on a power rail, limit to 1 cap
+            # to avoid claiming decoupling caps of downstream ICs
+            max_caps = 1 if (
+                net_name == inductor_output_net and _output_net_is_power
+            ) else _MAX_CAPS_PER_NET
+            for r in sorted(net_to_refs.get(net_name, set())):
                 if r in refs or r in claimed:
                     continue
                 rc = comp_map.get(r)
                 is_cap = rc and _ref_prefix(r) == "C"
                 is_fb_r = rc and _ref_prefix(r) == "R" and allow_resistors
                 if is_cap:
-                    if cap_count >= _MAX_CAPS_PER_NET:
+                    if cap_count >= max_caps:
                         continue
                     refs.append(r)
                     all_nets.add(net_name)
