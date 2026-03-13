@@ -3836,9 +3836,8 @@ def optimize_placement_ee(
                 placed_eth.add(ref)
                 cap_idx += 1
 
-            # Remaining caps (decoupling) — force-place adjacent to U6.
-            # Grid-based placement pushes bulk caps 20mm+ away when perimeter
-            # is crowded. Force-place in a tight column below IC instead.
+            # Remaining caps (decoupling) — place adjacent to U6.
+            # Use grid-aware placement to avoid overlapping crystal refs.
             col_y = ic_cy + ic_h / 2.0 + 1.5
             for ref in other_caps:
                 if (ref not in positions or ref in fixed_refs
@@ -3849,12 +3848,14 @@ def optimize_placement_ee(
                 ty = col_y + ch / 2.0
                 tx = max(ezx1 + 2.0, min(ezx2 - 2.0, tx))
                 ty = max(ezy1 + 2.0, min(ezy2 - 2.0, ty))
-                # Force-place — collision resolution will handle overlaps
-                positions[ref] = (tx, ty, 0.0)
-                eth_grid.place(tx, ty, cw, ch)
+                # Use grid to find collision-free position near target
+                px, py = eth_grid.find_free_pos(tx, ty, cw, ch,
+                                                max_radius=8.0)
+                positions[ref] = (px, py, 0.0)
+                eth_grid.place(px, py, cw, ch)
                 ethernet_fixed.add(ref)
                 placed_eth.add(ref)
-                col_y = ty + ch / 2.0 + 1.0
+                col_y = py + ch / 2.0 + 1.0
             col1_bottom = col_y
 
             # Column 2: PoE/PHY module — rotated 90° CCW, above J13 center
@@ -3950,6 +3951,27 @@ def optimize_placement_ee(
                 "    3c4: organized %d ethernet components in signal chain: %s",
                 len(ethernet_fixed), sorted(ethernet_fixed),
             )
+
+            # Local overlap fix: shift caps that collide with crystal
+            _crystal_placed = [r for r in placed_eth if r.startswith("Y")]
+            for yref in _crystal_placed:
+                yx, yy, yrot = positions[yref]
+                yw, yh = fp_sizes.get(yref, (3.2, 1.5))
+                for cref in list(placed_eth):
+                    if cref == yref or not cref.startswith("C"):
+                        continue
+                    cx, cy, crot = positions[cref]
+                    cw, ch = fp_sizes.get(cref, (1.5, 1.0))
+                    # Check overlap (axis-aligned)
+                    if (abs(cx - yx) < (cw + yw) / 2.0 + 0.3
+                            and abs(cy - yy) < (ch + yh) / 2.0 + 0.3):
+                        # Shift cap below crystal
+                        new_cy = yy + yh / 2.0 + ch / 2.0 + 0.5
+                        new_cy = max(ezy1 + 2.0, min(ezy2 - 2.0, new_cy))
+                        positions[cref] = (cx, new_cy, crot)
+                        _log.info("    3c4: shifted %s below %s "
+                                  "(%.1f,%.1f) → (%.1f,%.1f)",
+                                  cref, yref, cx, cy, cx, new_cy)
 
     # 3c4-post: Push non-ethernet components clear of ethernet ICs
     # U7 (optocoupler) in analog group drifts into U6 (W5500) bounding box.

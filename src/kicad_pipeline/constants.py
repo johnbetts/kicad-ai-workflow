@@ -230,8 +230,13 @@ CRYSTAL_MAX_DISTANCE_MM: float = 5.0
 MCU_PERIPHERAL_MAX_DISTANCE_MM: float = 20.0
 """Maximum distance from MCU peripherals (switches, LEDs, debug) to MCU (mm)."""
 
-RF_EDGE_MAX_MM: float = 3.0
-"""Maximum distance from an RF antenna to a board edge (mm)."""
+RF_EDGE_MAX_MM: float = 6.0
+"""Maximum distance from an RF antenna body to a board edge (mm).
+
+Large modules like ESP32-S3-WROOM (~25x18mm) have their antenna at one
+corner, so the body edge is the relevant measurement.  6mm allows for
+the antenna being at the far corner from the nearest board edge.
+"""
 
 RELAY_ROW_MAX_Y_SPREAD_MM: float = 5.0
 """Maximum Y-axis spread for relay row layout (mm)."""

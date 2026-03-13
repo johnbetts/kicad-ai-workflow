@@ -628,9 +628,15 @@ def _check_rf_edge_placement(
     pcb: PCBDesign,
     subcircuits: tuple[DetectedSubCircuit, ...],
 ) -> list[PlacementViolation]:
-    """Check that RF antenna modules are on board edge."""
+    """Check that RF antenna modules are on board edge.
+
+    Uses edge-to-edge distance (centroid minus half-size) so large
+    modules like ESP32-S3-WROOM are not penalised for having a centroid
+    far from the edge when their body actually touches it.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
+    fp_sizes = _fp_size_dict(pcb)
     bounds = _board_bounds(pcb)
     min_x, min_y, max_x, max_y = bounds
     threshold = RF_EDGE_MAX_MM
@@ -642,7 +648,15 @@ def _check_rf_edge_placement(
         if pos is None:
             continue
         x, y = pos
-        edge_dist = min(x - min_x, max_x - x, y - min_y, max_y - y)
+        w, h = fp_sizes.get(sc.anchor_ref, (2.0, 2.0))
+        # Edge-to-edge distance (body edge to board edge)
+        edge_dist = min(
+            (x - w / 2.0) - min_x,
+            max_x - (x + w / 2.0),
+            (y - h / 2.0) - min_y,
+            max_y - (y + h / 2.0),
+        )
+        edge_dist = max(0.0, edge_dist)  # clamp negative (already touching)
         if edge_dist > threshold:
             # Suggest nearest edge
             nearest_x = min_x + 2.0 if (x - min_x) < (max_x - x) else max_x - 2.0
