@@ -38,19 +38,19 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # reference board analysis.  Format: (x_start, y_start, x_end, y_end)
 # as fractions of board width/height.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
-    # Tiled layout (140x80mm reference board):
-    #   Row 0 (0-100% x, 0-15% y): input_connectors (screw terminals)
-    #   Row 1 left (0-40% x, 15-50% y): power
-    #   Row 1 right (40-100% x, 15-50% y): relay
-    #   Row 2 left (0-35% x, 50-100% y): analog
-    #   Row 2 center (35-60% x, 50-100% y): ethernet
-    #   Row 2 right (60-100% x, 50-100% y): mcu
-    "input_connectors": (0.00, 0.00, 1.00, 0.15),
-    "power":            (0.00, 0.15, 0.40, 0.60),
-    "relay":            (0.40, 0.15, 1.00, 0.50),
-    "analog":           (0.00, 0.60, 0.35, 1.00),
-    "mcu":              (0.60, 0.50, 1.00, 1.00),
-    "ethernet":         (0.35, 0.50, 0.60, 1.00),
+    # Tiled layout (160x80mm board):
+    #   Row 0 (0-100% x, 0-18% y): input_connectors (screw terminals)
+    #   Row 1 left (0-35% x, 18-55% y): power
+    #   Row 1 right (35-100% x, 18-55% y): relay (includes driver support)
+    #   Row 2 left (0-30% x, 55-90% y): analog
+    #   Row 2 center (30-55% x, 55-90% y): ethernet
+    #   Row 2 right (55-100% x, 55-90% y): mcu
+    "input_connectors": (0.00, 0.00, 1.00, 0.18),
+    "power":            (0.00, 0.18, 0.35, 0.55),
+    "relay":            (0.35, 0.18, 1.00, 0.55),
+    "analog":           (0.00, 0.55, 0.30, 0.90),
+    "mcu":              (0.55, 0.55, 1.00, 0.90),
+    "ethernet":         (0.30, 0.55, 0.55, 0.90),
 }
 
 # Minimum inter-zone gap (mm)

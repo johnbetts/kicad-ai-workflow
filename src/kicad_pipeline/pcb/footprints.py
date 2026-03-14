@@ -1031,9 +1031,13 @@ def make_esp32_wroom(
     value: str,
     layer: str = LAYER_F_CU,
 ) -> Footprint:
-    """ESP32-S3-WROOM-1 module footprint (18x25.5mm body, 39 castellated pads).
+    """ESP32-S3-WROOM-1 module footprint (18x25.5mm body, 41 castellated pads).
 
-    Edge-castellated pads along bottom and sides. GND pad underneath.
+    Pad layout per datasheet Figure 3-1 (top view, antenna at top/north):
+      - Left side:  14 pads (pins 1-14),  top to bottom
+      - Bottom edge: 12 pads (pins 15-26), left to right
+      - Right side: 14 pads (pins 27-40), bottom to top
+      - Center:     pad 41 (GND exposed pad)
 
     Args:
         ref: Reference designator (e.g. "U3").
@@ -1049,38 +1053,43 @@ def make_esp32_wroom(
     pad_h = 1.2
     pitch = 1.27
 
-    # 39 pads: arranged around bottom and two sides
-    # Bottom edge: 14 pads, left side: 12 pads, right side: 12 pads, GND: 1
+    # 41 pads: left(14) + bottom(12) + right(14) + center GND(1)
     pad_list: list[Pad] = []
 
-    # Bottom row (14 pads, centred)
+    # Left column: 14 pads (pins 1-14), top to bottom
+    # Pin 1 (GND) at top-left near antenna, pin 14 (IO20) at bottom-left.
+    # The topmost pad starts ~2.5mm below the top edge (antenna zone above).
+    left_x = -(body_w / 2.0 - pad_h / 2.0)
+    n_left = 14
+    left_top_y = -(body_h / 2.0) + 2.5 + pad_h / 2.0  # 2.5mm from top edge
+    for i in range(n_left):
+        pad_list.append(_smd_pad(
+            str(i + 1), left_x, left_top_y + i * pitch, pad_h, pad_w, layer,
+        ))
+
+    # Bottom row: 12 pads (pins 15-26), left to right
+    # Pin 15 (IO3) at bottom-left, pin 26 (IO45) at bottom-right.
     bottom_y = body_h / 2.0 - pad_h / 2.0
-    n_bottom = 14
+    n_bottom = 12
     start_x = -((n_bottom - 1) * pitch) / 2.0
     for i in range(n_bottom):
         pad_list.append(_smd_pad(
-            str(i + 1), start_x + i * pitch, bottom_y, pad_w, pad_h, layer,
+            str(15 + i), start_x + i * pitch, bottom_y, pad_w, pad_h, layer,
         ))
 
-    # Left column (12 pads, from bottom up)
-    left_x = -(body_w / 2.0 - pad_h / 2.0)
-    n_side = 12
-    side_start_y = body_h / 2.0 - 2.5  # offset from bottom
-    for i in range(n_side):
-        pad_list.append(_smd_pad(
-            str(15 + i), left_x, side_start_y - i * pitch, pad_h, pad_w, layer,
-        ))
-
-    # Right column (12 pads, from bottom up)
+    # Right column: 14 pads (pins 27-40), bottom to top
+    # Pin 27 (IO0) at bottom-right, pin 40 (GND) at top-right.
     right_x = body_w / 2.0 - pad_h / 2.0
-    for i in range(n_side):
+    n_right = 14
+    right_bot_y = body_h / 2.0 - 2.5 - pad_h / 2.0  # 2.5mm from bottom edge
+    for i in range(n_right):
         pad_list.append(_smd_pad(
-            str(27 + i), right_x, side_start_y - i * pitch, pad_h, pad_w, layer,
+            str(27 + i), right_x, right_bot_y - i * pitch, pad_h, pad_w, layer,
         ))
 
-    # GND pad (large thermal pad underneath)
+    # Center GND pad (large thermal pad underneath) — pin 41
     pad_list.append(Pad(
-        number="39",
+        number="41",
         pad_type="smd",
         shape="rect",
         position=Point(0.0, 0.0),
@@ -2436,7 +2445,7 @@ def compute_footprint_bbox(fp: Footprint) -> FootprintBBox:
 
 _BODY_EXTENSION: dict[str, tuple[float, float]] = {
     # (extra_width_per_side, extra_height_per_side)
-    "module": (0.5, 4.0),       # ESP32/W5500 — antenna/shield extends well beyond pads
+    "module": (0.5, 2.0),       # ESP32/W5500 — body extends ~2mm beyond pad field per side
     "qfn": (0.25, 0.25),        # QFN/QFP/BGA — body ≈ pad field
     "qfp": (0.25, 0.25),
     "bga": (0.25, 0.25),

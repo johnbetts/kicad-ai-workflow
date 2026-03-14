@@ -904,7 +904,7 @@ def _resolve_collisions(
                 gmax_x + margin, gmax_y + margin)
 
     # Iteratively relocate colliding components
-    for _pass in range(8):
+    for _pass in range(12):
         # Recompute colliding refs each pass (relocations may create new collisions)
         current_collisions = _count_collisions(result, fp_sizes)
         if not current_collisions:
