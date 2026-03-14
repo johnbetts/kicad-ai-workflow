@@ -4665,10 +4665,46 @@ def optimize_placement_ee(
                             | {r for r in best_positions if r.startswith("K")}
                             | top_edge_connector_refs
                             | adc_channel_refs | adc_ic_refs
-                            | ethernet_fixed)
+                            | ethernet_fixed
+                            | mcu_peripheral_refs | power_group_fixed)
             best_positions = _resolve_collisions(
                 best_positions, fp_sizes, bounds, _relay_fixed,
             )
+
+    # MCU decoupling re-pull — late phases and collision resolution may have
+    # scattered MCU decoupling caps. Re-pull them tight against U3's LEFT side.
+    # ESP32-S3-WROOM at 180° has VCC/GND on side castellation pads, so caps
+    # go to the left (toward board center) in a vertical column.
+    if mcu_ref_c3 and mcu_ref_c3 in best_positions:
+        _mcu_fx, _mcu_fy, _mcu_fr = best_positions[mcu_ref_c3]
+        _mcu_fw, _mcu_fh = fp_sizes.get(mcu_ref_c3, (19.5, 25.4))
+        if _mcu_fr % 180 in (90.0, 270.0):
+            _mcu_fw, _mcu_fh = _mcu_fh, _mcu_fw
+        _mcu_left = _mcu_fx - _mcu_fw / 2.0
+        _mcu_decoup_pulled = 0
+        _mcu_decoup_refs = sorted(
+            r for r in best_positions
+            if r.startswith("C") and r in mcu_peripheral_refs
+        )
+        # Place caps in a vertical column LEFT of U3, centered on U3's Y
+        _cap_x = _mcu_left - 3.0  # 3mm left of MCU body
+        _cap_y_start = _mcu_fy - (_mcu_fh / 3.0)  # start 1/3 above center
+        _cap_y = _cap_y_start
+        for ref in _mcu_decoup_refs:
+            cx, cy, crot = best_positions[ref]
+            d = ((cx - _mcu_fx) ** 2 + (cy - _mcu_fy) ** 2) ** 0.5
+            if d > 8.0:
+                cw, ch = fp_sizes.get(ref, (2.5, 1.5))
+                tx = _cap_x
+                ty = _cap_y
+                _cap_y += ch + 1.0
+                tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+                ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                best_positions[ref] = (tx, ty, crot)
+                _mcu_decoup_pulled += 1
+        if _mcu_decoup_pulled:
+            _log.info("MCU decoupling re-pull: %d caps to U3 left side",
+                      _mcu_decoup_pulled)
 
     # Final edge clamp — ensure ALL components are inside board after late phases
     for ref, (rx, ry, rot) in list(best_positions.items()):
