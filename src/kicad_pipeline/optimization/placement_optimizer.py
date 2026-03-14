@@ -2321,9 +2321,9 @@ def optimize_placement_ee(
         if power_ics and power_zone_rect is not None:
             zx1, zy1, zx2, zy2 = power_zone_rect
 
-            _STRIP_GAP = 1.0   # vertical gap between components
-            _COL_SPACING = 7.0  # horizontal gap between fork columns
-            _IC_MARGIN = 5.0    # max distance from IC for its passives
+            _STRIP_GAP = 0.5   # vertical gap between components
+            _COL_SPACING = 5.0  # horizontal gap between fork columns
+            _IC_MARGIN = 8.0    # max distance from IC for its passives
 
             placed_in_col: set[str] = set()  # prevent double-placement
 
@@ -2461,6 +2461,12 @@ def optimize_placement_ee(
                 _ow, _oh = _rotation_aware_size(_oref, positions, fp_sizes)
                 _pwr_grid.place(_ox, _oy, _ow, _oh)
 
+            # Clamp bounds for power columns — use power zone, not board
+            _pz_x1 = zx1 + 2.0
+            _pz_y1 = zy1 + 2.0
+            _pz_x2 = zx2 - 2.0
+            _pz_y2 = zy2 - 2.0
+
             def _place_column(
                 refs: list[str],
                 col_x: float,
@@ -2473,13 +2479,14 @@ def optimize_placement_ee(
                             or ref in placed_in_col or ref == ""):
                         continue
                     w, h = fp_sizes.get(ref, (2.0, 2.0))
-                    tx = col_x
-                    ty = cy + h / 2.0
-                    tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
-                    ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                    tx = max(_pz_x1, min(_pz_x2, col_x))
+                    ty = max(_pz_y1, min(_pz_y2, cy + h / 2.0))
                     # Use grid to avoid collisions with other groups
                     px, py = _pwr_grid.find_free_pos(tx, ty, w, h,
                                                       max_radius=_IC_MARGIN)
+                    # Clamp result to power zone to prevent escape
+                    px = max(_pz_x1, min(_pz_x2, px))
+                    py = max(_pz_y1, min(_pz_y2, py))
                     positions[ref] = (px, py, 0.0)
                     _pwr_grid.place(px, py, w, h)
                     power_group_fixed.add(ref)
@@ -2499,12 +2506,13 @@ def optimize_placement_ee(
                             or ref in placed_in_col or ref == ""):
                         continue
                     w, h = fp_sizes.get(ref, (2.0, 2.0))
-                    tx = col_x
-                    ty = cy - h / 2.0
-                    tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
-                    ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+                    tx = max(_pz_x1, min(_pz_x2, col_x))
+                    ty = max(_pz_y1, min(_pz_y2, cy - h / 2.0))
                     px, py = _pwr_grid.find_free_pos(tx, ty, w, h,
                                                       max_radius=_IC_MARGIN)
+                    # Clamp result to power zone
+                    px = max(_pz_x1, min(_pz_x2, px))
+                    py = max(_pz_y1, min(_pz_y2, py))
                     positions[ref] = (px, py, 0.0)
                     _pwr_grid.place(px, py, w, h)
                     power_group_fixed.add(ref)
@@ -4131,6 +4139,7 @@ def optimize_placement_ee(
         always_fixed_base = (mcu_peripheral_refs | top_edge_connector_refs
                              | ethernet_fixed | adc_channel_refs
                              | adc_ic_refs | relay_support_refs
+                             | power_group_fixed
                              | {r for r in positions if r.startswith("K")})
         # When both refs in a collision pair are in always_fixed,
         # unprotect the smaller one so collision resolution can act.

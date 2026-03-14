@@ -46,9 +46,9 @@ _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
     #   Row 2 center (35-60% x, 50-100% y): ethernet
     #   Row 2 right (60-100% x, 50-100% y): mcu
     "input_connectors": (0.00, 0.00, 1.00, 0.15),
-    "power":            (0.00, 0.15, 0.40, 0.50),
+    "power":            (0.00, 0.15, 0.40, 0.60),
     "relay":            (0.40, 0.15, 1.00, 0.50),
-    "analog":           (0.00, 0.50, 0.35, 1.00),
+    "analog":           (0.00, 0.60, 0.35, 1.00),
     "mcu":              (0.60, 0.50, 1.00, 1.00),
     "ethernet":         (0.35, 0.50, 0.60, 1.00),
 }
