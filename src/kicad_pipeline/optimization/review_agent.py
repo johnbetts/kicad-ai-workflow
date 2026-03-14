@@ -546,7 +546,11 @@ def _check_thermal_adjacency(
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
 
-    power_keywords = {"RELAY", "REGULATOR", "BUCK", "LDO", "MOSFET", "FET"}
+    # Only flag components that actually dissipate significant power —
+    # relay coils (K), buck/LDO ICs (U with regulator keywords), and
+    # power inductors (L).  Small-signal transistors (Q) and gate
+    # resistors (R) in relay driver circuits are NOT thermal sources.
+    power_keywords = {"REGULATOR", "BUCK", "LDO"}
     sensitive_keywords = {"ADC", "DAC", "VREF", "CRYSTAL", "SENSOR", "OPAMP"}
 
     # Identify power and sensitive components
@@ -555,7 +559,13 @@ def _check_thermal_adjacency(
 
     for comp in requirements.components:
         val_desc = f"{comp.value} {comp.description or ''}".upper()
-        if _ref_prefix(comp.ref) == "K" or any(kw in val_desc for kw in power_keywords):
+        prefix = _ref_prefix(comp.ref)
+        # Only large thermal sources: relays, power ICs, power inductors
+        if prefix == "K":
+            power_refs.append(comp.ref)
+        elif prefix == "U" and any(kw in val_desc for kw in power_keywords):
+            power_refs.append(comp.ref)
+        elif prefix == "L" and "INDUCTOR" in val_desc and "FERRITE" not in val_desc:
             power_refs.append(comp.ref)
         if any(kw in val_desc for kw in sensitive_keywords):
             sensitive_refs.append(comp.ref)
