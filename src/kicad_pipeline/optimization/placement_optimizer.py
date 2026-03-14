@@ -1067,9 +1067,16 @@ def _place_row_layout(
         if zones:
             for z in zones:
                 if z.name == "relay":
-                    relay_zone_x1 = z.rect[0]
-                    relay_zone_x2 = z.rect[2] - 5.0  # 5mm from zone right
+                    relay_zone_x1 = max(min_x + 2.0, z.rect[0])
+                    relay_zone_x2 = min(max_x - 15.0, z.rect[2] - 5.0)
                     break
+        # Ensure rightmost relay stays within board with margin
+        # Each relay at 90° has X half-width = aw/2 ≈ 8.8mm
+        max_relay_half_w = max(
+            (fp_sizes.get(sc.anchor_ref, (5.0, 5.0))[1] for _, _, sc in anchor_positions),
+            default=8.8,
+        ) / 2.0
+        relay_zone_x2 = min(relay_zone_x2, max_x - max_relay_half_w - 1.5)
         # Center the row within the available zone X range
         zone_center_x = (relay_zone_x1 + relay_zone_x2) / 2.0
         start_x = zone_center_x - total_width / 2.0
@@ -3368,37 +3375,33 @@ def optimize_placement_ee(
                 other_passive_refs.append(ref)
 
         # --- Step 3: Place decoupling caps FIRST — tight against MCU ---
-        # At 180° rotation, U3's top edge (non-antenna) has power pins.
-        # Place decoupling row above MCU.
-        _DECOUP_GAP = 3.5
+        # ESP32-S3-WROOM VCC/GND are on side castellation pads.
+        # Place decoupling caps in a vertical column LEFT of MCU body,
+        # centered vertically on the MCU. This keeps caps within 3mm of
+        # the IC body edge (much closer than placing above the 25mm-tall module).
         mcu_right = mcu_x + eff_w / 2.0
-        # Place caps above MCU top edge
-        max_cap_h = max((fp_sizes.get(r, (2.5, 1.5))[1] for r in decoupling_refs),
-                        default=1.5)
-        decoup_col_x = mcu_x - eff_w / 4.0  # start from left side of MCU
-        decoup_y_start = mcu_top - _DECOUP_GAP - max_cap_h / 2.0
-        decoup_y = decoup_y_start
-        decoup_y_max = mcu_bot - 1.0
-        decoup_x = decoup_col_x
+        max_cap_w = max((fp_sizes.get(r, (2.5, 1.5))[0] for r in decoupling_refs),
+                        default=2.5)
+        # Column X: 2mm left of MCU body edge
+        decoup_col_x = mcu_left - max_cap_w / 2.0 - 2.0
+        # Start Y: centered on MCU, offset upward by half the total column height
+        total_cap_h = sum(fp_sizes.get(r, (1.5, 1.0))[1] + 1.5
+                          for r in decoupling_refs)
+        decoup_y = mcu_y - total_cap_h / 2.0
         for ref in decoupling_refs:
             w, h = fp_sizes.get(ref, (1.0, 0.5))
-            tx = decoup_x
-            ty = decoup_y_start
-            # Overflow to next row above
-            if tx + w / 2.0 > mcu_right:
-                decoup_x = mcu_x - eff_w / 4.0
-                decoup_y_start -= (h + 2.0)
-                tx = decoup_x
-                ty = decoup_y_start
+            tx = decoup_col_x
+            ty = decoup_y + h / 2.0
             tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
             px, py = mcu_grid.find_free_pos(tx, ty, w, h, max_radius=8.0)
             positions[ref] = (px, py, 0.0)
             mcu_peripheral_refs.add(ref)
             mcu_grid.place(px, py, w, h)
-            decoup_x += w + 2.0  # horizontal gap between caps
-            _log.info("    %s (decoupling): →(%.1f,%.1f) [%.1fmm from U3 top]",
-                      ref, px, py, mcu_top - py - h / 2.0)
+            decoup_y += h + 1.5
+            dist_to_mcu = ((px - mcu_x) ** 2 + (py - mcu_y) ** 2) ** 0.5
+            _log.info("    %s (decoupling): →(%.1f,%.1f) [%.1fmm from U3]",
+                      ref, px, py, dist_to_mcu)
 
         # --- Step 4: Place connectors ---
         # MCU connectors go on the RIGHT board edge (accessible for cables).
@@ -4767,9 +4770,14 @@ def optimize_placement_ee(
         _cap_y = _cap_y_start
         for ref in _mcu_decoup_refs:
             cx, cy, crot = best_positions[ref]
-            d = ((cx - _mcu_fx) ** 2 + (cy - _mcu_fy) ** 2) ** 0.5
-            if d > 8.0:
-                cw, ch = fp_sizes.get(ref, (2.5, 1.5))
+            # Use edge-to-edge distance (not center-to-center) since
+            # ESP32 module is 25mm tall — center-to-center >8mm for any
+            # cap placed beside the module, even when touching the body.
+            cw, ch = fp_sizes.get(ref, (2.5, 1.5))
+            dx_edge = max(0.0, abs(cx - _mcu_fx) - (_mcu_fw + cw) / 2.0)
+            dy_edge = max(0.0, abs(cy - _mcu_fy) - (_mcu_fh + ch) / 2.0)
+            edge_dist = (dx_edge ** 2 + dy_edge ** 2) ** 0.5
+            if edge_dist > 5.0:
                 tx = _cap_x
                 ty = _cap_y
                 _cap_y += ch + 1.0
