@@ -227,13 +227,13 @@ def render_placement(
         ax.plot(xs, ys, "k-", linewidth=2)
         ax.fill(xs, ys, alpha=0.05, color="green")
 
-    # Draw footprints — center boxes on pad centroid, not KiCad origin
-    from kicad_pipeline.pcb.pin_map import origin_to_centroid
-
+    # Draw footprints — use KiCad origin coordinates so the render matches
+    # what the user sees in the KiCad PCB editor.  The box is drawn centered
+    # on the origin (pin 1), which is how KiCad renders the component.
     for fp in pcb.footprints:
         w, h = _fp_size(fp)
         color = ref_color.get(fp.ref, "#cccccc")
-        x, y = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        x, y = fp.position.x, fp.position.y
 
         rect = FancyBboxPatch(
             (x - w / 2, y - h / 2), w, h,
@@ -248,10 +248,9 @@ def render_placement(
     # Draw group bounding boxes with dotted lines
     if use_groups:
         assert group_map is not None
+        # Use origin positions for group bounding boxes (matches KiCad display)
         ref_pos = {
-            fp.ref: origin_to_centroid(
-                fp, fp.position.x, fp.position.y, fp.rotation,
-            )
+            fp.ref: (fp.position.x, fp.position.y)
             for fp in pcb.footprints
         }
         unique_groups = sorted(set(group_map.values()))
