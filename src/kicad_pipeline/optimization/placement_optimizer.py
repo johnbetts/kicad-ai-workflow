@@ -3952,7 +3952,9 @@ def optimize_placement_ee(
                 len(ethernet_fixed), sorted(ethernet_fixed),
             )
 
-            # Local overlap fix: shift caps that collide with crystal
+            # Local overlap fix: shift caps that collide with crystal.
+            # Use generous margin (2.0mm) so collision resolution can't
+            # push them back into the crystal.
             _crystal_placed = [r for r in placed_eth if r.startswith("Y")]
             for yref in _crystal_placed:
                 yx, yy, yrot = positions[yref]
@@ -3962,11 +3964,12 @@ def optimize_placement_ee(
                         continue
                     cx, cy, crot = positions[cref]
                     cw, ch = fp_sizes.get(cref, (1.5, 1.0))
-                    # Check overlap (axis-aligned)
-                    if (abs(cx - yx) < (cw + yw) / 2.0 + 0.3
-                            and abs(cy - yy) < (ch + yh) / 2.0 + 0.3):
-                        # Shift cap below crystal
-                        new_cy = yy + yh / 2.0 + ch / 2.0 + 0.5
+                    # Check overlap with 2mm safety margin
+                    _margin = 2.0
+                    if (abs(cx - yx) < (cw + yw) / 2.0 + _margin
+                            and abs(cy - yy) < (ch + yh) / 2.0 + _margin):
+                        # Shift cap below crystal with generous gap
+                        new_cy = yy + yh / 2.0 + ch / 2.0 + 2.0
                         new_cy = max(ezy1 + 2.0, min(ezy2 - 2.0, new_cy))
                         positions[cref] = (cx, new_cy, crot)
                         _log.info("    3c4: shifted %s below %s "
@@ -4587,6 +4590,39 @@ def optimize_placement_ee(
             if clamped_x != rx or clamped_y != ry:
                 best_positions[ref] = (clamped_x, clamped_y, rot)
 
+    # Final crystal-cap overlap resolution — collision resolution may have
+    # pushed caps back toward crystal refs.  Shift any overlapping caps away.
+    _crystal_refs_final = [r for r in best_positions if r.startswith("Y")]
+    for yref in _crystal_refs_final:
+        yx, yy, yrot = best_positions[yref]
+        yw, yh = fp_sizes.get(yref, (3.2, 1.5))
+        if yrot % 180 in (90.0, 270.0):
+            yw, yh = yh, yw
+        for cref in list(best_positions):
+            if cref == yref or not cref.startswith("C"):
+                continue
+            cx, cy, crot = best_positions[cref]
+            cw, ch = fp_sizes.get(cref, (1.5, 1.0))
+            if crot % 180 in (90.0, 270.0):
+                cw, ch = ch, cw
+            # Check overlap with 0.5mm margin
+            overlap_x = (cw + yw) / 2.0 + 0.5 - abs(cx - yx)
+            overlap_y = (ch + yh) / 2.0 + 0.5 - abs(cy - yy)
+            if overlap_x > 0 and overlap_y > 0:
+                # Push cap in the direction of least overlap
+                if overlap_x < overlap_y:
+                    shift = overlap_x + 0.5
+                    new_cx = cx + shift if cx > yx else cx - shift
+                    new_cx = max(min_x + 2, min(max_x - 2, new_cx))
+                    best_positions[cref] = (new_cx, cy, crot)
+                else:
+                    shift = overlap_y + 0.5
+                    new_cy = cy + shift if cy > yy else cy - shift
+                    new_cy = max(min_y + 2, min(max_y - 2, new_cy))
+                    best_positions[cref] = (cx, new_cy, crot)
+                _log.info("Final crystal overlap fix: shifted %s away from %s",
+                          cref, yref)
+
     # Build final PCB — use best_review from the main review loop
     # (which ran before late-phase re-alignments that may scatter components)
     if best_review is None:
@@ -4599,6 +4635,61 @@ def optimize_placement_ee(
     else:
         positions_tuple = _dict_to_positions(best_positions)
         final_pcb = _apply_positions(initial_pcb, positions_tuple)
+
+    # Filter stale violations — the review was captured before the final
+    # edge clamp and crystal overlap fix, so some violations may be resolved.
+    if best_review is not None:
+        from kicad_pipeline.optimization.review_agent import (
+            PlacementReview,
+            PlacementRule,
+            _check_board_edge_clearance,
+            _compute_grade,
+        )
+        fresh_edge = _check_board_edge_clearance(final_pcb)
+        fresh_edge_refs = {r for v in fresh_edge for r in v.refs}
+
+        # Also check which collision violations still exist in final PCB
+        fresh_collisions = _count_collisions(best_positions, fp_sizes)
+        fresh_collision_pairs = {
+            tuple(sorted((a, b))) for a, b in fresh_collisions
+        }
+
+        filtered: list[PlacementViolation] = []
+        _stale = 0
+        for v in best_review.violations:
+            if v.rule == PlacementRule.BOARD_EDGE_CLEARANCE:
+                if not any(r in fresh_edge_refs for r in v.refs):
+                    _stale += 1
+                    continue
+                # Replace with fresh measurement
+                for fv in fresh_edge:
+                    if fv.refs == v.refs:
+                        filtered.append(fv)
+                        break
+                else:
+                    filtered.append(v)
+            elif v.rule == PlacementRule.COLLISION:
+                # Check if this collision still exists in final positions
+                pair = tuple(sorted(v.refs))
+                if pair not in fresh_collision_pairs:
+                    _stale += 1
+                    continue
+                filtered.append(v)
+            else:
+                filtered.append(v)
+        if _stale:
+            _log.info("Filtered %d stale edge clearance violations", _stale)
+            grade = _compute_grade(tuple(filtered))
+            n_crit = sum(1 for v in filtered if v.severity == "critical")
+            n_major = sum(1 for v in filtered if v.severity == "major")
+            n_minor = sum(1 for v in filtered if v.severity == "minor")
+            best_review = PlacementReview(
+                violations=tuple(filtered),
+                summary=f"Grade {grade}: {len(filtered)} violations "
+                        f"({n_crit} critical, {n_major} major, "
+                        f"{n_minor} minor)",
+                grade=grade,
+            )
 
     # Post-optimization validation gate
     guard = validate_placement(final_pcb, requirements)
