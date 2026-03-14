@@ -856,6 +856,10 @@ def _check_board_edge_clearance(
                 suggested_position=(sx, sy),
             ))
         elif min_gap < warn_margin:
+            # Connectors intentionally sit on board edges — only warn
+            # for non-connector components
+            if ref.startswith("J"):
+                continue
             violations.append(PlacementViolation(
                 rule=PlacementRule.BOARD_EDGE_CLEARANCE,
                 severity="minor",
