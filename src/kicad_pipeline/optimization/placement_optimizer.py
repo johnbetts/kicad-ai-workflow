@@ -2234,6 +2234,77 @@ def optimize_placement_ee(
                 row_y += row_max_h + 0.5
                 row_max_h = 0.0
 
+    # 3b2. Relay LED indicator placement — D_LED + R_LED below support grid
+    # Each relay has a status LED (D18-D21) and current-limiting resistor
+    # (R33-R36) connected via K*_COIL and K*_LED nets. Place them consistently
+    # below each relay's support components.
+    _log.info("  3b2: Relay LED indicator placement")
+    relay_led_refs: set[str] = set()
+    # Build relay coil net → relay mapping
+    _coil_net_to_relay: dict[str, str] = {}
+    for net in requirements.nets:
+        if "_COIL" in net.name.upper():
+            for conn in net.connections:
+                if conn.ref.startswith("K"):
+                    _coil_net_to_relay[net.name] = conn.ref
+                    break
+
+    # Find LED+resistor pairs per relay via coil nets
+    _relay_leds: dict[str, list[str]] = {}  # K_ref → [D_led, R_led]
+    for net in requirements.nets:
+        if "_COIL" in net.name.upper():
+            k_ref = _coil_net_to_relay.get(net.name)
+            if not k_ref:
+                continue
+            for conn in net.connections:
+                if conn.ref.startswith("D") and conn.ref not in relay_support_refs:
+                    _relay_leds.setdefault(k_ref, []).append(conn.ref)
+        elif "_LED" in net.name.upper():
+            # K*_LED nets connect D_led to R_led
+            d_refs_in = [c.ref for c in net.connections if c.ref.startswith("D")]
+            r_refs_in = [c.ref for c in net.connections if c.ref.startswith("R")]
+            for d_ref in d_refs_in:
+                # Find which relay this D belongs to
+                for k_ref, led_list in _relay_leds.items():
+                    if d_ref in led_list:
+                        led_list.extend(r_refs_in)
+                        break
+
+    # Place LED pairs below each relay's support row
+    for k_ref in sorted(_relay_leds):
+        if k_ref not in positions:
+            continue
+        kx, ky, _krot = positions[k_ref]
+        kw, kh = fp_sizes.get(k_ref, (18.0, 16.0))
+        if _krot % 180 in (90.0, 270.0):
+            kw, kh = kh, kw
+
+        led_members = sorted(set(_relay_leds[k_ref]))
+        led_members = [r for r in led_members if r in positions and r not in fixed_refs]
+        if not led_members:
+            continue
+
+        # Place LED row below support grid (support is at ky + kh/2 + ~5mm)
+        led_y_base = ky + kh / 2.0 + 5.5
+        led_col = 0
+        led_cols_per_row = min(len(led_members), 2)
+        for ref in led_members:
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            px = kx - kw / 4.0 + led_col * (kw / 2.0)
+            py = led_y_base + h / 2.0
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            _, _, rot = positions[ref]
+            positions[ref] = (px, py, rot)
+            relay_support_refs.add(ref)
+            relay_led_refs.add(ref)
+            led_col += 1
+            if led_col >= led_cols_per_row:
+                led_col = 0
+                led_y_base += h + 0.5
+
+        _log.info("    3b2: placed %d LED refs for %s", len(led_members), k_ref)
+
     # 3c. Decoupling cap tightening — within 3-5mm of IC
     _log.info("  3c: Decoupling cap tightening")
     for sc in sc_list:
@@ -4505,8 +4576,8 @@ def optimize_placement_ee(
 
     # 3b-late: Post-collision relay driver re-alignment
     # Runs LAST — after all other late phases and their collision resolution.
-    # Re-snaps each relay's support (Q, D, R, LED) back into a tight
-    # 2-column grid directly below the relay.
+    # Re-snaps each relay's support (Q, D, R) + LED indicators back into a
+    # tight grid directly below the relay.
     _log.info("  3b-late: Relay driver re-alignment")
     _relay_realigned = 0
     for sc in sc_list:
@@ -4520,6 +4591,7 @@ def optimize_placement_ee(
         if krot % 180 in (90.0, 270.0):
             kw, kh = kh, kw
 
+        # Core support: Q, D_flyback, R_gate
         support_members = [
             r for r in sc.refs
             if r != anchor and r in best_positions
@@ -4528,13 +4600,42 @@ def optimize_placement_ee(
             0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
         ))
 
+        # LED indicators: D_led + R_led from _relay_leds mapping
+        led_members = sorted(
+            set(_relay_leds.get(anchor, []))
+            & set(best_positions.keys()),
+        )
+
         target_y_base = ky + kh / 2.0 + 1.0
         col = 0
         row_y = target_y_base
         row_max_h = 0.0
         cols_per_row = 2
 
+        # Place core support in 2-column grid
         for ref in support_members:
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
+            py = row_y + h / 2.0
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            old_x, old_y, old_rot = best_positions[ref]
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            best_positions[ref] = (px, py, old_rot)
+            row_max_h = max(row_max_h, h)
+            col += 1
+            if col >= cols_per_row:
+                col = 0
+                row_y += row_max_h + 0.5
+                row_max_h = 0.0
+
+        # Place LED indicators in next row below support
+        if col > 0:
+            row_y += row_max_h + 0.5
+            col = 0
+            row_max_h = 0.0
+        for ref in led_members:
             w, h = fp_sizes.get(ref, (2.0, 2.0))
             px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
             py = row_y + h / 2.0
