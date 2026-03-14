@@ -2442,7 +2442,8 @@ _BODY_EXTENSION: dict[str, tuple[float, float]] = {
     "bga": (0.25, 0.25),
     "sot": (0.75, 0.75),        # SOT-23/223 — body wider than pads
     "passive": (0.25, 0.25),    # 0402/0603/0805 — body fits between pads
-    "connector": (0.5, 0.5),    # THT connectors
+    "terminal_block": (2.0, 4.5),  # Screw terminals — body extends ~4.5mm above/below pad line
+    "connector": (0.5, 0.5),    # Generic THT connectors (pin headers, etc.)
     "relay": (1.0, 1.0),        # Relay modules
     "switch": (1.0, 1.0),       # Tactile switches
     "default": (0.5, 0.5),      # Catch-all
@@ -2468,9 +2469,10 @@ def _classify_package(fp: Footprint) -> str:
     if any(kw in lib_upper for kw in ("0402", "0603", "0805", "1206", "1210",
                                        "R_", "C_", "L_", "LED_")):
         return "passive"
+    if any(kw in lib_upper for kw in ("TERMINALBLOCK", "TB_", "MKDS")):
+        return "terminal_block"
     if any(kw in lib_upper for kw in ("PINHEADER", "PINSOCKET", "CONN_",
-                                       "TERMINALBLOCK", "TB_", "MOLEX",
-                                       "RJ45", "USB")):
+                                       "MOLEX", "RJ45", "USB")):
         return "connector"
     if "RELAY" in lib_upper:
         return "relay"

@@ -659,7 +659,11 @@ class TestDecouplingCapProximity:
         assert not _is_decoupling_cap("C5", "470uF")
 
     def test_decoupling_cap_near_constraint_distance(self) -> None:
-        """Decoupling caps are placed within 5mm of their IC power pin."""
+        """Decoupling caps use DECOUPLING_CAP_MAX/MIN_DISTANCE_MM constants."""
+        from kicad_pipeline.constants import (
+            DECOUPLING_CAP_MAX_DISTANCE_MM,
+            DECOUPLING_CAP_MIN_DISTANCE_MM,
+        )
         req = _make_requirements_for_constraints()
         sizes = {c.ref: (3.0, 3.0) for c in req.components}
         constraints = constraints_from_requirements(req, None, sizes)
@@ -668,8 +672,8 @@ class TestDecouplingCapProximity:
             if c.ref == "C1" and c.constraint_type == PlacementConstraintType.NEAR
         ]
         assert len(c1_near) >= 1
-        assert c1_near[0].max_distance_mm == pytest.approx(5.0)
-        assert c1_near[0].min_distance_mm == pytest.approx(3.0)
+        assert c1_near[0].max_distance_mm == pytest.approx(DECOUPLING_CAP_MAX_DISTANCE_MM)
+        assert c1_near[0].min_distance_mm == pytest.approx(DECOUPLING_CAP_MIN_DISTANCE_MM)
 
     def test_decoupling_cap_has_target_pin(self) -> None:
         """Decoupling cap NEAR constraint records the IC power pin."""
@@ -1056,9 +1060,9 @@ class TestRotationOptimization:
         rotations = {"C1": 0.0, "U1": 0.0}
         sizes = {"C1": (2.0, 1.0), "U1": (6.0, 4.0)}
         result = optimize_rotations(positions, rotations, req, footprint_sizes=sizes)
-        # Pad-1 at (-w/2, 0). At 270 deg, pad-1 rotates to (0, +w/2) = below centre,
-        # facing U1 which is below at y=30.
-        assert result["C1"] == pytest.approx(270.0)
+        # Pad-1 at (-w/2, 0). At 90 deg CW (KiCad convention), pad-1 rotates
+        # to (0, +w/2) = below centre, facing U1 which is below at y=30.
+        assert result["C1"] == pytest.approx(90.0)
 
     def test_voltage_divider_connected_pads_face_each_other(self) -> None:
         """R1-pad2 connects to R2-pad1; they should orient connected pads closest."""
@@ -1145,20 +1149,20 @@ class TestRotationOptimization:
         assert x == pytest.approx(1.5)
         assert y == pytest.approx(0.0)
 
-        # 90 degrees — (1.5, 0) -> (0, 1.5)
+        # 90 degrees CW (KiCad convention) — (1.5, 0) -> (0, -1.5)
         x, y = _rotated_pad_offset(1.5, 0.0, 90.0)
         assert x == pytest.approx(0.0, abs=1e-10)
-        assert y == pytest.approx(1.5)
+        assert y == pytest.approx(-1.5)
 
         # 180 degrees — (1.5, 0) -> (-1.5, 0)
         x, y = _rotated_pad_offset(1.5, 0.0, 180.0)
         assert x == pytest.approx(-1.5)
         assert y == pytest.approx(0.0, abs=1e-10)
 
-        # 270 degrees — (1.5, 0) -> (0, -1.5)
+        # 270 degrees CW (KiCad convention) — (1.5, 0) -> (0, 1.5)
         x, y = _rotated_pad_offset(1.5, 0.0, 270.0)
         assert x == pytest.approx(0.0, abs=1e-10)
-        assert y == pytest.approx(-1.5)
+        assert y == pytest.approx(1.5)
 
     def test_build_pad_connectivity(self) -> None:
         """Verify pin-level mapping excludes power nets."""
@@ -1698,7 +1702,8 @@ class TestPassiveNearConstraints:
         ]
         # Should have exactly 1 NEAR (from decoupling, not duplicated by 4b)
         assert len(c1_near) == 1
-        assert c1_near[0].max_distance_mm == pytest.approx(5.0)  # decoupling distance
+        from kicad_pipeline.constants import DECOUPLING_CAP_MAX_DISTANCE_MM
+        assert c1_near[0].max_distance_mm == pytest.approx(DECOUPLING_CAP_MAX_DISTANCE_MM)
 
     def test_passive_near_pin_level_targeting(self) -> None:
         """Passive NEAR constraint records the specific target pin."""

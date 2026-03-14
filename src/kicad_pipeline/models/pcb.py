@@ -2,9 +2,81 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
+
+
+class OriginType(Enum):
+    """How the footprint origin relates to the physical body.
+
+    SMD parts typically have the origin at the geometric center.
+    THT connectors typically have the origin at pin 1.
+    """
+
+    CENTER = "center"
+    PIN1 = "pin1"
+
+
+@dataclass(frozen=True)
+class FootprintBBox:
+    """Axis-aligned bounding box relative to the footprint origin.
+
+    All values are in mm, relative to the origin point.  For a center-origin
+    part min_x/min_y are typically negative.
+    """
+
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+
+    @property
+    def width(self) -> float:
+        """Total width (X extent) of the bounding box."""
+        return self.max_x - self.min_x
+
+    @property
+    def height(self) -> float:
+        """Total height (Y extent) of the bounding box."""
+        return self.max_y - self.min_y
+
+    @property
+    def center_offset(self) -> tuple[float, float]:
+        """Offset from origin to geometric center ``(dx, dy)``."""
+        return (
+            (self.min_x + self.max_x) / 2.0,
+            (self.min_y + self.max_y) / 2.0,
+        )
+
+    def rotated(self, degrees: float) -> FootprintBBox:
+        """Return a new AABB that encloses this bbox after rotation.
+
+        Rotation is clockwise around the origin (KiCad convention).
+        """
+        rad = math.radians(-degrees)
+
+        # Rotate all four corners and take the AABB of the result.
+        corners = (
+            (self.min_x, self.min_y),
+            (self.max_x, self.min_y),
+            (self.max_x, self.max_y),
+            (self.min_x, self.max_y),
+        )
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+        rxs: list[float] = []
+        rys: list[float] = []
+        for cx, cy in corners:
+            rxs.append(cx * cos_r - cy * sin_r)
+            rys.append(cx * sin_r + cy * cos_r)
+        return FootprintBBox(
+            min_x=min(rxs),
+            min_y=min(rys),
+            max_x=max(rxs),
+            max_y=max(rys),
+        )
 
 
 class TrackType(Enum):

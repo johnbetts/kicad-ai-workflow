@@ -951,7 +951,7 @@ def solve_placement(
         if c.target_pin is not None and target in pin_offsets:
             pin_off = pin_offsets[target].get(c.target_pin)
             if pin_off is not None:
-                rot_rad = math.radians(rotations.get(target, 0.0))
+                rot_rad = math.radians(-rotations.get(target, 0.0))
                 cos_r = math.cos(rot_rad)
                 sin_r = math.sin(rot_rad)
                 rpx = pin_off[0] * cos_r - pin_off[1] * sin_r
@@ -1550,17 +1550,18 @@ def _rotated_pad_offset(
 ) -> tuple[float, float]:
     """Rotate a pad's relative ``(px, py)`` offset by *rotation_deg* degrees.
 
-    Uses the standard 2-D rotation matrix.
+    Uses KiCad's CW rotation convention (positive angle = CW in screen
+    view with Y-down coordinate system).
 
     Args:
         px: Pad X offset from component centre.
         py: Pad Y offset from component centre.
-        rotation_deg: Rotation angle in degrees (counter-clockwise).
+        rotation_deg: Rotation angle in degrees (KiCad CW convention).
 
     Returns:
         Rotated ``(x, y)`` offset.
     """
-    rad = math.radians(rotation_deg)
+    rad = math.radians(-rotation_deg)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
     return (px * cos_r - py * sin_r, px * sin_r + py * cos_r)
 

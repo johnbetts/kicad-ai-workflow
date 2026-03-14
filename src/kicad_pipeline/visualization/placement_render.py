@@ -240,8 +240,11 @@ def render_placement(
         px0, py0, px1, py1 = pad_extent_in_board_space(fp, ox, oy, rot)
         pad_w = px1 - px0
         pad_h = py1 - py0
-        # Use courtyard size as minimum for visibility
+        # Use courtyard size as minimum for visibility — swap for 90/270° rotation
         court_w, court_h = _fp_size(fp)
+        rot_norm = rot % 360.0
+        if 45.0 < rot_norm < 135.0 or 225.0 < rot_norm < 315.0:
+            court_w, court_h = court_h, court_w
         w = max(pad_w, court_w)
         h = max(pad_h, court_h)
         # Center the (possibly enlarged) box on the pad centroid
