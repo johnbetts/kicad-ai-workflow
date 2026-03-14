@@ -227,32 +227,47 @@ def render_placement(
         ax.plot(xs, ys, "k-", linewidth=2)
         ax.fill(xs, ys, alpha=0.05, color="green")
 
-    # Draw footprints — use KiCad origin coordinates so the render matches
-    # what the user sees in the KiCad PCB editor.  The box is drawn centered
-    # on the origin (pin 1), which is how KiCad renders the component.
+    # Draw footprints using actual pad bounding box for position, expanded
+    # to courtyard size for visibility.  This matches KiCad's display:
+    # - Asymmetric components (connectors) are positioned correctly
+    # - Small SMD parts use courtyard size so they're visible
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
     for fp in pcb.footprints:
-        w, h = _fp_size(fp)
         color = ref_color.get(fp.ref, "#cccccc")
-        x, y = fp.position.x, fp.position.y
+        ox, oy = fp.position.x, fp.position.y
+        rot = fp.rotation
+        px0, py0, px1, py1 = pad_extent_in_board_space(fp, ox, oy, rot)
+        pad_w = px1 - px0
+        pad_h = py1 - py0
+        # Use courtyard size as minimum for visibility
+        court_w, court_h = _fp_size(fp)
+        w = max(pad_w, court_w)
+        h = max(pad_h, court_h)
+        # Center the (possibly enlarged) box on the pad centroid
+        cx = (px0 + px1) / 2.0
+        cy = (py0 + py1) / 2.0
 
         rect = FancyBboxPatch(
-            (x - w / 2, y - h / 2), w, h,
+            (cx - w / 2, cy - h / 2), w, h,
             boxstyle="round,pad=0.1",
             facecolor=color, edgecolor="black", alpha=0.6, linewidth=0.8,
         )
         ax.add_patch(rect)
         fontsize = 5 if len(fp.ref) <= 3 else 4
-        ax.text(x, y, fp.ref, ha="center", va="center",
+        ax.text(cx, cy, fp.ref, ha="center", va="center",
                 fontsize=fontsize, fontweight="bold", color="black")
 
     # Draw group bounding boxes with dotted lines
     if use_groups:
         assert group_map is not None
-        # Use origin positions for group bounding boxes (matches KiCad display)
-        ref_pos = {
-            fp.ref: (fp.position.x, fp.position.y)
-            for fp in pcb.footprints
-        }
+        # Use pad extent center for group bounding boxes (matches drawn boxes)
+        ref_pos: dict[str, tuple[float, float]] = {}
+        for fp in pcb.footprints:
+            px0, py0, px1, py1 = pad_extent_in_board_space(
+                fp, fp.position.x, fp.position.y, fp.rotation,
+            )
+            ref_pos[fp.ref] = ((px0 + px1) / 2.0, (py0 + py1) / 2.0)
         unique_groups = sorted(set(group_map.values()))
         group_color_map = {
             name: _get_group_color(name, i)
