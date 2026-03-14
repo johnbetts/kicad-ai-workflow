@@ -3450,26 +3450,20 @@ def optimize_placement_ee(
             mcu_peripheral_refs.add("J15")
             _log.info("    J15 → right edge, below J14 (%.1f, %.1f)", px15, py15)
 
-        # J16 (SD card slot): ABOVE U3, facing right edge
+        # J16 (SD card slot): RIGHT board edge, above U3
+        # microSD card insertion needs the slot opening at the board edge.
+        # Force-place at edge — no grid search (edge connectors take priority).
         if "J16" in connector_refs and "J16" in positions and "J16" not in fixed_refs:
             w16, h16 = fp_sizes.get("J16", (16.2, 6.9))
-            # Place above U3 near right edge (bottom is too crowded with J13/J2)
-            tx = bounds[2] - w16 / 2.0 - 2.0  # near right edge
-            ty = mcu_top - h16 / 2.0 - 2.0  # above U3
-            tx = max(bounds[0] + w16 / 2.0 + 1.0,
-                     min(bounds[2] - w16 / 2.0 - 1.0, tx))
-            ty = max(bounds[1] + h16 / 2.0 + 1.0,
-                     min(bounds[3] - h16 / 2.0 - 1.0, ty))
-            px, py = mcu_grid.find_free_pos(tx, ty, w16, h16, max_radius=10.0)
-            # Clamp: keep pad extent inside board with 2.0mm margin
-            px = max(bounds[0] + w16 / 2.0 + 2.0,
-                     min(bounds[2] - w16 / 2.0 - 2.0, px))
-            py = max(bounds[1] + h16 / 2.0 + 2.0,
-                     min(bounds[3] - h16 / 2.0 - 2.0, py))
-            positions["J16"] = (px, py, 0.0)  # near right edge
+            # Right edge: connector body flush with board edge
+            px = bounds[2] - w16 / 2.0
+            py = mcu_top - h16 / 2.0 - 2.0  # above U3
+            py = max(bounds[1] + h16 / 2.0 + 1.0,
+                     min(bounds[3] - h16 / 2.0 - 1.0, py))
+            positions["J16"] = (px, py, 0.0)
             mcu_grid.place(px, py, w16, h16)
             mcu_peripheral_refs.add("J16")
-            _log.info("    J16 → near right edge, above U3 (%.1f, %.1f)", px, py)
+            _log.info("    J16 → right edge, above U3 (%.1f, %.1f)", px, py)
 
         # J2 (USB-C): bottom edge, LEFT of U3, facing outward (180°)
         # U3's courtyard extends to mcu_bot ≈ 72.7mm on an 80mm board, leaving
