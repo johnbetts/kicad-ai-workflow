@@ -88,6 +88,8 @@ _BARE_KEYWORDS: frozenset[str] = frozenset({
     "edge", "full",
     # Keepout rules
     "not_allowed", "allowed",
+    # Symbol scope (KiCad 10: power symbol visibility)
+    "global", "local",
     # Misc
     "hide",
 })
