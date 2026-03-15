@@ -13,8 +13,8 @@ corner, X increases to the right, Y increases downward.
 # KiCad format identifiers
 # ---------------------------------------------------------------------------
 
-KICAD_SCH_VERSION: int = 20250114
-"""KiCad schematic file format version integer (KiCad 10 uses same as KiCad 9)."""
+KICAD_SCH_VERSION: int = 20260101
+"""KiCad schematic file format version integer (KiCad 10)."""
 
 KICAD_PCB_VERSION: int = 20260206
 """KiCad PCB file format version integer (KiCad 10)."""

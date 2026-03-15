@@ -218,12 +218,14 @@ def _power_lib_symbol_sexp(lib_id: str, net_name: str) -> SExpNode:
 
     return [
         "symbol", lib_id,
-        ["power"],
+        ["power", "global"],
         ["pin_numbers", ["hide", True]],
         ["pin_names", ["offset", 0], ["hide", True]],
         ["exclude_from_sim", False],
         ["in_bom", True],
         ["on_board", True],
+        ["in_pos_files", True],
+        ["duplicate_pin_numbers_are_jumpers", False],
         ["property", "Reference", "#PWR", ref_at,
          _effects_sexp(FontEffect(hidden=True))],
         ["property", "Value", net_name, val_at,
@@ -239,6 +241,7 @@ def _power_lib_symbol_sexp(lib_id: str, net_name: str) -> SExpNode:
              ["name", "~", ["effects", ["font", ["size", 1.27, 1.27]]]],
              ["number", "1", ["effects", ["font", ["size", 1.27, 1.27]]]]],
         ],
+        ["embedded_fonts", False],
     ]
 
 
@@ -1062,10 +1065,12 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
     """
     body: list[SExpNode] = ["symbol", sym.lib_id]
 
-    # KiCad 9 required attributes
+    # KiCad 10 required attributes
     body.append(["exclude_from_sim", False])
     body.append(["in_bom", True])
     body.append(["on_board", True])
+    body.append(["in_pos_files", True])
+    body.append(["duplicate_pin_numbers_are_jumpers", False])
 
     # KiCad 9 required properties on lib_symbols
     # Extract the symbol short name (after the colon in lib_id)
@@ -1124,6 +1129,9 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
     for pin in sym.pins:
         pin_body.append(_lib_pin_sexp(pin))
     body.append(pin_body)
+
+    # KiCad 10: embedded_fonts flag
+    body.append(["embedded_fonts", False])
 
     return body
 
@@ -1526,6 +1534,46 @@ def schematic_to_sexp(
 
 
 # ---------------------------------------------------------------------------
+# Ref designator validation (KI-001 guard)
+# ---------------------------------------------------------------------------
+
+
+def _validate_no_question_mark_refs(sch_path: Path) -> None:
+    """Raise SchematicError if any placed symbol has ref containing '?'.
+
+    This catches KI-001 (unannotated ref designators) at generation time
+    rather than waiting for user to discover ``?`` refs in KiCad.
+
+    Args:
+        sch_path: Path to the ``.kicad_sch`` file to validate.
+
+    Raises:
+        SchematicError: If any non-power symbol has ``?`` in its reference.
+    """
+    from kicad_pipeline.validation.consistency import _get_property
+
+    tree = parse_file(sch_path)
+    if not isinstance(tree, list):
+        return
+
+    bad_refs: list[str] = []
+    for child in tree:
+        if not isinstance(child, list) or not child or child[0] != "symbol":
+            continue
+        ref = _get_property(child, "Reference")
+        if ref is None or ref.startswith("#"):
+            continue
+        if "?" in ref:
+            bad_refs.append(ref)
+
+    if bad_refs:
+        raise SchematicError(
+            f"Unannotated ref designators found (KI-001): {', '.join(bad_refs)}. "
+            f"All symbols must have fully annotated references."
+        )
+
+
+# ---------------------------------------------------------------------------
 # File I/O
 # ---------------------------------------------------------------------------
 
@@ -1584,6 +1632,9 @@ def write_schematic(
     except Exception as exc:
         raise SchematicError(f"Failed to write schematic to {dest}: {exc}") from exc
     log.info("write_schematic: wrote %s", dest)
+
+    # KI-001 guard: verify no '?' refs in written file
+    _validate_no_question_mark_refs(dest)
 
 
 def write_hierarchical_schematic(
