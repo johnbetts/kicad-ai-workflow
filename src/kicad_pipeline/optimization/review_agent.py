@@ -72,6 +72,9 @@ class PlacementRule(enum.Enum):
     CONNECTOR_FUNCTIONAL_PROXIMITY = "connector_functional_proximity"
     BOARD_EDGE_CLEARANCE = "board_edge_clearance"
     DIODE_ORIENTATION_CONSISTENCY = "diode_orientation_consistency"
+    COMPONENT_OFF_BOARD = "component_off_board"
+    ZONE_OVERFLOW = "zone_overflow"
+    GROUP_CONTAMINATION = "group_contamination"
 
 
 # ---------------------------------------------------------------------------
@@ -897,14 +900,12 @@ def _check_diode_orientation_consistency(
             continue
 
         # Collect diode rotations per instance
+        fp_rot_map = {fp.ref: fp.rotation for fp in pcb.footprints}
         diode_rots: dict[str, float] = {}
         for sc in instances:
             for ref in sc.refs:
-                if ref.startswith("D"):
-                    for fp in pcb.footprints:
-                        if fp.ref == ref:
-                            diode_rots[ref] = fp.rotation
-                            break
+                if ref.startswith("D") and ref in fp_rot_map:
+                    diode_rots[ref] = fp_rot_map[ref]
 
         if len(diode_rots) < 2:
             continue
@@ -922,6 +923,210 @@ def _check_diode_orientation_consistency(
                             f"{majority_rot}° in {sc_type} subcircuits",
                     current_value=rot,
                     threshold=majority_rot,
+                    suggested_position=None,
+                ))
+
+    return violations
+
+
+def _fp_raw_pad_bbox(pcb: PCBDesign) -> dict[str, tuple[float, float, float, float]]:
+    """Compute raw pad bounding box per footprint (no margin).
+
+    Returns ref -> (half_w, half_h, centroid_x, centroid_y) where
+    half_w/half_h are the half-extents from the centroid.
+    """
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
+
+    result: dict[str, tuple[float, float, float, float]] = {}
+    for fp in pcb.footprints:
+        if not fp.pads:
+            result[fp.ref] = (1.5, 1.5, fp.position.x, fp.position.y)
+            continue
+        # Compute raw pad extents in local coordinates (before rotation)
+        xs_min = [p.position.x - p.size_x / 2.0 for p in fp.pads]
+        xs_max = [p.position.x + p.size_x / 2.0 for p in fp.pads]
+        ys_min = [p.position.y - p.size_y / 2.0 for p in fp.pads]
+        ys_max = [p.position.y + p.size_y / 2.0 for p in fp.pads]
+        raw_w = max(xs_max) - min(xs_min)
+        raw_h = max(ys_max) - min(ys_min)
+        # Apply rotation: swap w/h for 90/270
+        rot = fp.rotation % 360.0
+        if 80.0 <= rot <= 100.0 or 260.0 <= rot <= 280.0:
+            raw_w, raw_h = raw_h, raw_w
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        result[fp.ref] = (raw_w / 2.0, raw_h / 2.0, cx, cy)
+    return result
+
+
+def _check_component_off_board(
+    pcb: PCBDesign,
+) -> list[PlacementViolation]:
+    """Check if any component's pads physically extend past the board outline.
+
+    Uses raw pad extents (no +1mm margin from _fp_size_dict) to detect
+    components that cannot be manufactured because pads are off-board.
+    """
+    violations: list[PlacementViolation] = []
+    bx1, by1, bx2, by2 = _board_bounds(pcb)
+    pad_bboxes = _fp_raw_pad_bbox(pcb)
+    margin = 1.0  # desired minimum margin from board edge
+
+    for fp in pcb.footprints:
+        ref = fp.ref
+        bbox = pad_bboxes.get(ref)
+        if bbox is None:
+            continue
+        half_w, half_h, cx, cy = bbox
+
+        # Compute how far each pad edge extends past the board edge
+        left_gap = (cx - half_w) - bx1
+        right_gap = bx2 - (cx + half_w)
+        top_gap = (cy - half_h) - by1
+        bottom_gap = by2 - (cy + half_h)
+        min_gap = min(left_gap, right_gap, top_gap, bottom_gap)
+
+        if min_gap < 0.0:
+            # Pads physically off-board — compute suggested position
+            sx, sy = cx, cy
+            if left_gap < 0.0:
+                sx = bx1 + half_w + margin
+            elif right_gap < 0.0:
+                sx = bx2 - half_w - margin
+            if top_gap < 0.0:
+                sy = by1 + half_h + margin
+            elif bottom_gap < 0.0:
+                sy = by2 - half_h - margin
+
+            violations.append(PlacementViolation(
+                rule=PlacementRule.COMPONENT_OFF_BOARD,
+                severity="critical",
+                refs=(ref,),
+                message=f"{ref} pads extend {abs(min_gap):.1f}mm past board edge "
+                        f"(cannot be manufactured)",
+                current_value=min_gap,
+                threshold=0.0,
+                suggested_position=(sx, sy),
+            ))
+
+    return violations
+
+
+def _check_zone_overflow(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> list[PlacementViolation]:
+    """Detect when two FeatureBlock groups' component bounding boxes overlap.
+
+    Significant overlap means zones are not properly partitioned and
+    component nudging cannot fix the layout.
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+
+    # Compute axis-aligned bbox per FeatureBlock
+    group_bboxes: dict[str, tuple[float, float, float, float]] = {}
+    for fb in requirements.features:
+        member_positions = [positions[r] for r in fb.components if r in positions]
+        if len(member_positions) < 2:
+            continue
+        xs = [p[0] for p in member_positions]
+        ys = [p[1] for p in member_positions]
+        group_bboxes[fb.name] = (min(xs), min(ys), max(xs), max(ys))
+
+    # Check all pairs for overlap
+    names = list(group_bboxes.keys())
+    for i, name_a in enumerate(names):
+        ax1, ay1, ax2, ay2 = group_bboxes[name_a]
+        a_area = max((ax2 - ax1) * (ay2 - ay1), 0.01)
+        for name_b in names[i + 1:]:
+            bx1, by1, bx2, by2 = group_bboxes[name_b]
+            b_area = max((bx2 - bx1) * (by2 - by1), 0.01)
+
+            # Intersection
+            ix1 = max(ax1, bx1)
+            iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2)
+            iy2 = min(ay2, by2)
+            if ix1 >= ix2 or iy1 >= iy2:
+                continue  # no overlap
+            intersect_area = (ix2 - ix1) * (iy2 - iy1)
+            smaller_area = min(a_area, b_area)
+            pct = intersect_area / smaller_area * 100.0
+
+            if pct > 20.0:
+                severity = "critical" if pct > 50.0 else "major"
+                violations.append(PlacementViolation(
+                    rule=PlacementRule.ZONE_OVERFLOW,
+                    severity=severity,
+                    refs=(),
+                    message=f"Group '{name_a}' overlaps group '{name_b}' "
+                            f"by {pct:.0f}%",
+                    current_value=pct,
+                    threshold=20.0,
+                    suggested_position=None,
+                ))
+
+    return violations
+
+
+def _check_group_contamination(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> list[PlacementViolation]:
+    """Detect when a component from one group is inside another group's region.
+
+    Exemptions:
+    - Connectors (J*) are exempt (often legitimately span boundaries)
+    - Components in multiple FeatureBlocks are exempt
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+
+    # Build ref → group name(s) map
+    ref_groups: dict[str, list[str]] = {}
+    for fb in requirements.features:
+        for r in fb.components:
+            ref_groups.setdefault(r, []).append(fb.name)
+
+    # Compute shrunk bbox per group (2mm inset to tolerate boundary overlap)
+    shrink = 2.0
+    group_bboxes: dict[str, tuple[float, float, float, float]] = {}
+    for fb in requirements.features:
+        member_positions = [positions[r] for r in fb.components if r in positions]
+        if len(member_positions) < 2:
+            continue
+        xs = [p[0] for p in member_positions]
+        ys = [p[1] for p in member_positions]
+        gx1 = min(xs) + shrink
+        gy1 = min(ys) + shrink
+        gx2 = max(xs) - shrink
+        gy2 = max(ys) - shrink
+        if gx1 < gx2 and gy1 < gy2:
+            group_bboxes[fb.name] = (gx1, gy1, gx2, gy2)
+
+    # Check each component against groups it doesn't belong to
+    for ref, pos in positions.items():
+        # Exemption: connectors
+        if _ref_prefix(ref) == "J":
+            continue
+        own_groups = ref_groups.get(ref, [])
+        # Exemption: component in multiple feature blocks
+        if len(own_groups) > 1:
+            continue
+        own_group = own_groups[0] if own_groups else ""
+        x, y = pos
+        for group_name, (gx1, gy1, gx2, gy2) in group_bboxes.items():
+            if group_name == own_group:
+                continue
+            if gx1 <= x <= gx2 and gy1 <= y <= gy2:
+                violations.append(PlacementViolation(
+                    rule=PlacementRule.GROUP_CONTAMINATION,
+                    severity="major",
+                    refs=(ref,),
+                    message=f"{ref} (group '{own_group}') is inside "
+                            f"group '{group_name}' region",
+                    current_value=0.0,
+                    threshold=0.0,
                     suggested_position=None,
                 ))
 
@@ -1024,6 +1229,15 @@ def review_placement(
     )
     all_violations.extend(
         _check_diode_orientation_consistency(pcb, subcircuits)
+    )
+    all_violations.extend(
+        _check_component_off_board(pcb)
+    )
+    all_violations.extend(
+        _check_zone_overflow(pcb, requirements)
+    )
+    all_violations.extend(
+        _check_group_contamination(pcb, requirements)
     )
 
     violations = tuple(all_violations)

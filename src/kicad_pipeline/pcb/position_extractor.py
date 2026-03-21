@@ -299,35 +299,43 @@ def _extract_net_map(tree: SExpNode) -> dict[int, str]:
                     name_to_num[net_name] = next_num
 
     # From footprint pads: (pad ... (net N "name") ...)
+    _extract_nets_from_pads(tree, result, name_to_num)
+
+    return result
+
+
+def _extract_nets_from_pads(
+    tree: SExpNode,
+    result: dict[int, str],
+    name_to_num: dict[str, int],
+) -> None:
+    """Extract net mappings from footprint pad nodes."""
     for node in tree:
         if not isinstance(node, list) or not node or node[0] != "footprint":
             continue
         for child in node:
             if not isinstance(child, list) or not child or child[0] != "pad":
                 continue
-            for sub in child:
-                if isinstance(sub, list) and sub and sub[0] == "net":
-                    if len(sub) >= 3:
-                        # (net N "name") format
-                        try:
-                            num = int(float(str(sub[1])))
-                            name = str(sub[2])
-                            result[num] = name
-                        except (ValueError, IndexError):
-                            pass
-                    elif len(sub) == 2:
-                        # (net "name") format (KiCad 10)
-                        name = str(sub[1])
-                        # Assign a number if we know it from zones
-                        if name in name_to_num:
-                            result[name_to_num[name]] = name
-                        elif name not in result.values():
-                            # Assign next available number
-                            next_num = max(result.keys(), default=0) + 1
-                            result[next_num] = name
-                            name_to_num[name] = next_num
-
-    return result
+            net_sub = _find_child(child, "net")
+            if net_sub is None:
+                continue
+            if len(net_sub) >= 3:
+                # (net N "name") format
+                try:
+                    num = int(float(str(net_sub[1])))
+                    name = str(net_sub[2])
+                    result[num] = name
+                except (ValueError, IndexError):
+                    pass
+            elif len(net_sub) == 2:
+                # (net "name") format (KiCad 10)
+                name = str(net_sub[1])
+                if name in name_to_num:
+                    result[name_to_num[name]] = name
+                elif name not in result.values():
+                    next_num = max(result.keys(), default=0) + 1
+                    result[next_num] = name
+                    name_to_num[name] = next_num
 
 
 def _net_info(
@@ -459,6 +467,21 @@ def _is_auto_generated_zone(node: SExpNode) -> bool:
     return False
 
 
+def _extract_polygon_points(node: SExpNode) -> list[Point]:
+    """Extract points from a (polygon (pts (xy x y) ...)) structure."""
+    polygon_node = _find_child(node, "polygon")
+    if not polygon_node:
+        return []
+    pts_node = _find_child(polygon_node, "pts")
+    if not pts_node or not isinstance(pts_node, list):
+        return []
+    points: list[Point] = []
+    for child in pts_node[1:]:
+        if isinstance(child, list) and child and child[0] == "xy":
+            points.append(Point(float(str(child[1])), float(str(child[2]))))
+    return points
+
+
 def _extract_user_zones(
     tree: SExpNode,
     name_to_num: dict[str, int],
@@ -486,16 +509,7 @@ def _extract_user_zones(
         name = _str_val(node, "name")
         uuid = _str_val(node, "uuid")
         # Extract polygon points
-        polygon_node = _find_child(node, "polygon")
-        points: list[Point] = []
-        if polygon_node:
-            pts_node = _find_child(polygon_node, "pts")
-            if pts_node and isinstance(pts_node, list):
-                for child in pts_node[1:]:
-                    if isinstance(child, list) and child and child[0] == "xy":
-                        points.append(Point(
-                            float(str(child[1])), float(str(child[2])),
-                        ))
+        points = _extract_polygon_points(node)
         # Extract fill settings
         fill_node = _find_child(node, "fill")
         thermal_gap = 0.3
@@ -512,17 +526,18 @@ def _extract_user_zones(
         # Extract filled_polygon data
         filled_polys: list[tuple[Point, ...]] = []
         for child in node:
-            if isinstance(child, list) and child and child[0] == "filled_polygon":
-                fp_pts_node = _find_child(child, "pts")
-                if fp_pts_node and isinstance(fp_pts_node, list):
-                    fp_points: list[Point] = []
-                    for sub in fp_pts_node[1:]:
-                        if isinstance(sub, list) and sub and sub[0] == "xy":
-                            fp_points.append(Point(
-                                float(str(sub[1])), float(str(sub[2])),
-                            ))
-                    if fp_points:
-                        filled_polys.append(tuple(fp_points))
+            if not isinstance(child, list) or not child or child[0] != "filled_polygon":
+                continue
+            fp_pts_node = _find_child(child, "pts")
+            if not fp_pts_node or not isinstance(fp_pts_node, list):
+                continue
+            fp_points = [
+                Point(float(str(sub[1])), float(str(sub[2])))
+                for sub in fp_pts_node[1:]
+                if isinstance(sub, list) and sub and sub[0] == "xy"
+            ]
+            if fp_points:
+                filled_polys.append(tuple(fp_points))
         if points:
             zones.append(ZonePolygon(
                 net_number=net_num, net_name=net_name, layer=layer,
@@ -564,16 +579,7 @@ def _extract_user_keepouts(tree: SExpNode) -> list[Keepout]:
                     layers.append(str(child[1]))
         uuid = _str_val(node, "uuid")
         # Extract polygon
-        polygon_node = _find_child(node, "polygon")
-        points: list[Point] = []
-        if polygon_node:
-            pts_node = _find_child(polygon_node, "pts")
-            if pts_node and isinstance(pts_node, list):
-                for child in pts_node[1:]:
-                    if isinstance(child, list) and child and child[0] == "xy":
-                        points.append(Point(
-                            float(str(child[1])), float(str(child[2])),
-                        ))
+        points = _extract_polygon_points(node)
         # Extract keepout rules
         no_copper = False
         no_tracks = False
