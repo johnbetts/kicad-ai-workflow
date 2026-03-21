@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from kicad_pipeline.constants import JLCPCB_PARTS_SEARCH_URL
+from kicad_pipeline.constants import JLCPCB_MIN_STOCK_QTY, JLCPCB_PARTS_SEARCH_URL
 from kicad_pipeline.production.lcsc_client import LCSCStockInfo, fetch_lcsc_stock
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ class PartsValidationReport:
     all_parts_available: bool
     unresolved_count: int
     summary_text: str
+    low_stock_count: int = 0
 
 
 def _extract_package(footprint: str) -> str:
@@ -100,24 +101,24 @@ def _find_replacement(
         package = "0805"
 
     if category == "resistor":
-        value = _parse_resistance_ohms(comment)
-        if value is not None:
-            part = db.find_resistor(value, package)
-            if part is not None:
-                return part.lcsc, f"auto-replacement: {part.value} {part.package}"
+        parsed = _parse_resistance_ohms(comment)
+        if parsed is None:
+            return None, None
+        part = db.find_resistor(parsed, package)
+        if part is not None:
+            return part.lcsc, f"auto-replacement: {part.value} {part.package}"
     elif category == "capacitor":
-        value = _parse_capacitance_uf(comment)
-        if value is not None:
-            part = db.find_capacitor(value, package)
-            if part is not None:
-                return part.lcsc, f"auto-replacement: {part.value} {part.package}"
+        parsed = _parse_capacitance_uf(comment)
+        if parsed is None:
+            return None, None
+        part = db.find_capacitor(parsed, package)
+        if part is not None:
+            return part.lcsc, f"auto-replacement: {part.value} {part.package}"
     elif category == "diode":
-        # Try LED first, then generic diode
         for color in ("green", "red", "blue", "yellow"):
             part = db.find_led(color, package)
             if part is not None:
                 return part.lcsc, f"auto-replacement: {part.mfr} LED {color}"
-        return None, None
 
     return None, None
 
@@ -147,6 +148,7 @@ def validate_bom_parts(
     total_cost: float = 0.0
     all_available = True
     unresolved = 0
+    low_stock = 0
 
     # Collect web stock info for all LCSC parts in one pass
     web_stock: dict[str, LCSCStockInfo] = {}
@@ -190,6 +192,27 @@ def validate_bom_parts(
         if lcsc and lcsc in web_stock:
             info = web_stock[lcsc]
             if info.in_stock:
+                qty = info.stock_qty or 0
+                if qty < JLCPCB_MIN_STOCK_QTY:
+                    # Low stock — flag as unavailable, needs approval
+                    all_available = False
+                    unresolved += 1
+                    low_stock += 1
+                    parts.append(PartStatus(
+                        lcsc=lcsc,
+                        ref_designators=refs,
+                        comment=row.comment,
+                        footprint=row.footprint,
+                        tier=2,
+                        status="low_stock",
+                        in_stock=True,
+                        stock_qty=info.stock_qty,
+                        unit_price_usd=info.unit_price_usd,
+                        replacement_lcsc=None,
+                        replacement_reason=None,
+                        manual_url=_make_search_url(row.comment, row.footprint),
+                    ))
+                    continue
                 web_price = info.unit_price_usd
                 if web_price is not None:
                     total_cost += web_price * row.quantity
@@ -254,7 +277,9 @@ def validate_bom_parts(
         ))
 
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    summary = _build_summary(parts, total_cost, all_available, unresolved)
+    summary = _build_summary(
+        parts, total_cost, all_available, unresolved, low_stock,
+    )
 
     return PartsValidationReport(
         project_name=project_name,
@@ -264,6 +289,7 @@ def validate_bom_parts(
         all_parts_available=all_available,
         unresolved_count=unresolved,
         summary_text=summary,
+        low_stock_count=low_stock,
     )
 
 
@@ -272,6 +298,7 @@ def _build_summary(
     total_cost: float,
     all_available: bool,
     unresolved: int,
+    low_stock: int = 0,
 ) -> str:
     """Build human-readable summary text."""
     lines: list[str] = []
@@ -283,12 +310,21 @@ def _build_summary(
     lines.append(f"  Tier 2 (web stock):    {tier_counts[2]}")
     lines.append(f"  Tier 3 (auto-replace): {tier_counts[3]}")
     lines.append(f"  Tier 4 (manual):       {tier_counts[4]}")
+    if low_stock > 0:
+        lines.append(
+            f"  Low stock (<{JLCPCB_MIN_STOCK_QTY}):  {low_stock}"
+        )
     if total_cost > 0.0:
         lines.append(f"Estimated BOM cost: ${total_cost:.2f} USD")
     if all_available:
         lines.append("All parts available.")
     else:
         lines.append(f"ATTENTION: {unresolved} part(s) need manual resolution.")
+        if low_stock > 0:
+            lines.append(
+                f"  {low_stock} part(s) have stock below "
+                f"{JLCPCB_MIN_STOCK_QTY} — approval required."
+            )
     return "\n".join(lines)
 
 
@@ -302,7 +338,10 @@ def report_to_text(report: PartsValidationReport) -> str:
 
     for p in report.parts:
         refs = ", ".join(p.ref_designators)
-        lines.append(f"  [{p.status.upper():12s}] {refs:20s}  {p.comment:12s}  {p.footprint}")
+        status_label = p.status.upper()
+        if p.status == "low_stock":
+            status_label = f"LOW STOCK({p.stock_qty})"
+        lines.append(f"  [{status_label:12s}] {refs:20s}  {p.comment:12s}  {p.footprint}")
         lines.append(f"               LCSC: {p.lcsc or '(none)'}  Tier: {p.tier}")
         if p.in_stock and p.unit_price_usd is not None:
             stock_str = str(p.stock_qty) if p.stock_qty else "n/a"
@@ -347,6 +386,7 @@ def report_to_json(report: PartsValidationReport) -> str:
         "total_bom_cost_usd": report.total_bom_cost_usd,
         "all_parts_available": report.all_parts_available,
         "unresolved_count": report.unresolved_count,
+        "low_stock_count": report.low_stock_count,
         "summary_text": report.summary_text,
     }
     return json.dumps(obj, indent=2) + "\n"

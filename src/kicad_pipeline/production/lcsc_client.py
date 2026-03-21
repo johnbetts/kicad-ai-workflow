@@ -69,12 +69,14 @@ def _parse_lcsc_response(
     price_list = result.get("productPriceList")
     if isinstance(price_list, list) and price_list:
         for entry in price_list:
-            if isinstance(entry, dict):
-                price_val = entry.get("productPrice")
-                if price_val is not None:
-                    with contextlib.suppress(ValueError, TypeError):
-                        unit_price = float(price_val)
-                    break
+            if not isinstance(entry, dict):
+                continue
+            price_val = entry.get("productPrice")
+            if price_val is None:
+                continue
+            with contextlib.suppress(ValueError, TypeError):
+                unit_price = float(price_val)
+            break
 
     description = str(result.get("productDescEn", ""))
     package = str(result.get("encapStandard", ""))

@@ -29,6 +29,51 @@ if TYPE_CHECKING:
 # Tokeniser
 # ---------------------------------------------------------------------------
 
+_ESCAPE_MAP: dict[str, str] = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    '"': '"',
+    "\\": "\\",
+}
+
+
+def _lex_string(text: str, start: int, length: int) -> tuple[str, int]:
+    """Lex a double-quoted string starting at *start*.
+
+    Returns:
+        ``(unescaped_value, position_after_closing_quote)``
+
+    Raises:
+        SExpParseError: On unterminated string or escape sequence.
+    """
+    i = start + 1  # skip opening quote
+    buf: list[str] = []
+    while i < length:
+        c = text[i]
+        if c == "\\":
+            i += 1
+            if i >= length:
+                raise SExpParseError(
+                    "Unterminated escape sequence in string literal",
+                    position=start,
+                )
+            esc = text[i]
+            mapped = _ESCAPE_MAP.get(esc)
+            if mapped is not None:
+                buf.append(mapped)
+            else:
+                # Pass unknown escapes through verbatim
+                buf.append("\\")
+                buf.append(esc)
+            i += 1
+        elif c == '"':
+            return "".join(buf), i + 1
+        else:
+            buf.append(c)
+            i += 1
+    raise SExpParseError("Unterminated string literal", position=start)
+
 
 def _tokenise(text: str) -> list[tuple[str, int]]:
     """Break *text* into a flat list of ``(token, position)`` pairs.
@@ -80,44 +125,8 @@ def _tokenise(text: str) -> list[tuple[str, int]]:
 
         # Double-quoted string
         if ch == '"':
-            start = i
-            i += 1  # skip opening quote
-            buf: list[str] = []
-            while i < length:
-                c = text[i]
-                if c == "\\":
-                    i += 1
-                    if i >= length:
-                        raise SExpParseError(
-                            "Unterminated escape sequence in string literal",
-                            position=start,
-                        )
-                    esc = text[i]
-                    if esc == "n":
-                        buf.append("\n")
-                    elif esc == "t":
-                        buf.append("\t")
-                    elif esc == "r":
-                        buf.append("\r")
-                    elif esc in ('"', "\\"):
-                        buf.append(esc)
-                    else:
-                        # Pass unknown escapes through verbatim
-                        buf.append("\\")
-                        buf.append(esc)
-                    i += 1
-                elif c == '"':
-                    i += 1  # skip closing quote
-                    break
-                else:
-                    buf.append(c)
-                    i += 1
-            else:
-                raise SExpParseError(
-                    "Unterminated string literal",
-                    position=start,
-                )
-            tokens.append(("STRING:" + "".join(buf), start))
+            value, i = _lex_string(text, i, length)
+            tokens.append(("STRING:" + value, i))
             continue
 
         # Bare atom — everything up to the next whitespace / paren / quote / semicolon
