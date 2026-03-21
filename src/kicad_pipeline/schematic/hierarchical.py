@@ -174,16 +174,17 @@ def partition_requirements(
         fb_nets: list[Net] = []
         for net in requirements.nets:
             refs_in_net = {conn.ref for conn in net.connections}
-            if refs_in_net & fb_refs:
-                # For inter-feature nets, keep only connections in this feature
-                if net.name in inter_nets:
-                    filtered_conns = tuple(
-                        c for c in net.connections if c.ref in fb_refs
-                    )
-                    if filtered_conns:
-                        fb_nets.append(replace(net, connections=filtered_conns))
-                else:
-                    fb_nets.append(net)
+            if not (refs_in_net & fb_refs):
+                continue
+            # For inter-feature nets, keep only connections in this feature
+            if net.name not in inter_nets:
+                fb_nets.append(net)
+                continue
+            filtered_conns = tuple(
+                c for c in net.connections if c.ref in fb_refs
+            )
+            if filtered_conns:
+                fb_nets.append(replace(net, connections=filtered_conns))
 
         sub_req = ProjectRequirements(
             project=ProjectInfo(
@@ -245,6 +246,7 @@ def build_sub_sheet(
     sub_req: ProjectRequirements,
     inter_nets: frozenset[str],
     power_nets: frozenset[str],
+    project_name: str | None = None,
 ) -> Schematic:
     """Build a sub-sheet schematic for a single feature.
 
@@ -257,13 +259,14 @@ def build_sub_sheet(
         sub_req: Sub-requirements containing only this feature's components.
         inter_nets: Set of net names that cross feature boundaries.
         power_nets: Set of power net names (handled by global labels).
+        project_name: When set, footprint lib_ids use the project-local prefix.
 
     Returns:
         A :class:`Schematic` with hierarchical labels added.
     """
     from kicad_pipeline.schematic.builder import build_schematic
 
-    sch = build_schematic(sub_req, compact=True)
+    sch = build_schematic(sub_req, compact=True, project_name=project_name)
 
     # Collect which inter-feature nets need hierarchical labels
     fb_refs = set(feature.components)
@@ -425,6 +428,7 @@ def build_root_sheet(
 
 def build_hierarchical_schematic(
     requirements: ProjectRequirements,
+    project_name: str | None = None,
 ) -> dict[str, Schematic]:
     """Build a complete hierarchical schematic from requirements.
 
@@ -433,6 +437,7 @@ def build_hierarchical_schematic(
 
     Args:
         requirements: Full project requirements.
+        project_name: When set, footprint lib_ids use the project-local prefix.
 
     Returns:
         Mapping from filename stem to :class:`Schematic`:
@@ -452,7 +457,10 @@ def build_hierarchical_schematic(
     sub_schematics: dict[str, Schematic] = {}
     for feat_name, sub_req in sub_reqs.items():
         feature = next(fb for fb in requirements.features if fb.name == feat_name)
-        sub_sch = build_sub_sheet(feature, sub_req, inter_nets, power_nets)
+        sub_sch = build_sub_sheet(
+            feature, sub_req, inter_nets, power_nets,
+            project_name=project_name,
+        )
         sub_schematics[feat_name] = sub_sch
 
     # Build root sheet

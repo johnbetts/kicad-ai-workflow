@@ -62,6 +62,73 @@ def _stage_index(stage_id: StageId) -> int:
     raise OrchestrationError(f"Unknown stage: {stage_id}")  # pragma: no cover
 
 
+def _report_footprint_provenance(pcb: object, vdir: Path) -> None:
+    """Log and write a provenance report for footprint sources.
+
+    Parametric footprints need manual verification against datasheets.
+    Writes ``output/footprint_provenance.json`` for downstream tools.
+    """
+    from kicad_pipeline.models.pcb import PCBDesign
+
+    if not isinstance(pcb, PCBDesign):
+        return
+
+    jlcpcb: list[str] = []
+    parametric: list[str] = []
+    parametric_fallback: list[str] = []
+    other: list[str] = []
+
+    for fp in pcb.footprints:
+        src = fp.footprint_source
+        entry = f"{fp.ref} ({fp.lib_id})"
+        if src == "jlcpcb":
+            jlcpcb.append(entry)
+        elif src == "parametric-fallback":
+            parametric_fallback.append(entry)
+        elif src == "parametric":
+            parametric.append(entry)
+        else:
+            other.append(entry)
+
+    needs_verify = parametric + parametric_fallback
+    if needs_verify:
+        log.warning(
+            "Footprint verification needed: %d parametric footprints "
+            "(pad geometry not verified against datasheets): %s",
+            len(needs_verify),
+            ", ".join(needs_verify),
+        )
+    if parametric_fallback:
+        log.warning(
+            "UNKNOWN footprint IDs fell back to 0805: %s",
+            ", ".join(parametric_fallback),
+        )
+    log.info(
+        "Footprint provenance: %d JLCPCB, %d parametric, %d fallback",
+        len(jlcpcb), len(parametric), len(parametric_fallback),
+    )
+
+    # Write machine-readable report for downstream verification tools
+    import json
+    output_dir = vdir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "jlcpcb": sorted(jlcpcb),
+        "parametric": sorted(parametric),
+        "parametric_fallback": sorted(parametric_fallback),
+        "needs_verification": sorted(needs_verify),
+        "summary": {
+            "total": len(pcb.footprints),
+            "jlcpcb": len(jlcpcb),
+            "parametric": len(parametric),
+            "parametric_fallback": len(parametric_fallback),
+        },
+    }
+    report_path = output_dir / "footprint_provenance.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    log.info("Footprint provenance report: %s", report_path)
+
+
 # ---------------------------------------------------------------------------
 # Workflow engine
 # ---------------------------------------------------------------------------
@@ -229,16 +296,16 @@ class WorkflowEngine:
         warnings: list[str],
     ) -> None:
         """Dispatch generation logic for each stage type."""
-        if stage_id == StageId.REQUIREMENTS:
-            self._generate_requirements(vdir)
-        elif stage_id == StageId.SCHEMATIC:
-            self._generate_schematic(variant_name, vdir)
-        elif stage_id == StageId.PCB:
-            self._generate_pcb(variant_name, vdir)
-        elif stage_id == StageId.VALIDATION:
-            self._generate_validation(variant_name, vdir, warnings)
-        elif stage_id == StageId.PRODUCTION:
-            self._generate_production(variant_name, vdir)
+        dispatch: dict[StageId, object] = {
+            StageId.REQUIREMENTS: lambda: self._generate_requirements(vdir),
+            StageId.SCHEMATIC: lambda: self._generate_schematic(variant_name, vdir),
+            StageId.PCB: lambda: self._generate_pcb(variant_name, vdir),
+            StageId.VALIDATION: lambda: self._generate_validation(variant_name, vdir, warnings),
+            StageId.PRODUCTION: lambda: self._generate_production(variant_name, vdir),
+        }
+        handler = dispatch.get(stage_id)
+        if handler is not None:
+            handler()
 
     def _generate_requirements(self, vdir: Path) -> None:
         """Validate that requirements.json exists and download datasheets."""
@@ -274,6 +341,10 @@ class WorkflowEngine:
 
     def _generate_schematic(self, variant_name: str, vdir: Path) -> None:
         """Build and write a schematic from requirements."""
+        from kicad_pipeline.pcb.footprint_library import (
+            build_footprint_library,
+            write_fp_lib_table,
+        )
         from kicad_pipeline.project_file import write_project_file
         from kicad_pipeline.requirements.decomposer import load_requirements
         from kicad_pipeline.schematic.builder import (
@@ -285,7 +356,7 @@ class WorkflowEngine:
 
         req = load_requirements(vdir / "requirements.json")
         req = self._enrich_requirements(req)  # type: ignore[assignment]
-        schematics = build_project_schematics(req)
+        schematics = build_project_schematics(req, project_name=variant_name)
 
         if len(schematics) == 1:
             sch = next(iter(schematics.values()))
@@ -295,6 +366,10 @@ class WorkflowEngine:
         else:
             written = write_hierarchical_schematic(schematics, vdir, variant_name)
             log.info("Hierarchical schematic written: %d files", len(written))
+
+        # Generate project-local footprint library
+        build_footprint_library(req, vdir, variant_name)
+        write_fp_lib_table(vdir, variant_name)
 
         # Generate .kicad_pro so KiCad can open the project
         pro_path = vdir / f"{variant_name}.kicad_pro"
@@ -341,10 +416,21 @@ class WorkflowEngine:
         # Auto-detect board template from mechanical constraints
         tmpl = detect_template(req.mechanical)
         board_template = tmpl.name if tmpl is not None else None
-        pcb = build_pcb(req, board_template=board_template)
+        pcb = build_pcb(req, board_template=board_template, project_name=variant_name)
         pcb_path = vdir / f"{variant_name}.kicad_pcb"
         write_pcb(pcb, pcb_path)
         log.info("PCB written: %s", pcb_path)
+
+        # Report footprint provenance — parametric footprints need verification
+        _report_footprint_provenance(pcb, vdir)
+
+        # Regenerate project-local footprint library (ensures PCB lib_ids match)
+        from kicad_pipeline.pcb.footprint_library import (
+            build_footprint_library,
+            write_fp_lib_table,
+        )
+        build_footprint_library(req, vdir, variant_name)
+        write_fp_lib_table(vdir, variant_name)
 
         # Regenerate project file with netclass definitions so KiCad
         # applies correct clearances and track widths when routing.
@@ -353,6 +439,35 @@ class WorkflowEngine:
             drc_exclusions=pcb.drc_exclusions or None,
         )
         log.info("Project file updated with netclasses: %s", vdir)
+
+        # Render placement PNGs to project directory
+        try:
+            from kicad_pipeline.optimization.placement_optimizer import _build_group_map
+            from kicad_pipeline.optimization.functional_grouper import classify_voltage_domains
+            from kicad_pipeline.visualization.placement_render import render_placement
+
+            output_dir = vdir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            group_map = _build_group_map(req)
+            render_placement(
+                pcb, req, output_dir / "placement_groups.png",
+                title=f"{variant_name} (Groups)", group_map=group_map,
+            )
+            domain_map = classify_voltage_domains(req)
+            render_placement(
+                pcb, req, output_dir / "placement_domains.png",
+                title=f"{variant_name} (Domains)", domain_map=domain_map,
+            )
+            log.info("Placement renders written: %s", output_dir)
+
+            # Hi-fi export via kicad-cli (non-blocking)
+            try:
+                from kicad_pipeline.visualization.kicad_export import export_pcb_image
+                export_pcb_image(pcb_path, output_dir / "placement_hifi.png", pcb=pcb)
+            except Exception:
+                log.debug("kicad-cli hi-fi export unavailable (non-blocking)")
+        except Exception:
+            log.exception("Placement render failed (non-blocking)")
 
         # Check for requirements drift since schematic generation
         req_path = vdir / "requirements.json"
@@ -422,7 +537,7 @@ class WorkflowEngine:
         req = self._enrich_requirements(req)  # type: ignore[assignment]
         tmpl = detect_template(req.mechanical)
         board_template = tmpl.name if tmpl is not None else None
-        pcb = build_pcb(req, board_template=board_template)
+        pcb = build_pcb(req, board_template=board_template, project_name=variant_name)
         bom_rows = generate_bom(pcb, req)
 
         db = ComponentDB()
@@ -560,7 +675,7 @@ class WorkflowEngine:
         req = load_requirements(vdir / "requirements.json")
         tmpl = detect_template(req.mechanical)
         board_template = tmpl.name if tmpl is not None else None
-        pcb = build_pcb(req, board_template=board_template)
+        pcb = build_pcb(req, board_template=board_template, project_name=variant_name)
         pkg = build_production_package(pcb, variant_name, req)
         prod_dir = vdir / "production"
         prod_dir.mkdir(parents=True, exist_ok=True)

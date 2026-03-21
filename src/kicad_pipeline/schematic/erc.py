@@ -381,32 +381,29 @@ def _check_wire_pin_alignment(schematic: Schematic) -> list[ERCViolation]:
     violations: list[ERCViolation] = []
     reported: set[tuple[float, float]] = set()
 
+    tol_sq = _WIRE_PIN_TOLERANCE_MM ** 2
+
     for wire in schematic.wires:
         for wep in (wire.start, wire.end):
             key = (wep.x, wep.y)
-            if key in reported:
-                continue
-            # Fast exact match
-            if key in valid_points:
+            if key in reported or key in valid_points:
                 continue
             # Tolerance match
-            matched = False
-            for vp in valid_points:
-                dx = key[0] - vp[0]
-                dy = key[1] - vp[1]
-                if dx * dx + dy * dy <= _WIRE_PIN_TOLERANCE_MM**2:
-                    matched = True
-                    break
-            if not matched:
-                reported.add(key)
-                violations.append(
-                    ERCViolation(
-                        severity=ERCSeverity.WARNING,
-                        rule="wire_pin_misaligned",
-                        message=(
-                            f"Wire endpoint at ({wep.x}, {wep.y}) does not align "
-                            "with any pin, label, junction, or other wire endpoint."
-                        ),
+            matched = any(
+                (key[0] - vp[0]) ** 2 + (key[1] - vp[1]) ** 2 <= tol_sq
+                for vp in valid_points
+            )
+            if matched:
+                continue
+            reported.add(key)
+            violations.append(
+                ERCViolation(
+                    severity=ERCSeverity.WARNING,
+                    rule="wire_pin_misaligned",
+                    message=(
+                        f"Wire endpoint at ({wep.x}, {wep.y}) does not align "
+                        "with any pin, label, junction, or other wire endpoint."
+                    ),
                     )
                 )
 
