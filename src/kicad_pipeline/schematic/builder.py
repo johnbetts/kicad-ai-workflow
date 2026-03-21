@@ -741,6 +741,73 @@ def _refine_feature_map_by_connectivity(
     return refined
 
 
+def _pin_side_from_rotation(rotation: float) -> str:
+    """Map KiCad lib pin rotation to a side name."""
+    rot = rotation % 360.0
+    if abs(rot) < 1.0:
+        return "left"
+    if abs(rot - 180.0) < 1.0:
+        return "right"
+    if abs(rot - 270.0) < 1.0:
+        return "top"
+    if abs(rot - 90.0) < 1.0:
+        return "bottom"
+    return "left"
+
+
+def _make_no_connect_markers(
+    requirements: ProjectRequirements,
+    pin_positions: dict[tuple[str, str], Point],
+) -> list[NoConnect]:
+    """Create NoConnect markers for unconnected pins."""
+    connected_pins: set[tuple[str, str]] = set()
+    for net in requirements.nets:
+        for conn in net.connections:
+            connected_pins.add((conn.ref, conn.pin))
+
+    no_connects: list[NoConnect] = []
+    for comp in requirements.components:
+        for pin in comp.pins:
+            key = (comp.ref, pin.number)
+            if key in connected_pins:
+                continue
+            if pin.pin_type.value == "no_connect":
+                continue
+            pin_pos = pin_positions.get(key)
+            if pin_pos is not None:
+                no_connects.append(NoConnect(position=pin_pos, uuid=_new_uuid()))
+    return no_connects
+
+
+def _build_pin_position_map(
+    components: tuple,
+    positions: dict[str, Point],
+    comp_lib_sym: dict[str, LibSymbol],
+) -> tuple[dict[tuple[str, str], Point], dict[tuple[str, str], str]]:
+    """Build pin position and side maps from placed components.
+
+    Returns:
+        ``(pin_positions, pin_sides)`` where keys are ``(ref, pin_number)``.
+    """
+    pin_positions: dict[tuple[str, str], Point] = {}
+    pin_sides: dict[tuple[str, str], str] = {}
+    for comp in components:
+        sym_pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
+        comp_sym = comp_lib_sym.get(comp.ref)
+        if comp_sym is None:
+            continue
+        for lib_pin in comp_sym.pins:
+            pin_x = sym_pos.x + lib_pin.at.x
+            # KiCad lib_symbol Y-axis: positive = up (mathematical)
+            # Schematic Y-axis: positive = down (screen)
+            # Negate Y to convert from lib space to schematic space
+            pin_y = sym_pos.y - lib_pin.at.y
+            key = (comp.ref, lib_pin.number)
+            pin_positions[key] = Point(x=pin_x, y=pin_y)
+            pin_sides[key] = _pin_side_from_rotation(lib_pin.rotation)
+    return pin_positions, pin_sides
+
+
 # ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
@@ -749,6 +816,7 @@ def _refine_feature_map_by_connectivity(
 def build_schematic(
     requirements: ProjectRequirements,
     compact: bool = False,
+    project_name: str | None = None,
 ) -> Schematic:
     """Build a complete :class:`Schematic` from *requirements*.
 
@@ -878,48 +946,27 @@ def build_schematic(
         lib_id = lib_sym.lib_id
         pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
         # Resolve PCB footprint lib_id for the Footprint property
-        try:
-            pcb_fp = footprint_for_component(comp.ref, comp.value, comp.footprint, comp.lcsc)
-            fp_lib_id = pcb_fp.lib_id
-        except Exception:
-            fp_lib_id = comp.footprint  # fallback to bare name
+        if project_name is not None:
+            # Use project-local library prefix, deriving name from the
+            # component's requirements footprint field (same source as PCB)
+            from kicad_pipeline.pcb.footprint_library import footprint_name_from_lib_id
+            fp_name = footprint_name_from_lib_id(comp.footprint)
+            fp_lib_id = f"{project_name}:{fp_name}"
+        else:
+            try:
+                pcb_fp = footprint_for_component(comp.ref, comp.value, comp.footprint, comp.lcsc)
+                fp_lib_id = pcb_fp.lib_id
+            except Exception:
+                fp_lib_id = comp.footprint  # fallback to bare name
         inst = _make_symbol_instance(comp, lib_id, pos, lib_sym, footprint_lib_id=fp_lib_id)
         symbols_list.append(inst)
 
     # ------------------------------------------------------------------
     # Step 6: Build pin-position map for wire routing
     # ------------------------------------------------------------------
-    # Use actual LibSymbol pin positions (multi-sided layout from symbols.py)
-    pin_positions: dict[tuple[str, str], Point] = {}
-    pin_sides: dict[tuple[str, str], str] = {}
-    for comp in requirements.components:
-        sym_pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
-        comp_sym = comp_lib_sym.get(comp.ref)
-        if comp_sym is not None:
-            for lib_pin in comp_sym.pins:
-                pin_x = sym_pos.x + lib_pin.at.x
-                # KiCad lib_symbol Y-axis: positive = up (mathematical)
-                # Schematic Y-axis: positive = down (screen)
-                # Negate Y to convert from lib space to schematic space
-                pin_y = sym_pos.y - lib_pin.at.y
-                pin_positions[(comp.ref, lib_pin.number)] = Point(x=pin_x, y=pin_y)
-                # Determine side from lib pin rotation (KiCad convention):
-                # 0°=left-side pin (extends RIGHT toward body)
-                # 180°=right-side pin (extends LEFT toward body)
-                # 270°=top pin (extends DOWN toward body)
-                # 90°=bottom pin (extends UP toward body)
-                rot = lib_pin.rotation % 360.0
-                if abs(rot) < 1.0:
-                    side = "left"
-                elif abs(rot - 180.0) < 1.0:
-                    side = "right"
-                elif abs(rot - 270.0) < 1.0:
-                    side = "top"
-                elif abs(rot - 90.0) < 1.0:
-                    side = "bottom"
-                else:
-                    side = "left"
-                pin_sides[(comp.ref, lib_pin.number)] = side
+    pin_positions, pin_sides = _build_pin_position_map(
+        requirements.components, positions, comp_lib_sym,
+    )
 
     # ------------------------------------------------------------------
     # Step 7: Route nets (skip power nets — handled by power symbols)
@@ -955,19 +1002,7 @@ def build_schematic(
     # ------------------------------------------------------------------
     # Step 9: No-connect markers for pins with no net assignment
     # ------------------------------------------------------------------
-    connected_pins: set[tuple[str, str]] = set()
-    for net in requirements.nets:
-        for conn in net.connections:
-            connected_pins.add((conn.ref, conn.pin))
-
-    no_connects: list[NoConnect] = []
-    for comp in requirements.components:
-        for pin in comp.pins:
-            key = (comp.ref, pin.number)
-            if key not in connected_pins and pin.pin_type.value != "no_connect":
-                pin_pos = pin_positions.get(key)
-                if pin_pos is not None:
-                    no_connects.append(NoConnect(position=pin_pos, uuid=_new_uuid()))
+    no_connects = _make_no_connect_markers(requirements, pin_positions)
 
     log.info(
         "build_schematic complete: %d symbols, %d wires, %d labels, %d power syms, %d no-connects",
@@ -1715,6 +1750,7 @@ def write_hierarchical_schematic(
 def build_project_schematics(
     requirements: ProjectRequirements,
     hierarchical: bool | None = None,
+    project_name: str | None = None,
 ) -> dict[str, Schematic]:
     """Build schematic(s) from requirements, auto-detecting hierarchy.
 
@@ -1722,6 +1758,8 @@ def build_project_schematics(
         requirements: Project requirements.
         hierarchical: Force hierarchical (``True``), flat (``False``), or
             auto-detect (``None``).
+        project_name: When set, all footprint lib_ids use the project-local
+            library prefix ``{project_name}:{footprint_name}``.
 
     Returns:
         Mapping from filename stem to :class:`Schematic`. For flat output,
@@ -1740,9 +1778,9 @@ def build_project_schematics(
 
     if use_hierarchy:
         log.info("build_project_schematics: using hierarchical layout")
-        return build_hierarchical_schematic(requirements)
+        return build_hierarchical_schematic(requirements, project_name=project_name)
 
     log.info("build_project_schematics: using flat layout")
-    sch = build_schematic(requirements)
+    sch = build_schematic(requirements, project_name=project_name)
     project_stem = _sanitize_filename(requirements.project.name)
     return {project_stem: sch}

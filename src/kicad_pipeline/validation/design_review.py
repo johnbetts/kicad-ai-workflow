@@ -135,6 +135,89 @@ _REGULATOR_DESC_KEYWORDS: frozenset[str] = frozenset({
 _MAX_IC_COUNT_FOR_RAIL_MATCH = 2
 
 
+def _match_cap_by_description(
+    desc: str,
+    ic_refs: list[str],
+    comp_map: dict[str, object],
+) -> tuple[str, float]:
+    """Priority 1: Match cap to IC whose value name appears in cap description."""
+    for ic in ic_refs:
+        ic_comp = comp_map.get(ic)
+        if ic_comp is None:
+            continue
+        ic_value = ic_comp.value.upper()
+        if ic_value and ic_value in desc:
+            return ic, 1000.0
+    return "", 0.0
+
+
+def _match_cap_by_regulator(
+    desc: str,
+    cap_rails: set[str],
+    cap_feature: str,
+    ic_refs: list[str],
+    regulator_set: set[str],
+    ref_power_nets: dict[str, set[str]],
+    ref_to_feature: dict[str, str],
+) -> tuple[str, float]:
+    """Priority 2: Match cap with regulator keywords to a regulator on same rail."""
+    if not any(kw in desc for kw in _REGULATOR_DESC_KEYWORDS):
+        return "", 0.0
+    best_ic = ""
+    best_score = 0.0
+    for ic in ic_refs:
+        if ic not in regulator_set:
+            continue
+        ic_nets = ref_power_nets.get(ic, set())
+        if not (cap_rails & ic_nets):
+            continue
+        ic_feature = ref_to_feature.get(ic, "")
+        feature_bonus = 10.0 if (cap_feature and cap_feature == ic_feature) else 0.0
+        score = 500.0 + feature_bonus
+        if score > best_score:
+            best_score = score
+            best_ic = ic
+    return best_ic, best_score
+
+
+def _match_cap_by_rail(
+    cap_rails: set[str],
+    cap_feature: str,
+    ic_refs: list[str],
+    comp_map: dict[str, object],
+    ref_power_nets: dict[str, set[str]],
+    net_ic_count: dict[str, int],
+    ref_to_feature: dict[str, str],
+) -> tuple[str, float]:
+    """Priority 3: Match cap to IC sharing a specific (low-user-count) rail."""
+    best_ic = ""
+    best_score = 0.0
+    for ic in ic_refs:
+        if comp_map.get(ic) is None:
+            continue
+        ic_nets = ref_power_nets.get(ic, set())
+        shared_rails = cap_rails & ic_nets
+        if not shared_rails:
+            continue
+        specific_rails = {
+            r for r in shared_rails
+            if net_ic_count.get(r, 0) <= _MAX_IC_COUNT_FOR_RAIL_MATCH
+        }
+        if not specific_rails:
+            continue
+        score = sum(
+            1.0 / max(net_ic_count.get(r, 1), 1)
+            for r in specific_rails
+        )
+        ic_feature = ref_to_feature.get(ic, "")
+        if cap_feature and cap_feature == ic_feature:
+            score += 5.0
+        if score > best_score:
+            best_score = score
+            best_ic = ic
+    return best_ic, best_score
+
+
 def _find_ic_decoupling_pairs(
     requirements: ProjectRequirements,
 ) -> list[tuple[str, str]]:
@@ -198,67 +281,23 @@ def _find_ic_decoupling_pairs(
         desc = (cap_comp.description or "").upper() if cap_comp else ""
         cap_feature = ref_to_feature.get(cap, "")
 
-        best_ic = ""
-        best_score = 0.0
-
-        # --- Priority 1: Description mentions a specific IC value ---
-        for ic in ic_refs:
-            ic_comp = comp_map.get(ic)
-            if ic_comp is None:
-                continue
-            ic_value = ic_comp.value.upper()
-            if ic_value and ic_value in desc:
-                best_ic = ic
-                best_score = 1000.0
-                break
-
-        # --- Priority 2: Cap description has regulator keywords ---
-        # Pair with regulator in same feature block or sharing the cap's rail.
-        if best_score < 1000.0 and any(kw in desc for kw in _REGULATOR_DESC_KEYWORDS):
-            for ic in ic_refs:
-                if ic not in regulator_set:
-                    continue
-                ic_nets = ref_power_nets.get(ic, set())
-                shared = cap_rails & ic_nets
-                if not shared:
-                    continue
-                # Prefer same-feature regulator
-                ic_feature = ref_to_feature.get(ic, "")
-                feature_bonus = 10.0 if (cap_feature and cap_feature == ic_feature) else 0.0
-                score = 500.0 + feature_bonus
-                if score > best_score:
-                    best_score = score
-                    best_ic = ic
-
-        # --- Priority 3: Specific rail match (few IC users) ---
+        best_ic, best_score = _match_cap_by_description(
+            desc, ic_refs, comp_map,
+        )
+        if best_score < 1000.0:
+            ic, score = _match_cap_by_regulator(
+                desc, cap_rails, cap_feature, ic_refs,
+                regulator_set, ref_power_nets, ref_to_feature,
+            )
+            if score > best_score:
+                best_ic, best_score = ic, score
         if best_score < 500.0:
-            for ic in ic_refs:
-                ic_comp = comp_map.get(ic)
-                if ic_comp is None:
-                    continue
-                ic_nets = ref_power_nets.get(ic, set())
-                shared_rails = cap_rails & ic_nets
-                if not shared_rails:
-                    continue
-                # Skip busy rails — too many ICs to determine which one owns the cap
-                specific_rails = {
-                    r for r in shared_rails
-                    if net_ic_count.get(r, 0) <= _MAX_IC_COUNT_FOR_RAIL_MATCH
-                }
-                if not specific_rails:
-                    continue
-                # Score: prefer fewer IC users (more specific)
-                score = sum(
-                    1.0 / max(net_ic_count.get(r, 1), 1)
-                    for r in specific_rails
-                )
-                # Bonus for same feature block
-                ic_feature = ref_to_feature.get(ic, "")
-                if cap_feature and cap_feature == ic_feature:
-                    score += 5.0
-                if score > best_score:
-                    best_score = score
-                    best_ic = ic
+            ic, score = _match_cap_by_rail(
+                cap_rails, cap_feature, ic_refs, comp_map,
+                ref_power_nets, net_ic_count, ref_to_feature,
+            )
+            if score > best_score:
+                best_ic = ic
 
         if best_ic and cap not in seen_caps:
             pairs.append((best_ic, cap))
