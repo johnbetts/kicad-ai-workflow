@@ -185,6 +185,102 @@ class TestValidateBomParts:
         assert report.unresolved_count == 0
 
 
+    @patch("kicad_pipeline.production.parts_validator.fetch_lcsc_stock")
+    def test_tier2_low_stock_rejected(self, mock_fetch: MagicMock) -> None:
+        """Parts with stock < 1000 are flagged as low_stock."""
+        from kicad_pipeline.production.lcsc_client import LCSCStockInfo
+
+        mock_fetch.return_value = LCSCStockInfo(
+            lcsc="C37593", in_stock=True, stock_qty=500,
+            unit_price_usd=2.50, description="ADS1115", package="MSOP-10",
+        )
+        mock_db = MagicMock()
+        mock_db.find_by_lcsc.return_value = None
+        mock_db.find_resistor.return_value = None
+        mock_db.find_capacitor.return_value = None
+
+        rows = (
+            BOMRow(comment="ADS1115", designator="U1", footprint="MSOP-10",
+                   lcsc="C37593", quantity=1),
+        )
+        report = validate_bom_parts(rows, db=mock_db, check_web_stock=True)
+        assert report.parts[0].status == "low_stock"
+        assert report.parts[0].stock_qty == 500
+        assert report.all_parts_available is False
+        assert report.unresolved_count == 1
+        assert report.low_stock_count == 1
+        assert report.parts[0].manual_url is not None
+
+    @patch("kicad_pipeline.production.parts_validator.fetch_lcsc_stock")
+    def test_tier2_sufficient_stock_accepted(
+        self, mock_fetch: MagicMock,
+    ) -> None:
+        """Parts with stock >= 1000 pass normally."""
+        from kicad_pipeline.production.lcsc_client import LCSCStockInfo
+
+        mock_fetch.return_value = LCSCStockInfo(
+            lcsc="C37593", in_stock=True, stock_qty=5000,
+            unit_price_usd=2.50, description="ADS1115", package="MSOP-10",
+        )
+        mock_db = MagicMock()
+        mock_db.find_by_lcsc.return_value = None
+
+        rows = (
+            BOMRow(comment="ADS1115", designator="U1", footprint="MSOP-10",
+                   lcsc="C37593", quantity=1),
+        )
+        report = validate_bom_parts(rows, db=mock_db, check_web_stock=True)
+        assert report.parts[0].status == "ok"
+        assert report.parts[0].tier == 2
+        assert report.all_parts_available is True
+        assert report.low_stock_count == 0
+
+    @patch("kicad_pipeline.production.parts_validator.fetch_lcsc_stock")
+    def test_low_stock_summary_text(self, mock_fetch: MagicMock) -> None:
+        """Low stock parts appear in the summary text."""
+        from kicad_pipeline.production.lcsc_client import LCSCStockInfo
+
+        mock_fetch.return_value = LCSCStockInfo(
+            lcsc="C37593", in_stock=True, stock_qty=50,
+            unit_price_usd=2.50, description="ADS1115", package="MSOP-10",
+        )
+        mock_db = MagicMock()
+        mock_db.find_by_lcsc.return_value = None
+        mock_db.find_resistor.return_value = None
+        mock_db.find_capacitor.return_value = None
+
+        rows = (
+            BOMRow(comment="ADS1115", designator="U1", footprint="MSOP-10",
+                   lcsc="C37593", quantity=1),
+        )
+        report = validate_bom_parts(rows, db=mock_db, check_web_stock=True)
+        assert "low stock" in report.summary_text.lower()
+        assert "approval" in report.summary_text.lower()
+
+    @patch("kicad_pipeline.production.parts_validator.fetch_lcsc_stock")
+    def test_low_stock_in_json_report(self, mock_fetch: MagicMock) -> None:
+        """JSON report includes low_stock_count field."""
+        from kicad_pipeline.production.lcsc_client import LCSCStockInfo
+
+        mock_fetch.return_value = LCSCStockInfo(
+            lcsc="C37593", in_stock=True, stock_qty=100,
+            unit_price_usd=2.50, description="ADS1115", package="MSOP-10",
+        )
+        mock_db = MagicMock()
+        mock_db.find_by_lcsc.return_value = None
+        mock_db.find_resistor.return_value = None
+        mock_db.find_capacitor.return_value = None
+
+        rows = (
+            BOMRow(comment="ADS1115", designator="U1", footprint="MSOP-10",
+                   lcsc="C37593", quantity=1),
+        )
+        report = validate_bom_parts(rows, db=mock_db, check_web_stock=True)
+        data = json.loads(report_to_json(report))
+        assert data["low_stock_count"] == 1
+        assert data["parts"][0]["status"] == "low_stock"
+
+
 class TestReportFormatters:
     def test_report_to_text_contains_header(self) -> None:
         report = PartsValidationReport(

@@ -182,9 +182,13 @@ def test_pcb_has_nets(led_blinker_requirements: ProjectRequirements) -> None:
 
 
 def test_pcb_footprint_count_matches(led_blinker_requirements: ProjectRequirements) -> None:
-    """PCBDesign has exactly 3 footprints (U1, D1, R1)."""
+    """PCBDesign has 3 component footprints (U1, D1, R1) + 4 mounting holes."""
     design = build_pcb(led_blinker_requirements)
-    assert len(design.footprints) == 3
+    component_fps = [fp for fp in design.footprints if not fp.ref.startswith("H")]
+    mounting_fps = [fp for fp in design.footprints if fp.ref.startswith("H")]
+    assert len(component_fps) == 3
+    assert len(mounting_fps) == 4
+    assert len(design.footprints) == 7
 
 
 # ---------------------------------------------------------------------------

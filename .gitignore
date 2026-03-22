@@ -14,3 +14,4 @@ htmlcov/
 *.kicad_pcb
 *.kicad_pro
 production/
+.gitnexus

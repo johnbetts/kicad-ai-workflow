@@ -1,0 +1,385 @@
+{
+  "project_name": "",
+  "framework_version": "1.0.0",
+  "last_bootstrap": "2026-03-17T02:18:44.452767+00:00",
+  "decomposition_thresholds": {
+    "max_loc": 500,
+    "max_public_functions": 8,
+    "max_dependencies": 10,
+    "max_cyclomatic_complexity": 15,
+    "min_test_coverage": 85
+  },
+  "modules": {
+    "scripts": {
+      "path": "scripts",
+      "status": "active",
+      "health": "green",
+      "loc": 396,
+      "public_functions": 4,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "data",
+        "hardware/schematic",
+        "requirements",
+        "tooling",
+        "tooling/kicad"
+      ]
+    },
+    "src/kicad_pipeline": {
+      "path": "src/kicad_pipeline",
+      "status": "active",
+      "health": "red",
+      "loc": 2284,
+      "public_functions": 78,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [
+        "src/kicad_pipeline/agents",
+        "src/kicad_pipeline/cli",
+        "src/kicad_pipeline/config",
+        "src/kicad_pipeline/github",
+        "src/kicad_pipeline/ipc",
+        "src/kicad_pipeline/models",
+        "src/kicad_pipeline/optimization",
+        "src/kicad_pipeline/orchestrator",
+        "src/kicad_pipeline/parts",
+        "src/kicad_pipeline/pcb",
+        "src/kicad_pipeline/production",
+        "src/kicad_pipeline/requirements",
+        "src/kicad_pipeline/research",
+        "src/kicad_pipeline/routing",
+        "src/kicad_pipeline/schematic",
+        "src/kicad_pipeline/sexp",
+        "src/kicad_pipeline/validation",
+        "src/kicad_pipeline/visualization"
+      ],
+      "manager": true,
+      "domains": [
+        "data",
+        "reliability/validation",
+        "requirements",
+        "tooling/kicad",
+        "hardware/pcb"
+      ]
+    },
+    "src/kicad_pipeline/agents": {
+      "path": "src/kicad_pipeline/agents",
+      "status": "active",
+      "health": "red",
+      "loc": 2142,
+      "public_functions": 100,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "data",
+        "ml",
+        "reliability/logging",
+        "reliability/monitoring",
+        "reliability/validation"
+      ]
+    },
+    "src/kicad_pipeline/cli": {
+      "path": "src/kicad_pipeline/cli",
+      "status": "active",
+      "health": "red",
+      "loc": 2234,
+      "public_functions": 16,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "tooling/cli",
+        "reliability/logging",
+        "tooling",
+        "tooling/kicad"
+      ]
+    },
+    "src/kicad_pipeline/config": {
+      "path": "src/kicad_pipeline/config",
+      "status": "active",
+      "health": "yellow",
+      "loc": 1414,
+      "public_functions": 6,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "api-design",
+        "infrastructure/config",
+        "reliability/logging",
+        "tooling/kicad"
+      ]
+    },
+    "src/kicad_pipeline/github": {
+      "path": "src/kicad_pipeline/github",
+      "status": "active",
+      "health": "red",
+      "loc": 1236,
+      "public_functions": 52,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "reliability/validation",
+        "api-design",
+        "data",
+        "infrastructure/production",
+        "reliability/logging"
+      ]
+    },
+    "src/kicad_pipeline/ipc": {
+      "path": "src/kicad_pipeline/ipc",
+      "status": "active",
+      "health": "red",
+      "loc": 874,
+      "public_functions": 36,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "hardware/pcb",
+        "hardware/pcb/footprints",
+        "reliability/logging",
+        "tooling/cli",
+        "tooling/kicad"
+      ]
+    },
+    "src/kicad_pipeline/models": {
+      "path": "src/kicad_pipeline/models",
+      "status": "active",
+      "health": "red",
+      "loc": 1694,
+      "public_functions": 180,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "data",
+        "hardware/bom",
+        "hardware/pcb",
+        "hardware/pcb/fabrication",
+        "hardware/pcb/footprints"
+      ]
+    },
+    "src/kicad_pipeline/optimization": {
+      "path": "src/kicad_pipeline/optimization",
+      "status": "active",
+      "health": "red",
+      "loc": 17730,
+      "public_functions": 144,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "api-design",
+        "data/messaging",
+        "hardware/pcb/placement",
+        "infrastructure",
+        "infrastructure/config"
+      ]
+    },
+    "src/kicad_pipeline/orchestrator": {
+      "path": "src/kicad_pipeline/orchestrator",
+      "status": "active",
+      "health": "red",
+      "loc": 2996,
+      "public_functions": 66,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "api-design",
+        "data",
+        "hardware/pcb/footprints",
+        "ml",
+        "reliability/logging"
+      ]
+    },
+    "src/kicad_pipeline/parts": {
+      "path": "src/kicad_pipeline/parts",
+      "status": "active",
+      "health": "red",
+      "loc": 1930,
+      "public_functions": 46,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "data",
+        "data/cache",
+        "hardware/pcb",
+        "hardware/pcb/fabrication",
+        "hardware/pcb/footprints"
+      ]
+    },
+    "src/kicad_pipeline/pcb": {
+      "path": "src/kicad_pipeline/pcb",
+      "status": "active",
+      "health": "red",
+      "loc": 21316,
+      "public_functions": 260,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "reliability/validation",
+        "tooling/kicad",
+        "api-design",
+        "data",
+        "hardware/pcb"
+      ]
+    },
+    "src/kicad_pipeline/production": {
+      "path": "src/kicad_pipeline/production",
+      "status": "active",
+      "health": "red",
+      "loc": 2422,
+      "public_functions": 68,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "hardware/pcb/fabrication",
+        "hardware/bom",
+        "hardware/pcb",
+        "hardware/pcb/placement",
+        "infrastructure"
+      ]
+    },
+    "src/kicad_pipeline/requirements": {
+      "path": "src/kicad_pipeline/requirements",
+      "status": "active",
+      "health": "red",
+      "loc": 2696,
+      "public_functions": 86,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "api-design",
+        "hardware/pcb",
+        "hardware/pcb/fabrication",
+        "infrastructure",
+        "reliability/logging"
+      ]
+    },
+    "src/kicad_pipeline/research": {
+      "path": "src/kicad_pipeline/research",
+      "status": "active",
+      "health": "yellow",
+      "loc": 902,
+      "public_functions": 6,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "reliability/logging",
+        "requirements",
+        "tooling/kicad"
+      ]
+    },
+    "src/kicad_pipeline/routing": {
+      "path": "src/kicad_pipeline/routing",
+      "status": "active",
+      "health": "red",
+      "loc": 6862,
+      "public_functions": 66,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "api-design",
+        "hardware/pcb",
+        "hardware/pcb/routing",
+        "reliability/logging",
+        "reliability/monitoring"
+      ]
+    },
+    "src/kicad_pipeline/schematic": {
+      "path": "src/kicad_pipeline/schematic",
+      "status": "active",
+      "health": "red",
+      "loc": 9152,
+      "public_functions": 108,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "requirements",
+        "tooling/kicad",
+        "api-design",
+        "data",
+        "hardware/pcb/placement"
+      ]
+    },
+    "src/kicad_pipeline/sexp": {
+      "path": "src/kicad_pipeline/sexp",
+      "status": "active",
+      "health": "red",
+      "loc": 798,
+      "public_functions": 14,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "tooling/kicad"
+      ]
+    },
+    "src/kicad_pipeline/validation": {
+      "path": "src/kicad_pipeline/validation",
+      "status": "active",
+      "health": "red",
+      "loc": 6218,
+      "public_functions": 162,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "data",
+        "reliability/validation",
+        "api-design",
+        "hardware/pcb",
+        "hardware/pcb/footprints"
+      ]
+    },
+    "src/kicad_pipeline/visualization": {
+      "path": "src/kicad_pipeline/visualization",
+      "status": "active",
+      "health": "red",
+      "loc": 1536,
+      "public_functions": 12,
+      "test_coverage": 0,
+      "last_change": "2026-03-17",
+      "sub_modules": [],
+      "manager": false,
+      "domains": [
+        "tooling/visualization",
+        "hardware/pcb",
+        "hardware/pcb/placement",
+        "ml",
+        "reliability/logging"
+      ]
+    }
+  }
+}

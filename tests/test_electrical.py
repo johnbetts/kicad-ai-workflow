@@ -8,6 +8,7 @@ from kicad_pipeline.models.pcb import (
     BoardOutline,
     DesignRules,
     Footprint,
+    Footprint3DModel,
     NetEntry,
     Pad,
     PCBDesign,
@@ -82,6 +83,25 @@ def _make_pcb_no_gnd() -> PCBDesign:
         design_rules=_DEFAULT_RULES,
         nets=(vcc,),
         footprints=(),
+        tracks=(),
+        vias=(),
+        zones=(),
+        keepouts=(),
+    )
+
+
+def _make_pcb(
+    footprints: tuple[Footprint, ...] = (),
+    nets: tuple[NetEntry, ...] | None = None,
+) -> PCBDesign:
+    """Minimal PCB with GND net and custom footprints."""
+    if nets is None:
+        nets = (NetEntry(number=1, name="GND"),)
+    return PCBDesign(
+        outline=BoardOutline(polygon=_CLOSED_RECT),
+        design_rules=_DEFAULT_RULES,
+        nets=nets,
+        footprints=footprints,
         tracks=(),
         vias=(),
         zones=(),
@@ -292,3 +312,85 @@ def test_decoupling_cap_info() -> None:
         assert v.severity == Severity.INFO, (
             f"Expected INFO severity for decoupling_caps, got {v.severity}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: 3D model alignment checks
+# ---------------------------------------------------------------------------
+
+
+def test_3d_model_missing_warning() -> None:
+    """Footprint with pads but no 3D model emits INFO warning."""
+    fp = Footprint(
+        lib_id="Resistor_SMD:R_0805",
+        ref="R1",
+        value="10k",
+        position=Point(x=10.0, y=10.0),
+        pads=(
+            Pad(
+                number="1", pad_type="smd", shape="rect",
+                position=Point(x=-1.0, y=0.0), size_x=1.0, size_y=0.6,
+                layers=("F.Cu",),
+            ),
+        ),
+        models=(),  # Missing model
+    )
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_electrical_checks(pcb)
+    model_violations = [v for v in report.violations if v.rule == "3d_model_alignment"]
+    assert len(model_violations) >= 1
+    assert model_violations[0].severity == Severity.INFO
+    assert "missing" in model_violations[0].message.lower()
+
+
+def test_3d_model_rotation_mismatch() -> None:
+    """3D model with non-90° Z-rotation emits INFO warning."""
+    model = Footprint3DModel(
+        path="test.step",
+        rotate=(0.0, 0.0, 45.0),  # 45° is invalid
+    )
+    fp = Footprint(
+        lib_id="Resistor_SMD:R_0805",
+        ref="R1",
+        value="10k",
+        position=Point(x=10.0, y=10.0),
+        pads=(
+            Pad(
+                number="1", pad_type="smd", shape="rect",
+                position=Point(x=-1.0, y=0.0), size_x=1.0, size_y=0.6,
+                layers=("F.Cu",),
+            ),
+        ),
+        models=(model,),
+    )
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_electrical_checks(pcb)
+    model_violations = [v for v in report.violations if v.rule == "3d_model_alignment"]
+    assert len(model_violations) >= 1
+    assert "45" in model_violations[0].message
+
+
+def test_3d_model_correct_rotation() -> None:
+    """3D model with correct 0° Z-rotation emits no warning."""
+    model = Footprint3DModel(
+        path="test.step",
+        rotate=(0.0, 0.0, 0.0),
+    )
+    fp = Footprint(
+        lib_id="Resistor_SMD:R_0805",
+        ref="R1",
+        value="10k",
+        position=Point(x=10.0, y=10.0),
+        pads=(
+            Pad(
+                number="1", pad_type="smd", shape="rect",
+                position=Point(x=-1.0, y=0.0), size_x=1.0, size_y=0.6,
+                layers=("F.Cu",),
+            ),
+        ),
+        models=(model,),
+    )
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_electrical_checks(pcb)
+    model_violations = [v for v in report.violations if v.rule == "3d_model_alignment"]
+    assert len(model_violations) == 0

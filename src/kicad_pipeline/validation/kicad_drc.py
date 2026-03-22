@@ -13,12 +13,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_pipeline.cli.kicad_cli import find_kicad_cli as _find_kicad_cli_shared
 from kicad_pipeline.exceptions import DRCError, ValidationError
 
 logger = logging.getLogger(__name__)
-
-# Default kicad-cli path (macOS).  Override via KICAD_CLI env var.
-_KICAD_CLI_DEFAULT = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
 
 
 @dataclass(frozen=True)
@@ -88,33 +86,20 @@ class DRCReport:
 def _find_kicad_cli() -> str:
     """Locate the kicad-cli binary.
 
+    Delegates to the shared utility in ``kicad_pipeline.cli.kicad_cli``.
+
     Returns:
         Path to kicad-cli.
 
     Raises:
         DRCError: If kicad-cli cannot be found.
     """
-    import os
+    from kicad_pipeline.exceptions import KiCadPipelineError
 
-    env_path = os.environ.get("KICAD_CLI")
-    if env_path and Path(env_path).is_file():
-        return env_path
-    if Path(_KICAD_CLI_DEFAULT).is_file():
-        return _KICAD_CLI_DEFAULT
-    # Try PATH.
     try:
-        result = subprocess.run(
-            ["which", "kicad-cli"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    msg = "Cannot find kicad-cli. Install KiCad 9 or set KICAD_CLI env var."
-    raise DRCError(msg)
+        return _find_kicad_cli_shared()
+    except KiCadPipelineError as exc:
+        raise DRCError(str(exc)) from exc
 
 
 def _parse_position(pos_data: dict[str, object]) -> DRCPosition | None:

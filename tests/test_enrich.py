@@ -176,9 +176,14 @@ class TestSmdGenerators3DModels:
         assert "R_0805" in fp.models[0].path
 
     def test_footprint_for_component_preserves_models(self) -> None:
-        fp = footprint_for_component("R1", "10k", "R_0805", lcsc="C12345")
+        # Use no LCSC so parametric path is taken (JLCPCB footprints lack 3D models)
+        fp = footprint_for_component("R1", "10k", "R_0805")
         assert len(fp.models) > 0
-        assert fp.lcsc == "C12345"
+
+    def test_footprint_for_component_preserves_lcsc(self) -> None:
+        # Use no LCSC so parametric path is taken, then verify LCSC attachment
+        fp = footprint_for_component("R1", "10k", "R_0805", lcsc="CFAKE00")
+        assert fp.lcsc == "CFAKE00"
 
 
 # ---------------------------------------------------------------------------

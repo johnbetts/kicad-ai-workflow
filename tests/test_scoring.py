@@ -435,3 +435,85 @@ def test_score_clamp_to_valid_range() -> None:
     assert _clamp01(-0.5) == 0.0
     assert _clamp01(0.5) == 0.5
     assert _clamp01(1.5) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Pad Facing
+# ---------------------------------------------------------------------------
+
+
+def test_pad_facing_appears_in_fast_score_breakdown() -> None:
+    """Pad Facing dimension should appear in compute_fast_placement_score."""
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score = compute_fast_placement_score(pcb, reqs)
+    categories = [d.category for d in score.breakdown]
+    assert "Pad Facing" in categories
+
+
+def test_pad_facing_perfect_orientation() -> None:
+    """Two resistors with pads facing each other should score high."""
+    from kicad_pipeline.models.pcb import Pad
+    from kicad_pipeline.optimization.scoring import _score_pad_facing
+
+    # R1 at (10, 20), R2 at (30, 20) — connected via SIG net
+    # R1 pad 2 (east) connects to R2 pad 1 (west) — perfect facing
+    pad_r1_1 = Pad(
+        number="1", pad_type="smd", shape="rect",
+        position=Point(x=-0.9, y=0.0), size_x=1.0, size_y=0.5,
+        layers=("F.Cu",), net_number=1, net_name="GND",
+    )
+    pad_r1_2 = Pad(
+        number="2", pad_type="smd", shape="rect",
+        position=Point(x=0.9, y=0.0), size_x=1.0, size_y=0.5,
+        layers=("F.Cu",), net_number=2, net_name="SIG",
+    )
+    pad_r2_1 = Pad(
+        number="1", pad_type="smd", shape="rect",
+        position=Point(x=-0.9, y=0.0), size_x=1.0, size_y=0.5,
+        layers=("F.Cu",), net_number=2, net_name="SIG",
+    )
+    pad_r2_2 = Pad(
+        number="2", pad_type="smd", shape="rect",
+        position=Point(x=0.9, y=0.0), size_x=1.0, size_y=0.5,
+        layers=("F.Cu",), net_number=3, net_name="OUT",
+    )
+    fp1 = Footprint(
+        lib_id="test:R", ref="R1", value="10k",
+        position=Point(x=10.0, y=20.0), rotation=0.0,
+        pads=(pad_r1_1, pad_r1_2),
+    )
+    fp2 = Footprint(
+        lib_id="test:R", ref="R2", value="4.7k",
+        position=Point(x=30.0, y=20.0), rotation=0.0,
+        pads=(pad_r2_1, pad_r2_2),
+    )
+    pcb = PCBDesign(
+        outline=_minimal_outline(),
+        design_rules=DesignRules(),
+        nets=(
+            NetEntry(number=0, name=""),
+            NetEntry(number=1, name="GND"),
+            NetEntry(number=2, name="SIG"),
+            NetEntry(number=3, name="OUT"),
+        ),
+        footprints=(fp1, fp2),
+        tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    reqs = _minimal_requirements()
+
+    score, issues = _score_pad_facing(pcb, reqs)
+    # R1 pad 2 (EAST) faces R2 pad 1 (WEST) — both facing toward each other
+    assert score > 0.8, f"Expected high score for facing pads, got {score}"
+
+
+def test_pad_facing_no_signal_nets_neutral() -> None:
+    """PCB with only power nets should score 1.0 (neutral)."""
+    from kicad_pipeline.optimization.scoring import _score_pad_facing
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score, issues = _score_pad_facing(pcb, reqs)
+    assert score == 1.0

@@ -284,6 +284,9 @@ class Footprint:
     models: tuple[Footprint3DModel, ...] = ()
     datasheet: str | None = None
     description: str | None = None
+    footprint_source: str = ""  # "jlcpcb", "parametric", "parametric-fallback", "parsed"
+    mpn: str | None = None
+    manufacturer: str | None = None
 
 
 @dataclass(frozen=True)

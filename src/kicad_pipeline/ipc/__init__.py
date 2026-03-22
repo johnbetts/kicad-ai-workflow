@@ -21,6 +21,8 @@ except ImportError:  # pragma: no cover — optional dep
 from kicad_pipeline.ipc.board_ops import (
     pull_board_snapshot,
     pull_footprint_positions,
+    push_footprint_positions,
+    push_pcb_design,
     push_pcb_to_kicad,
     refill_zones,
 )
@@ -39,6 +41,8 @@ __all__ = [
     "is_available",
     "pull_board_snapshot",
     "pull_footprint_positions",
+    "push_footprint_positions",
+    "push_pcb_design",
     "push_pcb_to_kicad",
     "refill_zones",
 ]

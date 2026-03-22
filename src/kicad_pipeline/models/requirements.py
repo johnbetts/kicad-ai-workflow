@@ -68,6 +68,8 @@ class Component:
     lcsc: str | None = None
     description: str | None = None
     datasheet: str | None = None
+    mpn: str | None = None
+    manufacturer: str | None = None
     pins: tuple[Pin, ...] = ()
 
     def get_pin(self, number: str) -> Pin | None:

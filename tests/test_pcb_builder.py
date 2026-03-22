@@ -156,10 +156,11 @@ def test_build_pcb_minimal() -> None:
 
 
 def test_build_pcb_has_footprints() -> None:
-    """PCBDesign has one footprint per component in requirements."""
+    """PCBDesign has one footprint per component + mounting holes."""
     req = _make_requirements()
     design = build_pcb(req)
-    assert len(design.footprints) == len(req.components)
+    component_fps = [fp for fp in design.footprints if not fp.ref.startswith("H")]
+    assert len(component_fps) == len(req.components)
 
 
 def test_build_pcb_has_nets() -> None:

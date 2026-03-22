@@ -67,7 +67,7 @@ def _build_requirements() -> object:
         components=tuple(components),
         nets=tuple(nets),
         mechanical=MechanicalConstraints(
-            board_width_mm=140.0, board_height_mm=80.0,
+            board_width_mm=160.0, board_height_mm=80.0,
         ),
         board_context=BoardContext(
             target_system="Test",

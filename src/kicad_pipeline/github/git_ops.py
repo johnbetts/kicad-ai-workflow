@@ -228,7 +228,12 @@ def init_from_github(url: str, local_path: str) -> bool:
 
     Returns:
         ``True`` if the clone succeeded, ``False`` otherwise.
+
+    Raises:
+        ValueError: If *url* does not start with ``https://``.
     """
+    if not url.startswith("https://"):
+        raise ValueError(f"Only HTTPS URLs are accepted, got: {url!r}")
     result = subprocess.run(
         ["git", "clone", url, local_path],
         capture_output=True,

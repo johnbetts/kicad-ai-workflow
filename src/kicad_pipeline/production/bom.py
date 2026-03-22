@@ -71,6 +71,9 @@ def generate_bom(
     group_fp: dict[tuple[str, str, str], str] = {}
 
     for fp in pcb.footprints:
+        # Skip footprints marked as excluded from BOM (e.g. mounting holes)
+        if fp.attr and "exclude_from_bom" in fp.attr:
+            continue
         lcsc_val = fp.lcsc if fp.lcsc is not None else ""
         key = (fp.value, fp.lib_id, lcsc_val)
         if key not in groups:

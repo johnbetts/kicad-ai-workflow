@@ -76,6 +76,77 @@ def refill_zones(conn: KiCadConnection) -> None:
         raise IPCSyncError(f"Failed to refill zones via IPC: {exc}") from exc
 
 
+def push_footprint_positions(
+    positions: dict[str, tuple[float, float, float]],
+    conn: KiCadConnection,
+) -> int:
+    """Push footprint positions to the live KiCad board.
+
+    Reads footprints from KiCad (preserving their internal UUIDs),
+    sets new positions/orientations, and pushes them back via
+    ``board.update_items()``.  UUIDs must match for the update to
+    take effect — this is why we read from the board first rather
+    than constructing new ``FootprintInstance`` objects.
+
+    Args:
+        positions: Mapping of reference designator to ``(x_mm, y_mm, rotation_deg)``.
+            Coordinates are KiCad origin coordinates (not centroid).
+        conn: Active IPC connection.
+
+    Returns:
+        Number of footprints actually updated.
+
+    Raises:
+        IPCSyncError: If the update fails.
+    """
+    _require_kipy()
+
+    from kipy.geometry import Angle, Vector2
+
+    try:
+        board = conn.client.get_board()
+        commit = board.begin_commit()
+        to_update = []
+        for fp in board.get_footprints():
+            ref = fp.reference_field.text.value
+            if ref not in positions:
+                continue
+            x_mm, y_mm, rot_deg = positions[ref]
+            fp.position = Vector2.from_xy_mm(x_mm, y_mm)
+            fp.orientation = Angle.from_degrees(rot_deg)
+            to_update.append(fp)
+
+        if to_update:
+            board.update_items(to_update)
+        board.push_commit(commit, "Update footprint positions")
+        log.info("Pushed %d footprint positions to KiCad", len(to_update))
+        return len(to_update)
+    except Exception as exc:
+        raise IPCSyncError(f"Failed to push footprint positions: {exc}") from exc
+
+
+def push_pcb_design(
+    design: PCBDesign,
+    conn: KiCadConnection,
+) -> int:
+    """Push all footprint positions from a PCBDesign to KiCad.
+
+    Convenience wrapper around :func:`push_footprint_positions` that
+    extracts ``(x, y, rotation)`` from each footprint in the design.
+
+    Args:
+        design: The pipeline's PCB design with optimized positions.
+        conn: Active IPC connection.
+
+    Returns:
+        Number of footprints updated.
+    """
+    positions: dict[str, tuple[float, float, float]] = {}
+    for fp in design.footprints:
+        positions[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
+    return push_footprint_positions(positions, conn)
+
+
 def pull_footprint_positions(
     conn: KiCadConnection,
 ) -> dict[str, tuple[float, float, float]]:

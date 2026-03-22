@@ -193,7 +193,7 @@ def build_project_file(
         "boards": [],
         "cvpcb": {"equivalence_files": []},
         "libraries": {
-            "pinned_footprint_libs": [],
+            "pinned_footprint_libs": [project_name],
             "pinned_symbol_libs": [],
         },
         "meta": {

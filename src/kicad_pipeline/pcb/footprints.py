@@ -20,6 +20,7 @@ from kicad_pipeline.constants import (
     LAYER_B_MASK,
     LAYER_B_PASTE,
     LAYER_B_SILKSCREEN,
+    LAYER_EDGE_CUTS,
     LAYER_F_COURTYARD,
     LAYER_F_CU,
     LAYER_F_FAB,
@@ -282,6 +283,20 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         )
         return Footprint3DModel(path=path)
 
+    # Optocouplers (PC817, EL817, etc.) — SMD SOP-4 or THT DIP-4
+    if "PC817" in upper or "EL817" in upper or "OPTO" in upper:
+        if "SOP" in upper or "SMD" in upper or "MINI" in upper:
+            path = (
+                f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/"
+                "SOP-4_3.8x4.1mm_P2.54mm.step"
+            )
+        else:
+            path = (
+                f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/"
+                "DIP-4_W7.62mm.step"
+            )
+        return Footprint3DModel(path=path)
+
     # DIP packages (optocouplers, etc.)
     if upper.startswith("DIP-"):
         path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
@@ -341,6 +356,7 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
             path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
             return Footprint3DModel(path=path)
 
+    _log.debug("No 3D model mapping for lib_id=%r (KI-017)", lib_id)
     return None
 
 
@@ -428,14 +444,15 @@ _SOT23_VARIANTS: dict[str, tuple[float, float, list[tuple[float, float]]]] = {
 
 # USB-C power/signal pad definitions: (x, y, width, height, name)
 _USBC_PADS: list[tuple[float, float, float, float, str]] = [
-    (-3.5, 2.5, 1.6, 1.6, "VBUS"),   # VBUS left
-    (3.5, 2.5, 1.6, 1.6, "VBUS"),    # VBUS right
-    (-3.5, -2.5, 1.6, 1.6, "GND"),   # GND left
-    (3.5, -2.5, 1.6, 1.6, "GND"),    # GND right
-    (-2.0, 2.5, 0.6, 1.6, "CC1"),    # CC1
-    (2.0, 2.5, 0.6, 1.6, "CC2"),     # CC2
-    (-1.0, 2.5, 0.6, 1.6, "D-"),     # D-
-    (1.0, 2.5, 0.6, 1.6, "D+"),      # D+
+    (-3.5, 2.5, 1.6, 1.6, "A1"),     # GND (A1)
+    (-2.0, 2.5, 0.6, 1.6, "A5"),     # CC1 (A5)
+    (-1.0, 2.5, 0.6, 1.6, "A7"),     # D- (A7)
+    (1.0, 2.5, 0.6, 1.6, "A6"),      # D+ (A6)
+    (2.0, 2.5, 0.6, 1.6, "B5"),      # CC2 (B5)
+    (3.5, 2.5, 1.6, 1.6, "A4"),      # VBUS (A4)
+    (-1.0, -2.5, 0.6, 1.6, "B7"),    # D-_B (B7)
+    (1.0, -2.5, 0.6, 1.6, "B6"),     # D+_B (B6)
+    (0.0, -3.5, 2.0, 1.0, "S1"),     # Shield (S1)
 ]
 
 # RJ45 HR911105A pin geometry (from KiCad official footprint)
@@ -994,7 +1011,18 @@ def make_relay_spdt(
     cy = (-7.8 + 7.8) / 2.0
     hw = body_w / 2.0 + PCB_COURTYARD_CLEARANCE_MM
     hh = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM
+    # U-shaped isolation cutout around COM pin (pin 1 at 0,0).
+    # Lives on Edge.Cuts inside the footprint so it moves with the relay.
+    # The U opens toward positive X (toward relay body).
+    _cutout_w = 1.0       # slot width (mm)
+    _cutout_clr = 2.0     # clearance from pad edge to inner slot edge
+    _com_pad_r = 3.0 / 2  # COM pad radius (3mm pad)
+    _u_half = _com_pad_r + _cutout_clr   # half-height of the U
+    _u_closed_x = -(_com_pad_r + _cutout_clr)  # closed end (left)
+    _u_open_x = _com_pad_r + _cutout_clr       # open end (right, toward body)
+
     graphics = (
+        # Courtyard
         FootprintLine(
             start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh),
             layer=LAYER_F_COURTYARD, width=0.05,
@@ -1010,6 +1038,25 @@ def make_relay_spdt(
         FootprintLine(
             start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh),
             layer=LAYER_F_COURTYARD, width=0.05,
+        ),
+        # U-shaped Edge.Cuts isolation cutout around COM pin
+        # Left vertical (closed end of U)
+        FootprintLine(
+            start=Point(_u_closed_x, -_u_half),
+            end=Point(_u_closed_x, _u_half),
+            layer=LAYER_EDGE_CUTS, width=_cutout_w,
+        ),
+        # Bottom horizontal arm
+        FootprintLine(
+            start=Point(_u_closed_x, -_u_half),
+            end=Point(_u_open_x, -_u_half),
+            layer=LAYER_EDGE_CUTS, width=_cutout_w,
+        ),
+        # Top horizontal arm
+        FootprintLine(
+            start=Point(_u_closed_x, _u_half),
+            end=Point(_u_open_x, _u_half),
+            layer=LAYER_EDGE_CUTS, width=_cutout_w,
         ),
     )
     texts = (
@@ -1056,15 +1103,19 @@ def make_esp32_wroom(
     # 41 pads: left(14) + bottom(12) + right(14) + center GND(1)
     pad_list: list[Pad] = []
 
+    # Left and right columns share the same vertical span so pin 1
+    # (top-left) aligns with pin 40 (top-right), and pin 14 (bottom-left)
+    # aligns with pin 27 (bottom-right) — per datasheet Figure 3-1.
+    n_side = 14
+    col_top_y = -(body_h / 2.0) + 2.5 + pad_h / 2.0  # 2.5mm below top edge
+    col_bot_y = col_top_y + (n_side - 1) * pitch       # bottom of both columns
+
     # Left column: 14 pads (pins 1-14), top to bottom
     # Pin 1 (GND) at top-left near antenna, pin 14 (IO20) at bottom-left.
-    # The topmost pad starts ~2.5mm below the top edge (antenna zone above).
     left_x = -(body_w / 2.0 - pad_h / 2.0)
-    n_left = 14
-    left_top_y = -(body_h / 2.0) + 2.5 + pad_h / 2.0  # 2.5mm from top edge
-    for i in range(n_left):
+    for i in range(n_side):
         pad_list.append(_smd_pad(
-            str(i + 1), left_x, left_top_y + i * pitch, pad_h, pad_w, layer,
+            str(i + 1), left_x, col_top_y + i * pitch, pad_h, pad_w, layer,
         ))
 
     # Bottom row: 12 pads (pins 15-26), left to right
@@ -1080,11 +1131,9 @@ def make_esp32_wroom(
     # Right column: 14 pads (pins 27-40), bottom to top
     # Pin 27 (IO0) at bottom-right, pin 40 (GND) at top-right.
     right_x = body_w / 2.0 - pad_h / 2.0
-    n_right = 14
-    right_bot_y = body_h / 2.0 - 2.5 - pad_h / 2.0  # 2.5mm from bottom edge
-    for i in range(n_right):
+    for i in range(n_side):
         pad_list.append(_smd_pad(
-            str(27 + i), right_x, right_bot_y - i * pitch, pad_h, pad_w, layer,
+            str(27 + i), right_x, col_bot_y - i * pitch, pad_h, pad_w, layer,
         ))
 
     # Center GND pad (large thermal pad underneath) — pin 41
@@ -1136,16 +1185,26 @@ def make_crystal_smd(
     pad_w = 1.2
     pad_h = 1.0
     pitch = size_w - pad_w + 0.4
-    pads = (
+    # Signal pads (1, 2) + shield/ground pads (3, 4) for 4-pin crystals.
+    # 4-pin variants (3.2x2.5mm etc.) have ground pads at corners.
+    has_shield = size_h >= 2.0
+    pads_list = [
         _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
         _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
-    )
+    ]
+    if has_shield:
+        shield_x = pitch / 2.0
+        shield_y = size_h / 2.0 - pad_h / 2.0
+        pads_list.append(_smd_pad("3", -shield_x, -shield_y, pad_w, pad_h, layer))
+        pads_list.append(_smd_pad("4", shield_x, -shield_y, pad_w, pad_h, layer))
+    pads = tuple(pads_list)
     graphics = _courtyard_rect(size_w, size_h)
     texts = (
         _ref_text(ref, -(size_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
         _val_text(value, size_h / 2.0 + 1.0, LAYER_F_FAB),
     )
-    lib_id = f"Crystal:Crystal_SMD_{size_w:.0f}215-2Pin_{size_w}x{size_h}mm"
+    pin_suffix = "4Pin" if has_shield else "2Pin"
+    lib_id = f"Crystal:Crystal_SMD_{size_w:.0f}215-{pin_suffix}_{size_w}x{size_h}mm"
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
     return Footprint(
@@ -1333,17 +1392,21 @@ def make_generic_smd_ic(
     pin_count: int,
     pitch_mm: float = 0.5,
     lib_id: str = "",
+    thermal_pad: bool | None = None,
 ) -> Footprint:
     """Generate a generic SMD IC footprint (MSOP, TSSOP, SOIC, QFP, QFN, etc.).
 
     Pins are arranged in two rows: odd pins on the left, even on the right.
+    QFN/DFN packages automatically get a center thermal/exposed pad (pad N+1).
 
     Args:
         ref: Reference designator.
         value: Component value string.
-        pin_count: Total number of pins.
+        pin_count: Total number of pins (signal pins only, thermal pad auto-added).
         pitch_mm: Pin pitch in mm.
         lib_id: KiCad library ID string (auto-generated if empty).
+        thermal_pad: Whether to add a center thermal pad.  ``None`` (default)
+            auto-detects from the lib_id (QFN/DFN packages get one).
 
     Returns:
         Fully constructed :class:`Footprint`.
@@ -1364,6 +1427,15 @@ def make_generic_smd_ic(
         # Right column: pins half+1..pin_count going upward
         y = row_span / 2.0 - i * pitch_mm
         pads.append(_smd_pad(str(half + i + 1), col_pitch, y, pad_h, pad_w, LAYER_F_CU))
+
+    # Auto-detect thermal pad for QFN/DFN packages
+    _upper = lib_id.upper()
+    if thermal_pad is None:
+        thermal_pad = any(kw in _upper for kw in ("QFN", "DFN"))
+    if thermal_pad:
+        # Center exposed pad, size ~60% of body
+        ep_size = max(row_span * 0.5, 2.0)
+        pads.append(_smd_pad(str(pin_count + 1), 0.0, 0.0, ep_size, ep_size, LAYER_F_CU))
 
     body_w = col_pitch * 2.0 + pad_h
     body_h = row_span + pad_w + 0.5
@@ -1657,8 +1729,8 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
     _log.debug("make_usbc_connector ref=%s", ref)
     layer = LAYER_F_CU
     pads = tuple(
-        _smd_pad(str(i + 1), x, y, w, h, layer)
-        for i, (x, y, w, h, _name) in enumerate(_USBC_PADS)
+        _smd_pad(pad_id, x, y, w, h, layer)
+        for x, y, w, h, pad_id in _USBC_PADS
     )
     body_w = 9.0
     body_h = 7.35
@@ -2060,6 +2132,77 @@ def make_microsd_slot(
 
 
 # ---------------------------------------------------------------------------
+# JLCPCB footprint loader integration
+# ---------------------------------------------------------------------------
+
+
+def _try_jlcpcb_footprint(
+    lcsc: str,
+    ref: str,
+    value: str,
+    layer: str,
+    footprint_id: str = "",
+) -> Footprint | None:
+    """Attempt to load a JLCPCB-sourced footprint by LCSC number.
+
+    Downloads (if needed) and parses the ``.kicad_mod`` file. Returns
+    None on any failure, allowing fallback to parametric generation.
+    """
+    try:
+        from kicad_pipeline.parts.footprint_cache import get_jlcpcb_footprint
+        from kicad_pipeline.pcb.footprint_loader import load_kicad_mod
+    except ImportError:
+        return None
+
+    mod_path = get_jlcpcb_footprint(lcsc)
+    if mod_path is None:
+        return None
+
+    try:
+        fp = load_kicad_mod(mod_path, ref=ref, value=value, layer=layer, lcsc=lcsc)
+        # Tag source provenance for downstream verification tracking
+        fp = Footprint(
+            lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+            position=fp.position, rotation=fp.rotation, layer=fp.layer,
+            pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+            lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+            datasheet=fp.datasheet, description=fp.description,
+            footprint_source="jlcpcb",
+        )
+        # QFN/DFN packages: add thermal/exposed pad if the JLCPCB footprint
+        # doesn't include one.  The pad number is pin_count+1.
+        # Check both the JLCPCB lib_id and the original requested footprint_id.
+        _check_ids = (fp.lib_id.upper(), footprint_id.upper())
+        if any(kw in uid for uid in _check_ids for kw in ("QFN", "DFN")):
+            pin_count = _parse_pin_count(footprint_id) or _parse_pin_count(fp.lib_id)
+            if pin_count > 0 and len(fp.pads) == pin_count:
+                # No thermal pad present — add one
+                ep_size = max(2.0, pin_count * 0.08)
+                ep = _smd_pad(str(pin_count + 1), 0.0, 0.0, ep_size, ep_size, fp.layer)
+                fp = Footprint(
+                    lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                    position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                    pads=(*fp.pads, ep), graphics=fp.graphics, texts=fp.texts,
+                    lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+                    datasheet=fp.datasheet, description=fp.description,
+                    footprint_source=fp.footprint_source,
+                )
+                _log.info("Added thermal pad %d to QFN footprint %s", pin_count + 1, ref)
+
+        _log.info(
+            "Using JLCPCB footprint for %s (%s): %d pads from %s",
+            ref, lcsc, len(fp.pads), mod_path.name,
+        )
+        return fp
+    except Exception:
+        _log.warning(
+            "Failed to parse JLCPCB footprint for %s (%s), falling back to parametric",
+            ref, lcsc, exc_info=True,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Routing helper
 # ---------------------------------------------------------------------------
 
@@ -2099,10 +2242,18 @@ def footprint_for_component(
         Fully constructed :class:`Footprint`.
     """
     _log.debug("footprint_for_component ref=%s id=%s layer=%s", ref, footprint_id, layer)
+
+    # JLCPCB-first: try loading verified footprint from JLCPCB library
+    if lcsc:
+        fp = _try_jlcpcb_footprint(lcsc, ref, value, layer, footprint_id=footprint_id)
+        if fp is not None:
+            return fp
+
     fid = footprint_id.strip()
     upper = fid.upper()
 
     fp: Footprint
+    _source = "parametric"  # overridden to "parametric-fallback" if unknown footprint_id
 
     # WS2812B / addressable LED (before generic LED_ check)
     if "WS2812" in upper:
@@ -2264,24 +2415,25 @@ def footprint_for_component(
             ref,
         )
         fp = make_smd_resistor_capacitor(ref, value, package="0805")
+        _source = "parametric-fallback"
 
-    # Attach LCSC if provided
-    if lcsc is not None:
-        fp = Footprint(
-            lib_id=fp.lib_id,
-            ref=fp.ref,
-            value=fp.value,
-            position=fp.position,
-            rotation=fp.rotation,
-            layer=fp.layer,
-            pads=fp.pads,
-            graphics=fp.graphics,
-            texts=fp.texts,
-            lcsc=lcsc,
-            uuid=fp.uuid,
-            attr=fp.attr,
-            models=fp.models,
-        )
+    # Attach LCSC and source tag
+    fp = Footprint(
+        lib_id=fp.lib_id,
+        ref=fp.ref,
+        value=fp.value,
+        position=fp.position,
+        rotation=fp.rotation,
+        layer=fp.layer,
+        pads=fp.pads,
+        graphics=fp.graphics,
+        texts=fp.texts,
+        lcsc=lcsc if lcsc is not None else fp.lcsc,
+        uuid=fp.uuid,
+        attr=fp.attr,
+        models=fp.models,
+        footprint_source=_source,
+    )
     return fp
 
 
@@ -2445,7 +2597,7 @@ def compute_footprint_bbox(fp: Footprint) -> FootprintBBox:
 
 _BODY_EXTENSION: dict[str, tuple[float, float]] = {
     # (extra_width_per_side, extra_height_per_side)
-    "module": (0.5, 2.0),       # ESP32/W5500 — body extends ~2mm beyond pad field per side
+    "module": (0.5, 3.5),       # ESP32/W5500 — body extends well beyond pad field (antenna, shield)
     "qfn": (0.25, 0.25),        # QFN/QFP/BGA — body ≈ pad field
     "qfp": (0.25, 0.25),
     "bga": (0.25, 0.25),
@@ -2490,13 +2642,68 @@ def _classify_package(fp: Footprint) -> str:
     return "default"
 
 
+def _courtyard_from_graphics(fp: Footprint) -> tuple[float, float] | None:
+    """Extract courtyard dimensions from F.CrtYd graphics if present.
+
+    Scans footprint graphics for lines on the ``F.CrtYd`` or ``B.CrtYd``
+    layer and computes the bounding box.  Returns ``None`` if no courtyard
+    graphics exist.
+    """
+    from kicad_pipeline.models.pcb import FootprintLine
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for g in fp.graphics:
+        if isinstance(g, FootprintLine) and "CrtYd" in g.layer:
+            xs.extend((g.start.x, g.end.x))
+            ys.extend((g.start.y, g.end.y))
+    if not xs:
+        return None
+    w = max(xs) - min(xs)
+    h = max(ys) - min(ys)
+    if w < 0.5 or h < 0.5:
+        return None
+    return (w, h)
+
+
+def _body_from_fab_graphics(fp: Footprint) -> tuple[float, float] | None:
+    """Extract body dimensions from F.Fab graphics if present.
+
+    The ``F.Fab`` layer typically contains the component body outline.
+    Returns ``None`` if no fab graphics exist.
+    """
+    from kicad_pipeline.models.pcb import FootprintLine
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for g in fp.graphics:
+        if isinstance(g, FootprintLine) and "Fab" in g.layer:
+            xs.extend((g.start.x, g.end.x))
+            ys.extend((g.start.y, g.end.y))
+    if not xs:
+        return None
+    w = max(xs) - min(xs)
+    h = max(ys) - min(ys)
+    if w < 0.5 or h < 0.5:
+        return None
+    return (w, h)
+
+
 def estimate_courtyard_mm(fp: Footprint) -> tuple[float, float]:
     """Estimate courtyard (width, height) from footprint geometry.
 
-    Uses pad edges (not centers) plus a body extension factor that accounts
-    for the physical component body extending beyond the pad field.  The
-    body extension varies by package type — modules like ESP32 have large
-    antenna/shield areas, while passives are close to pad extent.
+    Resolution order (first valid result wins):
+
+    1. **Courtyard graphics** — ``F.CrtYd`` / ``B.CrtYd`` layer lines
+       define the exact courtyard.  Used directly when present.
+    2. **Fab body + clearance** — ``F.Fab`` layer lines define the
+       physical body outline.  Courtyard = body + clearance margin.
+    3. **Pad extents + body extension** — heuristic: pad field bounding
+       box plus a package-type-dependent body extension factor.
+
+    The first two methods use actual geometry from the footprint and are
+    accurate even for modules where the body far exceeds the pad field
+    (e.g., ESP32-WROOM: pads span ~18.5mm but body is 25.5mm).
 
     Args:
         fp: A :class:`Footprint` with pad data.
@@ -2504,10 +2711,30 @@ def estimate_courtyard_mm(fp: Footprint) -> tuple[float, float]:
     Returns:
         ``(width_mm, height_mm)`` courtyard estimate.
     """
+    # 1. Existing courtyard graphics — most authoritative
+    crtyd = _courtyard_from_graphics(fp)
+    if crtyd is not None:
+        return (max(crtyd[0], 1.0), max(crtyd[1], 1.0))
+
+    # 2. Fab body outline + clearance
+    body = _body_from_fab_graphics(fp)
+    if body is not None:
+        w = body[0] + 2.0 * _COURTYARD_CLEARANCE
+        h = body[1] + 2.0 * _COURTYARD_CLEARANCE
+        # Ensure courtyard is at least as large as pad extents
+        if fp.pads:
+            pad_w = (max(p.position.x + p.size_x / 2.0 for p in fp.pads)
+                     - min(p.position.x - p.size_x / 2.0 for p in fp.pads))
+            pad_h = (max(p.position.y + p.size_y / 2.0 for p in fp.pads)
+                     - min(p.position.y - p.size_y / 2.0 for p in fp.pads))
+            w = max(w, pad_w + 2.0 * _COURTYARD_CLEARANCE)
+            h = max(h, pad_h + 2.0 * _COURTYARD_CLEARANCE)
+        return (max(w, 1.0), max(h, 1.0))
+
+    # 3. Fallback: pad extents + heuristic body extension
     if not fp.pads:
         return estimate_footprint_size(fp.lib_id)
 
-    # Compute pad-edge extents
     min_x = min(p.position.x - p.size_x / 2.0 for p in fp.pads)
     max_x = max(p.position.x + p.size_x / 2.0 for p in fp.pads)
     min_y = min(p.position.y - p.size_y / 2.0 for p in fp.pads)
@@ -2516,7 +2743,6 @@ def estimate_courtyard_mm(fp: Footprint) -> tuple[float, float]:
     pad_w = max_x - min_x
     pad_h = max_y - min_y
 
-    # Apply body extension per package type
     pkg = _classify_package(fp)
     ext_w, ext_h = _BODY_EXTENSION.get(pkg, _BODY_EXTENSION["default"])
 

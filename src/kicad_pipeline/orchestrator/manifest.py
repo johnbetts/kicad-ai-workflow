@@ -57,6 +57,7 @@ def _stage_record_to_dict(sr: StageRecord) -> dict[str, object]:
         "approved_at": sr.approved_at,
         "generation_count": sr.generation_count,
         "notes": list(sr.notes),
+        "requirements_hash": sr.requirements_hash,
     }
 
 
@@ -127,6 +128,7 @@ def _package_strategy_from_dict(data: dict[str, object]) -> PackageStrategy:
 def _stage_record_from_dict(data: dict[str, object]) -> StageRecord:
     generated_at = data.get("generated_at")
     approved_at = data.get("approved_at")
+    req_hash = data.get("requirements_hash")
     return StageRecord(
         stage=StageId(str(data["stage"])),
         state=StageState(str(data["state"])),
@@ -134,6 +136,7 @@ def _stage_record_from_dict(data: dict[str, object]) -> StageRecord:
         approved_at=str(approved_at) if approved_at is not None else None,
         generation_count=int(str(data.get("generation_count", 0))),
         notes=tuple(str(x) for x in _as_list(data.get("notes", []))),
+        requirements_hash=str(req_hash) if req_hash is not None else None,
     )
 
 

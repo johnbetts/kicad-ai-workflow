@@ -86,6 +86,7 @@ class StageRecord:
     approved_at: str | None = None
     generation_count: int = 0
     notes: tuple[str, ...] = ()
+    requirements_hash: str | None = None
 
 
 @dataclass(frozen=True)

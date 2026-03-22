@@ -25,8 +25,9 @@ def rotate_point(
 ) -> tuple[float, float]:
     """Rotate a point around the origin by *angle_deg* degrees (KiCad CW convention)."""
     # KiCad stores rotation as CW in screen view (Y-down).
-    # Negate angle for the standard CCW rotation matrix.
-    rad = math.radians(-angle_deg)
+    # In Y-down coordinates, the standard rotation matrix with positive angle
+    # already produces CW rotation, so no negation is needed.
+    rad = math.radians(angle_deg)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
     return px * cos_a - py * sin_a, px * sin_a + py * cos_a
 

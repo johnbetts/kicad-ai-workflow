@@ -72,6 +72,10 @@ class RoutingError(PCBError):
     """Raised when autorouting fails or produces unroutable nets."""
 
 
+class FootprintError(PCBError):
+    """Raised when footprint creation, verification, or audit fails."""
+
+
 # ---------------------------------------------------------------------------
 # Validation (DRC, electrical, manufacturing)
 # ---------------------------------------------------------------------------

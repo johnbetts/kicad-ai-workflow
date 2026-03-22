@@ -610,10 +610,11 @@ def test_write_schematic_warns_on_unannotated_ref(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """write_schematic emits WARNING when symbols contain '?' refs."""
+    """write_schematic raises SchematicError for symbols with '?' refs."""
     import logging
     from dataclasses import replace as dreplace
 
+    from kicad_pipeline.exceptions import SchematicError
     from kicad_pipeline.models.schematic import Point, SymbolInstance
 
     reqs = _minimal_requirements()
@@ -631,9 +632,12 @@ def test_write_schematic_warns_on_unannotated_ref(
 
     dest = tmp_path / "test_warn.kicad_sch"
     with caplog.at_level(logging.WARNING, logger="kicad_pipeline.schematic.builder"):
-        write_schematic(sch_bad, dest)
+        with pytest.raises(SchematicError, match="R\\?"):
+            write_schematic(sch_bad, dest)
 
+    # Warning is still emitted before the validation error
     assert any("R?" in rec.message for rec in caplog.records)
+    # File is written before validation raises
     assert dest.exists()
 
 

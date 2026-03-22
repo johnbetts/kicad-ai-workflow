@@ -65,6 +65,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Track board-size warnings to avoid repeating the same message every build_pcb() call
+_board_size_warned: set[tuple[int, int, int]] = set()
+
 # Module-level storage for preserved edge cuts (board slots/cutouts)
 # populated by build_pcb() and consumed by pcb_to_sexp().
 _preserved_edge_cuts: list[tuple[Point, Point, float]] = []
@@ -368,19 +371,25 @@ def _build_nets(requirements: ProjectRequirements) -> tuple[NetEntry, ...]:
     return tuple(nets)
 
 
-def _footprint_lib_id(component: Component) -> str:
+def _footprint_lib_id(component: Component, project_name: str | None = None) -> str:
     """Derive a KiCad footprint library identifier for *component*.
 
-    Uses the component's ``footprint`` field when it contains a colon
-    (already fully qualified, e.g. ``"R_SMD:R_0805_2012Metric"``).
-    Otherwise wraps it as ``"kicad-ai:<footprint>"``.
+    When *project_name* is provided, all footprints use the project-local
+    library prefix ``{project_name}:{footprint_name}``.  Otherwise falls
+    back to the legacy behaviour (``kicad-ai:`` prefix for bare names).
 
     Args:
         component: The component to classify.
+        project_name: When set, use as the library prefix for all footprints.
 
     Returns:
         Fully-qualified KiCad footprint ``lib_id`` string.
     """
+    from kicad_pipeline.pcb.footprint_library import footprint_name_from_lib_id
+
+    if project_name is not None:
+        fp_name = footprint_name_from_lib_id(component.footprint)
+        return f"{project_name}:{fp_name}"
     fp = component.footprint
     if ":" in fp:
         return fp
@@ -1079,6 +1088,7 @@ def build_pcb(
     preserve_routing: bool = True,
     pcb_file_path: str | Path | None = None,
     skip_inner_zones: bool = False,
+    project_name: str | None = None,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1276,6 +1286,16 @@ def build_pcb(
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
                 datasheet=comp.datasheet, description=comp.description,
             )
+        # Remap lib_id to project-local library prefix
+        if project_name is not None:
+            new_lib_id = _footprint_lib_id(comp, project_name=project_name)
+            fp = Footprint(
+                lib_id=new_lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+                datasheet=fp.datasheet, description=fp.description,
+            )
         pre_footprints.append(fp)
 
     # ------------------------------------------------------------------
@@ -1324,40 +1344,45 @@ def build_pcb(
                 board_height_mm,
             )
 
-    # Warn if board area is too small for component footprints
+    # Warn if board area is too small for component footprints (once per size)
     board_area = board_width_mm * board_height_mm
     min_area = total_area * 3.0  # rule of thumb: 3x footprint area
     if total_area > 0.0 and board_area < min_area:
         import math as _math
         suggested_w = _math.sqrt(min_area * (board_width_mm / board_height_mm))
         suggested_h = min_area / suggested_w
-        log.warning(
-            "build_pcb: board %.0fx%.0fmm (%.0f mm^2) may be too small for "
-            "%.0f mm^2 of footprints (suggest %.0fx%.0fmm)",
-            board_width_mm, board_height_mm, board_area,
-            total_area, suggested_w, suggested_h,
-        )
+        _size_key = (round(board_width_mm), round(board_height_mm), round(total_area))
+        if _size_key not in _board_size_warned:
+            _board_size_warned.add(_size_key)
+            log.warning(
+                "build_pcb: board %.0fx%.0fmm (%.0f mm^2) may be too small for "
+                "%.0f mm^2 of footprints (suggest %.0fx%.0fmm)",
+                board_width_mm, board_height_mm, board_area,
+                total_area, suggested_w, suggested_h,
+            )
 
     # ------------------------------------------------------------------
     # Step 4c: Create keepouts BEFORE placement so solver can avoid them
     # ------------------------------------------------------------------
     keepouts: list[Keepout] = []
-    if _has_rf_module(requirements):
-        log.info("build_pcb: RF module detected — adding antenna keepout")
-        # Find RF module position + rotation from preserved layout
-        rf_pos: tuple[float, float, float] | None = None
-        if fixed_positions:
-            for comp in requirements.components:
-                val_lower = comp.value.lower()
-                if any(kw in val_lower for kw in _RF_KEYWORDS):
-                    if comp.ref in fixed_positions:
-                        px, py, pr = fixed_positions[comp.ref]
-                        rf_pos = (px, py, pr)
-                        log.info(
-                            "build_pcb: anchoring antenna keepout to %s at (%.1f, %.1f, rot=%.0f)",
-                            comp.ref, px, py, pr,
-                        )
-                    break
+    # Track whether we have an RF module — keepout created AFTER placement
+    # (KI-019: never create antenna keepout at hardcoded fallback position).
+    _has_rf = _has_rf_module(requirements)
+    rf_pos: tuple[float, float, float] | None = None
+    if _has_rf and fixed_positions:
+        for comp in requirements.components:
+            val_lower = comp.value.lower()
+            if any(kw in val_lower for kw in _RF_KEYWORDS):
+                if comp.ref in fixed_positions:
+                    px, py, pr = fixed_positions[comp.ref]
+                    rf_pos = (px, py, pr)
+                    log.info(
+                        "build_pcb: anchoring antenna keepout to %s at (%.1f, %.1f, rot=%.0f)",
+                        comp.ref, px, py, pr,
+                    )
+                break
+    if _has_rf and rf_pos is not None:
+        # Only create pre-placement keepout when position is known (preserved layout)
         antenna_ko = _make_antenna_keepout(
             board_width_mm,
             _ANTENNA_KEEPOUT_WIDTH_MM,
@@ -1367,18 +1392,20 @@ def build_pcb(
             board_height=board_height_mm,
         )
         keepouts.append(antenna_ko)
-
-        # Inner-layer keepout under the full module body
-        if rf_pos is not None:
-            body_ko = _make_rf_module_body_keepout(
-                rf_pos,
-                layer_count=layer_count,
-                board_width=board_width_mm,
-                board_height=board_height_mm,
-            )
-            if body_ko is not None:
-                log.info("build_pcb: adding RF module body keepout on inner layers")
-                keepouts.append(body_ko)
+        body_ko = _make_rf_module_body_keepout(
+            rf_pos,
+            layer_count=layer_count,
+            board_width=board_width_mm,
+            board_height=board_height_mm,
+        )
+        if body_ko is not None:
+            log.info("build_pcb: adding RF module body keepout on inner layers")
+            keepouts.append(body_ko)
+    elif _has_rf:
+        log.info(
+            "build_pcb: RF module detected but position unknown — "
+            "antenna keepout deferred to post-placement (KI-019)"
+        )
 
     # Mounting-hole keepouts
     mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
@@ -1459,6 +1486,39 @@ def build_pcb(
             models=fp.models, datasheet=fp.datasheet, description=fp.description,
         )
         footprints_with_pos.append(fp_placed)
+
+    # ------------------------------------------------------------------
+    # Step 5a-post: Create antenna keepout from actual placed position
+    # (KI-019: deferred from step 4c when position was unknown)
+    # ------------------------------------------------------------------
+    if _has_rf and rf_pos is None:
+        for fp in footprints_with_pos:
+            val_lower = fp.value.lower() if fp.value else ""
+            if any(kw in val_lower for kw in _RF_KEYWORDS):
+                rf_pos = (fp.position.x, fp.position.y, fp.rotation)
+                log.info(
+                    "build_pcb: creating post-placement antenna keepout for %s "
+                    "at (%.1f, %.1f, rot=%.0f)",
+                    fp.ref, fp.position.x, fp.position.y, fp.rotation,
+                )
+                antenna_ko = _make_antenna_keepout(
+                    board_width_mm,
+                    _ANTENNA_KEEPOUT_WIDTH_MM,
+                    _ANTENNA_KEEPOUT_HEIGHT_MM,
+                    rf_position=rf_pos,
+                    layer_count=layer_count,
+                    board_height=board_height_mm,
+                )
+                keepouts.append(antenna_ko)
+                body_ko = _make_rf_module_body_keepout(
+                    rf_pos,
+                    layer_count=layer_count,
+                    board_width=board_width_mm,
+                    board_height=board_height_mm,
+                )
+                if body_ko is not None:
+                    keepouts.append(body_ko)
+                break
 
     # ------------------------------------------------------------------
     # Step 5b: Net classification
@@ -1574,11 +1634,33 @@ def build_pcb(
     # ------------------------------------------------------------------
     # Step 9b: Mounting hole footprints (NPTH, no net)
     # ------------------------------------------------------------------
-    if template_mounting_positions and template_mounting_diameter is not None:
-        for idx, (mx, my) in enumerate(template_mounting_positions, start=1):
+    # Use template positions if available, otherwise fall back to
+    # requirements.mechanical positions (KI-020: both paths must create
+    # actual NPTH footprints, not just keepout zones).
+    mh_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
+    mh_diameter = template_mounting_diameter
+    if mh_positions is None and requirements.mechanical is not None:
+        if requirements.mechanical.mounting_hole_positions:
+            mh_positions = requirements.mechanical.mounting_hole_positions
+        if mh_diameter is None:
+            mh_diameter = requirements.mechanical.mounting_hole_diameter_mm
+    # Fallback: if keepouts were created at 4-corner positions but no explicit
+    # positions were given, generate footprints at the same 4-corner defaults.
+    if mh_positions is None and corner_keepouts:
+        inset = _MOUNTING_HOLE_INSET_MM
+        mh_positions = (
+            (inset, inset),
+            (board_width_mm - inset, inset),
+            (board_width_mm - inset, board_height_mm - inset),
+            (inset, board_height_mm - inset),
+        )
+    if mh_diameter is None:
+        mh_diameter = _MOUNTING_HOLE_DIAMETER_MM
+
+    if mh_positions:
+        for idx, (mx, my) in enumerate(mh_positions, start=1):
             mh_ref = f"H{idx}"
-            mh_fp = make_mounting_hole(mh_ref, drill_diameter=template_mounting_diameter)
-            # Place at the template-defined position
+            mh_fp = make_mounting_hole(mh_ref, drill_diameter=mh_diameter)
             mh_fp = Footprint(
                 lib_id=mh_fp.lib_id,
                 ref=mh_fp.ref,
@@ -1595,7 +1677,7 @@ def build_pcb(
             final_footprints.append(mh_fp)
         log.info(
             "build_pcb: added %d mounting hole footprints",
-            len(template_mounting_positions),
+            len(mh_positions),
         )
 
     # ------------------------------------------------------------------
@@ -2082,6 +2164,29 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
         ]
     )
 
+    # LCSC part number (for JLCPCB assembly)
+    _fab = "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"
+    if fp.lcsc:
+        node.append([
+            "property", "LCSC", fp.lcsc,
+            ["at", 0, 0, 0], ["layer", _fab],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ])
+    # Manufacturer part number
+    if fp.mpn:
+        node.append([
+            "property", "MPN", fp.mpn,
+            ["at", 0, 0, 0], ["layer", _fab],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ])
+    # Manufacturer name
+    if fp.manufacturer:
+        node.append([
+            "property", "Manufacturer", fp.manufacturer,
+            ["at", 0, 0, 0], ["layer", _fab],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ])
+
     # KiCad 9: fp_text replaced by property entries (already emitted above).
     # Only emit fp_text for custom user text, not reference/value.
     for text in fp.texts:
@@ -2411,6 +2516,66 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
 # ---------------------------------------------------------------------------
 
 
+def _sync_footprint_library(design: PCBDesign, project_dir: Path) -> None:
+    """Auto-generate a project-local ``.pretty`` library from PCB footprints.
+
+    Inspects the ``lib_id`` of each footprint to discover the project name
+    prefix (``{project}:{name}``).  When a consistent prefix is found, writes
+    one ``.kicad_mod`` per unique footprint and a matching ``fp-lib-table``.
+
+    This ensures KiCad's "Update PCB from Schematic" can always resolve every
+    footprint reference in the schematic.
+    """
+    from kicad_pipeline.pcb.footprint_library import (
+        footprint_name_from_lib_id,
+        footprint_to_kicad_mod,
+        write_fp_lib_table,
+    )
+
+    # Discover the project name from lib_id prefixes — use the most common
+    # prefix (mounting holes, KiCad standard libs may use a different one).
+    from collections import Counter
+
+    prefix_counts: Counter[str] = Counter()
+    for fp in design.footprints:
+        if ":" in fp.lib_id:
+            prefix_counts[fp.lib_id.split(":")[0]] += 1
+
+    if not prefix_counts:
+        return
+
+    project_name = prefix_counts.most_common(1)[0][0]
+
+    # Build .pretty directory
+    pretty_dir = project_dir / f"{project_name}.pretty"
+    pretty_dir.mkdir(parents=True, exist_ok=True)
+
+    seen: set[str] = set()
+    prefix_colon = f"{project_name}:"
+    for fp in design.footprints:
+        if not fp.lib_id.startswith(prefix_colon):
+            continue
+        fp_name = footprint_name_from_lib_id(fp.lib_id)
+        if fp_name in seen:
+            continue
+        seen.add(fp_name)
+
+        fp_sexp = _footprint_sexp(fp)
+        assert isinstance(fp_sexp, list)
+        kicad_mod = footprint_to_kicad_mod(fp_sexp, fp_name)
+        mod_path = pretty_dir / f"{fp_name}.kicad_mod"
+        mod_path.write_text(kicad_mod, encoding="utf-8")
+
+    # Write fp-lib-table
+    write_fp_lib_table(project_dir, project_name)
+
+    log.info(
+        "_sync_footprint_library: %d footprints in %s, fp-lib-table written",
+        len(seen),
+        pretty_dir,
+    )
+
+
 def write_pcb(
     design: PCBDesign,
     path: str | Path,
@@ -2443,6 +2608,19 @@ def write_pcb(
     except Exception as exc:
         raise PCBError(f"Failed to write PCB to {dest}: {exc}") from exc
     log.info("write_pcb: wrote %s", dest)
+
+    # Auto-generate project-local footprint library so "Update PCB from
+    # Schematic" works in KiCad.  Detect the project name from the lib_id
+    # prefix (all footprints use "{project_name}:{fp_name}" when
+    # project_name was passed to build_pcb).
+    _sync_footprint_library(design, dest.parent)
+
+    # Patch PCB with schematic symbol paths so KiCad can correlate
+    # footprints to symbols during "Update PCB from Schematic".
+    sch_path = dest.with_suffix(".kicad_sch")
+    if sch_path.exists():
+        from kicad_pipeline.pcb.footprint_library import sync_pcb_to_schematic
+        sync_pcb_to_schematic(dest, sch_path)
 
     if fill_zones:
         if ipc_connection is not None:

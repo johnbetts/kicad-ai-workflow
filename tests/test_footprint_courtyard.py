@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from kicad_pipeline.models.pcb import Footprint, Pad, Point
+from kicad_pipeline.models.pcb import Footprint, FootprintLine, Pad, Point
 from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
 
 
 def _make_fp(
     lib_id: str,
     pads: tuple[Pad, ...] = (),
+    graphics: tuple[FootprintLine, ...] = (),
     ref: str = "U1",
 ) -> Footprint:
     """Helper to build a minimal Footprint for testing."""
@@ -20,6 +21,7 @@ def _make_fp(
         value="test",
         position=Point(x=0.0, y=0.0),
         pads=pads,
+        graphics=graphics,
     )
 
 
@@ -38,9 +40,9 @@ def _make_pad(x: float, y: float, sx: float = 0.6, sy: float = 0.6) -> Pad:
 class TestModuleCourtyards:
     """ESP32 and similar modules should have large courtyards."""
 
-    def test_esp32_wroom_courtyard_size(self) -> None:
-        """ESP32-S3-WROOM-1 courtyard should be ~18.5x26mm, not ~16x19mm."""
-        # ESP32 pads: roughly 16mm wide, 18mm tall pad field
+    def test_esp32_wroom_courtyard_from_pads(self) -> None:
+        """ESP32 courtyard from pads-only heuristic should be ≥25mm tall."""
+        # ESP32 pads: roughly 16mm wide, 18mm tall pad field (no graphics)
         pads = tuple(
             _make_pad(x, y, 0.5, 0.5)
             for x in (-8.0, 8.0)
@@ -48,10 +50,52 @@ class TestModuleCourtyards:
         )
         fp = _make_fp("ESP32-S3-WROOM-1", pads=pads)
         w, h = estimate_courtyard_mm(fp)
-        # Body extension: 0.5mm/side width + 4.0mm/side height + 0.25mm courtyard
-        # pad_w=16.5, pad_h=18.5 → w≈18.0, h≈27.0
+        # Module extension: 0.5mm/side width + 3.5mm/side height + 0.25 clearance
+        # pad_w=16.5, pad_h=18.5 → w≈18.0, h≈26.0
         assert w >= 17.0, f"ESP32 width {w} too small (expected ≥17mm)"
         assert h >= 25.0, f"ESP32 height {h} too small (expected ≥25mm)"
+
+    def test_esp32_wroom_courtyard_from_graphics(self) -> None:
+        """ESP32 courtyard from CrtYd graphics should use actual body dimensions."""
+        pads = tuple(
+            _make_pad(x, y, 0.5, 0.5)
+            for x in (-8.0, 8.0)
+            for y in range(-9, 10)
+        )
+        # Courtyard graphics matching real 18x25.5mm body + 0.25mm clearance
+        hw, hh = 9.25, 13.0  # 18.5 x 26.0
+        crtyd = (
+            FootprintLine(start=Point(-hw, -hh), end=Point(hw, -hh), layer="F.CrtYd"),
+            FootprintLine(start=Point(hw, -hh), end=Point(hw, hh), layer="F.CrtYd"),
+            FootprintLine(start=Point(hw, hh), end=Point(-hw, hh), layer="F.CrtYd"),
+            FootprintLine(start=Point(-hw, hh), end=Point(-hw, -hh), layer="F.CrtYd"),
+        )
+        fp = _make_fp("ESP32-S3-WROOM-1", pads=pads, graphics=crtyd)
+        w, h = estimate_courtyard_mm(fp)
+        # Should use courtyard graphics directly: 18.5 x 26.0
+        assert abs(w - 18.5) < 0.1, f"ESP32 width {w} should be ~18.5mm from graphics"
+        assert abs(h - 26.0) < 0.1, f"ESP32 height {h} should be ~26.0mm from graphics"
+
+    def test_esp32_wroom_courtyard_from_fab(self) -> None:
+        """ESP32 courtyard from F.Fab body outline should add clearance."""
+        pads = tuple(
+            _make_pad(x, y, 0.5, 0.5)
+            for x in (-8.0, 8.0)
+            for y in range(-9, 10)
+        )
+        # Fab body outline: 18x25.5mm (no courtyard graphics)
+        hw, hh = 9.0, 12.75  # 18 x 25.5
+        fab = (
+            FootprintLine(start=Point(-hw, -hh), end=Point(hw, -hh), layer="F.Fab"),
+            FootprintLine(start=Point(hw, -hh), end=Point(hw, hh), layer="F.Fab"),
+            FootprintLine(start=Point(hw, hh), end=Point(-hw, hh), layer="F.Fab"),
+            FootprintLine(start=Point(-hw, hh), end=Point(-hw, -hh), layer="F.Fab"),
+        )
+        fp = _make_fp("ESP32-S3-WROOM-1", pads=pads, graphics=fab)
+        w, h = estimate_courtyard_mm(fp)
+        # Body 18x25.5 + 0.25mm clearance/side → 18.5 x 26.0
+        assert w >= 18.0, f"ESP32 width {w} too small from fab"
+        assert h >= 25.5, f"ESP32 height {h} too small from fab"
 
     def test_w5500_module_courtyard(self) -> None:
         """W5500 module should get module-class body extension."""

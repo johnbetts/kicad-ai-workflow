@@ -284,6 +284,10 @@ class JLCPCBPartsDB:
         """
         if not lcsc.startswith("C"):
             lcsc = f"C{lcsc}"
+        # Sanitize FTS5 special characters to prevent query injection (CWE-943)
+        lcsc = re.sub(r'["\'\*\(\)]', "", lcsc).strip()
+        if not lcsc:
+            return None
         sql = (
             f"SELECT {_SELECT_COLS} FROM parts "
             'WHERE parts MATCH \'"LCSC Part":"\' || ? || \'"\' LIMIT 1'

@@ -232,9 +232,12 @@ def test_through_hole_attr() -> None:
 
 
 def test_usbc_connector() -> None:
-    """USB-C connector produces exactly 8 pads."""
+    """USB-C connector produces 8 signal pads + 1 shield pad = 9 total."""
     fp = make_usbc_connector("J1")
-    assert len(fp.pads) == 8
+    assert len(fp.pads) == 9
+    # Verify shield pad exists
+    shield_pads = [p for p in fp.pads if p.number == "S1"]
+    assert len(shield_pads) == 1
 
 
 def test_usbc_connector_attr_smd() -> None:
@@ -287,9 +290,9 @@ def test_footprint_for_component_sot23() -> None:
 
 
 def test_footprint_for_component_usbc() -> None:
-    """'USB-C-SMD' footprint_id → USB-C connector with 8 pads."""
+    """'USB-C-SMD' footprint_id → USB-C connector with 9 pads (8 signal + 1 shield)."""
     fp = footprint_for_component("J1", "USB-C", "USB-C-SMD")
-    assert len(fp.pads) == 8
+    assert len(fp.pads) == 9
 
 
 def test_footprint_for_component_with_lcsc() -> None:
