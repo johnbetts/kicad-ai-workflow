@@ -9,7 +9,7 @@ position representations or query component properties.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.models.pcb import Point
@@ -21,7 +21,9 @@ from kicad_pipeline.pcb.pin_map import (
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import Footprint, PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
+    from kicad_pipeline.optimization.functional_grouper import DetectedSubCircuit
     from kicad_pipeline.optimization.scoring import QualityScore
+    from kicad_pipeline.optimization.zone_partitioner import BoardZone
 
 _log = logging.getLogger(__name__)
 
@@ -61,6 +63,40 @@ class GroupBoundingBox:
     internal_offsets: dict[str, tuple[float, float]]  # ref -> (dx, dy) from origin
     width: float
     height: float
+
+
+@dataclass
+class PlacementContext:
+    """Mutable state passed between placement phases.
+
+    Bundles all shared state that the EE placement phases read and mutate
+    so that each phase function can accept a single ``ctx`` argument instead
+    of a long parameter list.  This dataclass is deliberately **not** frozen
+    because phases mutate it in place.
+    """
+
+    positions: dict[str, tuple[float, float, float]]
+    fp_sizes: dict[str, tuple[float, float]]
+    bounds: tuple[float, float, float, float]
+    fixed_refs: set[str]
+    requirements: ProjectRequirements
+    initial_pcb: PCBDesign
+    zones: list[BoardZone]
+    subcircuits: list[DetectedSubCircuit]
+    max_review_passes: int = 5
+    # Phase-tracking sets — accumulated by phases, consumed by later phases
+    relay_support_refs: set[str] = field(default_factory=set)
+    adc_channel_refs: set[str] = field(default_factory=set)
+    adc_ic_refs: set[str] = field(default_factory=set)
+    mcu_peripheral_refs: set[str] = field(default_factory=set)
+    power_group_fixed: set[str] = field(default_factory=set)
+    ethernet_fixed: set[str] = field(default_factory=set)
+    top_edge_connector_refs: set[str] = field(default_factory=set)
+    template_fixed: set[str] = field(default_factory=set)
+    # Review loop output — set by _phase_review_loop
+    best_positions: dict[str, tuple[float, float, float]] = field(
+        default_factory=dict,
+    )
 
 
 def _extract_positions(pcb: PCBDesign) -> tuple[tuple[str, float, float, float], ...]:
