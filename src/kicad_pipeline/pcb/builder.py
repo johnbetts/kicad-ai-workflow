@@ -24,9 +24,7 @@ from kicad_pipeline.constants import (
     LAYER_B_CU,
     LAYER_EDGE_CUTS,
     LAYER_F_CU,
-    PCB_EDGE_CUTS_WIDTH_MM,
     ZONE_CLEARANCE_DEFAULT_MM,
-    ZONE_MIN_THICKNESS_MM,
 )
 from kicad_pipeline.exceptions import PCBError
 from kicad_pipeline.models.pcb import (
@@ -44,7 +42,6 @@ from kicad_pipeline.models.pcb import (
     Point,
     Track,
     Via,
-    ZoneFill,
     ZonePolygon,
 )
 from kicad_pipeline.pcb.board_templates import get_template
@@ -54,9 +51,57 @@ from kicad_pipeline.pcb.footprints import (
     footprint_for_component,
     make_mounting_hole,
 )
+from kicad_pipeline.pcb.keepout_builder import (
+    ANTENNA_KEEPOUT_HEIGHT_MM as _ANTENNA_KEEPOUT_HEIGHT_MM,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    ANTENNA_KEEPOUT_WIDTH_MM as _ANTENNA_KEEPOUT_WIDTH_MM,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    KEEPOUT_MARGIN_MM as _KEEPOUT_MARGIN_MM,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    MOUNTING_HOLE_DIAMETER_MM as _MOUNTING_HOLE_DIAMETER_MM,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    MOUNTING_HOLE_INSET_MM as _MOUNTING_HOLE_INSET_MM,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    RF_KEYWORDS as _RF_KEYWORDS,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    has_rf_module as _has_rf_module,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    make_antenna_keepout as _make_antenna_keepout,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    make_mounting_hole_keepouts as _make_mounting_hole_keepouts,
+)
+from kicad_pipeline.pcb.keepout_builder import (
+    make_rf_module_body_keepout as _make_rf_module_body_keepout,
+)
 from kicad_pipeline.pcb.netclasses import classify_nets
+from kicad_pipeline.pcb.outline_builder import make_board_outline as _make_board_outline
 from kicad_pipeline.pcb.placement import layout_pcb, place_groups_off_board
-from kicad_pipeline.pcb.silkscreen import add_silkscreen_to_footprint
+from kicad_pipeline.pcb.silkscreen import (
+    add_silkscreen_to_footprint,
+)
+from kicad_pipeline.pcb.silkscreen import (
+    clamp_silk_to_board as _clamp_silk_to_board,
+)
+from kicad_pipeline.pcb.silkscreen import (
+    resolve_silk_collisions as _resolve_silk_collisions,
+)
+from kicad_pipeline.pcb.zone_builder import (
+    make_gnd_stitching_vias as _make_gnd_stitching_vias,
+)
+from kicad_pipeline.pcb.zone_builder import (
+    make_gnd_zones as _make_gnd_zones,
+)
+from kicad_pipeline.pcb.zone_builder import (
+    make_rf_via_fence as _make_rf_via_fence,
+)
 from kicad_pipeline.sexp.writer import SExpNode, write_file
 
 if TYPE_CHECKING:
@@ -82,28 +127,6 @@ _DEFAULT_BOARD_WIDTH_MM: float = 80.0
 _DEFAULT_BOARD_HEIGHT_MM: float = 40.0
 """Default PCB height in mm (Hammond 1551K enclosure footprint)."""
 
-_MOUNTING_HOLE_INSET_MM: float = 3.5
-"""Distance from board corner to mounting-hole centre in mm."""
-
-_MOUNTING_HOLE_DIAMETER_MM: float = 3.2
-"""Mounting hole drill diameter in mm (M3 screw)."""
-
-_KEEPOUT_MARGIN_MM: float = 3.0
-"""Radius of the keepout zone around each mounting hole in mm.
-
-Must be <= ``_MOUNTING_HOLE_INSET_MM`` (3.5 mm) to prevent keepout
-circles from extending past the board edge.
-"""
-
-_ANTENNA_KEEPOUT_WIDTH_MM: float = 15.0
-"""Width of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
-
-_ANTENNA_KEEPOUT_HEIGHT_MM: float = 10.0
-"""Height of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
-
-# Keywords that indicate the design contains an RF module requiring a keepout
-_RF_KEYWORDS: frozenset[str] = frozenset({"esp32", "esp8266", "nrf", "cc3200", "rf"})
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -119,227 +142,6 @@ def _new_uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _resolve_silk_collisions(
-    footprints: list[Footprint],
-) -> list[Footprint]:
-    """Push silk ref labels that overlap other footprints' copper.
-
-    For each reference label, compute its board-space bounding box and
-    check for overlap with pads on OTHER footprints.  If overlap is
-    detected, flip the label to the opposite side of the component
-    (negate Y offset).  Also resolves silk-on-silk overlap by nudging
-    the second label sideways.
-    """
-    import math as _m
-
-    # Build pad lookup: list of (abs_x, abs_y, half_w, half_h, owner_ref)
-    all_pads: list[tuple[float, float, float, float, str]] = []
-    for fp in footprints:
-        rot_r = _m.radians(fp.rotation)
-        cos_r = _m.cos(rot_r)
-        sin_r = _m.sin(rot_r)
-        for pad in fp.pads:
-            rpx = pad.position.x * cos_r - pad.position.y * sin_r
-            rpy = pad.position.x * sin_r + pad.position.y * cos_r
-            px = fp.position.x + rpx
-            py = fp.position.y + rpy
-            hw = max(pad.size_x, pad.size_y) / 2.0
-            all_pads.append((px, py, hw, hw, fp.ref))
-
-    # Collect all ref label bboxes for silk-overlap detection
-    label_bboxes: list[tuple[float, float, float, float, int]] = []
-    # (cx, cy, half_w, half_h, fp_index)
-
-    result: list[Footprint] = []
-    for idx, fp in enumerate(footprints):
-        ref_text = None
-        ref_text_idx = -1
-        for ti, t in enumerate(fp.texts):
-            if t.text_type == "reference" and not t.hidden:
-                ref_text = t
-                ref_text_idx = ti
-                break
-        if ref_text is None:
-            result.append(fp)
-            continue
-
-        # Compute label board-space bbox
-        rot_r = _m.radians(fp.rotation)
-        cos_r = _m.cos(rot_r)
-        sin_r = _m.sin(rot_r)
-        # Label position in board space (rotated with footprint)
-        lx = ref_text.position.x * cos_r - ref_text.position.y * sin_r
-        ly = ref_text.position.x * sin_r + ref_text.position.y * cos_r
-        abs_lx = fp.position.x + lx
-        abs_ly = fp.position.y + ly
-        half_w = 0.65 * ref_text.effects_size * max(2, len(ref_text.text)) / 2.0
-        half_h = ref_text.effects_size * 0.75 / 2.0
-
-        # Check overlap with other footprints' pads
-        overlaps_pad = False
-        for px, py, phw, phh, owner in all_pads:
-            if owner == fp.ref:
-                continue
-            if (abs_lx + half_w > px - phw - 0.1
-                    and abs_lx - half_w < px + phw + 0.1
-                    and abs_ly + half_h > py - phh - 0.1
-                    and abs_ly - half_h < py + phh + 0.1):
-                overlaps_pad = True
-                break
-
-        new_fp = fp
-        if overlaps_pad:
-            # Flip label to opposite side (negate Y in footprint-local)
-            new_y = -ref_text.position.y
-            new_texts = list(fp.texts)
-            new_texts[ref_text_idx] = FootprintText(
-                text_type=ref_text.text_type,
-                text=ref_text.text,
-                position=Point(x=ref_text.position.x, y=new_y),
-                layer=ref_text.layer,
-                effects_size=ref_text.effects_size,
-                hidden=ref_text.hidden,
-            )
-            new_fp = Footprint(
-                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
-                position=fp.position, rotation=fp.rotation, layer=fp.layer,
-                pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
-                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
-                models=fp.models, datasheet=fp.datasheet,
-                description=fp.description,
-            )
-            # Recompute label position after flip
-            new_ly = ref_text.position.x * sin_r + new_y * cos_r
-            abs_ly = fp.position.y + new_ly
-
-        label_bboxes.append((abs_lx, abs_ly, half_w, half_h, idx))
-        result.append(new_fp)
-
-    return result
-
-
-def _clamp_silk_to_board(
-    fp: Footprint,
-    origin_x: float,
-    origin_y: float,
-    board_w: float,
-    board_h: float,
-    margin: float = 0.3,
-) -> Footprint:
-    """Move silkscreen texts that extend beyond the board edge inward.
-
-    Silk items whose absolute position falls outside the board rectangle
-    (with *margin*) are shifted so the text stays fully on-board.  Only
-    ``reference`` and ``value`` texts are adjusted — user texts are left
-    alone.
-    """
-    changed = False
-    new_texts: list[FootprintText] = []
-    for t in fp.texts:
-        if t.text_type not in ("reference", "value"):
-            new_texts.append(t)
-            continue
-        half_h = t.effects_size / 2.0
-        # Estimate text width: ~0.65 * size per character
-        half_w = 0.65 * t.effects_size * len(t.text) / 2.0
-        abs_y = fp.position.y + t.position.y
-        abs_x = fp.position.x + t.position.x
-        new_y = t.position.y
-        new_x = t.position.x
-        # Clamp Y
-        if abs_y - half_h < origin_y + margin:
-            new_y = (origin_y + margin + half_h) - fp.position.y
-            changed = True
-        elif abs_y + half_h > origin_y + board_h - margin:
-            new_y = (origin_y + board_h - margin - half_h) - fp.position.y
-            changed = True
-        # Clamp X
-        if abs_x - half_w < origin_x + margin:
-            new_x = (origin_x + margin + half_w) - fp.position.x
-            changed = True
-        elif abs_x + half_w > origin_x + board_w - margin:
-            new_x = (origin_x + board_w - margin - half_w) - fp.position.x
-            changed = True
-        new_texts.append(
-            FootprintText(
-                text_type=t.text_type,
-                text=t.text,
-                position=Point(x=new_x, y=new_y),
-                layer=t.layer,
-                effects_size=t.effects_size,
-                hidden=t.hidden,
-            ) if (new_x != t.position.x or new_y != t.position.y) else t
-        )
-    if not changed:
-        return fp
-    return Footprint(
-        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
-        position=fp.position, rotation=fp.rotation, layer=fp.layer,
-        pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
-        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
-        models=fp.models, datasheet=fp.datasheet,
-        description=fp.description,
-    )
-
-
-def _make_board_outline(
-    width: float,
-    height: float,
-    origin_x: float = 0.0,
-    origin_y: float = 0.0,
-    corner_radius_mm: float = 0.0,
-) -> BoardOutline:
-    """Create a rectangular :class:`BoardOutline` for the given dimensions.
-
-    Args:
-        width: Board width in mm.
-        height: Board height in mm.
-        origin_x: X coordinate of the board origin in mm.
-        origin_y: Y coordinate of the board origin in mm.
-        corner_radius_mm: Corner rounding radius in mm (0 for sharp corners).
-
-    Returns:
-        :class:`BoardOutline` with a closed polygon (rounded if radius > 0).
-    """
-    import math as _m
-
-    r = corner_radius_mm
-    if r <= 0.0:
-        # Sharp-cornered rectangle
-        polygon = (
-            Point(x=origin_x, y=origin_y),
-            Point(x=origin_x + width, y=origin_y),
-            Point(x=origin_x + width, y=origin_y + height),
-            Point(x=origin_x, y=origin_y + height),
-            Point(x=origin_x, y=origin_y),
-        )
-        return BoardOutline(polygon=polygon, width=PCB_EDGE_CUTS_WIDTH_MM)
-
-    # Clamp radius to half the smaller dimension
-    r = min(r, width / 2.0, height / 2.0)
-    n_seg = 8  # arc segments per corner
-
-    points: list[Point] = []
-    # Corner centres and start angles (CW traversal)
-    corners = [
-        (origin_x + r, origin_y + r, _m.pi, _m.pi * 1.5),           # top-left
-        (origin_x + width - r, origin_y + r, _m.pi * 1.5, 2 * _m.pi),  # top-right
-        (origin_x + width - r, origin_y + height - r, 0.0, _m.pi * 0.5),  # bottom-right
-        (origin_x + r, origin_y + height - r, _m.pi * 0.5, _m.pi),   # bottom-left
-    ]
-    for cx, cy, a_start, a_end in corners:
-        for i in range(n_seg + 1):
-            angle = a_start + (a_end - a_start) * i / n_seg
-            points.append(Point(
-                x=round(cx + r * _m.cos(angle), 6),
-                y=round(cy + r * _m.sin(angle), 6),
-            ))
-
-    # Explicitly close polygon (last point == first point)
-    if points:
-        points.append(points[0])
-
-    return BoardOutline(polygon=tuple(points), width=PCB_EDGE_CUTS_WIDTH_MM)
 
 
 def _build_nets(requirements: ProjectRequirements) -> tuple[NetEntry, ...]:
@@ -517,555 +319,6 @@ def _apply_nets_to_footprint(
     )
 
 
-def _make_gnd_zones(
-    board: BoardOutline,
-    gnd_net_number: int,
-    clearance_mm: float = ZONE_CLEARANCE_DEFAULT_MM,
-    strategy: str = "both",
-) -> tuple[ZonePolygon, ...]:
-    """Create GND copper pours on ``F.Cu`` and/or ``B.Cu``.
-
-    Args:
-        board: The board outline; its polygon is used as the zone boundary.
-        gnd_net_number: Net number of the GND net.
-        clearance_mm: Zone-to-pad/track clearance in mm.
-        strategy: Ground plane strategy.  ``"both"`` (default) places GND
-            pours on both layers.  ``"back_only"`` places GND only on B.Cu,
-            leaving F.Cu free for routing (recommended for designs with
-            >20 nets or analog signals).
-
-    Returns:
-        Tuple of :class:`ZonePolygon` objects (1 or 2 zones).
-    """
-    back = ZonePolygon(
-        net_number=gnd_net_number,
-        net_name="GND",
-        layer=LAYER_B_CU,
-        name="GND_B",
-        polygon=board.polygon,
-        min_thickness=ZONE_MIN_THICKNESS_MM,
-        fill=ZoneFill.SOLID,
-        clearance_mm=clearance_mm,
-        uuid=_new_uuid(),
-    )
-    if strategy == "back_only":
-        log.info("build_pcb: GND plane on B.Cu only (back_only strategy)")
-        return (back,)
-    front = ZonePolygon(
-        net_number=gnd_net_number,
-        net_name="GND",
-        layer=LAYER_F_CU,
-        name="GND_F",
-        polygon=board.polygon,
-        min_thickness=ZONE_MIN_THICKNESS_MM,
-        fill=ZoneFill.SOLID,
-        clearance_mm=clearance_mm,
-        uuid=_new_uuid(),
-    )
-    return (front, back)
-
-
-def _make_mounting_hole_keepouts(
-    board_width: float,
-    board_height: float,
-    inset: float,
-    radius: float,
-    mounting_positions: tuple[tuple[float, float], ...] | None = None,
-) -> tuple[Keepout, ...]:
-    """Create circular keepout zones around mounting holes.
-
-    When *mounting_positions* is provided, keepouts are placed at those exact
-    positions. Otherwise, keepouts are placed at 4-corner fallback positions
-    using the *inset* parameter.
-
-    Each keepout is represented as a 12-point polygon approximating a circle.
-
-    Args:
-        board_width: Board width in mm.
-        board_height: Board height in mm.
-        inset: Distance from board corner to mounting hole centre in mm
-            (used only for 4-corner fallback).
-        radius: Radius of the keepout zone in mm.
-        mounting_positions: Explicit mounting hole centres ``(x, y)`` in mm.
-            When provided, overrides the 4-corner fallback.
-
-    Returns:
-        Tuple of :class:`Keepout` objects, one per mounting hole.
-    """
-    import math
-
-    if mounting_positions is not None:
-        corners = list(mounting_positions)
-    else:
-        corners = [
-            (inset, inset),
-            (board_width - inset, inset),
-            (board_width - inset, board_height - inset),
-            (inset, board_height - inset),
-        ]
-    keepouts: list[Keepout] = []
-    n_pts = 12
-    for cx, cy in corners:
-        points: list[Point] = [
-            Point(
-                x=cx + radius * math.cos(2.0 * math.pi * i / n_pts),
-                y=cy + radius * math.sin(2.0 * math.pi * i / n_pts),
-            )
-            for i in range(n_pts)
-        ]
-        # Do NOT explicitly close — KiCad auto-closes polygons.
-        # Explicit closure creates a zero-length edge → "malformed" warning.
-        pts = tuple(points)
-        keepouts.append(
-            Keepout(
-                polygon=pts,
-                layers=(LAYER_F_CU, LAYER_B_CU),
-                no_copper=True,
-                no_vias=True,
-                no_tracks=True,
-                uuid=_new_uuid(),
-                tag="mounting_hole",
-            )
-        )
-    return tuple(keepouts)
-
-
-def _make_antenna_keepout(
-    board_width: float,
-    width: float,
-    height: float,
-    rf_position: tuple[float, float, float] | None = None,
-    layer_count: int = 2,
-    board_height: float = 80.0,
-) -> Keepout:
-    """Create a no-copper keepout zone for an RF antenna.
-
-    When *rf_position* is given ``(x, y, rotation_deg)`` the keepout is
-    placed at the antenna end of the module, accounting for rotation.
-    Otherwise falls back to the top-right corner of the board.
-
-    Args:
-        board_width: Total board width in mm (fallback positioning).
-        width: Width of the antenna keepout zone in mm.
-        height: Height of the antenna keepout zone in mm.
-        rf_position: Optional ``(x, y, rotation_deg)`` of the RF module.
-        layer_count: Number of copper layers (keepout spans all layers).
-        board_height: Total board height in mm (for clamping).
-
-    Returns:
-        A :class:`Keepout` covering the antenna area.
-    """
-    if rf_position is not None:
-        cx, cy, rot = rf_position
-        # ESP32-S3-WROOM-1: antenna extends from one end of the module.
-        # Module half-length ~12.75mm.  Place keepout at antenna end.
-        import math as _m
-        antenna_offset = 8.0  # mm from module centre toward antenna end
-        # Antenna is at the "top" of the module (negative Y in local coords).
-        # Rotation rotates the antenna direction.
-        angle_rad = _m.radians(rot)
-        # In unrotated position, antenna points in -Y direction.
-        # At 180°, antenna points in +Y direction.
-        dx = -antenna_offset * _m.sin(angle_rad)
-        dy = -antenna_offset * _m.cos(angle_rad)
-        ax = cx + dx
-        ay = cy + dy
-        x0 = ax - width / 2.0
-        y0 = ay - height / 2.0
-        # Clamp to board bounds
-        x0 = max(0.0, min(x0, board_width - width))
-        y0 = max(0.0, min(y0, board_height - height))
-    else:
-        # Fallback: top-right corner
-        x0 = board_width - width
-        y0 = 0.0
-
-    # Do NOT explicitly close — KiCad auto-closes polygons for keepouts.
-    polygon = (
-        Point(x=x0, y=y0),
-        Point(x=x0 + width, y=y0),
-        Point(x=x0 + width, y=y0 + height),
-        Point(x=x0, y=y0 + height),
-    )
-    # Keepout on all copper layers for proper isolation
-    layers: list[str] = [LAYER_F_CU, LAYER_B_CU]
-    if layer_count >= 4:
-        layers.extend(["In1.Cu", "In2.Cu"])
-    return Keepout(
-        polygon=tuple(polygon),
-        layers=tuple(layers),
-        no_copper=True,
-        no_vias=False,
-        no_tracks=True,
-        uuid=_new_uuid(),
-    )
-
-
-_RF_MODULE_BODY_WIDTH_MM: float = 18.0
-"""Width of the ESP32-S3-WROOM-1 module body in mm."""
-
-_RF_MODULE_BODY_HEIGHT_MM: float = 25.5
-"""Height of the ESP32-S3-WROOM-1 module body in mm."""
-
-
-def _make_rf_module_body_keepout(
-    rf_position: tuple[float, float, float],
-    layer_count: int = 2,
-    board_width: float = 150.0,
-    board_height: float = 80.0,
-) -> Keepout | None:
-    """Create an inner-layer keepout covering the RF module body.
-
-    Prevents ground/power pours on inner copper layers from degrading
-    WiFi/BT antenna performance. Only applies to In1.Cu and In2.Cu —
-    F.Cu and B.Cu are left alone because the module's castellated pads
-    need copper on the outer layers.
-
-    Args:
-        rf_position: ``(x, y, rotation_deg)`` of the RF module.
-        layer_count: Number of copper layers (needs ≥4 for inner layers).
-        board_width: Total board width in mm (for clamping).
-        board_height: Total board height in mm (for clamping).
-
-    Returns:
-        A :class:`Keepout` on inner layers, or ``None`` if < 4 layers.
-    """
-    if layer_count < 4:
-        return None
-
-    import math as _m
-
-    cx, cy, rot = rf_position
-    angle_rad = _m.radians(rot)
-    hw = _RF_MODULE_BODY_WIDTH_MM / 2.0
-    hh = _RF_MODULE_BODY_HEIGHT_MM / 2.0
-
-    # Module body corners in local coordinates (centered on module)
-    local_corners = [
-        (-hw, -hh),
-        ( hw, -hh),
-        ( hw,  hh),
-        (-hw,  hh),
-    ]
-
-    # Rotate and translate to board coordinates
-    cos_a = _m.cos(angle_rad)
-    sin_a = _m.sin(angle_rad)
-    polygon: list[Point] = []
-    for lx, ly in local_corners:
-        bx = cx + lx * cos_a - ly * sin_a
-        by = cy + lx * sin_a + ly * cos_a
-        # Clamp to board bounds
-        bx = max(0.0, min(bx, board_width))
-        by = max(0.0, min(by, board_height))
-        polygon.append(Point(x=bx, y=by))
-
-    return Keepout(
-        polygon=tuple(polygon),
-        layers=("In1.Cu", "In2.Cu"),
-        no_copper=True,
-        no_vias=False,
-        no_tracks=False,
-        uuid=_new_uuid(),
-    )
-
-
-def _has_rf_module(requirements: ProjectRequirements) -> bool:
-    """Return True if any component value suggests an RF / WiFi module.
-
-    Args:
-        requirements: Project requirements document.
-
-    Returns:
-        ``True`` when an RF-type component is detected.
-    """
-    for comp in requirements.components:
-        val_lower = comp.value.lower()
-        if any(kw in val_lower for kw in _RF_KEYWORDS):
-            return True
-    return False
-
-
-
-
-def _make_gnd_stitching_vias(
-    board: BoardOutline,
-    gnd_net_number: int,
-    footprints: tuple[Footprint, ...],
-    existing_vias: tuple[Via, ...],
-    existing_tracks: tuple[Track, ...],
-    spacing_mm: float = 15.0,
-    keepout_zones: tuple[Keepout, ...] = (),
-) -> tuple[Via, ...]:
-    """Place GND stitching vias on a regular grid across the board.
-
-    Vias are placed on a grid with *spacing_mm* pitch (default 15mm,
-    midpoint of the 10-20mm spec range).  Positions are skipped if they
-    fall within 2mm of any footprint bounding box or within 1mm of an
-    existing via or track segment.
-
-    Args:
-        board: Board outline for dimensions.
-        gnd_net_number: Net number of the GND net.
-        footprints: All placed footprints.
-        existing_vias: Vias already placed by the router.
-        existing_tracks: Tracks already placed by the router.
-        spacing_mm: Grid spacing for stitching vias.
-
-    Returns:
-        Tuple of GND stitching vias.
-    """
-    from kicad_pipeline.constants import (
-        GND_STITCH_FP_CLEARANCE_MM,
-        VIA_DIAMETER_SIGNAL_MM,
-        VIA_DRILL_SIGNAL_MM,
-    )
-
-    # Compute board bounding box from outline
-    xs = [p.x for p in board.polygon]
-    ys = [p.y for p in board.polygon]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-
-    # Build footprint bounding boxes (with clearance)
-    fp_bboxes: list[tuple[float, float, float, float]] = []  # (x1, y1, x2, y2)
-    for fp in footprints:
-        pad_xs = [fp.position.x]
-        pad_ys = [fp.position.y]
-        for pad in fp.pads:
-            px, py = fp.position.x + pad.position.x, fp.position.y + pad.position.y
-            pad_xs.extend([px - pad.size_x / 2, px + pad.size_x / 2])
-            pad_ys.extend([py - pad.size_y / 2, py + pad.size_y / 2])
-        fp_bboxes.append((
-            min(pad_xs) - GND_STITCH_FP_CLEARANCE_MM,
-            min(pad_ys) - GND_STITCH_FP_CLEARANCE_MM,
-            max(pad_xs) + GND_STITCH_FP_CLEARANCE_MM,
-            max(pad_ys) + GND_STITCH_FP_CLEARANCE_MM,
-        ))
-
-    # Collect existing via positions
-    via_positions = [(v.position.x, v.position.y) for v in existing_vias]
-
-    # Check if any GND copper exists (for proximity filtering)
-    _has_gnd_copper = any(
-        pad.net_number == gnd_net_number
-        for fp in footprints for pad in fp.pads
-    ) or any(trk.net_number == gnd_net_number for trk in existing_tracks)
-
-    # Build grid candidates
-    edge_margin = 2.0
-    vias: list[Via] = []
-    y = min_y + edge_margin
-    while y < max_y - edge_margin:
-        x = min_x + edge_margin
-        while x < max_x - edge_margin:
-            # Check footprint clearance
-            in_fp = False
-            for x1, y1, x2, y2 in fp_bboxes:
-                if x1 <= x <= x2 and y1 <= y <= y2:
-                    in_fp = True
-                    break
-            if in_fp:
-                x += spacing_mm
-                continue
-
-            # Check keepout zones
-            in_keepout = False
-            for ko in keepout_zones:
-                ko_xs = [p.x for p in ko.polygon]
-                ko_ys = [p.y for p in ko.polygon]
-                if min(ko_xs) <= x <= max(ko_xs) and min(ko_ys) <= y <= max(ko_ys):
-                    in_keepout = True
-                    break
-            if in_keepout:
-                x += spacing_mm
-                continue
-
-            # Check existing via clearance (1mm)
-            too_close_via = False
-            for vx, vy in via_positions:
-                if abs(x - vx) < 1.0 and abs(y - vy) < 1.0:
-                    too_close_via = True
-                    break
-            if too_close_via:
-                x += spacing_mm
-                continue
-
-            # Check existing track clearance (1mm)
-            too_close_track = False
-            for trk in existing_tracks:
-                # Simple AABB check for track segment
-                tx1 = min(trk.start.x, trk.end.x) - 1.0
-                ty1 = min(trk.start.y, trk.end.y) - 1.0
-                tx2 = max(trk.start.x, trk.end.x) + 1.0
-                ty2 = max(trk.start.y, trk.end.y) + 1.0
-                if tx1 <= x <= tx2 and ty1 <= y <= ty2:
-                    too_close_track = True
-                    break
-            if too_close_track:
-                x += spacing_mm
-                continue
-
-            # Only place via if there's GND copper nearby (pad or track)
-            # to avoid dangling vias far from any GND connection.
-            # Skip this check if there are no GND pads at all (empty board).
-            if _has_gnd_copper:
-                proximity_r = spacing_mm / 2.0
-                has_gnd_nearby = False
-                for fp in footprints:
-                    for pad in fp.pads:
-                        if pad.net_number == gnd_net_number:
-                            px = fp.position.x + pad.position.x
-                            py = fp.position.y + pad.position.y
-                            if (abs(x - px) < proximity_r
-                                    and abs(y - py) < proximity_r):
-                                has_gnd_nearby = True
-                                break
-                    if has_gnd_nearby:
-                        break
-                if not has_gnd_nearby:
-                    for trk in existing_tracks:
-                        if trk.net_number == gnd_net_number:
-                            mid_x = (trk.start.x + trk.end.x) / 2
-                            mid_y = (trk.start.y + trk.end.y) / 2
-                            if (abs(x - mid_x) < proximity_r
-                                    and abs(y - mid_y) < proximity_r):
-                                has_gnd_nearby = True
-                                break
-                if not has_gnd_nearby:
-                    x += spacing_mm
-                    continue
-
-            vias.append(Via(
-                position=Point(round(x, 3), round(y, 3)),
-                drill=VIA_DRILL_SIGNAL_MM,
-                size=VIA_DIAMETER_SIGNAL_MM,
-                layers=("F.Cu", "B.Cu"),
-                net_number=gnd_net_number,
-            ))
-            x += spacing_mm
-        y += spacing_mm
-
-    return tuple(vias)
-
-
-def _make_rf_via_fence(
-    keepouts: tuple[Keepout, ...],
-    gnd_net_num: int,
-    spacing_mm: float,
-    footprints: tuple[Footprint, ...] = (),
-    board_width: float = 0.0,
-    board_height: float = 0.0,
-) -> tuple[Via, ...]:
-    """Place GND stitching vias around RF keepout perimeters.
-
-    Creates a via fence at *spacing_mm* intervals around each keepout
-    that has ``no_copper=True`` and layers containing ``"F.Cu"`` -- typical
-    of RF/antenna keepouts.  Vias are skipped where they overlap
-    footprint bounding boxes.
-
-    Args:
-        keepouts: All board keepouts.
-        gnd_net_num: GND net number.
-        spacing_mm: Target via-to-via spacing along the fence.
-        footprints: Footprints to avoid.
-
-    Returns:
-        Tuple of GND vias forming the fence.
-    """
-    import math as _m
-
-    vias: list[Via] = []
-    fence_margin = 0.5  # mm outside keepout perimeter
-
-    for ko in keepouts:
-        if not ko.no_copper or not ko.polygon:
-            continue
-        # Skip non-RF keepouts (mounting holes, etc.)
-        if ko.tag == "mounting_hole":
-            continue
-        # Check if this is an RF-related keepout (on F.Cu)
-        if ko.layers and "F.Cu" not in ko.layers:
-            continue
-
-        # Walk the polygon perimeter and place vias at spacing intervals
-        pts = list(ko.polygon)
-        if len(pts) < 3:
-            continue
-
-        # Pre-compute footprint bounding boxes for avoidance
-        fp_boxes: list[tuple[float, float, float, float]] = []
-        for fp in footprints:
-            pad_xs = (
-                [fp.position.x + p.position.x for p in fp.pads]
-                if fp.pads else [fp.position.x]
-            )
-            pad_ys = (
-                [fp.position.y + p.position.y for p in fp.pads]
-                if fp.pads else [fp.position.y]
-            )
-            half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
-            half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
-            min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=False)) - 0.5
-            max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=False)) + 0.5
-            min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=False)) - 0.5
-            max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=False)) + 0.5
-            fp_boxes.append((min_x, min_y, max_x, max_y))
-
-        # Compute centroid for outward offset direction
-        cx = sum(p.x for p in pts) / len(pts)
-        cy = sum(p.y for p in pts) / len(pts)
-
-        for i in range(len(pts)):
-            p1 = pts[i]
-            p2 = pts[(i + 1) % len(pts)]
-            edge_len = _m.hypot(p2.x - p1.x, p2.y - p1.y)
-            if edge_len < 0.01:
-                continue
-
-            # Normal direction (outward from centroid)
-            dx = p2.x - p1.x
-            dy = p2.y - p1.y
-            nx = -dy / edge_len
-            ny = dx / edge_len
-            # Ensure normal points away from centroid
-            mid_x = (p1.x + p2.x) / 2.0
-            mid_y = (p1.y + p2.y) / 2.0
-            if nx * (mid_x - cx) + ny * (mid_y - cy) < 0:
-                nx, ny = -nx, -ny
-
-            n_vias = max(1, int(edge_len / spacing_mm))
-            for j in range(n_vias):
-                t = (j + 0.5) / n_vias
-                vx = round(p1.x + t * dx + nx * fence_margin, 3)
-                vy = round(p1.y + t * dy + ny * fence_margin, 3)
-
-                # Skip if outside board edge (0.4mm margin for edge clearance)
-                edge_margin = 0.4
-                if board_width > 0 and board_height > 0:
-                    if (vx < edge_margin or vx > board_width - edge_margin
-                            or vy < edge_margin or vy > board_height - edge_margin):
-                        continue
-
-                # Skip if inside any footprint
-                blocked = False
-                for bx0, by0, bx1, by1 in fp_boxes:
-                    if bx0 <= vx <= bx1 and by0 <= vy <= by1:
-                        blocked = True
-                        break
-                if blocked:
-                    continue
-
-                vias.append(Via(
-                    position=Point(vx, vy),
-                    drill=0.6,
-                    size=1.0,
-                    layers=(LAYER_F_CU, LAYER_B_CU),
-                    net_number=gnd_net_num,
-                    uuid=_new_uuid(),
-                ))
-
-    return tuple(vias)
 
 
 # ---------------------------------------------------------------------------
@@ -1824,8 +1077,8 @@ def build_pcb(
     # ------------------------------------------------------------------
     if preserve_routing and preserve_from is not None:
         from kicad_pipeline.pcb.position_extractor import (
-            routing_from_source,
             remap_routing,
+            routing_from_source,
         )
 
         # Determine on-disk file path for IPC connections
@@ -2526,15 +1779,15 @@ def _sync_footprint_library(design: PCBDesign, project_dir: Path) -> None:
     This ensures KiCad's "Update PCB from Schematic" can always resolve every
     footprint reference in the schematic.
     """
+    # Discover the project name from lib_id prefixes — use the most common
+    # prefix (mounting holes, KiCad standard libs may use a different one).
+    from collections import Counter
+
     from kicad_pipeline.pcb.footprint_library import (
         footprint_name_from_lib_id,
         footprint_to_kicad_mod,
         write_fp_lib_table,
     )
-
-    # Discover the project name from lib_id prefixes — use the most common
-    # prefix (mounting holes, KiCad standard libs may use a different one).
-    from collections import Counter
 
     prefix_counts: Counter[str] = Counter()
     for fp in design.footprints:

@@ -260,27 +260,51 @@ class _Grid:
         for c in range(self.cols):
             self._cells[c][:] = state[c]
 
+    def mark_area(self, col: int, row: int, radius: int) -> None:
+        """Mark all cells within *radius* of (col, row), clamped to grid bounds."""
+        c_lo = max(0, col - radius)
+        c_hi = min(self.cols, col + radius + 1)
+        r_lo = max(0, row - radius)
+        r_hi = min(self.rows, row + radius + 1)
+        cells = self._cells
+        for cc in range(c_lo, c_hi):
+            col_cells = cells[cc]
+            for rr in range(r_lo, r_hi):
+                col_cells[rr] = True
+
+    def unmark_area(self, col: int, row: int, radius: int) -> None:
+        """Unmark all cells within *radius* of (col, row), clamped to grid bounds."""
+        c_lo = max(0, col - radius)
+        c_hi = min(self.cols, col + radius + 1)
+        r_lo = max(0, row - radius)
+        r_hi = min(self.rows, row + radius + 1)
+        cells = self._cells
+        for cc in range(c_lo, c_hi):
+            col_cells = cells[cc]
+            for rr in range(r_lo, r_hi):
+                col_cells[rr] = False
+
     def mark_mm(self, x_mm: float, y_mm: float, radius_cells: int = 1) -> None:
         """Mark cell and all neighbors within radius_cells (Manhattan distance)."""
         base_col, base_row = self.to_cell(x_mm, y_mm)
-        for dc in range(-radius_cells, radius_cells + 1):
-            for dr in range(-radius_cells, radius_cells + 1):
-                self.mark(base_col + dc, base_row + dr)
+        self.mark_area(base_col, base_row, radius_cells)
 
     def unmark_mm(self, x_mm: float, y_mm: float, radius_cells: int = 1) -> None:
         """Unmark cell and all neighbors within radius_cells (Manhattan distance)."""
         base_col, base_row = self.to_cell(x_mm, y_mm)
-        for dc in range(-radius_cells, radius_cells + 1):
-            for dr in range(-radius_cells, radius_cells + 1):
-                self.unmark(base_col + dc, base_row + dr)
+        self.unmark_area(base_col, base_row, radius_cells)
 
     def add_congestion(self, col: int, row: int, radius: int = 1) -> None:
         """Increment congestion counter around a cell."""
-        for dc in range(-radius, radius + 1):
-            for dr in range(-radius, radius + 1):
-                nc, nr = col + dc, row + dr
-                if 0 <= nc < self.cols and 0 <= nr < self.rows:
-                    self._congestion[nc][nr] += 1
+        c_lo = max(0, col - radius)
+        c_hi = min(self.cols, col + radius + 1)
+        r_lo = max(0, row - radius)
+        r_hi = min(self.rows, row + radius + 1)
+        congestion = self._congestion
+        for nc in range(c_lo, c_hi):
+            col_cong = congestion[nc]
+            for nr in range(r_lo, r_hi):
+                col_cong[nr] += 1
 
     def get_cost(self, col: int, row: int) -> float:
         """Return traversal cost for a cell accounting for congestion.
@@ -304,6 +328,61 @@ class _Grid:
 
 _PAD_CLEARANCE_MM: float = 0.2
 """Routing clearance around pads in mm (matches KiCad default netclass)."""
+
+
+@dataclass(frozen=True)
+class _CachedPad:
+    """Pre-computed absolute position and rotated half-sizes for a pad."""
+
+    ref: str
+    pad_number: str
+    x: float
+    y: float
+    half_w: float
+    half_h: float
+    pad_type: str
+    net_number: int | None
+
+
+def _build_pad_cache(footprints: list[Footprint]) -> list[_CachedPad]:
+    """Pre-compute absolute positions and rotated sizes for all pads.
+
+    Avoids repeated trigonometry in inner loops by computing pad world
+    positions once up front.
+    """
+    cache: list[_CachedPad] = []
+    for fp in footprints:
+        rad = math.radians(-fp.rotation)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+        rot_mod = fp.rotation % 360.0
+        for pad in fp.pads:
+            # Inline _pad_abs_pos
+            rx = pad.position.x * cos_r - pad.position.y * sin_r
+            ry = pad.position.x * sin_r + pad.position.y * cos_r
+            px = fp.position.x + rx
+            py = fp.position.y + ry
+            # Inline _pad_rotated_half_size
+            hw = pad.size_x / 2.0
+            hh = pad.size_y / 2.0
+            if abs(rot_mod - 90.0) < 0.01 or abs(rot_mod - 270.0) < 0.01:
+                phw, phh = hh, hw
+            elif abs(rot_mod) < 0.01 or abs(rot_mod - 180.0) < 0.01:
+                phw, phh = hw, hh
+            else:
+                cos_a = abs(math.cos(math.radians(rot_mod)))
+                sin_a = abs(math.sin(math.radians(rot_mod)))
+                phw = hw * cos_a + hh * sin_a
+                phh = hw * sin_a + hh * cos_a
+            cache.append(_CachedPad(
+                ref=fp.ref,
+                pad_number=pad.number,
+                x=px, y=py,
+                half_w=phw, half_h=phh,
+                pad_type=pad.pad_type,
+                net_number=pad.net_number,
+            ))
+    return cache
 
 _KEEPOUT_MARGIN_CELLS: int = 2
 """Extra grid cells marked around keepout zone bounding boxes."""
@@ -382,6 +461,7 @@ def _track_crosses_other_pads(
     clearance_mm: float = 0.05,
     net_pad_set: frozenset[tuple[str, str]] | None = None,
     allow_same_ref: str | None = None,
+    _pad_cache: list[_CachedPad] | None = None,
 ) -> bool:
     """Return True if any F.Cu track crosses a pad on a different net.
 
@@ -395,35 +475,46 @@ def _track_crosses_other_pads(
         allow_same_ref: If provided, allow crossings with pads on this
             component (e.g. IC ref).  Intra-footprint clearance violations
             are handled by DRC exclusions for dense ICs.
+        _pad_cache: Optional pre-computed pad cache to avoid repeated
+            trigonometry. Built via ``_build_pad_cache()``.
     """
-    for fp in footprints:
-        if allow_same_ref is not None and fp.ref == allow_same_ref:
+    # Filter F.Cu tracks once and precompute their AABBs
+    fcu_tracks: list[tuple[float, float, float, float]] = []
+    for t in tracks:
+        if t.layer != "F.Cu":
             continue
-        for pad in fp.pads:
-            px, py = _pad_abs_pos(fp, pad)
-            phw, phh = _pad_rotated_half_size(fp, pad)
-            # Skip pads on the same net
-            if net_pad_set is not None:
-                if (fp.ref, pad.number) in net_pad_set:
-                    continue
-            elif pad.net_number is not None and pad.net_number == net_number:
+        hw = t.width / 2.0
+        fcu_tracks.append((
+            min(t.start.x, t.end.x) - hw,
+            max(t.start.x, t.end.x) + hw,
+            min(t.start.y, t.end.y) - hw,
+            max(t.start.y, t.end.y) + hw,
+        ))
+    if not fcu_tracks:
+        return False
+
+    # Use pad cache if available, otherwise compute on the fly
+    if _pad_cache is not None:
+        pads_iter = _pad_cache
+    else:
+        pads_iter = _build_pad_cache(footprints)
+
+    for cp in pads_iter:
+        if allow_same_ref is not None and cp.ref == allow_same_ref:
+            continue
+        # Skip pads on the same net
+        if net_pad_set is not None:
+            if (cp.ref, cp.pad_number) in net_pad_set:
                 continue
-            for t in tracks:
-                if t.layer != "F.Cu":
-                    continue
-                hw = t.width / 2.0
-                # Quick AABB check: does the track segment bounding box
-                # overlap the pad rectangle (with clearance)?
-                tx0 = min(t.start.x, t.end.x) - hw
-                tx1 = max(t.start.x, t.end.x) + hw
-                ty0 = min(t.start.y, t.end.y) - hw
-                ty1 = max(t.start.y, t.end.y) + hw
-                pad_x0 = px - phw - clearance_mm
-                pad_x1 = px + phw + clearance_mm
-                pad_y0 = py - phh - clearance_mm
-                pad_y1 = py + phh + clearance_mm
-                if tx1 > pad_x0 and tx0 < pad_x1 and ty1 > pad_y0 and ty0 < pad_y1:
-                    return True
+        elif cp.net_number is not None and cp.net_number == net_number:
+            continue
+        pad_x0 = cp.x - cp.half_w - clearance_mm
+        pad_x1 = cp.x + cp.half_w + clearance_mm
+        pad_y0 = cp.y - cp.half_h - clearance_mm
+        pad_y1 = cp.y + cp.half_h + clearance_mm
+        for tx0, tx1, ty0, ty1 in fcu_tracks:
+            if tx1 > pad_x0 and tx0 < pad_x1 and ty1 > pad_y0 and ty0 < pad_y1:
+                return True
     return False
 
 
@@ -432,6 +523,7 @@ def _restore_pad_marks(
     footprints: list[Footprint],
     net_clearances: dict[str, float] | None = None,
     net_widths: dict[str, float] | None = None,
+    _pad_cache: list[_CachedPad] | None = None,
 ) -> None:
     """Re-mark all pad areas after temporarily clearing same-net pads.
 
@@ -440,11 +532,9 @@ def _restore_pad_marks(
     routing, this function restores ALL pad marks with correct clearances.
     """
     cl = _global_pad_clearance(net_clearances, net_widths)
-    for fp in footprints:
-        for pad in fp.pads:
-            px, py = _pad_abs_pos(fp, pad)
-            phw, phh = _pad_rotated_half_size(fp, pad)
-            _mark_pad_area(grid, px, py, phw, phh, cl)
+    pads = _pad_cache if _pad_cache is not None else _build_pad_cache(footprints)
+    for cp in pads:
+        _mark_pad_area(grid, cp.x, cp.y, cp.half_w, cp.half_h, cl)
 
 
 def _remark_other_pads(
@@ -453,6 +543,7 @@ def _remark_other_pads(
     net_pad_set: frozenset[tuple[str, str]],
     net_clearances: dict[str, float] | None = None,
     net_widths: dict[str, float] | None = None,
+    _pad_cache: list[_CachedPad] | None = None,
 ) -> None:
     """Re-mark pads NOT in the current net to prevent cross-net contamination.
 
@@ -461,13 +552,70 @@ def _remark_other_pads(
     function re-marks all non-current-net pads to restore correct blocking.
     """
     cl = _global_pad_clearance(net_clearances, net_widths)
-    for fp in footprints:
-        for pad in fp.pads:
-            if (fp.ref, pad.number) in net_pad_set:
-                continue
-            px, py = _pad_abs_pos(fp, pad)
-            phw, phh = _pad_rotated_half_size(fp, pad)
-            _mark_pad_area(grid, px, py, phw, phh, cl)
+    pads = _pad_cache if _pad_cache is not None else _build_pad_cache(footprints)
+    for cp in pads:
+        if (cp.ref, cp.pad_number) in net_pad_set:
+            continue
+        _mark_pad_area(grid, cp.x, cp.y, cp.half_w, cp.half_h, cl)
+
+
+def _mark_edge_margins(grid: _Grid) -> None:
+    """Mark board-edge margin cells as occupied."""
+    margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
+    for col in range(grid.cols):
+        for mr in range(margin_cells):
+            grid.mark(col, mr)
+            grid.mark(col, grid.rows - 1 - mr)
+    for row in range(grid.rows):
+        for mc in range(margin_cells):
+            grid.mark(mc, row)
+            grid.mark(grid.cols - 1 - mc, row)
+
+
+def _mark_corner_arcs(grid: _Grid, corner_radius_mm: float) -> None:
+    """Mark rounded-corner regions as occupied so tracks stay inside the arc."""
+    if corner_radius_mm <= 0:
+        return
+    r_cells = math.ceil(
+        (corner_radius_mm + JLCPCB_BOARD_EDGE_CLEARANCE_MM) / grid.grid_step_mm,
+    )
+    corners = [
+        (r_cells, r_cells),
+        (grid.cols - 1 - r_cells, r_cells),
+        (r_cells, grid.rows - 1 - r_cells),
+        (grid.cols - 1 - r_cells, grid.rows - 1 - r_cells),
+    ]
+    gs = grid.grid_step_mm
+    for cx, cy in corners:
+        for dc in range(-r_cells, r_cells + 1):
+            for dr in range(-r_cells, r_cells + 1):
+                cc, cr = cx + dc, cy + dr
+                if 0 <= cc < grid.cols and 0 <= cr < grid.rows:
+                    dist = math.hypot((cc - cx) * gs, (cr - cy) * gs)
+                    if dist > corner_radius_mm:
+                        grid.mark(cc, cr)
+
+
+def _mark_keepouts(grid: _Grid, keepouts: tuple[Keepout, ...], layer: str) -> None:
+    """Mark keepout zones as occupied on the given layer."""
+    for ko in keepouts:
+        if not ko.polygon:
+            continue
+        if not _keepout_blocks_layer(ko, layer):
+            continue
+        ko_xs = [p.x for p in ko.polygon]
+        ko_ys = [p.y for p in ko.polygon]
+        min_col, min_row = grid.to_cell(min(ko_xs), min(ko_ys))
+        max_col, max_row = grid.to_cell(max(ko_xs), max(ko_ys))
+        for kc in range(
+            max(0, min_col - _KEEPOUT_MARGIN_CELLS),
+            min(grid.cols, max_col + _KEEPOUT_MARGIN_CELLS + 1),
+        ):
+            for kr in range(
+                max(0, min_row - _KEEPOUT_MARGIN_CELLS),
+                min(grid.rows, max_row + _KEEPOUT_MARGIN_CELLS + 1),
+            ):
+                grid.mark(kc, kr)
 
 
 def _prepare_grid(
@@ -490,73 +638,14 @@ def _prepare_grid(
         net_clearances: Optional per-net clearance overrides for pad marking.
     """
     # Mark all pad areas with their actual size + clearance margin.
-    # Clearance = max(netclass clearances) + half(max track width) because
-    # KiCad DRC checks clearance as max(net_A_clearance, net_B_clearance)
-    # and measures from copper edge to copper edge.
     _pad_mark_cl = _global_pad_clearance(net_clearances, net_widths)
-    for fp in footprints:
-        for pad in fp.pads:
-            px, py = _pad_abs_pos(fp, pad)
-            phw, phh = _pad_rotated_half_size(fp, pad)
-            _mark_pad_area(grid, px, py, phw, phh, _pad_mark_cl)
+    pad_cache = _build_pad_cache(footprints)
+    for cp in pad_cache:
+        _mark_pad_area(grid, cp.x, cp.y, cp.half_w, cp.half_h, _pad_mark_cl)
 
-    # Mark board-edge margins as occupied
-    margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / grid.grid_step_mm) + 1)
-    for col in range(grid.cols):
-        for mr in range(margin_cells):
-            grid.mark(col, mr)                       # top edge
-            grid.mark(col, grid.rows - 1 - mr)       # bottom edge
-    for row in range(grid.rows):
-        for mc in range(margin_cells):
-            grid.mark(mc, row)                        # left edge
-            grid.mark(grid.cols - 1 - mc, row)        # right edge
-
-    # Mark rounded-corner regions as occupied so tracks stay inside the arc
-    if corner_radius_mm > 0:
-        r_cells = math.ceil(
-            (corner_radius_mm + JLCPCB_BOARD_EDGE_CLEARANCE_MM) / grid.grid_step_mm,
-        )
-        # Four corner regions: check each cell's distance from the corner arc centre
-        corners = [
-            (r_cells, r_cells),                                    # top-left
-            (grid.cols - 1 - r_cells, r_cells),                    # top-right
-            (r_cells, grid.rows - 1 - r_cells),                    # bottom-left
-            (grid.cols - 1 - r_cells, grid.rows - 1 - r_cells),   # bottom-right
-        ]
-        for cx, cy in corners:
-            for dc in range(-r_cells, r_cells + 1):
-                for dr in range(-r_cells, r_cells + 1):
-                    cc, cr = cx + dc, cy + dr
-                    if 0 <= cc < grid.cols and 0 <= cr < grid.rows:
-                        # Cell is inside the corner region — mark if it's
-                        # outside the arc (farther from board centre than the
-                        # arc centre).
-                        dist = math.hypot(
-                            (cc - cx) * grid.grid_step_mm,
-                            (cr - cy) * grid.grid_step_mm,
-                        )
-                        if dist > corner_radius_mm:
-                            grid.mark(cc, cr)
-
-    # Mark keepout zones as occupied (with extra margin for hole_clearance)
-    for ko in keepouts:
-        if not ko.polygon:
-            continue
-        if not _keepout_blocks_layer(ko, "F.Cu"):
-            continue
-        ko_xs = [p.x for p in ko.polygon]
-        ko_ys = [p.y for p in ko.polygon]
-        min_col, min_row = grid.to_cell(min(ko_xs), min(ko_ys))
-        max_col, max_row = grid.to_cell(max(ko_xs), max(ko_ys))
-        for kc in range(
-            max(0, min_col - _KEEPOUT_MARGIN_CELLS),
-            min(grid.cols, max_col + _KEEPOUT_MARGIN_CELLS + 1),
-        ):
-            for kr in range(
-                max(0, min_row - _KEEPOUT_MARGIN_CELLS),
-                min(grid.rows, max_row + _KEEPOUT_MARGIN_CELLS + 1),
-            ):
-                grid.mark(kc, kr)
+    _mark_edge_margins(grid)
+    _mark_corner_arcs(grid, corner_radius_mm)
+    _mark_keepouts(grid, keepouts, "F.Cu")
 
 
 def _prepare_bcu_grid(
@@ -589,59 +678,9 @@ def _prepare_bcu_grid(
         grid.grid_step_mm,
     )
 
-    # Mark board-edge margins (same as F.Cu)
-    margin_cells = max(1, int(JLCPCB_BOARD_EDGE_CLEARANCE_MM / bcu.grid_step_mm) + 1)
-    for col in range(bcu.cols):
-        for mr in range(margin_cells):
-            bcu.mark(col, mr)
-            bcu.mark(col, bcu.rows - 1 - mr)
-    for row in range(bcu.rows):
-        for mc in range(margin_cells):
-            bcu.mark(mc, row)
-            bcu.mark(bcu.cols - 1 - mc, row)
-
-    # Mark rounded-corner regions (same logic as F.Cu grid)
-    if corner_radius_mm > 0:
-        r_cells = math.ceil(
-            (corner_radius_mm + JLCPCB_BOARD_EDGE_CLEARANCE_MM) / bcu.grid_step_mm,
-        )
-        corners = [
-            (r_cells, r_cells),
-            (bcu.cols - 1 - r_cells, r_cells),
-            (r_cells, bcu.rows - 1 - r_cells),
-            (bcu.cols - 1 - r_cells, bcu.rows - 1 - r_cells),
-        ]
-        for cx, cy in corners:
-            for dc in range(-r_cells, r_cells + 1):
-                for dr in range(-r_cells, r_cells + 1):
-                    cc, cr = cx + dc, cy + dr
-                    if 0 <= cc < bcu.cols and 0 <= cr < bcu.rows:
-                        dist = math.hypot(
-                            (cc - cx) * bcu.grid_step_mm,
-                            (cr - cy) * bcu.grid_step_mm,
-                        )
-                        if dist > corner_radius_mm:
-                            bcu.mark(cc, cr)
-
-    # Mark keepout zones (only those that block B.Cu)
-    for ko in keepouts:
-        if not ko.polygon:
-            continue
-        if not _keepout_blocks_layer(ko, "B.Cu"):
-            continue
-        ko_xs = [p.x for p in ko.polygon]
-        ko_ys = [p.y for p in ko.polygon]
-        min_col, min_row = bcu.to_cell(min(ko_xs), min(ko_ys))
-        max_col, max_row = bcu.to_cell(max(ko_xs), max(ko_ys))
-        for kc in range(
-            max(0, min_col - _KEEPOUT_MARGIN_CELLS),
-            min(bcu.cols, max_col + _KEEPOUT_MARGIN_CELLS + 1),
-        ):
-            for kr in range(
-                max(0, min_row - _KEEPOUT_MARGIN_CELLS),
-                min(bcu.rows, max_row + _KEEPOUT_MARGIN_CELLS + 1),
-            ):
-                bcu.mark(kc, kr)
+    _mark_edge_margins(bcu)
+    _mark_corner_arcs(bcu, corner_radius_mm)
+    _mark_keepouts(bcu, keepouts, "B.Cu")
 
     # Mark THT pads only (they penetrate both layers)
     pad_cl = _global_pad_clearance(net_clearances, net_widths)
@@ -782,9 +821,7 @@ def _route_stub_on_fcu(
         (clearance_mm + width_mm) / grid.grid_step_mm,
     ) - 1)
     for cell_col, cell_row in path:
-        for dc in range(-excl_cells, excl_cells + 1):
-            for dr in range(-excl_cells, excl_cells + 1):
-                grid.mark(cell_col + dc, cell_row + dr)
+        grid.mark_area(cell_col, cell_row, excl_cells)
 
     return tuple(tracks)
 
@@ -820,17 +857,7 @@ def _find_free_via_position(
     )
 
     def _area_free(col: int, row: int) -> bool:
-        for dc in range(-excl_radius, excl_radius + 1):
-            for dr in range(-excl_radius, excl_radius + 1):
-                cc = col + dc
-                rr = row + dr
-                if cc < 0 or rr < 0 or cc >= fcu_grid.cols or rr >= fcu_grid.rows:
-                    return False
-                if not fcu_grid.is_free(cc, rr):
-                    return False
-                if bcu_grid is not None and not bcu_grid.is_free(cc, rr):
-                    return False
-        return True
+        return _is_area_free(fcu_grid, col, row, excl_radius, bcu_grid)
 
     def _check_candidate(col: int, row: int) -> bool:
         if not _area_free(col, row):
@@ -1118,9 +1145,7 @@ def _route_on_bcu(
         (clearance_mm + width_mm) / bcu_grid.grid_step_mm,
     ) - 1)
     for cell_col, cell_row in path:
-        for dc in range(-excl_cells, excl_cells + 1):
-            for dr in range(-excl_cells, excl_cells + 1):
-                bcu_grid.mark(cell_col + dc, cell_row + dr)
+        bcu_grid.mark_area(cell_col, cell_row, excl_cells)
 
     # Mark via exclusion on both grids (skip for THT — no via emitted)
     emitted_vias: list[Via] = []
@@ -1132,9 +1157,7 @@ def _route_on_bcu(
         if fcu_grid is not None:
             _mark_via_on_fcu(fcu_grid, via, clearance_mm)
         vc, vr = bcu_grid.to_cell(via.position.x, via.position.y)
-        for dc in range(-via_excl, via_excl + 1):
-            for dr in range(-via_excl, via_excl + 1):
-                bcu_grid.mark(vc + dc, vr + dr)
+        bcu_grid.mark_area(vc, vr, via_excl)
 
     all_tracks = list(stub_tracks) + list(tracks)
     return (tuple(all_tracks), tuple(emitted_vias))
@@ -1182,6 +1205,43 @@ def _mark_line_on_grid(
         if e2 < dc:
             err += dc
             cr += sr
+
+
+def _is_area_free(
+    grid: _Grid,
+    col: int,
+    row: int,
+    radius: int,
+    secondary_grid: _Grid | None = None,
+) -> bool:
+    """Check whether all cells within *radius* of (col, row) are free.
+
+    Optionally checks a secondary grid (e.g. B.Cu) as well.
+    Returns False immediately on the first occupied cell.
+    """
+    c_lo = max(0, col - radius)
+    c_hi = min(grid.cols, col + radius + 1)
+    r_lo = max(0, row - radius)
+    r_hi = min(grid.rows, row + radius + 1)
+    # Reject if clamped bounds are smaller than requested (near edge)
+    if c_lo > col - radius or c_hi <= col + radius:
+        return False
+    if r_lo > row - radius or r_hi <= row + radius:
+        return False
+    cells = grid._cells
+    for cc in range(c_lo, c_hi):
+        col_cells = cells[cc]
+        for rr in range(r_lo, r_hi):
+            if col_cells[rr]:
+                return False
+    if secondary_grid is not None:
+        s_cells = secondary_grid._cells
+        for cc in range(c_lo, c_hi):
+            s_col = s_cells[cc]
+            for rr in range(r_lo, r_hi):
+                if s_col[rr]:
+                    return False
+    return True
 
 
 def _mark_via_on_fcu(
@@ -1447,6 +1507,9 @@ def route_net(
     # Build a lookup: ref -> Footprint
     fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
 
+    # Pre-compute pad positions/sizes once — avoids repeated trig in loops
+    _pad_cache = _build_pad_cache(footprints)
+
     # Resolve pad world positions and sizes
     resolved = _resolve_pad_positions(request, fp_by_ref)
     if isinstance(resolved, str):
@@ -1552,7 +1615,8 @@ def route_net(
                     )
         elif len(non_ic_infos) == 0:
             # All pads on dense ICs: skip routing entirely
-            _restore_pad_marks(grid, footprints, net_clearances, net_widths)
+            _restore_pad_marks(grid, footprints, net_clearances, net_widths,
+                               _pad_cache=_pad_cache)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -1564,7 +1628,8 @@ def route_net(
 
     # After all unmark operations, re-mark other-net pads to prevent
     # cross-net contamination from overlapping clearance zones.
-    _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
+    _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
+                       _pad_cache=_pad_cache)
 
     all_tracks: list[Track] = []
     all_vias: list[Via] = []
@@ -1658,7 +1723,8 @@ def route_net(
                     _mark_pad_area(grid, px, py, phw, phh, 0.0)
             _tht_refs_in_net.clear()
             net_pad_set = frozenset(extended_pads)
-            _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
+            _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
+                               _pad_cache=_pad_cache)
             path = _astar(grid, start_col, start_row, goal_col, goal_row)
             _log.debug(
                 "MST %s: THT retry F.Cu=%s",
@@ -1767,9 +1833,7 @@ def route_net(
                     _vc, _vr = bcu_grid.to_cell(
                         _bv.position.x, _bv.position.y,
                     )
-                    for _dc in range(-_via_excl, _via_excl + 1):
-                        for _dr in range(-_via_excl, _via_excl + 1):
-                            bcu_grid.mark(_vc + _dc, _vr + _dr)
+                    bcu_grid.mark_area(_vc, _vr, _via_excl)
                 # Validate F.Cu stubs don't cross other-net pads
                 # Use original net_pad_set — THT sibling extension must
                 # not relax cross-pad validation.
@@ -1800,7 +1864,8 @@ def route_net(
                 unrouted.discard(best_to)
                 continue
             # Restore all pad markings that may have been cleared
-            _restore_pad_marks(grid, footprints, net_clearances, net_widths)
+            _restore_pad_marks(grid, footprints, net_clearances, net_widths,
+                               _pad_cache=_pad_cache)
             return RouteResult(
                 net_number=request.net_number,
                 net_name=request.net_name,
@@ -1828,9 +1893,7 @@ def route_net(
 
         # Mark path cells with clearance + congestion
         for cell_col, cell_row in path:
-            for dc in range(-excl_cells, excl_cells + 1):
-                for dr in range(-excl_cells, excl_cells + 1):
-                    grid.mark(cell_col + dc, cell_row + dr)
+            grid.mark_area(cell_col, cell_row, excl_cells)
             grid.add_congestion(cell_col, cell_row, radius=2)
 
         # Re-unmark same-net pads so subsequent MST connections can still
@@ -1838,7 +1901,8 @@ def route_net(
         # cross-net contamination from overlapping clearance zones.
         for pi in pad_infos:
             _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
-        _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
+        _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
+                           _pad_cache=_pad_cache)
 
         routed_set.add(best_to)
         unrouted.discard(best_to)
@@ -1921,7 +1985,8 @@ def route_net(
                 best_pi.half_w, best_pi.half_h, ic_pad_cl,
             )
             # Remark non-IC other-net pads (but NOT the IC's own pads)
-            _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths)
+            _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
+                               _pad_cache=_pad_cache)
             # Re-unmark IC pads again (remark_other_pads re-marks them)
             for _ip in ic_fp.pads:
                 _ipx, _ipy = _pad_abs_pos(ic_fp, _ip)
@@ -1962,9 +2027,7 @@ def route_net(
                     all_tracks.extend(fcu_segs)
                     # Mark path with exclusion
                     for cell_col, cell_row in path:
-                        for dc in range(-excl_cells, excl_cells + 1):
-                            for dr in range(-excl_cells, excl_cells + 1):
-                                grid.mark(cell_col + dc, cell_row + dr)
+                        grid.mark_area(cell_col, cell_row, excl_cells)
                     ic_routed = True
 
             if not ic_routed and bcu_grid is not None:
@@ -2085,21 +2148,9 @@ def route_net(
                         _cx = px + fan_dx * step * grid.grid_step_mm
                         _cy = py + fan_dy * step * grid.grid_step_mm
                         col, row = grid.to_cell(_cx, _cy)
-                        clear = True
-                        for dc in range(-r_cells, r_cells + 1):
-                            for dr in range(-r_cells, r_cells + 1):
-                                if not grid.is_free(
-                                    col + dc, row + dr,
-                                ):
-                                    clear = False
-                                    break
-                                if (bcu_grid is not None
-                                        and not bcu_grid.is_free(
-                                            col + dc, row + dr)):
-                                    clear = False
-                                    break
-                            if not clear:
-                                break
+                        clear = _is_area_free(
+                            grid, col, row, r_cells, bcu_grid,
+                        )
                         if not clear:
                             continue
                         _cand_pos = grid.to_mm(col, row)
@@ -2213,6 +2264,7 @@ def route_net(
                     _remark_other_pads(
                         grid, footprints, net_pad_set,
                         net_clearances, net_widths,
+                        _pad_cache=_pad_cache,
                     )
                     # THT headers (2.54mm pitch, 0.85mm pads)
                     # have gaps narrower than the grid step after
@@ -2375,14 +2427,7 @@ def route_net(
                         all_vias.extend(fan_via_extra)
                         if fcu_fan_path is not None and not fan_via_extra:
                             for cc, cr in fcu_fan_path:
-                                for dc in range(
-                                    -excl_cells, excl_cells + 1,
-                                ):
-                                    for dr in range(
-                                        -excl_cells,
-                                        excl_cells + 1,
-                                    ):
-                                        grid.mark(cc + dc, cr + dr)
+                                grid.mark_area(cc, cr, excl_cells)
                         _mark_pad_area(
                             grid,
                             fan_via_pos[0], fan_via_pos[1],
@@ -2508,7 +2553,8 @@ def route_net(
                 )
 
     # Restore all pad markings that may have been cleared during unmark
-    _restore_pad_marks(grid, footprints, net_clearances, net_widths)
+    _restore_pad_marks(grid, footprints, net_clearances, net_widths,
+                       _pad_cache=_pad_cache)
 
     return RouteResult(
         net_number=request.net_number,
@@ -2830,423 +2876,16 @@ def route_all_nets(
     return tuple(results)
 
 
-def _point_to_segment_dist(
-    px: float, py: float,
-    sx1: float, sy1: float, sx2: float, sy2: float,
-) -> float:
-    """Compute minimum distance from point (px, py) to line segment (sx1,sy1)-(sx2,sy2)."""
-    dx = sx2 - sx1
-    dy = sy2 - sy1
-    len_sq = dx * dx + dy * dy
-    if len_sq < 1e-12:
-        return math.sqrt((px - sx1) ** 2 + (py - sy1) ** 2)
-    t = max(0.0, min(1.0, ((px - sx1) * dx + (py - sy1) * dy) / len_sq))
-    cx = sx1 + t * dx
-    cy = sy1 + t * dy
-    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
 
-
-def _drop_pad_crossing_tracks(
-    results: list[RouteResult],
-    footprints: list[Footprint],
-) -> list[RouteResult]:
-    """Remove individual tracks that cross pads of other nets.
-
-    After track simplification, merged diagonal segments may cross pad areas
-    that weren't in the original A* path.  This post-route filter detects
-    and drops those offending segments.
-    """
-    import math as _math
-
-    # Build pad info: (abs_x, abs_y, net_number, half_w, half_h, ref)
-    pad_info: list[tuple[float, float, int, float, float, str]] = []
-    ref_nets: dict[str, set[int]] = {}
-    for fp in footprints:
-        rot_rad = _math.radians(fp.rotation)
-        cos_r = _math.cos(rot_rad)
-        sin_r = _math.sin(rot_rad)
-        fp_nets: set[int] = set()
-        for pad in fp.pads:
-            rpx = pad.position.x * cos_r - pad.position.y * sin_r
-            rpy = pad.position.x * sin_r + pad.position.y * cos_r
-            px = fp.position.x + rpx
-            py = fp.position.y + rpy
-            net = pad.net_number if pad.net_number is not None else 0
-            pad_info.append((px, py, net, pad.size_x / 2.0, pad.size_y / 2.0, fp.ref))
-            if net > 0:
-                fp_nets.add(net)
-        ref_nets[fp.ref] = fp_nets
-
-    updated: list[RouteResult] = []
-    for r in results:
-        if not r.routed or not r.tracks:
-            updated.append(r)
-            continue
-
-        good_tracks: list[Track] = []
-        for track in r.tracks:
-            # Only check long diagonal segments (>3mm)
-            dx = abs(track.end.x - track.start.x)
-            dy = abs(track.end.y - track.start.y)
-            seg_len = (dx * dx + dy * dy) ** 0.5
-            if seg_len < 3.0:
-                good_tracks.append(track)
-                continue
-
-            thw = track.width / 2.0
-            crosses = False
-            for px, py, pnet, hw, hh, ref in pad_info:
-                if pnet == track.net_number or pnet == 0:
-                    continue
-                # Skip intra-footprint crossings
-                if track.net_number in ref_nets.get(ref, set()):
-                    continue
-                # Use point-to-segment distance for precise check
-                dist = _point_to_segment_dist(
-                    px, py,
-                    track.start.x, track.start.y,
-                    track.end.x, track.end.y,
-                )
-                # Track crosses pad if track edge (dist - half_width)
-                # is less than pad half-size
-                pad_radius = max(hw, hh)
-                if dist < pad_radius + thw - 0.05:
-                    crosses = True
-                    break
-
-            if not crosses:
-                good_tracks.append(track)
-
-        updated.append(RouteResult(
-            net_name=r.net_name,
-            net_number=r.net_number,
-            routed=r.routed,
-            tracks=tuple(good_tracks),
-            vias=r.vias,
-        ))
-
-    return updated
-
-
-def _segment_min_distance(
-    ax1: float, ay1: float, ax2: float, ay2: float,
-    bx1: float, by1: float, bx2: float, by2: float,
-) -> float:
-    """Compute minimum distance between two line segments.
-
-    Checks for intersection first, then falls back to point-to-segment
-    distances for non-intersecting segments.
-    """
-    # Check for segment intersection using cross products
-    dx_a = ax2 - ax1
-    dy_a = ay2 - ay1
-    dx_b = bx2 - bx1
-    dy_b = by2 - by1
-    denom = dx_a * dy_b - dy_a * dx_b
-    if abs(denom) > 1e-12:
-        t = ((bx1 - ax1) * dy_b - (by1 - ay1) * dx_b) / denom
-        u = ((bx1 - ax1) * dy_a - (by1 - ay1) * dx_a) / denom
-        if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
-            return 0.0
-
-    def _point_seg_dist(
-        px: float, py: float,
-        sx1: float, sy1: float, sx2: float, sy2: float,
-    ) -> float:
-        dx = sx2 - sx1
-        dy = sy2 - sy1
-        len_sq = dx * dx + dy * dy
-        if len_sq < 1e-12:
-            return math.sqrt((px - sx1) ** 2 + (py - sy1) ** 2)
-        t = max(0.0, min(1.0, ((px - sx1) * dx + (py - sy1) * dy) / len_sq))
-        cx = sx1 + t * dx
-        cy = sy1 + t * dy
-        return math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
-
-    return min(
-        _point_seg_dist(ax1, ay1, bx1, by1, bx2, by2),
-        _point_seg_dist(ax2, ay2, bx1, by1, bx2, by2),
-        _point_seg_dist(bx1, by1, ax1, ay1, ax2, ay2),
-        _point_seg_dist(bx2, by2, ax1, ay1, ax2, ay2),
-    )
-
-
-def _validate_track_clearances(
-    results: list[RouteResult],
-    grid: _Grid,
-    bcu_grid: _Grid,
-    grid_step_mm: float,
-    entry_by_name: dict[str, NetlistEntry],
-    route_fn: object,
-    footprints: list[Footprint],
-    net_clearances: dict[str, float] | None,
-    net_widths: dict[str, float] | None,
-    pad_positions_fn: object,
-) -> list[RouteResult]:
-    """Detect and fix cross-net clearance violations after routing.
-
-    Iterates all track pairs from different nets. If edge-to-edge distance
-    violates CLEARANCE_DEFAULT_MM, rips up the worse-scored net and re-routes.
-    Repeats up to 3 times to resolve cascading violations.
-    """
-    from kicad_pipeline.constants import CLEARANCE_DEFAULT_MM
-
-    log = _log
-
-    previously_ripped: set[str] = set()
-
-    for iteration in range(3):
-        # Build per-net track lists
-        net_tracks: dict[int, list[Track]] = {}
-        net_result_idx: dict[int, int] = {}
-        for idx, r in enumerate(results):
-            if not r.routed:
-                continue
-            net_tracks[r.net_number] = list(r.tracks)
-            net_result_idx[r.net_number] = idx
-
-        # Check all cross-net pairs for clearance violations
-        violating_nets: set[int] = set()
-        net_nums = list(net_tracks.keys())
-        for i in range(len(net_nums)):
-            for j in range(i + 1, len(net_nums)):
-                n1, n2 = net_nums[i], net_nums[j]
-                for t1 in net_tracks[n1]:
-                    for t2 in net_tracks[n2]:
-                        if t1.layer != t2.layer:
-                            continue
-                        hw1 = t1.width / 2.0
-                        hw2 = t2.width / 2.0
-                        min_gap = CLEARANCE_DEFAULT_MM
-                        edge_dist = _segment_min_distance(
-                            t1.start.x, t1.start.y, t1.end.x, t1.end.y,
-                            t2.start.x, t2.start.y, t2.end.x, t2.end.y,
-                        ) - hw1 - hw2
-                        if edge_dist < min_gap - 0.001:
-                            violating_nets.add(n1)
-                            violating_nets.add(n2)
-
-        if not violating_nets:
-            return results
-
-        log.info(
-            "clearance validation (iter %d): %d nets involved in violations",
-            iteration + 1, len(violating_nets),
-        )
-
-        # Score violating nets, rip up the worst half
-        scored: list[tuple[float, int]] = []
-        for net_num in violating_nets:
-            maybe_idx = net_result_idx.get(net_num)
-            if maybe_idx is None:
-                continue
-            idx = maybe_idx
-            r = results[idx]
-            entry = entry_by_name.get(r.net_name)
-            if entry is None:
-                continue
-            q = _score_route(r, pad_positions_fn(entry))  # type: ignore[operator]
-            scored.append((q.score, idx))
-
-        if not scored:
-            return results
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        # Deprioritize nets with B.Cu routes (vias) — they are
-        # harder to re-route and may lose B.Cu corridors.
-        fcu_only = [(s, i) for s, i in scored
-                    if not results[i].vias]
-        has_vias = [(s, i) for s, i in scored
-                    if results[i].vias]
-        scored = fcu_only + has_vias
-
-        # Break rip-up oscillation: on iteration 2+, prefer ripping nets
-        # that haven't been ripped before so both sides get a chance.
-        # Applied AFTER fcu_only sort so anti-oscillation takes priority.
-        if previously_ripped:
-            never_ripped = [(s, i) for s, i in scored
-                            if results[i].net_name not in previously_ripped]
-            prev_ripped = [(s, i) for s, i in scored
-                           if results[i].net_name in previously_ripped]
-            scored = never_ripped + prev_ripped
-
-        n_ripup = max(1, len(scored) // 2)
-        ripup_indices = [idx for _, idx in scored[:n_ripup]]
-
-        # Unmark tracks and vias from ripped routes
-        for ri in ripup_indices:
-            rr = results[ri]
-            for trk in rr.tracks:
-                if trk.layer == "F.Cu":
-                    _unmark_route_tracks(grid, [trk], grid_step_mm)
-                elif trk.layer == "B.Cu":
-                    _unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
-            # Unmark vias on BOTH grids (vias span both layers)
-            for via in rr.vias:
-                vc, vr_ = grid.to_cell(
-                    via.position.x, via.position.y,
-                )
-                grid.unmark(vc, vr_)
-                bcu_grid.unmark(vc, vr_)
-
-        ripped_names: set[str] = set()
-        for ri in ripup_indices:
-            ripped_names.add(results[ri].net_name)
-            previously_ripped.add(results[ri].net_name)
-        for ri in sorted(ripup_indices, reverse=True):
-            results.pop(ri)
-
-        log.debug("clearance rip-up: %s", ", ".join(sorted(ripped_names)))
-        for name in ripped_names:
-            retry_entry = entry_by_name.get(name)
-            if retry_entry is not None:
-                new_result = route_fn(retry_entry)  # type: ignore[operator]
-                results.append(new_result)
-
-    return results
-
-
-def _unmark_route_tracks(
-    grid: _Grid | None,
-    tracks: list[Track],
-    grid_step_mm: float,
-) -> None:
-    """Unmark grid cells occupied by routed tracks (for rip-up)."""
-    if grid is None:
-        return
-    for trk in tracks:
-        c1, r1 = grid.to_cell(trk.start.x, trk.start.y)
-        c2, r2 = grid.to_cell(trk.end.x, trk.end.y)
-        # Walk line between cells
-        dc = abs(c2 - c1)
-        dr = abs(r2 - r1)
-        sc = 1 if c1 < c2 else -1
-        sr = 1 if r1 < r2 else -1
-        err = dc - dr
-        cc, cr = c1, r1
-        while True:
-            grid.unmark(cc, cr)
-            if cc == c2 and cr == r2:
-                break
-            e2 = 2 * err
-            if e2 > -dr:
-                err -= dr
-                cc += sc
-            if e2 < dc:
-                err += dc
-                cr += sr
-
-
-def collect_tracks(
-    results: tuple[RouteResult, ...],
-    *,
-    routed_only: bool = True,
-    filter_dangling: bool = True,
-) -> tuple[Track, ...]:
-    """Flatten all Track objects from all RouteResults into a single tuple.
-
-    When *routed_only* is ``True`` (default), tracks from partially-routed
-    nets are excluded.  Partial routes create tracks that don't complete
-    connections, causing both ``unconnected`` and ``clearance``/``shorting``
-    DRC violations — removing them reduces overall violation count.
-
-    When *filter_dangling* is ``True`` (default), single-segment tracks whose
-    endpoints don't connect to any other track in the same net are removed.
-
-    Args:
-        results: Routing results to collect tracks from.
-        routed_only: Only include tracks from fully-routed nets (default True).
-        filter_dangling: Remove orphan single-segment stubs (default True).
-
-    Returns:
-        Combined tuple of all tracks.
-    """
-    tracks: list[Track] = []
-    for r in results:
-        if routed_only and not r.routed:
-            continue
-        tracks.extend(r.tracks)
-
-    if not filter_dangling or len(tracks) < 2:
-        return tuple(tracks)
-
-    # Group tracks by net, then find dangling endpoints
-    by_net: dict[int, list[Track]] = {}
-    for t in tracks:
-        by_net.setdefault(t.net_number, []).append(t)
-
-    keep: list[Track] = []
-    for net_tracks in by_net.values():
-        if len(net_tracks) <= 1:
-            # A single-segment net is OK (direct pad-to-pad)
-            keep.extend(net_tracks)
-            continue
-
-        # Build endpoint connectivity: count how many tracks touch each point
-        eps: dict[tuple[float, float], int] = {}
-        for t in net_tracks:
-            sk = (round(t.start.x, 4), round(t.start.y, 4))
-            ek = (round(t.end.x, 4), round(t.end.y, 4))
-            eps[sk] = eps.get(sk, 0) + 1
-            eps[ek] = eps.get(ek, 0) + 1
-
-        for t in net_tracks:
-            sk = (round(t.start.x, 4), round(t.start.y, 4))
-            ek = (round(t.end.x, 4), round(t.end.y, 4))
-            # A stub has both endpoints only appearing once (no connections)
-            if eps.get(sk, 0) <= 1 and eps.get(ek, 0) <= 1:
-                continue  # orphan stub — skip
-            keep.append(t)
-
-    return tuple(keep)
-
-
-def collect_vias(
-    results: tuple[RouteResult, ...],
-    *,
-    routed_only: bool = True,
-) -> tuple[Via, ...]:
-    """Flatten all Via objects from RouteResults into a single tuple.
-
-    Args:
-        results: Routing results to collect vias from.
-        routed_only: When ``True`` (default), skip vias from unrouted nets
-            to avoid dangling via DRC violations.
-
-    Returns:
-        Combined tuple of all vias.
-    """
-    vias: list[Via] = []
-    for r in results:
-        if routed_only and not r.routed:
-            continue
-        vias.extend(r.vias)
-
-    # Deduplicate: skip vias at same position (within 0.01mm)
-    seen: set[tuple[float, float]] = set()
-    deduped: list[Via] = []
-    for v in vias:
-        key = (round(v.position.x, 2), round(v.position.y, 2))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(v)
-
-    # Distance-based dedup: skip if any previously-kept same-net via
-    # is within via.size mm (pad diameter), preventing hole_to_hole violations
-    final: list[Via] = []
-    for v in deduped:
-        too_close = False
-        for kept in final:
-            if kept.net_number != v.net_number:
-                continue
-            dist = math.hypot(
-                v.position.x - kept.position.x,
-                v.position.y - kept.position.y,
-            )
-            if dist < v.size:
-                too_close = True
-                break
-        if not too_close:
-            final.append(v)
-    return tuple(final)
+# Post-route validation and collection functions extracted to post_route.py.
+# Re-exported here for backwards compatibility.  Must remain at module
+# bottom to avoid circular import (post_route imports RouteResult).
+from kicad_pipeline.routing.post_route import (  # noqa: E402, I001
+    collect_tracks as collect_tracks,
+    collect_vias as collect_vias,
+    drop_pad_crossing_tracks as _drop_pad_crossing_tracks,
+    point_to_segment_dist as _point_to_segment_dist,  # noqa: F401
+    segment_min_distance as _segment_min_distance,  # noqa: F401
+    unmark_route_tracks as _unmark_route_tracks,
+    validate_track_clearances as _validate_track_clearances,
+)

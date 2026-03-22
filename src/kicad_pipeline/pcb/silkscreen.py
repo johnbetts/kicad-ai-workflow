@@ -19,6 +19,173 @@ from kicad_pipeline.constants import (
 )
 from kicad_pipeline.models.pcb import Footprint, FootprintLine, FootprintText, Point
 
+# ---------------------------------------------------------------------------
+# Silk collision resolution and board-edge clamping
+# ---------------------------------------------------------------------------
+
+
+def resolve_silk_collisions(
+    footprints: list[Footprint],
+) -> list[Footprint]:
+    """Push silk ref labels that overlap other footprints' copper.
+
+    For each reference label, compute its board-space bounding box and
+    check for overlap with pads on OTHER footprints.  If overlap is
+    detected, flip the label to the opposite side of the component
+    (negate Y offset).  Also resolves silk-on-silk overlap by nudging
+    the second label sideways.
+    """
+    import math as _m
+
+    # Build pad lookup: list of (abs_x, abs_y, half_w, half_h, owner_ref)
+    all_pads: list[tuple[float, float, float, float, str]] = []
+    for fp in footprints:
+        rot_r = _m.radians(fp.rotation)
+        cos_r = _m.cos(rot_r)
+        sin_r = _m.sin(rot_r)
+        for pad in fp.pads:
+            rpx = pad.position.x * cos_r - pad.position.y * sin_r
+            rpy = pad.position.x * sin_r + pad.position.y * cos_r
+            px = fp.position.x + rpx
+            py = fp.position.y + rpy
+            hw = max(pad.size_x, pad.size_y) / 2.0
+            all_pads.append((px, py, hw, hw, fp.ref))
+
+    # Collect all ref label bboxes for silk-overlap detection
+    label_bboxes: list[tuple[float, float, float, float, int]] = []
+    # (cx, cy, half_w, half_h, fp_index)
+
+    result: list[Footprint] = []
+    for idx, fp in enumerate(footprints):
+        ref_text = None
+        ref_text_idx = -1
+        for ti, t in enumerate(fp.texts):
+            if t.text_type == "reference" and not t.hidden:
+                ref_text = t
+                ref_text_idx = ti
+                break
+        if ref_text is None:
+            result.append(fp)
+            continue
+
+        # Compute label board-space bbox
+        rot_r = _m.radians(fp.rotation)
+        cos_r = _m.cos(rot_r)
+        sin_r = _m.sin(rot_r)
+        # Label position in board space (rotated with footprint)
+        lx = ref_text.position.x * cos_r - ref_text.position.y * sin_r
+        ly = ref_text.position.x * sin_r + ref_text.position.y * cos_r
+        abs_lx = fp.position.x + lx
+        abs_ly = fp.position.y + ly
+        half_w = 0.65 * ref_text.effects_size * max(2, len(ref_text.text)) / 2.0
+        half_h = ref_text.effects_size * 0.75 / 2.0
+
+        # Check overlap with other footprints' pads
+        overlaps_pad = False
+        for px, py, phw, phh, owner in all_pads:
+            if owner == fp.ref:
+                continue
+            if (abs_lx + half_w > px - phw - 0.1
+                    and abs_lx - half_w < px + phw + 0.1
+                    and abs_ly + half_h > py - phh - 0.1
+                    and abs_ly - half_h < py + phh + 0.1):
+                overlaps_pad = True
+                break
+
+        new_fp = fp
+        if overlaps_pad:
+            # Flip label to opposite side (negate Y in footprint-local)
+            new_y = -ref_text.position.y
+            new_texts = list(fp.texts)
+            new_texts[ref_text_idx] = FootprintText(
+                text_type=ref_text.text_type,
+                text=ref_text.text,
+                position=Point(x=ref_text.position.x, y=new_y),
+                layer=ref_text.layer,
+                effects_size=ref_text.effects_size,
+                hidden=ref_text.hidden,
+            )
+            new_fp = Footprint(
+                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+                models=fp.models, datasheet=fp.datasheet,
+                description=fp.description,
+            )
+            # Recompute label position after flip
+            new_ly = ref_text.position.x * sin_r + new_y * cos_r
+            abs_ly = fp.position.y + new_ly
+
+        label_bboxes.append((abs_lx, abs_ly, half_w, half_h, idx))
+        result.append(new_fp)
+
+    return result
+
+
+def clamp_silk_to_board(
+    fp: Footprint,
+    origin_x: float,
+    origin_y: float,
+    board_w: float,
+    board_h: float,
+    margin: float = 0.3,
+) -> Footprint:
+    """Move silkscreen texts that extend beyond the board edge inward.
+
+    Silk items whose absolute position falls outside the board rectangle
+    (with *margin*) are shifted so the text stays fully on-board.  Only
+    ``reference`` and ``value`` texts are adjusted -- user texts are left
+    alone.
+    """
+    changed = False
+    new_texts: list[FootprintText] = []
+    for t in fp.texts:
+        if t.text_type not in ("reference", "value"):
+            new_texts.append(t)
+            continue
+        half_h = t.effects_size / 2.0
+        # Estimate text width: ~0.65 * size per character
+        half_w = 0.65 * t.effects_size * len(t.text) / 2.0
+        abs_y = fp.position.y + t.position.y
+        abs_x = fp.position.x + t.position.x
+        new_y = t.position.y
+        new_x = t.position.x
+        # Clamp Y
+        if abs_y - half_h < origin_y + margin:
+            new_y = (origin_y + margin + half_h) - fp.position.y
+            changed = True
+        elif abs_y + half_h > origin_y + board_h - margin:
+            new_y = (origin_y + board_h - margin - half_h) - fp.position.y
+            changed = True
+        # Clamp X
+        if abs_x - half_w < origin_x + margin:
+            new_x = (origin_x + margin + half_w) - fp.position.x
+            changed = True
+        elif abs_x + half_w > origin_x + board_w - margin:
+            new_x = (origin_x + board_w - margin - half_w) - fp.position.x
+            changed = True
+        new_texts.append(
+            FootprintText(
+                text_type=t.text_type,
+                text=t.text,
+                position=Point(x=new_x, y=new_y),
+                layer=t.layer,
+                effects_size=t.effects_size,
+                hidden=t.hidden,
+            ) if (new_x != t.position.x or new_y != t.position.y) else t
+        )
+    if not changed:
+        return fp
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+        models=fp.models, datasheet=fp.datasheet,
+        description=fp.description,
+    )
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
