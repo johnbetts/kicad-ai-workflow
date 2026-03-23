@@ -11,6 +11,10 @@ import json
 import logging
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from kicad_pipeline.constants import (
     KICAD_3DMODEL_VAR,
@@ -337,6 +341,74 @@ def _model_ws2812(upper: str) -> Footprint3DModel | None:
     return Footprint3DModel(path=path)
 
 
+def _model_sanyou_relay(
+    _name: str, upper: str, _lib_id: str, _layer: str,
+) -> Footprint3DModel | None:
+    """Match Sanyou-specific relay 3D model."""
+    if "RELAY" in upper and "SANYOU" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
+            "Relay_SPDT_SANYOU_SRD_Series_Form_C.step"
+        )
+        return Footprint3DModel(path=path)
+    return None
+
+
+def _model_dip_package(
+    name: str, upper: str, _lib_id: str, _layer: str,
+) -> Footprint3DModel | None:
+    """Match DIP package 3D model."""
+    if upper.startswith("DIP-"):
+        path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
+        return Footprint3DModel(path=path)
+    return None
+
+
+def _model_generic_relay(
+    _name: str, upper: str, _lib_id: str, _layer: str,
+) -> Footprint3DModel | None:
+    """Match generic relay SPDT 3D model (non-Sanyou)."""
+    if "RELAY" in upper and "SPDT" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
+            "Relay_SPDT_Omron_G5V-1.step"
+        )
+        return Footprint3DModel(path=path)
+    return None
+
+
+def _model_static_pattern(
+    _name: str, upper: str, _lib_id: str, _layer: str,
+) -> Footprint3DModel | None:
+    """Match passives/transistors/diodes/inductors/crystals via static pattern map."""
+    for pattern, directory, model_file in _3D_MODEL_MAP:
+        if pattern.upper() in upper:
+            path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
+            return Footprint3DModel(path=path)
+    return None
+
+
+# Ordered dispatch pipeline for 3D model resolution.
+# Each handler receives (name, upper, lib_id, layer) and returns model or None.
+# Sanyou relay must precede generic relay; DIP package must precede static pattern map.
+_3D_MODEL_DISPATCH: list[
+    Callable[[str, str, str, str], Footprint3DModel | None]
+] = [
+    lambda name, upper, lib_id, layer: _model_pin_header_socket(name, upper, layer),
+    lambda name, upper, lib_id, layer: _model_ic_package(name, upper),
+    lambda name, upper, lib_id, layer: _model_terminal_block(lib_id, upper),
+    lambda name, upper, lib_id, layer: _model_esp32(name, upper),
+    _model_sanyou_relay,
+    lambda name, upper, lib_id, layer: _model_switch(name, upper, lib_id),
+    lambda name, upper, lib_id, layer: _model_connector(name, upper, layer),
+    lambda name, upper, lib_id, layer: _model_optocoupler(name, upper),
+    _model_dip_package,
+    lambda name, upper, lib_id, layer: _model_ws2812(upper),
+    _model_generic_relay,
+    _model_static_pattern,
+]
+
+
 def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel | None:
     """Determine the 3D model path for a given KiCad lib_id.
 
@@ -350,65 +422,10 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
     name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
     upper = name.upper()
 
-    # Dispatch through category helpers (first match wins)
-    result = _model_pin_header_socket(name, upper, layer)
-    if result is not None:
-        return result
-
-    result = _model_ic_package(name, upper)
-    if result is not None:
-        return result
-
-    result = _model_terminal_block(lib_id, upper)
-    if result is not None:
-        return result
-
-    result = _model_esp32(name, upper)
-    if result is not None:
-        return result
-
-    # Relays — Sanyou-specific before generic SPDT
-    if "RELAY" in upper and "SANYOU" in upper:
-        path = (
-            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
-            "Relay_SPDT_SANYOU_SRD_Series_Form_C.step"
-        )
-        return Footprint3DModel(path=path)
-
-    result = _model_switch(name, upper, lib_id)
-    if result is not None:
-        return result
-
-    result = _model_connector(name, upper, layer)
-    if result is not None:
-        return result
-
-    result = _model_optocoupler(name, upper)
-    if result is not None:
-        return result
-
-    # DIP packages
-    if upper.startswith("DIP-"):
-        path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
-        return Footprint3DModel(path=path)
-
-    result = _model_ws2812(upper)
-    if result is not None:
-        return result
-
-    # Generic relay SPDT (non-Sanyou)
-    if "RELAY" in upper and "SPDT" in upper:
-        path = (
-            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
-            "Relay_SPDT_Omron_G5V-1.step"
-        )
-        return Footprint3DModel(path=path)
-
-    # Static pattern map for passives/transistors/diodes/inductors/crystals
-    for pattern, directory, model_file in _3D_MODEL_MAP:
-        if pattern.upper() in upper:
-            path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
-            return Footprint3DModel(path=path)
+    for handler in _3D_MODEL_DISPATCH:
+        result = handler(name, upper, lib_id, layer)
+        if result is not None:
+            return result
 
     _log.debug("No 3D model mapping for lib_id=%r (KI-017)", lib_id)
     return None
@@ -2364,78 +2381,170 @@ def _try_jlcpcb_footprint(
 # ---------------------------------------------------------------------------
 
 
+def _fp_ws2812(
+    ref: str, value: str, fid: str, _upper: str, layer: str,
+) -> Footprint:
+    """Build WS2812 footprint with size auto-detection."""
+    ws_size = "5050"
+    if "2020" in fid:
+        ws_size = "2020"
+    elif "3535" in fid:
+        ws_size = "3535"
+    return make_ws2812b(ref, value, layer=layer, size=ws_size)
+
+
+def _fp_led(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SMD LED footprint."""
+    pkg = fid[4:].upper()
+    pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
+    return make_smd_led(ref, value, package=pkg_norm)
+
+
+def _fp_rc(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SMD resistor/capacitor footprint."""
+    pkg = fid[2:].upper()
+    pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
+    return make_smd_resistor_capacitor(ref, value, package=pkg_norm)
+
+
+def _fp_sod323(
+    ref: str, value: str, _fid: str, _upper: str, layer: str,
+) -> Footprint:
+    """Build SOD-323 diode footprint."""
+    return make_sod323(ref, value, layer=layer)
+
+
+def _fp_sod123(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SOD-123 diode footprint."""
+    return make_sod123(ref, value)
+
+
+def _fp_inductor(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SMD inductor footprint."""
+    pkg = fid[2:].upper()
+    return make_inductor_smd(ref, value, package=pkg)
+
+
+def _fp_sot223(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SOT-223 footprint."""
+    return make_sot23(ref, value, variant="SOT-23")
+
+
+def _fp_sot23(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SOT-23 family footprint."""
+    variant = fid.upper().replace("TSOT-", "SOT-")
+    if variant not in _SOT23_VARIANTS:
+        variant = "SOT-23"
+    return make_sot23(ref, value, variant=variant)
+
+
+# Ordered (predicate, handler) dispatch table for passive/LED footprints.
+# Order matters: WS2812 contains-check first, SOT-223 exact before SOT-23 prefix.
+_PASSIVE_LED_DISPATCH: list[
+    tuple[
+        Callable[[str, str], bool],
+        Callable[[str, str, str, str, str], Footprint],
+    ]
+] = [
+    (lambda _u, _f: "WS2812" in _u, _fp_ws2812),
+    (lambda _u, _f: _u.startswith("LED_"), _fp_led),
+    (lambda _u, _f: _u.startswith(("R_", "C_")), _fp_rc),
+    (lambda _u, _f: _u.startswith("SOD-323"), _fp_sod323),
+    (lambda _u, _f: _u.startswith("SOD-123"), _fp_sod123),
+    (lambda _u, _f: _u.startswith("L_"), _fp_inductor),
+    (lambda _u, _f: _u == "SOT-223", _fp_sot223),
+    (lambda _u, _f: _u.startswith(("SOT-23", "TSOT-23")), _fp_sot23),
+]
+
+
 def _route_fp_passive_led(
     ref: str, value: str, fid: str, upper: str, layer: str,
 ) -> Footprint | None:
     """Match WS2812, LED, R_, C_, SOD, L_, SOT packages."""
-    if "WS2812" in upper:
-        ws_size = "5050"
-        if "2020" in fid:
-            ws_size = "2020"
-        elif "3535" in fid:
-            ws_size = "3535"
-        return make_ws2812b(ref, value, layer=layer, size=ws_size)
-
-    if upper.startswith("LED_"):
-        pkg = fid[4:].upper()
-        pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
-        return make_smd_led(ref, value, package=pkg_norm)
-
-    if upper.startswith(("R_", "C_")):
-        pkg = fid[2:].upper()
-        pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
-        return make_smd_resistor_capacitor(ref, value, package=pkg_norm)
-
-    if upper.startswith("SOD-323"):
-        return make_sod323(ref, value, layer=layer)
-
-    if upper.startswith("SOD-123"):
-        return make_sod123(ref, value)
-
-    if upper.startswith("L_"):
-        pkg = fid[2:].upper()
-        return make_inductor_smd(ref, value, package=pkg)
-
-    if upper == "SOT-223":
-        return make_sot23(ref, value, variant="SOT-23")
-
-    if upper.startswith(("SOT-23", "TSOT-23")):
-        variant = fid.upper().replace("TSOT-", "SOT-")
-        if variant not in _SOT23_VARIANTS:
-            variant = "SOT-23"
-        return make_sot23(ref, value, variant=variant)
-
+    for predicate, handler in _PASSIVE_LED_DISPATCH:
+        if predicate(upper, fid):
+            return handler(ref, value, fid, upper, layer)
     return None
+
+
+def _fp_usbc(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build USB-C connector footprint."""
+    return make_usbc_connector(ref, value)
+
+
+def _fp_rj45(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build RJ45 connector footprint."""
+    return make_rj45(ref, value)
+
+
+def _fp_pin_header_socket(
+    ref: str, value: str, fid: str, upper: str, layer: str,
+) -> Footprint:
+    """Build pin header/socket connector footprint."""
+    pin_count = _parse_pin_count(fid)
+    pitch = _parse_pitch(fid)
+    rows = 2 if "2X" in upper or "2x" in fid else 1
+    rpi_swap = "2X20" in upper or "RPI" in upper or "RASPBERRY" in upper
+    return make_pin_header_socket(
+        ref, value, pin_count, pitch, rows, lib_id=fid, row_swap=rpi_swap,
+        layer=layer,
+    )
+
+
+def _fp_terminal_block(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build terminal block footprint."""
+    pin_count = _parse_pin_count(fid)
+    pitch = _parse_pitch(fid)
+    return make_terminal_block(ref, value, pin_count, pitch)
+
+
+def _fp_microsd(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build MicroSD slot footprint."""
+    return make_microsd_slot(ref, value)
+
+
+# Ordered (predicate, handler) dispatch table for connector footprints.
+_CONNECTOR_DISPATCH: list[
+    tuple[
+        Callable[[str, str], bool],
+        Callable[[str, str, str, str, str], Footprint],
+    ]
+] = [
+    (lambda _u, _f: _u.startswith(("USB-C", "USB_C")), _fp_usbc),
+    (lambda _u, _f: _u.startswith("RJ45"), _fp_rj45),
+    (lambda _u, _f: _u.startswith(("PINHEADER", "PINSOCKET", "CONN_")), _fp_pin_header_socket),
+    (lambda _u, _f: _u.startswith(("TERMINALBLOCK", "TB_")), _fp_terminal_block),
+    (lambda _u, _f: _u.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")), _fp_microsd),
+]
 
 
 def _route_fp_connector(
     ref: str, value: str, fid: str, upper: str, layer: str,
 ) -> Footprint | None:
     """Match USB-C, RJ45, PinHeader, PinSocket, Conn_, TerminalBlock."""
-    if upper.startswith(("USB-C", "USB_C")):
-        return make_usbc_connector(ref, value)
-
-    if upper.startswith("RJ45"):
-        return make_rj45(ref, value)
-
-    if upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        rows = 2 if "2X" in upper or "2x" in fid else 1
-        rpi_swap = "2X20" in upper or "RPI" in upper or "RASPBERRY" in upper
-        return make_pin_header_socket(
-            ref, value, pin_count, pitch, rows, lib_id=fid, row_swap=rpi_swap,
-            layer=layer,
-        )
-
-    if upper.startswith("TERMINALBLOCK") or upper.startswith("TB_"):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        return make_terminal_block(ref, value, pin_count, pitch)
-
-    if upper.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")):
-        return make_microsd_slot(ref, value)
-
+    for predicate, handler in _CONNECTOR_DISPATCH:
+        if predicate(upper, fid):
+            return handler(ref, value, fid, upper, layer)
     return None
 
 
@@ -2456,44 +2565,102 @@ def _parse_dimensions(fid: str) -> tuple[float, float] | None:
     return (float(m.group(1)), float(m.group(2))) if m else None
 
 
+def _fp_dip_switch(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build DIP switch footprint."""
+    return make_dip_switch(ref, value, _parse_dip_switch_pin_count(fid))
+
+
+def _fp_relay(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build relay SPDT footprint."""
+    return make_relay_spdt(ref, value)
+
+
+def _fp_esp32(
+    ref: str, value: str, _fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build ESP32/WROOM footprint."""
+    return make_esp32_wroom(ref, value)
+
+
+def _fp_smd_tact_switch(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SMD tactile switch footprint."""
+    dims = _parse_dimensions(fid)
+    w, h = dims if dims else (3.0, 2.5)
+    return make_smd_tact_switch(ref, value, width_mm=w, height_mm=h)
+
+
+def _fp_tact_switch(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build THT tactile switch footprint."""
+    dims = _parse_dimensions(fid)
+    size_mm = dims[0] if dims else 4.5
+    return make_tact_switch(ref, value, size_mm=size_mm)
+
+
+def _fp_crystal(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build SMD crystal footprint."""
+    dims = _parse_dimensions(fid)
+    w, h = dims if dims else (3.2, 1.5)
+    return make_crystal_smd(ref, value, size_w=w, size_h=h)
+
+
+def _fp_test_point(
+    ref: str, value: str, fid: str, _upper: str, layer: str,
+) -> Footprint:
+    """Build test point footprint."""
+    dims = _parse_dimensions(fid)
+    pad_size = dims[0] if dims else 1.5
+    return make_test_point(ref, value, pad_size=pad_size, layer=layer)
+
+
+def _fp_dip_package(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build DIP IC package footprint."""
+    pin_count = _parse_pin_count(fid)
+    return make_dip_package(ref, value, max(pin_count, 4) if pin_count < 2 else pin_count)
+
+
+# Ordered (predicate, handler) dispatch table for switches and misc footprints.
+# Order matters: SW_DIP before SW_SMD before generic SW_, ESP32 contains-check.
+_SWITCH_MISC_DISPATCH: list[
+    tuple[
+        Callable[[str, str], bool],
+        Callable[[str, str, str, str, str], Footprint],
+    ]
+] = [
+    (lambda _u, _f: _u.startswith(("SW_DIP", "DIP_SWITCH")), _fp_dip_switch),
+    (lambda _u, _f: _u.startswith("RELAY"), _fp_relay),
+    (lambda _u, _f: "ESP32" in _u or "WROOM" in _u, _fp_esp32),
+    (lambda _u, _f: _u.startswith("SW_") and "SMD" in _u, _fp_smd_tact_switch),
+    (lambda _u, _f: _u.startswith("SW_"), _fp_tact_switch),
+    (lambda _u, _f: _u.startswith("CRYSTAL"), _fp_crystal),
+    (lambda _u, _f: _u.startswith(("TP_", "TESTPOINT")), _fp_test_point),
+    (
+        lambda _u, _f: _u.startswith("DIP-") or (
+            _u.startswith("DIP_") and "SWITCH" not in _u
+        ),
+        _fp_dip_package,
+    ),
+]
+
+
 def _route_fp_switch_misc(
     ref: str, value: str, fid: str, upper: str, layer: str,
 ) -> Footprint | None:
     """Match DIP switches, tactile switches, relays, ESP32, crystals, test points, DIP packages."""
-    if upper.startswith(("SW_DIP", "DIP_SWITCH")):
-        return make_dip_switch(ref, value, _parse_dip_switch_pin_count(fid))
-
-    if upper.startswith("RELAY"):
-        return make_relay_spdt(ref, value)
-
-    if "ESP32" in upper or "WROOM" in upper:
-        return make_esp32_wroom(ref, value)
-
-    # SMD tactile switches must come before generic SW_ check
-    if upper.startswith("SW_") and "SMD" in upper:
-        dims = _parse_dimensions(fid)
-        w, h = dims if dims else (3.0, 2.5)
-        return make_smd_tact_switch(ref, value, width_mm=w, height_mm=h)
-
-    if upper.startswith("SW_"):
-        dims = _parse_dimensions(fid)
-        size_mm = dims[0] if dims else 4.5
-        return make_tact_switch(ref, value, size_mm=size_mm)
-
-    if upper.startswith("CRYSTAL"):
-        dims = _parse_dimensions(fid)
-        w, h = dims if dims else (3.2, 1.5)
-        return make_crystal_smd(ref, value, size_w=w, size_h=h)
-
-    if upper.startswith(("TP_", "TESTPOINT")):
-        dims = _parse_dimensions(fid)
-        pad_size = dims[0] if dims else 1.5
-        return make_test_point(ref, value, pad_size=pad_size, layer=layer)
-
-    if upper.startswith("DIP-") or (upper.startswith("DIP_") and "SWITCH" not in upper):
-        pin_count = _parse_pin_count(fid)
-        return make_dip_package(ref, value, max(pin_count, 4) if pin_count < 2 else pin_count)
-
+    for predicate, handler in _SWITCH_MISC_DISPATCH:
+        if predicate(upper, fid):
+            return handler(ref, value, fid, upper, layer)
     return None
 
 

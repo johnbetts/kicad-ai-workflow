@@ -31,57 +31,34 @@ from kicad_pipeline.optimization.scoring import (
     score_to_grade,
 )
 
+from tests.helpers import (
+    make_board_outline,
+    make_component,
+    make_pcb_design,
+    make_requirements,
+)
+
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures — thin wrappers over shared conftest helpers
 # ---------------------------------------------------------------------------
 
 
 def _minimal_outline() -> BoardOutline:
-    return BoardOutline(
-        polygon=(
-            Point(0.0, 0.0),
-            Point(50.0, 0.0),
-            Point(50.0, 40.0),
-            Point(0.0, 40.0),
-            Point(0.0, 0.0),
-        ),
-    )
+    return make_board_outline(w=50.0, h=40.0)
 
 
 def _minimal_pcb(
     footprints: tuple[Footprint, ...] = (),
 ) -> PCBDesign:
-    return PCBDesign(
-        outline=_minimal_outline(),
-        design_rules=DesignRules(),
-        nets=(NetEntry(number=0, name=""),),
-        footprints=footprints,
-        tracks=(),
-        vias=(),
-        zones=(),
-        keepouts=(),
-    )
+    return make_pcb_design(footprints=footprints, w=50.0, h=40.0)
 
 
 def _minimal_requirements() -> ProjectRequirements:
-    return ProjectRequirements(
-        project=ProjectInfo(name="test-project"),
-        features=(
-            FeatureBlock(
-                name="Test",
-                description="test block",
-                components=("R1",),
-                nets=("GND",),
-                subcircuits=(),
-            ),
-        ),
-        components=(
-            Component(ref="R1", value="10k", footprint="R_0805"),
-        ),
+    return make_requirements(
+        components=(make_component("R1", "10k", "R_0805"),),
         nets=(Net(name="GND", connections=()),),
-        mechanical=MechanicalConstraints(
-            board_width_mm=50.0, board_height_mm=40.0
-        ),
+        w=50.0,
+        h=40.0,
     )
 
 

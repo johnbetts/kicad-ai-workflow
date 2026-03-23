@@ -28,6 +28,8 @@ from kicad_pipeline.models.requirements import (
     ProjectInfo,
     ProjectRequirements,
 )
+from tests.helpers import make_board_outline, make_pcb_design, make_requirements
+
 from kicad_pipeline.optimization.placement_optimizer import (
     OptimizationConfig,
     PlacementCandidate,
@@ -65,13 +67,7 @@ class _FakeQualityScore:
 # ---------------------------------------------------------------------------
 
 def _make_outline(w: float = 80.0, h: float = 40.0) -> BoardOutline:
-    return BoardOutline(polygon=(
-        Point(x=0.0, y=0.0),
-        Point(x=w, y=0.0),
-        Point(x=w, y=h),
-        Point(x=0.0, y=h),
-        Point(x=0.0, y=0.0),
-    ))
+    return make_board_outline(w=w, h=h)
 
 
 def _make_pcb(
@@ -88,41 +84,15 @@ def _make_pcb(
             Footprint(lib_id="C:C_0805", ref="C1", value="100nF",
                        position=Point(x=30.0, y=20.0), rotation=0.0),
         )
-    return PCBDesign(
-        outline=_make_outline(w, h),
-        design_rules=DesignRules(),
-        nets=(NetEntry(number=0, name=""),),
-        footprints=footprints,
-        tracks=(),
-        vias=(),
-        zones=(),
-        keepouts=(),
-    )
+    return make_pcb_design(footprints=footprints, w=w, h=h)
 
 
 def _make_requirements(
     components: tuple[Component, ...] | None = None,
     mechanical: MechanicalConstraints | None = None,
 ) -> ProjectRequirements:
-    if components is None:
-        components = (
-            Component(ref="R1", value="10k", footprint="R_0805"),
-            Component(ref="R2", value="4.7k", footprint="R_0805"),
-            Component(ref="C1", value="100nF", footprint="C_0805"),
-        )
-    return ProjectRequirements(
-        project=ProjectInfo(name="test"),
-        features=(
-            FeatureBlock(
-                name="Main",
-                description="Test block",
-                components=tuple(c.ref for c in components),
-                nets=(),
-                subcircuits=(),
-            ),
-        ),
+    return make_requirements(
         components=components,
-        nets=(),
         mechanical=mechanical,
     )
 

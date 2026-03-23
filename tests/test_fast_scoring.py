@@ -28,29 +28,25 @@ from kicad_pipeline.optimization.scoring import (
     compute_fast_placement_score,
 )
 
+from tests.helpers import (
+    make_board_outline,
+    make_footprint,
+    make_pad,
+    make_pcb_design,
+    make_requirements,
+)
+
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — thin wrappers over shared conftest helpers
 # ---------------------------------------------------------------------------
 
 
 def _outline(w: float = 80.0, h: float = 60.0) -> BoardOutline:
-    return BoardOutline(
-        polygon=(
-            Point(0.0, 0.0),
-            Point(w, 0.0),
-            Point(w, h),
-            Point(0.0, h),
-            Point(0.0, 0.0),
-        ),
-    )
+    return make_board_outline(w=w, h=h)
 
 
 def _pad(x: float = 0.0, y: float = 0.0) -> Pad:
-    return Pad(
-        number="1", pad_type="smd", shape="rect",
-        position=Point(x, y), size_x=1.0, size_y=1.0,
-        layers=("F.Cu",),
-    )
+    return make_pad(number="1", x=x, y=y)
 
 
 def _fp(
@@ -76,16 +72,7 @@ def _pcb(
     w: float = 80.0,
     h: float = 60.0,
 ) -> PCBDesign:
-    return PCBDesign(
-        outline=_outline(w, h),
-        design_rules=DesignRules(),
-        nets=(NetEntry(number=0, name=""),),
-        footprints=footprints,
-        tracks=(),
-        vias=(),
-        zones=(),
-        keepouts=(),
-    )
+    return make_pcb_design(footprints=footprints, w=w, h=h)
 
 
 def _req(
@@ -93,12 +80,12 @@ def _req(
     nets: tuple[Net, ...] = (),
     features: tuple[FeatureBlock, ...] = (),
 ) -> ProjectRequirements:
-    return ProjectRequirements(
-        project=ProjectInfo(name="test"),
-        components=components,
+    return make_requirements(
+        components=components if components else None,
         nets=nets,
-        features=features,
-        mechanical=MechanicalConstraints(board_width_mm=80.0, board_height_mm=60.0),
+        features=features if features else None,
+        w=80.0,
+        h=60.0,
     )
 
 
