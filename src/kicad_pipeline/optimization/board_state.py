@@ -369,6 +369,113 @@ def _compute_group_cohesion(
 # ---------------------------------------------------------------------------
 
 
+def _build_placed_component(
+    fp: Footprint,
+    board: tuple[float, float, float, float],
+    ref_to_group: dict[str, str],
+    ref_to_zone: dict[str, str],
+    ref_to_domain: dict[str, str],
+    ref_to_subcircuits: dict[str, list[str]],
+) -> tuple[str, tuple[float, float, float, float], PlacedComponent]:
+    """Build a single PlacedComponent from a footprint (without overlap info)."""
+    ox, oy = fp.position.x, fp.position.y
+    rot = fp.rotation
+
+    centroid = origin_to_centroid(fp, ox, oy, rot)
+    bbox = pad_extent_in_board_space(fp, ox, oy, rot)
+    courtyard = estimate_courtyard_mm(fp)
+    edges = _edge_distances(bbox, board)
+    edge_name, edge_dist = _nearest_edge(edges)
+
+    mating = _mating_face_for_connector(fp, rot) if fp.ref.startswith("J") else ""
+
+    pc = PlacedComponent(
+        ref=fp.ref,
+        value=fp.value,
+        footprint_id=fp.lib_id,
+        centroid=(round(centroid[0], 2), round(centroid[1], 2)),
+        origin=(round(ox, 2), round(oy, 2)),
+        rotation=rot,
+        bbox=(round(bbox[0], 2), round(bbox[1], 2), round(bbox[2], 2), round(bbox[3], 2)),
+        courtyard_size=(round(courtyard[0], 2), round(courtyard[1], 2)),
+        nearest_edge=edge_name,
+        nearest_edge_distance_mm=round(edge_dist, 2),
+        mating_face=mating,
+        group_name=ref_to_group.get(fp.ref, ""),
+        zone_name=ref_to_zone.get(fp.ref, ""),
+        voltage_domain=ref_to_domain.get(fp.ref, ""),
+        subcircuit_types=tuple(ref_to_subcircuits.get(fp.ref, [])),
+        overlapping_refs=(),
+    )
+    return (fp.ref, bbox, pc)
+
+
+def _build_placed_components(
+    pcb: PCBDesign,
+    board: tuple[float, float, float, float],
+    ref_to_group: dict[str, str],
+    ref_to_zone: dict[str, str],
+    ref_to_domain: dict[str, str],
+    ref_to_subcircuits: dict[str, list[str]],
+) -> list[tuple[str, tuple[float, float, float, float], PlacedComponent]]:
+    """Build PlacedComponent entries for all footprints (without overlap info)."""
+    return [
+        _build_placed_component(
+            fp, board, ref_to_group, ref_to_zone, ref_to_domain, ref_to_subcircuits,
+        )
+        for fp in pcb.footprints
+    ]
+
+
+def _detect_overlaps(
+    fp_data: list[tuple[str, tuple[float, float, float, float], PlacedComponent]],
+) -> tuple[tuple[PlacedComponent, ...], list[OverlapPair]]:
+    """Detect AABB overlaps and return components with overlap refs populated.
+
+    Returns:
+        Tuple of (sorted components with overlap info, list of overlap pairs).
+    """
+    overlap_threshold_mm2 = 0.01
+
+    overlaps: list[OverlapPair] = []
+    overlap_map: dict[str, list[str]] = {}
+    n = len(fp_data)
+    for i in range(n):
+        ref_a, bbox_a, _ = fp_data[i]
+        for j in range(i + 1, n):
+            ref_b, bbox_b, _ = fp_data[j]
+            area = _bbox_overlap_area(bbox_a, bbox_b)
+            if area > overlap_threshold_mm2:
+                overlaps.append(OverlapPair(ref_a, ref_b, round(area, 2)))
+                overlap_map.setdefault(ref_a, []).append(ref_b)
+                overlap_map.setdefault(ref_b, []).append(ref_a)
+
+    components: list[PlacedComponent] = []
+    for ref, _bbox, pc in fp_data:
+        if ref in overlap_map:
+            pc = PlacedComponent(
+                ref=pc.ref,
+                value=pc.value,
+                footprint_id=pc.footprint_id,
+                centroid=pc.centroid,
+                origin=pc.origin,
+                rotation=pc.rotation,
+                bbox=pc.bbox,
+                courtyard_size=pc.courtyard_size,
+                nearest_edge=pc.nearest_edge,
+                nearest_edge_distance_mm=pc.nearest_edge_distance_mm,
+                mating_face=pc.mating_face,
+                group_name=pc.group_name,
+                zone_name=pc.zone_name,
+                voltage_domain=pc.voltage_domain,
+                subcircuit_types=pc.subcircuit_types,
+                overlapping_refs=tuple(sorted(overlap_map[ref])),
+            )
+        components.append(pc)
+
+    return tuple(sorted(components, key=lambda c: c.ref)), overlaps
+
+
 def build_board_state(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -395,82 +502,12 @@ def build_board_state(
     ref_to_subcircuits = _build_ref_to_subcircuits(subcircuits)
 
     # Phase 1: build PlacedComponent for each footprint (without overlaps yet)
-    fp_data: list[tuple[str, tuple[float, float, float, float], PlacedComponent]] = []
+    fp_data = _build_placed_components(
+        pcb, board, ref_to_group, ref_to_zone, ref_to_domain, ref_to_subcircuits,
+    )
 
-    for fp in pcb.footprints:
-        ox, oy = fp.position.x, fp.position.y
-        rot = fp.rotation
-
-        centroid = origin_to_centroid(fp, ox, oy, rot)
-        bbox = pad_extent_in_board_space(fp, ox, oy, rot)
-        courtyard = estimate_courtyard_mm(fp)
-        edges = _edge_distances(bbox, board)
-        edge_name, edge_dist = _nearest_edge(edges)
-
-        # Mating face: only for connectors (J prefix)
-        mating = ""
-        if fp.ref.startswith("J"):
-            mating = _mating_face_for_connector(fp, rot)
-
-        pc = PlacedComponent(
-            ref=fp.ref,
-            value=fp.value,
-            footprint_id=fp.lib_id,
-            centroid=(round(centroid[0], 2), round(centroid[1], 2)),
-            origin=(round(ox, 2), round(oy, 2)),
-            rotation=rot,
-            bbox=(round(bbox[0], 2), round(bbox[1], 2), round(bbox[2], 2), round(bbox[3], 2)),
-            courtyard_size=(round(courtyard[0], 2), round(courtyard[1], 2)),
-            nearest_edge=edge_name,
-            nearest_edge_distance_mm=round(edge_dist, 2),
-            mating_face=mating,
-            group_name=ref_to_group.get(fp.ref, ""),
-            zone_name=ref_to_zone.get(fp.ref, ""),
-            voltage_domain=ref_to_domain.get(fp.ref, ""),
-            subcircuit_types=tuple(ref_to_subcircuits.get(fp.ref, [])),
-            overlapping_refs=(),  # filled in phase 2
-        )
-        fp_data.append((fp.ref, bbox, pc))
-
-    # Phase 2: detect AABB overlaps
-    overlaps: list[OverlapPair] = []
-    overlap_map: dict[str, list[str]] = {}
-    n = len(fp_data)
-    for i in range(n):
-        ref_a, bbox_a, _ = fp_data[i]
-        for j in range(i + 1, n):
-            ref_b, bbox_b, _ = fp_data[j]
-            area = _bbox_overlap_area(bbox_a, bbox_b)
-            if area > 0.01:  # > 0.01 mm^2 threshold
-                overlaps.append(OverlapPair(ref_a, ref_b, round(area, 2)))
-                overlap_map.setdefault(ref_a, []).append(ref_b)
-                overlap_map.setdefault(ref_b, []).append(ref_a)
-
-    # Rebuild components with overlap info
-    components: list[PlacedComponent] = []
-    for ref, _bbox, pc in fp_data:
-        if ref in overlap_map:
-            pc = PlacedComponent(
-                ref=pc.ref,
-                value=pc.value,
-                footprint_id=pc.footprint_id,
-                centroid=pc.centroid,
-                origin=pc.origin,
-                rotation=pc.rotation,
-                bbox=pc.bbox,
-                courtyard_size=pc.courtyard_size,
-                nearest_edge=pc.nearest_edge,
-                nearest_edge_distance_mm=pc.nearest_edge_distance_mm,
-                mating_face=pc.mating_face,
-                group_name=pc.group_name,
-                zone_name=pc.zone_name,
-                voltage_domain=pc.voltage_domain,
-                subcircuit_types=pc.subcircuit_types,
-                overlapping_refs=tuple(sorted(overlap_map[ref])),
-            )
-        components.append(pc)
-
-    components_t = tuple(sorted(components, key=lambda c: c.ref))
+    # Phase 2: detect AABB overlaps and rebuild components with overlap info
+    components_t, overlaps = _detect_overlaps(fp_data)
 
     # Phase 3: edge violations
     edge_violations: list[EdgeViolation] = []
@@ -521,40 +558,19 @@ def build_board_state(
 # ---------------------------------------------------------------------------
 
 
-def _format_report(state: BoardState, cell_size_mm: float) -> str:
-    """Format BoardState as a structured text report."""
-    lines: list[str] = []
+def _format_component_map(
+    state: BoardState, cell_size_mm: float, lines: list[str],
+) -> None:
+    """Append ASCII component map grid to lines."""
     bb = state.board_bounds
-
-    # Header
-    lines.append("=== BOARD STATE REPORT ===")
-    lines.append(
-        f"Board: {state.board_width_mm}x{state.board_height_mm}mm "
-        f"({round(state.board_width_mm * state.board_height_mm)}mm\u00b2) | "
-        f"{len(state.components)} components | "
-        f"{state.total_utilization_pct}% utilization"
-    )
-    lines.append(
-        f"Review: Grade {state.review_grade} \u2014 "
-        f"{state.review_violation_count} violations | "
-        f"Off-board: {state.off_board_count} | "
-        f"Overlaps: {len(state.overlaps)}"
-    )
-    lines.append("")
-
-    # Component map (ASCII grid)
-    lines.append(f"--- COMPONENT MAP ({cell_size_mm}mm cells) ---")
     cols = max(1, math.ceil(state.board_width_mm / cell_size_mm))
     rows = max(1, math.ceil(state.board_height_mm / cell_size_mm))
 
-    # Build grid: each cell has a list of refs
     grid: list[list[list[str]]] = [[[] for _ in range(cols)] for _ in range(rows)]
     for c in state.components:
         cx, cy = c.centroid
-        col = int((cx - bb[0]) / cell_size_mm)
-        row = int((cy - bb[1]) / cell_size_mm)
-        col = max(0, min(col, cols - 1))
-        row = max(0, min(row, rows - 1))
+        col = max(0, min(int((cx - bb[0]) / cell_size_mm), cols - 1))
+        row = max(0, min(int((cy - bb[1]) / cell_size_mm), rows - 1))
         label = c.ref
         if c.mating_face:
             arrow = {"N": "\u2191", "S": "\u2193", "E": "\u2192", "W": "\u2190"}.get(
@@ -563,54 +579,55 @@ def _format_report(state: BoardState, cell_size_mm: float) -> str:
             label = f"{c.ref}{arrow}"
         grid[row][col].append(label)
 
-    # Header row
-    header = "     "
+    header_parts = ["     "]
     for col_idx in range(cols):
-        header += f"{int(bb[0] + col_idx * cell_size_mm):>5}"
-    lines.append(header)
+        header_parts.append(f"{int(bb[0] + col_idx * cell_size_mm):>5}")
+    lines.append("".join(header_parts))
 
-    # Grid rows
     for row_idx in range(rows):
         y_val = int(bb[1] + row_idx * cell_size_mm)
-        row_str = f"{y_val:>4} "
+        row_parts = [f"{y_val:>4} "]
         for col_idx in range(cols):
             cell = grid[row_idx][col_idx]
             if not cell:
-                row_str += "    ."
+                row_parts.append("    .")
             elif len(cell) == 1:
-                row_str += f"{cell[0]:>5}"
+                row_parts.append(f"{cell[0]:>5}")
             else:
-                row_str += f" {len(cell)}x  "
-        lines.append(row_str)
+                row_parts.append(f" {len(cell)}x  ")
+        lines.append("".join(row_parts))
     lines.append("")
 
-    # Connectors table
-    connectors = [c for c in state.components if c.ref.startswith("J")]
-    if connectors:
-        lines.append("--- CONNECTORS ---")
-        lines.append(f"{'Ref':<6}{'Edge':<8}{'Mating':<10}{'Dist':<8}Status")
-        for c in sorted(connectors, key=lambda x: x.ref):
-            arrow = _MATING_ARROWS.get(c.mating_face, "?")
-            dist_str = f"{c.nearest_edge_distance_mm:.1f}mm"
-            # Check if mating face points away from nearest edge (good)
-            edge_to_expected_face = {
-                "top": "N",
-                "bottom": "S",
-                "left": "W",
-                "right": "E",
-            }
-            expected = edge_to_expected_face.get(c.nearest_edge, "")
-            if c.nearest_edge_distance_mm <= 0.5 and c.mating_face == expected:
-                status = "OK (flush)"
-            elif c.mating_face == expected:
-                status = "OK"
-            elif c.mating_face:
-                status = "\u2717 FACING INWARD"
-            else:
-                status = "?"
-            lines.append(f"{c.ref:<6}{c.nearest_edge:<8}{arrow:<10}{dist_str:<8}{status}")
-        lines.append("")
 
+_EDGE_TO_EXPECTED_FACE = {"top": "N", "bottom": "S", "left": "W", "right": "E"}
+
+
+def _format_connectors_table(
+    connectors: list, lines: list[str],
+) -> None:
+    """Append connectors table to lines."""
+    if not connectors:
+        return
+    lines.append("--- CONNECTORS ---")
+    lines.append(f"{'Ref':<6}{'Edge':<8}{'Mating':<10}{'Dist':<8}Status")
+    for c in sorted(connectors, key=lambda x: x.ref):
+        arrow = _MATING_ARROWS.get(c.mating_face, "?")
+        dist_str = f"{c.nearest_edge_distance_mm:.1f}mm"
+        expected = _EDGE_TO_EXPECTED_FACE.get(c.nearest_edge, "")
+        if c.nearest_edge_distance_mm <= 0.5 and c.mating_face == expected:
+            status = "OK (flush)"
+        elif c.mating_face == expected:
+            status = "OK"
+        elif c.mating_face:
+            status = "\u2717 FACING INWARD"
+        else:
+            status = "?"
+        lines.append(f"{c.ref:<6}{c.nearest_edge:<8}{arrow:<10}{dist_str:<8}{status}")
+    lines.append("")
+
+
+def _format_sections(state: BoardState, lines: list[str]) -> None:
+    """Append RF, overlaps, zones, groups, and isolation sections."""
     # RF module
     rf_comps = [c for c in state.components if "rf_antenna" in c.subcircuit_types]
     if rf_comps:
@@ -649,7 +666,6 @@ def _format_report(state: BoardState, cell_size_mm: float) -> str:
     if state.group_cohesion:
         lines.append("--- GROUPS ---")
         lines.append(f"{'Group':<22}{'Refs':>5}{'Spread':>8}{'Density':>9}{'Zone':>8}")
-        # Build group→zone map
         group_zones: dict[str, str] = {}
         for c in state.components:
             if c.group_name and c.zone_name:
@@ -673,7 +689,11 @@ def _format_report(state: BoardState, cell_size_mm: float) -> str:
             )
         lines.append("")
 
-    # Critical issues
+
+def _format_critical_issues(
+    state: BoardState, connectors: list, lines: list[str],
+) -> None:
+    """Append critical issues section."""
     issues: list[str] = []
     for ov in state.overlaps:
         issues.append(f"[OVERLAP] {ov.ref_a} \u2194 {ov.ref_b}: courtyard collision")
@@ -683,10 +703,8 @@ def _format_report(state: BoardState, cell_size_mm: float) -> str:
             issues.append(
                 f"[OFF-BOARD] {ev.ref}: extends past {ev.edge} edge by {dist:.1f}mm"
             )
-    # Connector facing issues
     for c in sorted(connectors, key=lambda x: x.ref) if connectors else []:
-        edge_to_expected = {"top": "N", "bottom": "S", "left": "W", "right": "E"}
-        expected = edge_to_expected.get(c.nearest_edge, "")
+        expected = _EDGE_TO_EXPECTED_FACE.get(c.nearest_edge, "")
         if c.mating_face and c.mating_face != expected:
             issues.append(f"[CONNECTOR] {c.ref}: mating face points INTO board")
 
@@ -694,10 +712,43 @@ def _format_report(state: BoardState, cell_size_mm: float) -> str:
         lines.append("--- CRITICAL ISSUES ---")
         for i, issue in enumerate(issues, 1):
             lines.append(f"{i}. {issue}")
-        lines.append("")
-
-    if not issues:
+    else:
         lines.append("--- NO CRITICAL ISSUES ---")
-        lines.append("")
+    lines.append("")
+
+
+def _format_report(state: BoardState, cell_size_mm: float) -> str:
+    """Format BoardState as a structured text report."""
+    lines: list[str] = []
+
+    # Header
+    lines.append("=== BOARD STATE REPORT ===")
+    lines.append(
+        f"Board: {state.board_width_mm}x{state.board_height_mm}mm "
+        f"({round(state.board_width_mm * state.board_height_mm)}mm\u00b2) | "
+        f"{len(state.components)} components | "
+        f"{state.total_utilization_pct}% utilization"
+    )
+    lines.append(
+        f"Review: Grade {state.review_grade} \u2014 "
+        f"{state.review_violation_count} violations | "
+        f"Off-board: {state.off_board_count} | "
+        f"Overlaps: {len(state.overlaps)}"
+    )
+    lines.append("")
+
+    # Component map
+    lines.append(f"--- COMPONENT MAP ({cell_size_mm}mm cells) ---")
+    _format_component_map(state, cell_size_mm, lines)
+
+    # Connectors
+    connectors = [c for c in state.components if c.ref.startswith("J")]
+    _format_connectors_table(connectors, lines)
+
+    # Sections: RF, overlaps, zones, groups, isolation
+    _format_sections(state, lines)
+
+    # Critical issues
+    _format_critical_issues(state, connectors, lines)
 
     return "\n".join(lines)

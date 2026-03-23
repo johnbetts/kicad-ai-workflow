@@ -258,20 +258,19 @@ def _score_collisions(
 
     collisions: list[str] = []
     refs = list(centroid_positions.keys())
-    for i, ref_a in enumerate(refs):
-        xa, ya = centroid_positions[ref_a]
-        wa, ha = sizes.get(ref_a, (2.0, 2.0))
-        rot_a = rotations.get(ref_a, 0.0)
-        if rot_a % 180 in (90.0, 270.0):
-            wa, ha = ha, wa
 
-        for ref_b in refs[i + 1:]:
-            xb, yb = centroid_positions[ref_b]
-            wb, hb = sizes.get(ref_b, (2.0, 2.0))
-            rot_b = rotations.get(ref_b, 0.0)
-            if rot_b % 180 in (90.0, 270.0):
-                wb, hb = hb, wb
+    # Pre-build flat arrays with rotation-adjusted sizes for O(n^2) inner loop
+    fp_data: list[tuple[str, float, float, float, float]] = []
+    for ref in refs:
+        x, y = centroid_positions[ref]
+        w, h = sizes.get(ref, (2.0, 2.0))
+        rot = rotations.get(ref, 0.0)
+        if rot % 180 in (90.0, 270.0):
+            w, h = h, w
+        fp_data.append((ref, x, y, w, h))
 
+    for i, (ref_a, xa, ya, wa, ha) in enumerate(fp_data):
+        for ref_b, xb, yb, wb, hb in fp_data[i + 1:]:
             # AABB overlap check (center-based)
             dx = abs(xa - xb)
             dy = abs(ya - yb)
@@ -415,15 +414,12 @@ def _score_group_cohesion(
             group_scores.append(1.0)
             continue
 
-        # Compute max pairwise distance (spread)
-        max_dist = 0.0
-        for i in range(len(block_positions)):
-            for j in range(i + 1, len(block_positions)):
-                dx = block_positions[i][0] - block_positions[j][0]
-                dy = block_positions[i][1] - block_positions[j][1]
-                d = math.sqrt(dx * dx + dy * dy)
-                if d > max_dist:
-                    max_dist = d
+        # Compute max pairwise distance via bounding box diagonal (O(n) vs O(n^2))
+        xs = [p[0] for p in block_positions]
+        ys = [p[1] for p in block_positions]
+        max_dist = math.sqrt(
+            (max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2
+        )
 
         threshold = (
             _GROUP_SPREAD_SMALL_THRESHOLD
@@ -553,16 +549,19 @@ def _score_voltage_isolation(
     issues: list[str] = []
     domains = list(domain_refs.keys())
 
+    # Pre-build position arrays per domain (avoids repeated dict lookups)
+    domain_positions: dict[VoltageDomain, list[tuple[float, float]]] = {
+        d: [pos[r] for r in refs[:10]]
+        for d, refs in domain_refs.items()
+    }
+
     for i, d1 in enumerate(domains):
         for d2 in domains[i + 1:]:
-            # Sample: check closest pair per domain pair
+            # Sample: check closest pair per domain pair using pre-built arrays
             min_dist = float("inf")
-            for r1 in domain_refs[d1][:10]:  # cap for performance
-                for r2 in domain_refs[d2][:10]:
-                    d = math.sqrt(
-                        (pos[r1][0] - pos[r2][0]) ** 2 +
-                        (pos[r1][1] - pos[r2][1]) ** 2
-                    )
+            for x1, y1 in domain_positions[d1]:
+                for x2, y2 in domain_positions[d2]:
+                    d = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
                     min_dist = min(min_dist, d)
             total_checks += 1
             if min_dist < VOLTAGE_DOMAIN_MIN_GAP_MM:
@@ -814,12 +813,12 @@ def _score_subgroup_cohesion(
         if len(positions) < 2:
             continue
 
-        # Compute spread (max distance between any two members)
-        max_dist = 0.0
-        for i, p1 in enumerate(positions):
-            for p2 in positions[i + 1:]:
-                d = math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
-                max_dist = max(max_dist, d)
+        # Compute spread via bounding box diagonal (O(n) vs O(n^2))
+        xs = [p[0] for p in positions]
+        ys = [p[1] for p in positions]
+        max_dist = math.sqrt(
+            (max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2
+        )
 
         if max_dist <= threshold:
             scores.append(1.0)
@@ -916,11 +915,10 @@ def _score_pad_facing(
     from kicad_pipeline.pcb.pin_map import CardinalSide, compute_pin_map
     from kicad_pipeline.visualization.ratsnest import POWER_NETS
 
-    # Build net -> list of (ref, pad_number) pairs
+    # Build net -> list of (ref, pad_number) pairs and fp lookup in single pass
     net_connections: dict[str, list[tuple[str, str]]] = {}
-    fp_map: dict[str, object] = {}
+    fp_map: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
     for fp in pcb.footprints:
-        fp_map[fp.ref] = fp
         for pad in fp.pads:
             if pad.net_name and pad.net_name.upper() not in POWER_NETS:
                 net_connections.setdefault(pad.net_name, []).append(

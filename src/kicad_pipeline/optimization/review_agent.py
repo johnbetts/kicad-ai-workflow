@@ -153,19 +153,31 @@ def _fp_positions(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
 
 
 def _fp_size_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
-    """Extract footprint ref → (width, height) map from pad extents."""
+    """Extract footprint ref -> (width, height) map from pad extents."""
     result: dict[str, tuple[float, float]] = {}
     for fp in pcb.footprints:
         if not fp.pads:
             result[fp.ref] = (3.0, 3.0)
             continue
-        xs = [p.position.x - p.size_x / 2 for p in fp.pads] + \
-             [p.position.x + p.size_x / 2 for p in fp.pads]
-        ys = [p.position.y - p.size_y / 2 for p in fp.pads] + \
-             [p.position.y + p.size_y / 2 for p in fp.pads]
-        w = max(xs) - min(xs) + 1.0
-        h = max(ys) - min(ys) + 1.0
-        result[fp.ref] = (w, h)
+        # Single pass: track min/max in one loop instead of 4 list comprehensions
+        x_min = float("inf")
+        x_max = float("-inf")
+        y_min = float("inf")
+        y_max = float("-inf")
+        for p in fp.pads:
+            px_lo = p.position.x - p.size_x / 2.0
+            px_hi = p.position.x + p.size_x / 2.0
+            py_lo = p.position.y - p.size_y / 2.0
+            py_hi = p.position.y + p.size_y / 2.0
+            if px_lo < x_min:
+                x_min = px_lo
+            if px_hi > x_max:
+                x_max = px_hi
+            if py_lo < y_min:
+                y_min = py_lo
+            if py_hi > y_max:
+                y_max = py_hi
+        result[fp.ref] = (x_max - x_min + 1.0, y_max - y_min + 1.0)
     return result
 
 
@@ -323,21 +335,19 @@ def _check_voltage_isolation(
             continue
         domain_refs.setdefault(domain, []).append(ref)
 
+    # Pre-filter domain_refs to only include refs with positions
+    domain_refs_positioned: dict[VoltageDomain, list[tuple[str, tuple[float, float]]]] = {}
+    for domain, refs in domain_refs.items():
+        positioned = [(r, positions[r]) for r in refs if r in positions]
+        if positioned:
+            domain_refs_positioned[domain] = positioned
+
     # Check inter-domain distances
-    domains = list(domain_refs.keys())
+    domains = list(domain_refs_positioned.keys())
     for i, d1 in enumerate(domains):
         for d2 in domains[i + 1:]:
-            # Only check domains that should be isolated
-            if d1 == d2:
-                continue
-            for r1 in domain_refs[d1]:
-                p1 = positions.get(r1)
-                if p1 is None:
-                    continue
-                for r2 in domain_refs[d2]:
-                    p2 = positions.get(r2)
-                    if p2 is None:
-                        continue
+            for r1, p1 in domain_refs_positioned[d1]:
+                for r2, p2 in domain_refs_positioned[d2]:
                     # Skip exempt pairs (cross-domain affinities)
                     pair = (min(r1, r2), max(r1, r2))
                     if pair in exempt_pairs:
@@ -493,25 +503,27 @@ def _check_crystal_proximity(
     if not crystals:
         return violations
 
-    # Build crystal→IC map via net connectivity
-    # Each crystal connects to a specific IC via its oscillator pins
+    # Pre-build ref -> set[net_name] and net -> set[ref] indices
+    _ref_nets: dict[str, set[str]] = {}
+    _net_refs: dict[str, set[str]] = {}
+    for net in requirements.nets:
+        refs_in_net = {conn.ref for conn in net.connections}
+        _net_refs[net.name] = refs_in_net
+        for ref in refs_in_net:
+            _ref_nets.setdefault(ref, set()).add(net.name)
+
+    _gnd_set = frozenset({"GND", "AGND", "DGND", "PGND", "VSS", "AVSS"})
+
+    # Build crystal->IC map via pre-built indices
     crystal_to_ic: dict[str, str] = {}
     for crystal in crystals:
-        crystal_nets: set[str] = set()
-        for net in requirements.nets:
-            for conn in net.connections:
-                if conn.ref == crystal.ref:
-                    crystal_nets.add(net.name)
-        # Find connected IC on crystal's non-GND nets
-        for net in requirements.nets:
-            if net.name not in crystal_nets:
+        crystal_nets = _ref_nets.get(crystal.ref, set())
+        for net_name in crystal_nets:
+            if net_name.upper() in _gnd_set:
                 continue
-            _nl = net.name.upper()
-            if _nl in ("GND", "AGND", "DGND", "PGND", "VSS", "AVSS"):
-                continue
-            for conn in net.connections:
-                if conn.ref.startswith("U") and conn.ref in positions:
-                    crystal_to_ic[crystal.ref] = conn.ref
+            for ref in _net_refs.get(net_name, set()):
+                if ref.startswith("U") and ref in positions:
+                    crystal_to_ic[crystal.ref] = ref
                     break
             if crystal.ref in crystal_to_ic:
                 break
@@ -574,14 +586,12 @@ def _check_thermal_adjacency(
             sensitive_refs.append(comp.ref)
 
     threshold = 5.0  # minimum mm between power and sensitive
-    for pr in power_refs:
-        p1 = positions.get(pr)
-        if p1 is None:
-            continue
-        for sr in sensitive_refs:
-            p2 = positions.get(sr)
-            if p2 is None:
-                continue
+    # Pre-filter to only refs with positions
+    power_positioned = [(r, positions[r]) for r in power_refs if r in positions]
+    sensitive_positioned = [(r, positions[r]) for r in sensitive_refs if r in positions]
+
+    for pr, p1 in power_positioned:
+        for sr, p2 in sensitive_positioned:
             d = _dist(p1, p2)
             if d < threshold:
                 violations.append(PlacementViolation(
@@ -816,17 +826,16 @@ def _check_board_edge_clearance(
     warn_margin = 1.0
     crit_margin = 0.3
 
+    # Pre-build ref -> rotation index to avoid O(N^2) inner lookup
+    _fp_rotations: dict[str, float] = {fp.ref: fp.rotation for fp in pcb.footprints}
+
     for fp in pcb.footprints:
         ref = fp.ref
         if ref not in positions:
             continue
         x, y = positions[ref]
         w, h = fp_sizes.get(ref, (2.0, 2.0))
-        rot = 0.0
-        for fpp in pcb.footprints:
-            if fpp.ref == ref:
-                rot = fpp.rotation
-                break
+        rot = _fp_rotations.get(ref, 0.0)
         if rot % 180 in (90.0, 270.0):
             w, h = h, w
 
@@ -1022,16 +1031,7 @@ def _check_zone_overflow(
     """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
-
-    # Compute axis-aligned bbox per FeatureBlock
-    group_bboxes: dict[str, tuple[float, float, float, float]] = {}
-    for fb in requirements.features:
-        member_positions = [positions[r] for r in fb.components if r in positions]
-        if len(member_positions) < 2:
-            continue
-        xs = [p[0] for p in member_positions]
-        ys = [p[1] for p in member_positions]
-        group_bboxes[fb.name] = (min(xs), min(ys), max(xs), max(ys))
+    group_bboxes = _build_feature_bboxes(requirements, positions, shrink=0.0)
 
     # Check all pairs for overlap
     names = list(group_bboxes.keys())
@@ -1069,6 +1069,48 @@ def _check_zone_overflow(
     return violations
 
 
+def _build_feature_bboxes(
+    requirements: ProjectRequirements,
+    positions: dict[str, tuple[float, float]],
+    shrink: float = 0.0,
+) -> dict[str, tuple[float, float, float, float]]:
+    """Compute axis-aligned bbox per FeatureBlock from placed positions.
+
+    Args:
+        requirements: Project requirements with feature blocks.
+        positions: ref -> (x, y) position mapping.
+        shrink: Inset amount in mm from each edge (for contamination tolerance).
+
+    Returns:
+        Mapping from feature name to (x1, y1, x2, y2) bbox.
+    """
+    bboxes: dict[str, tuple[float, float, float, float]] = {}
+    for fb in requirements.features:
+        member_positions = [positions[r] for r in fb.components if r in positions]
+        if len(member_positions) < 2:
+            continue
+        xs = [p[0] for p in member_positions]
+        ys = [p[1] for p in member_positions]
+        x1 = min(xs) + shrink
+        y1 = min(ys) + shrink
+        x2 = max(xs) - shrink
+        y2 = max(ys) - shrink
+        if x1 < x2 and y1 < y2:
+            bboxes[fb.name] = (x1, y1, x2, y2)
+    return bboxes
+
+
+def _build_ref_groups(
+    requirements: ProjectRequirements,
+) -> dict[str, list[str]]:
+    """Build ref -> list[group_name] mapping."""
+    ref_groups: dict[str, list[str]] = {}
+    for fb in requirements.features:
+        for r in fb.components:
+            ref_groups.setdefault(r, []).append(fb.name)
+    return ref_groups
+
+
 def _check_group_contamination(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -1081,28 +1123,8 @@ def _check_group_contamination(
     """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
-
-    # Build ref → group name(s) map
-    ref_groups: dict[str, list[str]] = {}
-    for fb in requirements.features:
-        for r in fb.components:
-            ref_groups.setdefault(r, []).append(fb.name)
-
-    # Compute shrunk bbox per group (2mm inset to tolerate boundary overlap)
-    shrink = 2.0
-    group_bboxes: dict[str, tuple[float, float, float, float]] = {}
-    for fb in requirements.features:
-        member_positions = [positions[r] for r in fb.components if r in positions]
-        if len(member_positions) < 2:
-            continue
-        xs = [p[0] for p in member_positions]
-        ys = [p[1] for p in member_positions]
-        gx1 = min(xs) + shrink
-        gy1 = min(ys) + shrink
-        gx2 = max(xs) - shrink
-        gy2 = max(ys) - shrink
-        if gx1 < gx2 and gy1 < gy2:
-            group_bboxes[fb.name] = (gx1, gy1, gx2, gy2)
+    ref_groups = _build_ref_groups(requirements)
+    group_bboxes = _build_feature_bboxes(requirements, positions, shrink=2.0)
 
     # Check each component against groups it doesn't belong to
     for ref, pos in positions.items():

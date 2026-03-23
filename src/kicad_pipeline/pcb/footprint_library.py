@@ -361,7 +361,6 @@ def sync_pcb_to_schematic(pcb_path: Path, sch_path: Path) -> int:
         # Detect the start of a footprint block at indent level 2
         if re.match(r'^  \(footprint\s', line):
             # Scan the footprint block to find its Reference and where it ends
-            fp_lines = [line]
             depth = line.count("(") - line.count(")")
             j = i + 1
             ref_found: str | None = None
