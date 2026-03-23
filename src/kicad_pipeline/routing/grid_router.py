@@ -1012,6 +1012,52 @@ def _build_stub_track(
     ]
 
 
+def _finalize_bcu_route(
+    path: list[tuple[int, int]],
+    tracks: list[Track],
+    stub_tracks: list[Track],
+    via_start: Via | None,
+    via_goal: Via | None,
+    bcu_grid: _Grid,
+    fcu_grid: _Grid | None,
+    width_mm: float,
+    clearance_mm: float,
+    via_radius: float,
+) -> tuple[tuple[Track, ...], tuple[Via, ...]]:
+    """Mark grids and assemble the final tracks/vias for a B.Cu route."""
+    # Mark F.Cu stub tracks on fcu_grid
+    if fcu_grid is not None:
+        for stub in stub_tracks:
+            if stub.layer == "F.Cu":
+                _mark_line_on_grid(
+                    fcu_grid, stub.start.x, stub.start.y,
+                    stub.end.x, stub.end.y,
+                    clearance_mm + width_mm,
+                )
+
+    # Mark path cells with exclusion on B.Cu grid
+    excl_cells = max(1, math.ceil(
+        (clearance_mm + width_mm) / bcu_grid.grid_step_mm,
+    ) - 1)
+    for cell_col, cell_row in path:
+        bcu_grid.mark_area(cell_col, cell_row, excl_cells)
+
+    # Mark via exclusion on both grids
+    emitted_vias: list[Via] = []
+    via_excl = math.ceil((via_radius + clearance_mm) / bcu_grid.grid_step_mm)
+    for via in (via_start, via_goal):
+        if via is None:
+            continue
+        emitted_vias.append(via)
+        if fcu_grid is not None:
+            _mark_via_on_fcu(fcu_grid, via, clearance_mm)
+        vc, vr = bcu_grid.to_cell(via.position.x, via.position.y)
+        bcu_grid.mark_area(vc, vr, via_excl)
+
+    all_tracks = list(stub_tracks) + list(tracks)
+    return (tuple(all_tracks), tuple(emitted_vias))
+
+
 def _route_on_bcu(
     start_x: float,
     start_y: float,
@@ -1028,22 +1074,10 @@ def _route_on_bcu(
     start_via_in_pad: bool = False,
     goal_via_in_pad: bool = False,
 ) -> tuple[tuple[Track, ...], tuple[Via, ...]] | None:
-    """Attempt to route a segment on B.Cu with vias at each end.
+    """Route a segment on B.Cu with vias at each end.
 
-    When *fcu_grid* is provided, vias are placed at positions that do
-    not overlap existing F.Cu pads (using :func:`_find_free_via_position`).
-    If the via must be offset from the pad, a short F.Cu stub track is
-    added to bridge pad-to-via.  Uses smaller signal vias (0.6 mm pad /
-    0.3 mm drill) to reduce footprint near congested IC pads.
-
-    When *start_is_tht* or *goal_is_tht* is ``True``, that endpoint is
-    a plated through-hole pad.  THT pads already provide layer
-    transition, so the via is placed at the pad position without
-    searching for a free F.Cu location.
-
-    Temporarily unmarks start/goal cells on the B.Cu grid, runs A*,
-    then marks the path with exclusion.  Returns B.Cu tracks and two
-    vias (at start and goal) on success, or ``None`` on failure.
+    Finds free via positions, runs A* on B.Cu, and adds F.Cu stub tracks
+    to bridge offset vias.  Returns ``(tracks, vias)`` or ``None``.
     """
     via_drill = VIA_DRILL_SIGNAL_MM
     via_size = VIA_DIAMETER_SIGNAL_MM
@@ -1103,37 +1137,10 @@ def _route_on_bcu(
         _goal_needs_astar_stub, fcu_grid, net_number, width_mm, clearance_mm,
     ))
 
-    # Mark F.Cu stub tracks on fcu_grid
-    if fcu_grid is not None:
-        for stub in stub_tracks:
-            if stub.layer == "F.Cu":
-                _mark_line_on_grid(
-                    fcu_grid, stub.start.x, stub.start.y,
-                    stub.end.x, stub.end.y,
-                    clearance_mm + width_mm,
-                )
-
-    # Mark path cells with exclusion on B.Cu grid
-    excl_cells = max(1, math.ceil(
-        (clearance_mm + width_mm) / bcu_grid.grid_step_mm,
-    ) - 1)
-    for cell_col, cell_row in path:
-        bcu_grid.mark_area(cell_col, cell_row, excl_cells)
-
-    # Mark via exclusion on both grids (skip for THT — no via emitted)
-    emitted_vias: list[Via] = []
-    via_excl = math.ceil((via_radius + clearance_mm) / bcu_grid.grid_step_mm)
-    for via in (via_start, via_goal):
-        if via is None:
-            continue
-        emitted_vias.append(via)
-        if fcu_grid is not None:
-            _mark_via_on_fcu(fcu_grid, via, clearance_mm)
-        vc, vr = bcu_grid.to_cell(via.position.x, via.position.y)
-        bcu_grid.mark_area(vc, vr, via_excl)
-
-    all_tracks = list(stub_tracks) + list(tracks)
-    return (tuple(all_tracks), tuple(emitted_vias))
+    return _finalize_bcu_route(
+        path, tracks, stub_tracks, via_start, via_goal,
+        bcu_grid, fcu_grid, width_mm, clearance_mm, via_radius,
+    )
 
 
 def _mark_line_on_grid(
@@ -2556,6 +2563,98 @@ def _route_mst_pairs(
     return None
 
 
+def _build_route_context(
+    request: RouteRequest,
+    grid: _Grid,
+    bcu_grid: _Grid | None,
+    fp_by_ref: dict[str, Footprint],
+    pad_infos: list[_PadInfo],
+    net_pad_set: frozenset[tuple[str, str]],
+    pad_cl: float,
+    tht_refs_in_net: frozenset[str],
+    ic_refs_in_net: frozenset[str],
+    ic_pad_infos: list[_PadInfo],
+    ic_pad_refs: list[tuple[str, str]],
+    pad_cache: list[object],
+    net_clearances: dict[str, float] | None,
+    net_widths: dict[str, float] | None,
+    placed_via_positions: list[tuple[float, float]] | None,
+    footprints: list[Footprint],
+) -> _RouteContext:
+    """Build the shared routing context for a single net."""
+    excl_cells = max(1, math.ceil(
+        (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
+    ) - 1)
+    return _RouteContext(
+        request=request, grid=grid, bcu_grid=bcu_grid,
+        fp_by_ref=fp_by_ref, pad_infos=pad_infos,
+        net_pad_set=net_pad_set, original_net_pad_set=net_pad_set,
+        pad_cl=pad_cl, bcu_pad_cl=pad_cl,
+        excl_cells=excl_cells,
+        all_tracks=[], all_vias=[],
+        tht_refs_in_net=tht_refs_in_net,
+        ic_refs_in_net=ic_refs_in_net,
+        ic_pad_infos=ic_pad_infos,
+        ic_pad_refs=ic_pad_refs,
+        pad_cache=pad_cache,
+        net_clearances=net_clearances,
+        net_widths=net_widths,
+        placed_via_positions=placed_via_positions,
+        footprints=footprints,
+    )
+
+
+def _handle_ic_pads(
+    ic_refs_in_net: frozenset[str],
+    pad_infos: list[_PadInfo],
+    request: RouteRequest,
+    fp_by_ref: dict[str, Footprint],
+    net_pad_set: frozenset[tuple[str, str]],
+    grid: _Grid,
+    pad_cl: float,
+    footprints: list[Footprint],
+    net_clearances: dict[str, float] | None,
+    net_widths: dict[str, float] | None,
+    _pad_cache: list[object],
+) -> (
+    tuple[list[_PadInfo], list[_PadInfo], list[tuple[str, str]]]
+    | RouteResult
+):
+    """Partition IC pads from non-IC pads.
+
+    Returns ``(pad_infos, ic_pad_infos, ic_pad_refs)`` on success, or a
+    failed :class:`RouteResult` if all pads belong to dense ICs.
+    """
+    _ic_pad_infos: list[_PadInfo] = []
+    _ic_pad_refs: list[tuple[str, str]] = []
+    if not ic_refs_in_net:
+        return pad_infos, _ic_pad_infos, _ic_pad_refs
+
+    non_ic_infos, _ic_pad_infos, _ic_pad_refs = _partition_ic_pads(
+        pad_infos, request.pad_refs, ic_refs_in_net,
+    )
+    if len(non_ic_infos) >= 2:
+        return non_ic_infos, _ic_pad_infos, _ic_pad_refs
+    if len(non_ic_infos) == 1:
+        for ic_ref in ic_refs_in_net:
+            fp = fp_by_ref[ic_ref]
+            for pad in fp.pads:
+                if (ic_ref, pad.number) not in net_pad_set:
+                    continue
+                px, py = _pad_abs_pos(fp, pad)
+                phw, phh = _pad_rotated_half_size(fp, pad)
+                _unmark_pad_area(grid, px, py, phw, phh, pad_cl)
+        return non_ic_infos, _ic_pad_infos, _ic_pad_refs
+    # All pads on dense ICs
+    _restore_pad_marks(grid, footprints, net_clearances, net_widths,
+                       _pad_cache=_pad_cache)
+    return RouteResult(
+        net_number=request.net_number, net_name=request.net_name,
+        tracks=(), vias=(), routed=False,
+        reason="all pads on dense ICs - needs via routing",
+    )
+
+
 def route_net(
     request: RouteRequest,
     footprints: list[Footprint],
@@ -2571,23 +2670,8 @@ def route_net(
 ) -> RouteResult:
     """Route a single net using A* on a 2-D occupancy grid.
 
-    When *grid* is provided, it is used as a shared occupancy grid (for
-    multi-net routing where each net's tracks become obstacles for
-    subsequent nets).  Same-net pad cells are temporarily unmarked
-    before routing so the router can reach its own target pads.
-
-    Args:
-        request: The routing request describing the net and its pads.
-        footprints: All footprints on the board (used to build occupancy).
-        board_width_mm: Board width in mm (defines grid extent).
-        board_height_mm: Board height in mm (defines grid extent).
-        grid_step_mm: Grid resolution in mm.
-        grid: Optional shared grid.  When ``None``, a fresh grid is created
-            with all pad positions marked as occupied.
-        keepouts: Keepout zones to avoid (only used when creating fresh grid).
-
-    Returns:
-        A RouteResult with all generated tracks (or failure info).
+    Uses a shared *grid* when provided; otherwise creates a fresh one.
+    Returns a :class:`RouteResult` with tracks and vias.
     """
     if grid is None:
         grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
@@ -2621,58 +2705,21 @@ def route_net(
     tht_refs_in_net = _detect_tht_refs(request, fp_by_ref)
     ic_refs_in_net = _detect_dense_ic_refs(request, fp_by_ref)
 
-    _ic_pad_infos: list[_PadInfo] = []
-    _ic_pad_refs: list[tuple[str, str]] = []
-    if ic_refs_in_net:
-        non_ic_infos, _ic_pad_infos, _ic_pad_refs = _partition_ic_pads(
-            pad_infos, request.pad_refs, ic_refs_in_net,
-        )
-        if len(non_ic_infos) >= 2:
-            pad_infos = non_ic_infos
-        elif len(non_ic_infos) == 1:
-            pad_infos = non_ic_infos
-            for ic_ref in ic_refs_in_net:
-                fp = fp_by_ref[ic_ref]
-                for pad in fp.pads:
-                    if (ic_ref, pad.number) not in net_pad_set:
-                        continue
-                    px, py = _pad_abs_pos(fp, pad)
-                    phw, phh = _pad_rotated_half_size(fp, pad)
-                    _unmark_pad_area(grid, px, py, phw, phh, pad_cl)
-        elif len(non_ic_infos) == 0:
-            _restore_pad_marks(grid, footprints, net_clearances, net_widths,
-                               _pad_cache=_pad_cache)
-            return RouteResult(
-                net_number=request.net_number, net_name=request.net_name,
-                tracks=(), vias=(), routed=False,
-                reason="all pads on dense ICs - needs via routing",
-            )
+    ic_result = _handle_ic_pads(
+        ic_refs_in_net, pad_infos, request, fp_by_ref, net_pad_set,
+        grid, pad_cl, footprints, net_clearances, net_widths, _pad_cache,
+    )
+    if isinstance(ic_result, RouteResult):
+        return ic_result
+    pad_infos, _ic_pad_infos, _ic_pad_refs = ic_result
 
     _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
                        _pad_cache=_pad_cache)
 
-    excl_cells = max(1, math.ceil(
-        (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
-    ) - 1)
-
-    # Build routing context
-    ctx = _RouteContext(
-        request=request, grid=grid, bcu_grid=bcu_grid,
-        fp_by_ref=fp_by_ref, pad_infos=pad_infos,
-        net_pad_set=net_pad_set,
-        original_net_pad_set=net_pad_set,
-        pad_cl=pad_cl, bcu_pad_cl=pad_cl,
-        excl_cells=excl_cells,
-        all_tracks=[], all_vias=[],
-        tht_refs_in_net=tht_refs_in_net,
-        ic_refs_in_net=ic_refs_in_net,
-        ic_pad_infos=_ic_pad_infos,
-        ic_pad_refs=_ic_pad_refs,
-        pad_cache=_pad_cache,
-        net_clearances=net_clearances,
-        net_widths=net_widths,
-        placed_via_positions=placed_via_positions,
-        footprints=footprints,
+    ctx = _build_route_context(
+        request, grid, bcu_grid, fp_by_ref, pad_infos, net_pad_set, pad_cl,
+        tht_refs_in_net, ic_refs_in_net, _ic_pad_infos, _ic_pad_refs,
+        _pad_cache, net_clearances, net_widths, placed_via_positions, footprints,
     )
 
     # MST-style routing
@@ -2956,6 +3003,42 @@ def _pad_positions_for_entry(
     return positions
 
 
+def _route_with_retries(
+    routable: list[NetlistEntry],
+    route_fn: object,
+    record_vias_fn: object,
+    results: list[RouteResult],
+    footprints: list[Footprint],
+    board_width_mm: float,
+    board_height_mm: float,
+    grid_step_mm: float,
+    grid: _Grid,
+    bcu_grid: _Grid | None,
+    net_widths: dict[str, float] | None,
+    net_clearances: dict[str, float] | None,
+    all_placed_vias: list[tuple[float, float]],
+) -> None:
+    """Run first-pass routing with standard and relaxed retries."""
+    failed_entries: list[NetlistEntry] = []
+    for entry in routable:
+        result = route_fn(entry)  # type: ignore[operator]
+        if result.routed:
+            results.append(result)
+            record_vias_fn(result)  # type: ignore[operator]
+        else:
+            failed_entries.append(entry)
+
+    still_failed = _retry_failed_nets(
+        failed_entries, route_fn, record_vias_fn, results,
+    )
+
+    _retry_relaxed_clearance(
+        still_failed, footprints, board_width_mm, board_height_mm,
+        grid_step_mm, grid, bcu_grid, net_widths, net_clearances,
+        all_placed_vias, results, record_vias_fn,
+    )
+
+
 def route_all_nets(
     netlist: Netlist,
     footprints: list[Footprint],
@@ -2967,15 +3050,9 @@ def route_all_nets(
     keepouts: tuple[Keepout, ...] = (),
     corner_radius_mm: float = 0.0,
 ) -> tuple[RouteResult, ...]:
-    """Route all nets in the netlist using a shared occupancy grid.
+    """Route all nets using a shared occupancy grid.
 
-    A single grid is created and shared across all nets so that each
-    net's routed tracks become obstacles for subsequent nets, preventing
-    shorts.  Nets are sorted by pad count ascending (simpler nets first)
-    to improve overall routability.
-
-    Returns:
-        Tuple of RouteResult, one per routed net entry.
+    Returns a tuple of :class:`RouteResult`, one per routed net entry.
     """
     routable = [
         e for e in netlist.entries
@@ -3010,29 +3087,12 @@ def route_all_nets(
         for v in result.vias:
             all_placed_vias.append((v.position.x, v.position.y))
 
-    # First pass
-    failed_entries: list[NetlistEntry] = []
-    for entry in routable:
-        result = _route_entry(entry)  # type: ignore[operator]
-        if result.routed:
-            results.append(result)
-            _record_vias(result)
-        else:
-            failed_entries.append(entry)
-
-    # Retry failed nets
-    still_failed = _retry_failed_nets(
-        failed_entries, _route_entry, _record_vias, results,
+    _route_with_retries(
+        routable, _route_entry, _record_vias, results, footprints,
+        board_width_mm, board_height_mm, grid_step_mm,
+        grid, bcu_grid, net_widths, net_clearances, all_placed_vias,
     )
 
-    # Relaxed clearance retry
-    _retry_relaxed_clearance(
-        still_failed, footprints, board_width_mm, board_height_mm,
-        grid_step_mm, grid, bcu_grid, net_widths, net_clearances,
-        all_placed_vias, results, _record_vias,
-    )
-
-    # Rip-up-and-retry
     entry_by_name: dict[str, NetlistEntry] = {e.net.name: e for e in routable}
     _rip_up_and_retry(
         results, entry_by_name, _route_entry,
@@ -3040,13 +3100,11 @@ def route_all_nets(
         grid, bcu_grid, grid_step_mm,
     )
 
-    # Post-routing clearance validation
     results = _validate_track_clearances(
         results, grid, bcu_grid, grid_step_mm, entry_by_name,
         _route_entry, footprints, net_clearances, net_widths,
         lambda e: _pad_positions_for_entry(e, fp_by_ref),
     )
-
     results = _drop_pad_crossing_tracks(results, footprints)
 
     return tuple(results)

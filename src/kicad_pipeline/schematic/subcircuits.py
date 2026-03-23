@@ -30,6 +30,16 @@ from kicad_pipeline.requirements.component_db import ComponentDB, nearest_e_seri
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Unit conversion
+# ---------------------------------------------------------------------------
+
+_MA_TO_A: float = 1000.0
+"""Divisor to convert milliamps to amps."""
+
+_BASE_RESISTOR_OHMS: float = 1000.0
+"""Default base resistor value for transistor driver circuits (ohms)."""
+
+# ---------------------------------------------------------------------------
 # Result container
 # ---------------------------------------------------------------------------
 
@@ -476,13 +486,13 @@ def led_drive(
     Returns:
         :class:`SubcircuitResult` with LED + resistor components and nets.
     """
-    r_exact = (vcc_v - vf_v) / (target_ma / 1000.0)
+    r_exact = (vcc_v - vf_v) / (target_ma / _MA_TO_A)
     r_actual = _nearest_e24(r_exact)
     log.debug(
         "led_drive: R = (%.2f - %.2f) / %.4f A = %.1f Ω → E24 %.1f Ω",
         vcc_v,
         vf_v,
-        target_ma / 1000.0,
+        target_ma / _MA_TO_A,
         r_exact,
         r_actual,
     )
@@ -637,6 +647,37 @@ def _relay_contact_nets_and_terminal(
     return nets, terminal_comp
 
 
+def _relay_component(
+    ref_k: str,
+    relay_type: str,
+    is_spdt: bool,
+    vcc_net: str,
+    coil_net: str,
+    com_net: str,
+    no_net: str,
+    nc_net: str | None,
+) -> Component:
+    """Build the relay Component with coil and contact pins."""
+    relay_pins: list[Pin] = [
+        Pin(number="1", name="COIL+", pin_type=PinType.PASSIVE, net=vcc_net),
+        Pin(number="2", name="COIL-", pin_type=PinType.PASSIVE, net=coil_net),
+        Pin(number="3", name="COM", pin_type=PinType.PASSIVE, net=com_net),
+        Pin(number="4", name="NO", pin_type=PinType.PASSIVE, net=no_net),
+    ]
+    if is_spdt:
+        relay_pins.append(
+            Pin(number="5", name="NC", pin_type=PinType.PASSIVE, net=nc_net),
+        )
+    relay_footprint = "Relay_SPDT_SANYOU_SRD" if is_spdt else "Relay_SPST"
+    return Component(
+        ref=ref_k,
+        value="SRD-05VDC-SL-C" if is_spdt else "SRD-05VDC-SL-A",
+        footprint=relay_footprint,
+        description=f"Relay {relay_type}",
+        pins=tuple(relay_pins),
+    )
+
+
 def relay_driver(
     ref_q: str,
     ref_r_base: str,
@@ -649,16 +690,7 @@ def relay_driver(
     relay_type: str = "SPDT",
     db: ComponentDB | None = None,
 ) -> SubcircuitResult:
-    """Generate an NPN relay driver circuit with flyback protection.
-
-    Topology::
-
-        GPIO --- R_base(1k) --- Q_base
-        Q_collector --- K_COIL- ; K_COIL+ --- VCC
-        Q_emitter --- GND
-        Flyback diode: anode -> Q_collector, cathode -> VCC
-        K_COM/NO/NC --- J screw terminal (optional)
-    """
+    """Generate an NPN relay driver circuit with flyback protection."""
     base_net = f"{ref_q}_BASE"
     coil_net = f"{ref_k}_COIL"
     is_spdt = relay_type.upper() == "SPDT"
@@ -668,7 +700,7 @@ def relay_driver(
 
     # Driver components
     r_base_comp = _resistor_component(
-        ref_r_base, 1000.0, "0402", gpio_net, base_net, db,
+        ref_r_base, _BASE_RESISTOR_OHMS, "0402", gpio_net, base_net, db,
     )
     q_comp = Component(
         ref=ref_q, value="BC817", footprint="SOT-23",
@@ -688,24 +720,8 @@ def relay_driver(
         ),
     )
 
-    # Relay component
-    relay_pins: list[Pin] = [
-        Pin(number="1", name="COIL+", pin_type=PinType.PASSIVE, net=vcc_net),
-        Pin(number="2", name="COIL-", pin_type=PinType.PASSIVE, net=coil_net),
-        Pin(number="3", name="COM", pin_type=PinType.PASSIVE, net=com_net),
-        Pin(number="4", name="NO", pin_type=PinType.PASSIVE, net=no_net),
-    ]
-    if is_spdt:
-        relay_pins.append(
-            Pin(number="5", name="NC", pin_type=PinType.PASSIVE, net=nc_net),
-        )
-    relay_footprint = "Relay_SPDT_SANYOU_SRD" if is_spdt else "Relay_SPST"
-    relay_comp = Component(
-        ref=ref_k,
-        value="SRD-05VDC-SL-C" if is_spdt else "SRD-05VDC-SL-A",
-        footprint=relay_footprint,
-        description=f"Relay {relay_type}",
-        pins=tuple(relay_pins),
+    relay_comp = _relay_component(
+        ref_k, relay_type, is_spdt, vcc_net, coil_net, com_net, no_net, nc_net,
     )
 
     components: list[Component] = [r_base_comp, q_comp, diode_comp, relay_comp]
@@ -785,7 +801,7 @@ def npn_buzzer_drive(
         ),
     )
     r_base_comp = _resistor_component(
-        ref_r_base, 1000.0, "0805", gpio_net, base_net, None
+        ref_r_base, _BASE_RESISTOR_OHMS, "0805", gpio_net, base_net, None
     )
     diode_comp = Component(
         ref=ref_d,
@@ -1187,4 +1203,4 @@ def led_limit_resistor(vcc_v: float, vf_v: float, target_ma: float) -> float:
     """
     if target_ma <= 0:
         raise ValueError(f"target_ma must be positive, got {target_ma}")
-    return (vcc_v - vf_v) / (target_ma / 1000.0)
+    return (vcc_v - vf_v) / (target_ma / _MA_TO_A)

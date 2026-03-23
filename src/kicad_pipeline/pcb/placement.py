@@ -49,6 +49,23 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Grid placement tuning
+# ---------------------------------------------------------------------------
+
+_SPACING_MARGIN_MM: float = 4.0
+"""Extra margin added to the largest footprint dimension when calculating
+component spacing within a zone."""
+
+_MIN_SPACING_MM: float = 2.0
+"""Minimum component spacing (mm) when auto-reducing for small zones."""
+
+_SPACING_REDUCTION_STEP_MM: float = 0.5
+"""Step size (mm) for iteratively reducing component spacing."""
+
+_HEIGHT_EPSILON_MM: float = 1e-9
+"""Floating-point epsilon for zone height comparisons."""
+
+# ---------------------------------------------------------------------------
 # PCB placement zone descriptor
 # ---------------------------------------------------------------------------
 
@@ -215,8 +232,8 @@ def place_pcb_components(
             max_w = max(s[0] for s in zone_sizes)
             max_h = max(s[1] for s in zone_sizes)
             max_dim = max(max_w, max_h)
-            if max_dim + 4.0 > component_spacing_mm:
-                component_spacing_mm = max_dim + 4.0
+            if max_dim + _SPACING_MARGIN_MM > component_spacing_mm:
+                component_spacing_mm = max_dim + _SPACING_MARGIN_MM
                 log.info(
                     "place_pcb_components: increased spacing to %.1f mm "
                     "for zone '%s' (largest footprint %.1f mm)",
@@ -229,15 +246,15 @@ def place_pcb_components(
     rows_needed = math.ceil(len(refs) / cols)
     required_height = rows_needed * component_spacing_mm
 
-    # Auto-reduce spacing if zone is too small, down to a minimum of 2.0 mm
-    if required_height > zone.height + 1e-9:
+    # Auto-reduce spacing if zone is too small, down to a minimum
+    if required_height > zone.height + _HEIGHT_EPSILON_MM:
         reduced = component_spacing_mm
-        while reduced > 2.0:
-            reduced -= 0.5
+        while reduced > _MIN_SPACING_MM:
+            reduced -= _SPACING_REDUCTION_STEP_MM
             cols = max(1, math.floor(zone.width / reduced))
             rows_needed = math.ceil(len(refs) / cols)
             required_height = rows_needed * reduced
-            if required_height <= zone.height + 1e-9:
+            if required_height <= zone.height + _HEIGHT_EPSILON_MM:
                 log.info(
                     "place_pcb_components: auto-reduced spacing from %.1f to %.1f mm "
                     "for zone '%s' (%d components)",

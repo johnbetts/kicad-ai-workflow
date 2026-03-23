@@ -1289,6 +1289,111 @@ def _assemble_pcb_design(
     )
 
 
+def _setup_board(
+    requirements: ProjectRequirements,
+    board_template: str | None,
+    board_width_mm: float | None,
+    board_height_mm: float | None,
+    origin_x: float,
+    origin_y: float,
+    layer_count: int,
+    project_name: str | None,
+    preserve_from: str | Path | object | None,
+    preserve_ref_text: bool,
+) -> tuple[_BuildContext, tuple[NetEntry, ...], list[Footprint]]:
+    """Resolve template, dimensions, nets, and footprints; build context."""
+    (
+        board_template, board_width_mm, board_height_mm, corner_radius_mm,
+        fixed_positions, layer_overrides, template_mounting_positions,
+        template_mounting_diameter, tmpl_obj,
+    ) = _resolve_board_template(
+        requirements, board_template, board_width_mm, board_height_mm,
+    )
+
+    fixed_positions, preserved_ref_text_positions = _resolve_preserved_positions(
+        preserve_from, preserve_ref_text, requirements, fixed_positions,
+    )
+
+    board_width_mm, board_height_mm, _explicit_dimensions = _resolve_board_dimensions(
+        board_width_mm, board_height_mm, requirements,
+    )
+
+    outline = _make_board_outline(
+        board_width_mm, board_height_mm, origin_x, origin_y,
+        corner_radius_mm=corner_radius_mm,
+    )
+
+    nets = _build_nets(requirements)
+    net_lookup: dict[str, int] = {n.name: n.number for n in nets}
+
+    pre_footprints = _build_pre_footprints(
+        requirements, net_lookup, layer_overrides, project_name,
+    )
+
+    fp_sizes, total_area = _compute_footprint_sizes(requirements)
+
+    if tmpl_obj is None and not _explicit_dimensions:
+        board_width_mm, board_height_mm, outline = _auto_size_board(
+            board_width_mm, board_height_mm, origin_x, origin_y,
+            corner_radius_mm, fp_sizes, total_area,
+        )
+
+    _warn_board_size(board_width_mm, board_height_mm, total_area)
+
+    fp_bboxes = _compute_footprint_bboxes(pre_footprints)
+
+    ctx = _build_context(
+        board_width_mm, board_height_mm, origin_x, origin_y,
+        corner_radius_mm, layer_count, project_name, outline,
+        nets, net_lookup, fixed_positions, layer_overrides,
+        template_mounting_positions, template_mounting_diameter,
+        tmpl_obj, preserved_ref_text_positions,
+        requirements, fp_sizes, fp_bboxes,
+    )
+
+    return ctx, nets, pre_footprints
+
+
+def _post_placement_assembly(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    footprints_with_pos: list[Footprint],
+    nets: tuple[NetEntry, ...],
+    corner_keepouts: list[object],
+    auto_route: bool,
+    preserve_from: str | Path | object | None,
+    preserve_routing: bool,
+    pcb_file_path: str | Path | None,
+    skip_inner_zones: bool,
+) -> PCBDesign:
+    """Run post-placement steps: keepouts, zones, silkscreen, routing, assembly."""
+    _create_post_placement_keepouts(ctx, footprints_with_pos)
+
+    netclasses = classify_nets(nets)
+    _build_gnd_zones(ctx, skip_inner_zones)
+
+    final_footprints = _apply_silkscreen_pass(ctx, footprints_with_pos)
+    _add_mounting_hole_footprints(ctx, final_footprints, corner_keepouts, requirements)
+
+    all_tracks, all_vias, freerouting_used = _run_autoroute_step(
+        ctx, requirements, final_footprints, auto_route, netclasses,
+    )
+
+    all_vias = _add_rf_via_fence(ctx, requirements, final_footprints, all_vias)
+    all_vias = _add_gnd_stitching_vias(
+        ctx, final_footprints, all_vias, all_tracks, auto_route, freerouting_used,
+    )
+    all_tracks, all_vias = _preserve_user_routing(
+        ctx, preserve_from, preserve_routing, pcb_file_path,
+        all_tracks, all_vias,
+    )
+
+    return _assemble_pcb_design(
+        ctx, requirements, final_footprints, nets, netclasses,
+        all_tracks, all_vias,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1313,43 +1418,12 @@ def build_pcb(
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
-    Steps:
-
-    1. Determine board dimensions from *board_template*, mechanical
-       constraints, or the supplied overrides (default 80 x 40 mm).
-    2. Create the rectangular :class:`BoardOutline`.
-    3. Build the :class:`NetEntry` list from requirements (GND always = net 1).
-    4. Generate :class:`Footprint` objects for all components with net
-       assignments applied to pads.
-    5. Run zone-based PCB placement (:func:`~.placement.layout_pcb`) to assign
-       board coordinates to each footprint.
-    6. Add GND copper pours on ``F.Cu`` and ``B.Cu``.
-    7. Add an antenna keepout in the top-right corner if an ESP32 / RF module
-       is detected in the component list.
-    8. Add mounting-hole keepout zones at the four board corners.
-    9. Apply silkscreen labels to every footprint.
-    10. Return the complete :class:`PCBDesign` (no tracks — added by autorouter).
-
-    Args:
-        requirements: Fully-populated project requirements document.
-        board_width_mm: Override board width in mm.  If ``None``, the value
-            from :attr:`~ProjectRequirements.mechanical` is used, or
-            80 mm as the default.
-        board_height_mm: Override board height in mm.  If ``None``, the value
-            from :attr:`~ProjectRequirements.mechanical` is used, or
-            40 mm as the default.
-        origin_x: X coordinate of the board origin in mm (default 0.0).
-        origin_y: Y coordinate of the board origin in mm (default 0.0).
-        board_template: Optional board template name (e.g. ``"RPI_HAT"``).
-            When provided, uses template dimensions and fixed component
-            positions.
-
-    Returns:
-        A complete :class:`PCBDesign` ready for serialisation.
+    Resolves board dimensions, generates footprints, runs placement,
+    adds zones/keepouts/silkscreen, routes traces, and returns the
+    assembled design.
 
     Raises:
-        PCBError: If the requirements contain no components, or if placement
-            fails for any other reason.
+        PCBError: If the requirements contain no components.
     """
     if not requirements.components:
         raise PCBError("Cannot build PCB: requirements has no components")
@@ -1362,112 +1436,23 @@ def build_pcb(
         len(requirements.nets),
     )
 
-    # Step 0: Board template
-    (
-        board_template, board_width_mm, board_height_mm, corner_radius_mm,
-        fixed_positions, layer_overrides, template_mounting_positions,
-        template_mounting_diameter, tmpl_obj,
-    ) = _resolve_board_template(
+    ctx, nets, pre_footprints = _setup_board(
         requirements, board_template, board_width_mm, board_height_mm,
+        origin_x, origin_y, layer_count, project_name,
+        preserve_from, preserve_ref_text,
     )
 
-    # Step 0b: Preserve positions from existing PCB
-    fixed_positions, preserved_ref_text_positions = _resolve_preserved_positions(
-        preserve_from, preserve_ref_text, requirements, fixed_positions,
-    )
-
-    # Step 1: Board dimensions
-    board_width_mm, board_height_mm, _explicit_dimensions = _resolve_board_dimensions(
-        board_width_mm, board_height_mm, requirements,
-    )
-
-    # Step 2: Board outline
-    outline = _make_board_outline(
-        board_width_mm, board_height_mm, origin_x, origin_y,
-        corner_radius_mm=corner_radius_mm,
-    )
-
-    # Step 3: Nets
-    nets = _build_nets(requirements)
-    net_lookup: dict[str, int] = {n.name: n.number for n in nets}
-
-    # Step 4: Footprints
-    pre_footprints = _build_pre_footprints(
-        requirements, net_lookup, layer_overrides, project_name,
-    )
-
-    # Step 4b: Compute sizes and auto-size board
-    fp_sizes, total_area = _compute_footprint_sizes(requirements)
-
-    if tmpl_obj is None and not _explicit_dimensions:
-        board_width_mm, board_height_mm, outline = _auto_size_board(
-            board_width_mm, board_height_mm, origin_x, origin_y,
-            corner_radius_mm, fp_sizes, total_area,
-        )
-
-    _warn_board_size(board_width_mm, board_height_mm, total_area)
-
-    # Step 4c: Compute bounding boxes
-    fp_bboxes = _compute_footprint_bboxes(pre_footprints)
-
-    # Build shared context for remaining steps
-    ctx = _build_context(
-        board_width_mm, board_height_mm, origin_x, origin_y,
-        corner_radius_mm, layer_count, project_name, outline,
-        nets, net_lookup, fixed_positions, layer_overrides,
-        template_mounting_positions, template_mounting_diameter,
-        tmpl_obj, preserved_ref_text_positions,
-        requirements, fp_sizes, fp_bboxes,
-    )
-
-    # Step 4c: Create keepouts BEFORE placement
     _build_pre_placement_keepouts(ctx, requirements)
-    # Snapshot corner keepouts for mounting hole fallback
     corner_keepouts = list(ctx.keepouts)
 
-    # Step 5: Placement
     footprints_with_pos = _run_placement(
         ctx, requirements, pre_footprints, placement_mode,
     )
 
-    # Step 5a-post: Antenna keepout from actual placement
-    _create_post_placement_keepouts(ctx, footprints_with_pos)
-
-    # Step 5b: Net classification
-    netclasses = classify_nets(nets)
-
-    # Step 6: GND pours and inner-layer zones
-    _build_gnd_zones(ctx, skip_inner_zones)
-
-    # Step 9: Silkscreen
-    final_footprints = _apply_silkscreen_pass(ctx, footprints_with_pos)
-
-    # Step 9b: Mounting holes
-    _add_mounting_hole_footprints(ctx, final_footprints, corner_keepouts, requirements)
-
-    # Step 10: Autoroute
-    all_tracks, all_vias, freerouting_used = _run_autoroute_step(
-        ctx, requirements, final_footprints, auto_route, netclasses,
-    )
-
-    # Step 10b: RF via fence
-    all_vias = _add_rf_via_fence(ctx, requirements, final_footprints, all_vias)
-
-    # Step 10c: GND stitching vias
-    all_vias = _add_gnd_stitching_vias(
-        ctx, final_footprints, all_vias, all_tracks, auto_route, freerouting_used,
-    )
-
-    # Step 10d: Preserve user routing
-    all_tracks, all_vias = _preserve_user_routing(
-        ctx, preserve_from, preserve_routing, pcb_file_path,
-        all_tracks, all_vias,
-    )
-
-    # Step 11-12: Final assembly
-    return _assemble_pcb_design(
-        ctx, requirements, final_footprints, nets, netclasses,
-        all_tracks, all_vias,
+    return _post_placement_assembly(
+        ctx, requirements, footprints_with_pos, nets,
+        corner_keepouts, auto_route, preserve_from, preserve_routing,
+        pcb_file_path, skip_inner_zones,
     )
 
 

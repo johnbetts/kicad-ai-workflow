@@ -12,6 +12,7 @@ import math
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
+    CONNECTOR_EDGE_MARGIN_MM,
     DECOUPLING_CAP_MAX_DISTANCE_MM,
     DECOUPLING_CAP_MIN_DISTANCE_MM,
     PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
@@ -45,6 +46,9 @@ _THT_GAP_MM: float = 1.0
 
 _THT_SIZE_THRESHOLD_MM: float = 5.0
 """Footprint dimension above which the THT gap is used."""
+
+_DEFAULT_FP_SIZE: tuple[float, float] = (3.0, 3.0)
+"""Default footprint size (mm) when actual size is unknown."""
 
 
 def _placement_gap(w: float, h: float) -> float:
@@ -153,7 +157,7 @@ def _edge_position(
     comp_w: float,
     comp_h: float,
     offset: float,
-    margin: float = 3.0,
+    margin: float = CONNECTOR_EDGE_MARGIN_MM,
 ) -> tuple[float, float, float]:
     """Calculate ``(x, y, rotation)`` for placing a component along a board edge.
 
@@ -816,7 +820,7 @@ def _grid_rect_for_ref(
             bbox.width + 2 * gap,
             bbox.height + 2 * gap,
         )
-    w, h = footprint_sizes.get(ref, (3.0, 3.0))
+    w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
     if gap is None:
         gap = _placement_gap(w, h)
     return (
@@ -857,12 +861,12 @@ def _solve_edge_placement(
         edge_len = board_w if is_horizontal else board_h
         refs_sorted = sorted(
             refs,
-            key=lambda r: footprint_sizes.get(r, (3.0, 3.0))[0 if is_horizontal else 1],
+            key=lambda r: footprint_sizes.get(r, _DEFAULT_FP_SIZE)[0 if is_horizontal else 1],
             reverse=True,
         )
         spacing = edge_len / (len(refs_sorted) + 1)
         for i, ref in enumerate(refs_sorted):
-            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
             base = origin_x if is_horizontal else origin_y
             half_extent = w / 2.0 if is_horizontal else h / 2.0
             offset = spacing * (i + 1) + base
@@ -931,8 +935,8 @@ def _solve_group_placement(
 
     for gname, refs in group_members.items():
         refs.sort(key=lambda r: conn_degree_index.get(r, 0), reverse=True)
-        item_w = max(footprint_sizes.get(r, (3.0, 3.0))[0] + 2.0 for r in refs)
-        max_h = max(footprint_sizes.get(r, (3.0, 3.0))[1] for r in refs) + 2.0
+        item_w = max(footprint_sizes.get(r, _DEFAULT_FP_SIZE)[0] + 2.0 for r in refs)
+        max_h = max(footprint_sizes.get(r, _DEFAULT_FP_SIZE)[1] for r in refs) + 2.0
 
         max_row_w = board_w - 10.0
         cols_per_row = max(1, int(max_row_w / item_w))
@@ -952,7 +956,7 @@ def _solve_group_placement(
         for idx, ref in enumerate(refs):
             col = idx % cols_per_row
             row = idx // cols_per_row
-            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
             x_pos = base_x + col * item_w + w / 2
             y_pos = base_y + row * max_h + max_h / 2
             positions[ref] = Point(x=x_pos, y=y_pos)
@@ -988,7 +992,7 @@ def _solve_remaining_placement(
         key=lambda r: conn_degree_index.get(r, 0), reverse=True,
     )
     for ref in unplaced:
-        w, h = footprint_sizes.get(ref, (3.0, 3.0))
+        w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
         free = grid.find_nearest_free(board_w / 2.0, board_h / 2.0, w, h)
         if free is not None:
             positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
@@ -1021,7 +1025,7 @@ def _build_pin_offsets(
     for comp in (requirements.components if requirements is not None else []):
         if not (comp.ref.startswith("U") or comp.ref in near_targets):
             continue
-        w, h = footprint_sizes.get(comp.ref, (3.0, 3.0))
+        w, h = footprint_sizes.get(comp.ref, _DEFAULT_FP_SIZE)
         comp_pins: dict[str, tuple[float, float]] = {}
         pin_list = [c.pin for net in (requirements.nets if requirements is not None else [])
                     for c in net.connections if c.ref == comp.ref]
@@ -1231,7 +1235,7 @@ def _solve_near_placement(
 
             max_dist = c.max_distance_mm or 5.0
             enforce_min = c.min_distance_mm or 0.0
-            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
 
             placed = _try_near_grid_search(
                 ref, pin_pos, preferred_angle, max_dist, enforce_min,
@@ -1354,7 +1358,7 @@ def solve_placement(
         if c.x is not None and c.y is not None:
             x_rel = c.x - origin_x
             y_rel = c.y - origin_y
-            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
             positions[ref] = Point(x=c.x, y=c.y)
             rot = c.rotation if c.rotation is not None else 0.0
             rotations[ref] = rot
@@ -2100,7 +2104,7 @@ def check_courtyard_collisions(
                 pos.x + bbox.max_x,
                 pos.y + bbox.max_y,
             )
-        w, h = footprint_sizes.get(ref, (3.0, 3.0))
+        w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
         # Swap width/height for ±90° rotations (axis-aligned approximation)
         rot = rots.get(ref, 0.0) % 360.0
         if 45.0 < rot < 135.0 or 225.0 < rot < 315.0:

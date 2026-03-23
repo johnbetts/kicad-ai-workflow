@@ -35,6 +35,22 @@ _POWER_NET_PREFIXES = (
 
 _SMALL_PREFIXES = ("R", "C", "D", "L", "LED", "SW")
 
+# Default fallback footprint sizes (w, h) in mm for named components
+_DEFAULT_CRYSTAL_SIZE_MM: tuple[float, float] = (3.2, 1.5)
+"""Default crystal oscillator footprint size (SMD 3215 package)."""
+
+_DEFAULT_J2_SIZE_MM: tuple[float, float] = (9.6, 7.6)
+"""Default USB-C connector (J2) footprint size."""
+
+_DEFAULT_J14_SIZE_MM: tuple[float, float] = (2.7, 35.7)
+"""Default pin-header connector (J14) footprint size."""
+
+_BOARD_EDGE_MARGIN_MM: float = 2.0
+"""Margin from board edge for component placement within groups."""
+
+_ZONE_CLAMP_MARGIN_MM: float = 2.0
+"""Margin used when clamping positions inside zone rectangles."""
+
 
 def _clamp(val: float, lo: float, hi: float) -> float:
     """Clamp *val* to [lo, hi]."""
@@ -43,7 +59,7 @@ def _clamp(val: float, lo: float, hi: float) -> float:
 
 def _clamp_to_bounds(
     x: float, y: float, bounds: tuple[float, float, float, float],
-    margin: float = 2.0,
+    margin: float = _BOARD_EDGE_MARGIN_MM,
 ) -> tuple[float, float]:
     """Clamp (x, y) inside *bounds* with *margin*."""
     return (
@@ -364,7 +380,7 @@ def _mcu_place_u3(
         if mcu_zone_rect is not None:
             _zx1, _zy1, _zx2, _zy2 = mcu_zone_rect
             mcu_group_refs = _collect_feature_refs(ctx, "mcu", "controller", "processor")
-            _j14_w = (ctx.fp_sizes.get("J14", (2.7, 35.7))[0]
+            _j14_w = (ctx.fp_sizes.get("J14", _DEFAULT_J14_SIZE_MM)[0]
                       if "J14" in mcu_group_refs else 0.0)
             mcu_origin_x = (_zx1 + _zx2 - _j14_w) / 2.0
         else:
@@ -465,7 +481,7 @@ def _mcu_place_connectors(
     right_edge_x = bounds[2] - 2.0
 
     if "J14" in connector_refs and "J14" in ctx.positions and "J14" not in ctx.fixed_refs:
-        w14, h14 = ctx.fp_sizes.get("J14", (2.7, 35.7))
+        w14, h14 = ctx.fp_sizes.get("J14", _DEFAULT_J14_SIZE_MM)
         _mcu_place_named_connector(
             "J14", bounds[2] - w14 / 2.0 - 1.0, mcu_y, ctx, grid,
         )
@@ -474,7 +490,7 @@ def _mcu_place_connectors(
         w15, h15 = ctx.fp_sizes.get("J15", (5.2, 12.9))
         j14_pos = ctx.positions.get("J14")
         if j14_pos:
-            j14_bottom = j14_pos[1] + ctx.fp_sizes.get("J14", (2.7, 35.7))[1] / 2.0
+            j14_bottom = j14_pos[1] + ctx.fp_sizes.get("J14", _DEFAULT_J14_SIZE_MM)[1] / 2.0
             tx = right_edge_x - w15 / 2.0
             ty = j14_bottom + h15 / 2.0 + 2.0
         else:
@@ -501,7 +517,7 @@ def _mcu_place_connectors(
         _log.info("    J16 -> right edge, above U3 (%.1f, %.1f)", px, py)
 
     if "J2" in connector_refs and "J2" in ctx.positions and "J2" not in ctx.fixed_refs:
-        w2, h2 = ctx.fp_sizes.get("J2", (9.6, 7.6))
+        w2, h2 = ctx.fp_sizes.get("J2", _DEFAULT_J2_SIZE_MM)
         tx = mcu_left - w2 / 2.0 - 8.0
         ty = bounds[3] - h2 / 2.0 - 1.0
         tx = _clamp(tx, bounds[0] + w2 / 2.0 + 1.0, bounds[2] - w2 / 2.0 - 1.0)
@@ -541,7 +557,7 @@ def _mcu_place_usb_subcircuit(
     bounds = ctx.bounds
     if "U9" in other_passive_refs and "U9" in ctx.positions and j2_pos:
         j2x, j2y, _j2r = j2_pos
-        j2w, j2h = ctx.fp_sizes.get("J2", (9.6, 7.6))
+        j2w, j2h = ctx.fp_sizes.get("J2", _DEFAULT_J2_SIZE_MM)
         u9w, u9h = ctx.fp_sizes.get("U9", (3.0, 3.0))
         u9_tx = j2x - j2w / 4.0
         u9_ty = j2y - j2h / 2.0 - u9h / 2.0 - 6.0
@@ -558,8 +574,8 @@ def _mcu_place_usb_subcircuit(
                   and r in ctx.positions]
     if usb_r_refs and j2_pos:
         j2x_r, j2y_r, _ = j2_pos
-        j2w_r = ctx.fp_sizes.get("J2", (9.6, 7.6))[0]
-        j2h_r = ctx.fp_sizes.get("J2", (9.6, 7.6))[1]
+        j2w_r = ctx.fp_sizes.get("J2", _DEFAULT_J2_SIZE_MM)[0]
+        j2h_r = ctx.fp_sizes.get("J2", _DEFAULT_J2_SIZE_MM)[1]
         for i, ref in enumerate(usb_r_refs):
             w, h = ctx.fp_sizes.get(ref, (1.0, 0.5))
             px = j2x_r - j2w_r / 4.0 + i * (w + 2.0)
@@ -812,7 +828,7 @@ def _eth_place_crystal_and_caps(
     bounds = ctx.bounds
     ezx1, ezy1, ezx2, ezy2 = zone_rect
     y_crystal_h = ctx.fp_sizes.get(
-        crystal_refs[0], (3.2, 1.5))[1] if crystal_refs else 1.5
+        crystal_refs[0], _DEFAULT_CRYSTAL_SIZE_MM)[1] if crystal_refs else 1.5
     crystal_y = ic_cy - ic_h / 2.0 - y_crystal_h / 2.0 - 0.5
     crystal_x = ic_cx
 
@@ -820,7 +836,7 @@ def _eth_place_crystal_and_caps(
         if (ref not in ctx.positions or ref in ctx.fixed_refs
                 or ref in placed_eth or ref == ""):
             continue
-        w, h = ctx.fp_sizes.get(ref, (3.2, 1.5))
+        w, h = ctx.fp_sizes.get(ref, _DEFAULT_CRYSTAL_SIZE_MM)
         tx, ty = _clamp_to_bounds(crystal_x, crystal_y, bounds)
         ctx.positions[ref] = (tx, ty, 0.0)
         eth_grid.place(tx, ty, w, h)
@@ -837,7 +853,7 @@ def _eth_place_crystal_and_caps(
             continue
         w, h = ctx.fp_sizes.get(ref, (1.0, 0.5))
         y_w = ctx.fp_sizes.get(
-            crystal_refs[0], (3.2, 1.5))[0] if crystal_refs else 3.2
+            crystal_refs[0], _DEFAULT_CRYSTAL_SIZE_MM)[0] if crystal_refs else _DEFAULT_CRYSTAL_SIZE_MM[0]
         if cap_idx % 2 == 0:
             tx = crystal_x - y_w / 2.0 - w / 2.0 - 0.5
         else:
@@ -951,7 +967,7 @@ def _eth_fix_crystal_cap_overlaps(
     crystal_placed = [r for r in placed_eth if r.startswith("Y")]
     for yref in crystal_placed:
         yx, yy, _yrot = ctx.positions[yref]
-        yw, yh = ctx.fp_sizes.get(yref, (3.2, 1.5))
+        yw, yh = ctx.fp_sizes.get(yref, _DEFAULT_CRYSTAL_SIZE_MM)
         for cref in list(placed_eth):
             if cref == yref or not cref.startswith("C"):
                 continue

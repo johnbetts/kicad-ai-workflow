@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
     JLCPCB_MIN_TRACE_MM,
+    MM_PER_MIL,
     VOLTAGE_CLEARANCE_THRESHOLDS,
 )
 from kicad_pipeline.models.pcb import NetClass
@@ -31,39 +32,75 @@ _POWER_PATTERN: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Default via dimensions (mm)
+# ---------------------------------------------------------------------------
+_DEFAULT_VIA_DIAMETER_MM: float = 0.8
+"""Standard via pad diameter for signal/power netclasses (mm)."""
+
+_DEFAULT_VIA_DRILL_MM: float = 0.508
+"""Standard via drill diameter for signal/power netclasses (mm)."""
+
+# ---------------------------------------------------------------------------
+# Default clearance / trace widths (mm)
+# ---------------------------------------------------------------------------
+_DEFAULT_CLEARANCE_MM: float = 0.2
+"""Default clearance for signal netclasses (mm)."""
+
+_DEFAULT_POWER_TRACE_WIDTH_MM: float = 0.3
+"""Default trace width for power-rail netclasses (mm)."""
+
+_DEFAULT_SIGNAL_TRACE_WIDTH_MM: float = 0.25
+"""Default trace width for unmatched signal nets (mm)."""
+
+# ---------------------------------------------------------------------------
+# IPC-2221 outer-layer formula coefficients (1 oz copper)
+# ---------------------------------------------------------------------------
+_IPC2221_K: float = 0.048
+"""Coefficient *k* in the IPC-2221 current-capacity formula."""
+
+_IPC2221_B: float = 0.44
+"""Exponent *b* (temperature-rise) in the IPC-2221 formula."""
+
+_IPC2221_C: float = 0.725
+"""Exponent *c* (area-to-current) in the IPC-2221 formula."""
+
+_COPPER_1OZ_THICKNESS_MILS: float = 1.378
+"""Thickness of 1 oz/ft² copper foil in mils (thousandths of an inch)."""
+
 _NETCLASS_PATTERNS: tuple[tuple[re.Pattern[str], str, float, float, float, float], ...] = (
     # pattern, class_name, trace_width, clearance, via_diameter, via_drill
     (
         re.compile(r"^(SENS|AIN|ADC|VREF)", re.IGNORECASE),
         "HighVoltageAnalog",
         0.4,
-        0.2,
-        0.8,
-        0.508,
+        _DEFAULT_CLEARANCE_MM,
+        _DEFAULT_VIA_DIAMETER_MM,
+        _DEFAULT_VIA_DRILL_MM,
     ),
     (
         re.compile(r"^(SPI[_\d]|MOSI|MISO|SCLK|SCK|CS)", re.IGNORECASE),
         "SPI",
-        0.2,
-        0.2,
-        0.8,
-        0.508,
+        _DEFAULT_CLEARANCE_MM,
+        _DEFAULT_CLEARANCE_MM,
+        _DEFAULT_VIA_DIAMETER_MM,
+        _DEFAULT_VIA_DRILL_MM,
     ),
     (
         re.compile(r"^(I2C[_\d]|SDA|SCL$|SCL[_\d])", re.IGNORECASE),
         "I2C",
-        0.25,
-        0.2,
-        0.8,
-        0.508,
+        _DEFAULT_SIGNAL_TRACE_WIDTH_MM,
+        _DEFAULT_CLEARANCE_MM,
+        _DEFAULT_VIA_DIAMETER_MM,
+        _DEFAULT_VIA_DRILL_MM,
     ),
     (
         re.compile(r"^(ANT|RF|WIFI|BLE|2G4)", re.IGNORECASE),
         "RF",
-        0.3,
-        0.3,
-        0.8,
-        0.508,
+        _DEFAULT_POWER_TRACE_WIDTH_MM,
+        _DEFAULT_POWER_TRACE_WIDTH_MM,
+        _DEFAULT_VIA_DIAMETER_MM,
+        _DEFAULT_VIA_DRILL_MM,
     ),
 )
 
@@ -138,13 +175,11 @@ def _current_trace_width(current_a: float, temp_rise_c: float = 10.0) -> float:
     """
     if current_a <= 0:
         return JLCPCB_MIN_TRACE_MM
-    k = 0.048
-    b = 0.44
-    c = 0.725
-    area_mils2 = (current_a / (k * temp_rise_c**b)) ** (1.0 / c)
-    # 1 oz copper thickness = 1.378 mils
-    width_mils = area_mils2 / 1.378
-    width_mm: float = width_mils * 0.0254
+    area_mils2 = (
+        current_a / (_IPC2221_K * temp_rise_c**_IPC2221_B)
+    ) ** (1.0 / _IPC2221_C)
+    width_mils = area_mils2 / _COPPER_1OZ_THICKNESS_MILS
+    width_mm: float = width_mils * MM_PER_MIL
     return max(width_mm, JLCPCB_MIN_TRACE_MM)
 
 
@@ -214,20 +249,22 @@ def classify_nets(
             if entry.name.upper() == "GND" or voltage == 0.0:
                 # GND stays in generic Power class
                 class_name = "Power"
-                tw, cl = 0.3, 0.2
+                tw, cl = _DEFAULT_POWER_TRACE_WIDTH_MM, _DEFAULT_CLEARANCE_MM
             elif voltage is not None and voltage > 0:
                 # Per-voltage subclass
                 v_label = _voltage_label(entry.name)
                 class_name = f"Power_{v_label}"
                 cl = _voltage_clearance(voltage)
-                tw = 0.3  # default power trace width
+                tw = _DEFAULT_POWER_TRACE_WIDTH_MM
             else:
                 # Unknown voltage (VDD, VCC, VBUS, etc.) - conservative
                 class_name = "Power"
-                tw, cl = 0.3, 0.2
+                tw, cl = _DEFAULT_POWER_TRACE_WIDTH_MM, _DEFAULT_CLEARANCE_MM
 
             buckets.setdefault(class_name, []).append(entry.name)
-            class_params[class_name] = (tw, cl, 0.8, 0.508)
+            class_params[class_name] = (
+                tw, cl, _DEFAULT_VIA_DIAMETER_MM, _DEFAULT_VIA_DRILL_MM,
+            )
             continue
 
         # Check non-power patterns
@@ -246,8 +283,8 @@ def classify_nets(
     result: list[NetClass] = []
 
     # Default class first (always present)
-    default_tw = 0.25
-    default_cl = 0.2
+    default_tw = _DEFAULT_SIGNAL_TRACE_WIDTH_MM
+    default_cl = _DEFAULT_CLEARANCE_MM
     if design_rules is not None:
         default_tw = design_rules.default_trace_width_mm
         default_cl = design_rules.default_clearance_mm

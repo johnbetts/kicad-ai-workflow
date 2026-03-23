@@ -56,6 +56,16 @@ _JAR_NAMES: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
+# FreeRouting SES coordinate scaling
+# ---------------------------------------------------------------------------
+
+_FREEROUTING_COORD_THRESHOLD: float = 200.0
+"""Coordinate magnitude above which FreeRouting resolution is assumed to be mm*1000."""
+
+_FREEROUTING_SCALE_FACTOR: float = 0.001
+"""Scale factor to convert FreeRouting mm*1000 coordinates to mm."""
+
+# ---------------------------------------------------------------------------
 # Public data classes
 # ---------------------------------------------------------------------------
 
@@ -271,8 +281,10 @@ def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
             coord_vals = [float(v) for v in coords_str.split()]
 
             # FreeRouting uses resolution mm 1000 — convert to mm
-            is_scaled = any(abs(v) > 200.0 for v in coord_vals)
-            scale = 0.001 if is_scaled else 1.0
+            is_scaled = any(
+                abs(v) > _FREEROUTING_COORD_THRESHOLD for v in coord_vals
+            )
+            scale = _FREEROUTING_SCALE_FACTOR if is_scaled else 1.0
             width = width_raw * scale
 
             # Each consecutive pair of (x, y) values forms a track segment
@@ -367,8 +379,11 @@ def ses_to_vias(
             x_raw = float(via_m.group(1))
             y_raw = float(via_m.group(2))
             # FreeRouting uses resolution mm 1000 — detect and scale
-            is_scaled = abs(x_raw) > 200.0 or abs(y_raw) > 200.0
-            scale = 0.001 if is_scaled else 1.0
+            is_scaled = (
+                abs(x_raw) > _FREEROUTING_COORD_THRESHOLD
+                or abs(y_raw) > _FREEROUTING_COORD_THRESHOLD
+            )
+            scale = _FREEROUTING_SCALE_FACTOR if is_scaled else 1.0
             vias.append(
                 Via(
                     position=Point(x=x_raw * scale, y=y_raw * scale),
