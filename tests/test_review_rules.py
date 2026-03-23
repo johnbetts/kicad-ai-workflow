@@ -28,6 +28,21 @@ from kicad_pipeline.optimization.review_agent import (
 )
 
 # ---------------------------------------------------------------------------
+# Test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_BOARD_W: float = 100.0
+_DEFAULT_BOARD_H: float = 80.0
+_DEFAULT_PAD_SX: float = 1.0
+_DEFAULT_PAD_SY: float = 0.6
+_BOARD_CENTER_Y: float = 40.0
+_GROUP_A_OFFSET: float = 20.0
+_GROUP_B_OFFSET_X: float = 70.0
+_GROUP_B_OFFSET_Y: float = 60.0
+_CONTAM_X: float = 73.0
+_CONTAM_Y: float = 62.0
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -42,7 +57,7 @@ def _comp(ref: str, value: str, fp: str = "R_0402") -> Component:
 
 
 def _pad(num: str, x: float = 0.0, y: float = 0.0,
-         sx: float = 1.0, sy: float = 0.6) -> Pad:
+         sx: float = _DEFAULT_PAD_SX, sy: float = _DEFAULT_PAD_SY) -> Pad:
     return Pad(number=num, pad_type="smd", shape="roundrect",
                position=Point(x, y), size_x=sx, size_y=sy,
                layers=("F.Cu", "F.Paste", "F.Mask"),
@@ -70,8 +85,8 @@ def _fp(ref: str, x: float, y: float,
 
 def _make_pcb(
     footprints: list[Footprint],
-    board_w: float = 100.0,
-    board_h: float = 80.0,
+    board_w: float = _DEFAULT_BOARD_W,
+    board_h: float = _DEFAULT_BOARD_H,
 ) -> PCBDesign:
     outline = BoardOutline(
         polygon=(
@@ -104,7 +119,7 @@ def _make_requirements(
         nets=(),
         pin_map=None,
         power_budget=None,
-        mechanical=MechanicalConstraints(board_width_mm=100.0, board_height_mm=80.0),
+        mechanical=MechanicalConstraints(board_width_mm=_DEFAULT_BOARD_W, board_height_mm=_DEFAULT_BOARD_H),
         recommendations=(),
         board_context=None,
     )
@@ -119,7 +134,7 @@ class TestComponentOffBoard:
     def test_pad_off_board_detected(self) -> None:
         """Component with pads 2mm past board edge → critical violation."""
         # Place component at x=-1 so pads extend past left edge (x=0)
-        pcb = _make_pcb([_fp("R1", -1.0, 40.0)])
+        pcb = _make_pcb([_fp("R1", -1.0, _BOARD_CENTER_Y)])
         violations = _check_component_off_board(pcb)
         off_board = [v for v in violations
                      if v.rule == PlacementRule.COMPONENT_OFF_BOARD]
@@ -132,7 +147,7 @@ class TestComponentOffBoard:
 
     def test_pad_inside_board_ok(self) -> None:
         """Component fully inside board → no off-board violation."""
-        pcb = _make_pcb([_fp("R1", 50.0, 40.0)])
+        pcb = _make_pcb([_fp("R1", 50.0, _BOARD_CENTER_Y)])
         violations = _check_component_off_board(pcb)
         off_board = [v for v in violations
                      if v.rule == PlacementRule.COMPONENT_OFF_BOARD]
@@ -144,7 +159,7 @@ class TestComponentOffBoard:
         # Place at x=0.5 so left pad edge is at x=0.0 (board edge).
         # That's a gap of 0.0 which is not negative, so not flagged.
         # Place at x=0.4 so left pad edge is at -0.1 (past edge).
-        pcb = _make_pcb([_fp("R1", 0.4, 40.0)])
+        pcb = _make_pcb([_fp("R1", 0.4, _BOARD_CENTER_Y)])
         violations = _check_component_off_board(pcb)
         off_board = [v for v in violations
                      if v.rule == PlacementRule.COMPONENT_OFF_BOARD]
@@ -153,7 +168,7 @@ class TestComponentOffBoard:
 
     def test_component_past_right_edge(self) -> None:
         """Component past right board edge is detected."""
-        pcb = _make_pcb([_fp("R1", 100.5, 40.0)])
+        pcb = _make_pcb([_fp("R1", 100.5, _BOARD_CENTER_Y)])
         violations = _check_component_off_board(pcb)
         off_board = [v for v in violations
                      if v.rule == PlacementRule.COMPONENT_OFF_BOARD]
@@ -170,7 +185,7 @@ class TestZoneOverflow:
         """Two groups with >50% bbox overlap → critical violation."""
         # Both groups in same area
         pcb = _make_pcb([
-            _fp("R1", 20, 20), _fp("R2", 25, 25),   # group A
+            _fp("R1", _GROUP_A_OFFSET, _GROUP_A_OFFSET), _fp("R2", 25, 25),   # group A
             _fp("C1", 21, 21), _fp("C2", 24, 24),    # group B — same area
         ])
         features = [
@@ -216,7 +231,7 @@ class TestZoneOverflow:
         """Groups in separate quadrants → no zone overflow."""
         pcb = _make_pcb([
             _fp("R1", 10, 10), _fp("R2", 15, 15),   # top-left
-            _fp("C1", 70, 60), _fp("C2", 75, 65),    # bottom-right
+            _fp("C1", _GROUP_B_OFFSET_X, _GROUP_B_OFFSET_Y), _fp("C2", 75, 65),    # bottom-right
         ])
         features = [
             FeatureBlock(name="GroupA", description="", components=("R1", "R2"),
@@ -244,12 +259,12 @@ class TestGroupContamination:
         """Component from group A inside group B's bbox → major violation."""
         pcb = _make_pcb([
             _fp("R1", 50, 50),   # group A component
-            _fp("C1", 70, 60),   # group B
+            _fp("C1", _GROUP_B_OFFSET_X, _GROUP_B_OFFSET_Y),   # group B
             _fp("C2", 75, 65),   # group B
-            _fp("C3", 80, 60),   # group B
+            _fp("C3", 80, _GROUP_B_OFFSET_Y),   # group B
             # R1 placed at 50,50 but group B spans 70-80, so R1 is NOT inside B.
             # Instead, place R3 (group A) INSIDE group B's area:
-            _fp("R3", 73, 62),   # group A but inside group B bbox
+            _fp("R3", _CONTAM_X, _CONTAM_Y),   # group A but inside group B bbox
         ])
         features = [
             FeatureBlock(name="GroupA", description="",
@@ -271,10 +286,10 @@ class TestGroupContamination:
     def test_connector_exempt(self) -> None:
         """J-prefix component inside another group → no violation (exempt)."""
         pcb = _make_pcb([
-            _fp("J1", 73, 62),   # connector — should be exempt
-            _fp("C1", 70, 60),   # group B
+            _fp("J1", _CONTAM_X, _CONTAM_Y),   # connector — should be exempt
+            _fp("C1", _GROUP_B_OFFSET_X, _GROUP_B_OFFSET_Y),   # group B
             _fp("C2", 75, 65),   # group B
-            _fp("C3", 80, 60),   # group B
+            _fp("C3", 80, _GROUP_B_OFFSET_Y),   # group B
         ])
         features = [
             FeatureBlock(name="GroupA", description="",
@@ -295,10 +310,10 @@ class TestGroupContamination:
     def test_shared_component_exempt(self) -> None:
         """Component in multiple feature blocks → no violation (exempt)."""
         pcb = _make_pcb([
-            _fp("R1", 73, 62),   # shared component
-            _fp("C1", 70, 60),   # group B
+            _fp("R1", _CONTAM_X, _CONTAM_Y),   # shared component
+            _fp("C1", _GROUP_B_OFFSET_X, _GROUP_B_OFFSET_Y),   # group B
             _fp("C2", 75, 65),   # group B
-            _fp("C3", 80, 60),   # group B
+            _fp("C3", 80, _GROUP_B_OFFSET_Y),   # group B
         ])
         features = [
             FeatureBlock(name="GroupA", description="",

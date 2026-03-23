@@ -30,6 +30,21 @@ from kicad_pipeline.optimization.review_agent import PlacementReview, PlacementV
 from kicad_pipeline.optimization.zone_partitioner import BoardZone
 
 # ---------------------------------------------------------------------------
+# Test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_BOARD_W: float = 100.0
+_DEFAULT_BOARD_H: float = 60.0
+_BOARD_CENTER_X: float = 50.0
+_BOARD_CENTER_Y: float = 30.0
+_CONNECTOR_PIN_PITCH: float = 2.54
+_LEFT_POS_X: float = 20.0
+_RIGHT_POS_X: float = 80.0
+_OVERLAP_POS_X: float = 30.0
+_OVERLAP_OFFSET: float = 30.5
+_ZONE_SIZE: float = 50.0
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -83,7 +98,7 @@ def _make_connector(
 ) -> Footprint:
     """Create a connector footprint with pads along Y axis."""
     pads = tuple(
-        _make_smd_pad(str(i + 1), 0.0, float(i) * 2.54 - (num_pins - 1) * 1.27)
+        _make_smd_pad(str(i + 1), 0.0, float(i) * _CONNECTOR_PIN_PITCH - (num_pins - 1) * 1.27)
         for i in range(num_pins)
     )
     return Footprint(
@@ -98,8 +113,8 @@ def _make_connector(
 
 def _make_pcb(
     footprints: tuple[Footprint, ...],
-    width: float = 100.0,
-    height: float = 60.0,
+    width: float = _DEFAULT_BOARD_W,
+    height: float = _DEFAULT_BOARD_H,
 ) -> PCBDesign:
     """Create a minimal PCB design."""
     outline = BoardOutline(
@@ -224,8 +239,8 @@ class TestOverlapDetection:
     """Test AABB overlap detection."""
 
     def test_no_overlap(self) -> None:
-        fp1 = _make_footprint("R1", "10k", "R_0402", 20.0, 30.0)
-        fp2 = _make_footprint("R2", "10k", "R_0402", 50.0, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _LEFT_POS_X, _BOARD_CENTER_Y)
+        fp2 = _make_footprint("R2", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp1, fp2))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -236,8 +251,8 @@ class TestOverlapDetection:
 
     def test_overlap_detected(self) -> None:
         # Two components at same position — guaranteed overlap
-        fp1 = _make_footprint("R1", "10k", "R_0402", 30.0, 30.0)
-        fp2 = _make_footprint("R2", "10k", "R_0402", 30.5, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _OVERLAP_POS_X, _BOARD_CENTER_Y)
+        fp2 = _make_footprint("R2", "10k", "R_0402", _OVERLAP_OFFSET, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp1, fp2))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -253,7 +268,7 @@ class TestOverlapDetection:
 
     def test_tiny_overlap_ignored(self) -> None:
         # Components barely touching — overlap < 0.01 mm^2 threshold
-        fp1 = _make_footprint("R1", "10k", "R_0402", 30.0, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _OVERLAP_POS_X, _BOARD_CENTER_Y)
         # Place far enough that pads don't meaningfully overlap
         fp2 = _make_footprint("R2", "10k", "R_0402", 35.0, 30.0)
         pcb = _make_pcb(footprints=(fp1, fp2))
@@ -267,7 +282,7 @@ class TestEdgeViolations:
     """Test off-board and edge proximity detection."""
 
     def test_component_in_center_no_violation(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -304,7 +319,7 @@ class TestGroupAndDomainMapping:
     """Test group, zone, domain, and subcircuit assignment."""
 
     def test_group_assignment(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         features = (
             FeatureBlock(
@@ -321,7 +336,7 @@ class TestGroupAndDomainMapping:
         assert state.components[0].group_name == "Power Supply"
 
     def test_domain_from_subcircuit(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         sc = DetectedSubCircuit(
@@ -338,7 +353,7 @@ class TestGroupAndDomainMapping:
         assert "voltage_divider" in c.subcircuit_types
 
     def test_domain_from_domain_map(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(
@@ -348,7 +363,7 @@ class TestGroupAndDomainMapping:
         assert state.components[0].voltage_domain == "3v3"
 
     def test_zone_from_placed_group(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         pg = PlacedGroup(
@@ -368,8 +383,8 @@ class TestIsolationGaps:
     """Test voltage domain isolation gap calculation."""
 
     def test_two_domains(self) -> None:
-        fp1 = _make_footprint("R1", "10k", "R_0402", 20.0, 30.0)
-        fp2 = _make_footprint("R2", "10k", "R_0402", 80.0, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _LEFT_POS_X, _BOARD_CENTER_Y)
+        fp2 = _make_footprint("R2", "10k", "R_0402", _RIGHT_POS_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp1, fp2))
         req = _make_requirements()
         sc1 = DetectedSubCircuit(
@@ -422,8 +437,8 @@ class TestGroupCohesion:
     """Test group spread and density calculation."""
 
     def test_single_group(self) -> None:
-        fp1 = _make_footprint("R1", "10k", "R_0402", 20.0, 30.0)
-        fp2 = _make_footprint("R2", "10k", "R_0402", 30.0, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _LEFT_POS_X, _BOARD_CENTER_Y)
+        fp2 = _make_footprint("R2", "10k", "R_0402", _OVERLAP_POS_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp1, fp2))
         features = (
             FeatureBlock(
@@ -458,7 +473,7 @@ class TestConnectorMatingFace:
         assert c.mating_face != ""  # Should detect a direction
 
     def test_non_connector_no_mating_face(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -484,7 +499,7 @@ class TestTextReport:
         assert "0 components" in report
 
     def test_report_contains_component_map(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -504,8 +519,8 @@ class TestTextReport:
         assert "J1" in report
 
     def test_report_overlap_section(self) -> None:
-        fp1 = _make_footprint("R1", "10k", "R_0402", 30.0, 30.0)
-        fp2 = _make_footprint("R2", "10k", "R_0402", 30.5, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _OVERLAP_POS_X, _BOARD_CENTER_Y)
+        fp2 = _make_footprint("R2", "10k", "R_0402", _OVERLAP_OFFSET, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp1, fp2))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -515,7 +530,7 @@ class TestTextReport:
         assert "CRITICAL ISSUES" in report
 
     def test_report_no_issues(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -540,8 +555,8 @@ class TestTextReport:
         assert "power" in report
 
     def test_report_groups(self) -> None:
-        fp1 = _make_footprint("R1", "10k", "R_0402", 20.0, 30.0)
-        fp2 = _make_footprint("R2", "10k", "R_0402", 30.0, 30.0)
+        fp1 = _make_footprint("R1", "10k", "R_0402", _LEFT_POS_X, _BOARD_CENTER_Y)
+        fp2 = _make_footprint("R2", "10k", "R_0402", _OVERLAP_POS_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp1, fp2))
         features = (
             FeatureBlock(
@@ -586,7 +601,7 @@ class TestTextReport:
         assert "3v3" in report
 
     def test_report_cell_size(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(pcb, req)
@@ -622,7 +637,7 @@ class TestImmutability:
             state.off_board_count = 99  # type: ignore[misc]
 
     def test_placed_component_frozen(self) -> None:
-        fp = _make_footprint("R1", "10k", "R_0402", 50.0, 30.0)
+        fp = _make_footprint("R1", "10k", "R_0402", _BOARD_CENTER_X, _BOARD_CENTER_Y)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
         state = build_board_state(pcb, req)

@@ -664,6 +664,12 @@ _RELAY_BODY_Y_MAX: float = 7.8
 _TEXT_OFFSET_SMALL: float = 1.0
 _TEXT_OFFSET_LARGE: float = 1.5
 
+# Reference/value text margin beyond courtyard edge (mm)
+_TEXT_MARGIN_MM: float = 0.5
+
+# Body margin added to pad extent for body estimates (mm)
+_BODY_MARGIN_MM: float = 0.5
+
 # Silkscreen clearance threshold: compact packages skip silk marks (mm)
 _COMPACT_PKG_THRESHOLD: float = 1.0
 
@@ -855,8 +861,8 @@ def make_smd_resistor_capacitor(
     # Compact packages: ref on F.Fab to avoid silk-over-copper DRC
     ref_layer = LAYER_F_FAB if body_h <= _COMPACT_PKG_THRESHOLD else LAYER_F_SILKSCREEN
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), ref_layer),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), ref_layer),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     # Use standard KiCad lib_id: detect R vs C from ref prefix
     ref_prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
@@ -985,7 +991,7 @@ def make_sod123(
         *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
     )
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
     )
     lib_id = "Diode_SMD:D_SOD-123"
@@ -1027,7 +1033,7 @@ def make_inductor_smd(
         *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
     )
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
     )
     lib_id = f"Inductor_SMD:L_{pkg}"
@@ -1086,7 +1092,7 @@ def make_tact_switch(
         _thru_pad("2", half_x, half_y, pad_diam, drill),
     )
     body = size_mm
-    graphics = _courtyard_rect(body + 1.5, body + 1.5)
+    graphics = _courtyard_rect(body + _TEXT_OFFSET_LARGE, body + _TEXT_OFFSET_LARGE)
     texts = (
         _ref_text(ref, -(body / 2.0 + 1.5), LAYER_F_SILKSCREEN),
         _val_text(value, body / 2.0 + 1.5, LAYER_F_FAB),
@@ -1138,12 +1144,12 @@ def make_smd_tact_switch(
         _smd_pad("2", -pad_x, pad_y, pad_size_x, pad_size_y, LAYER_F_CU),
         _smd_pad("2", pad_x, pad_y, pad_size_x, pad_size_y, LAYER_F_CU),
     )
-    court_w = pad_x * 2 + pad_size_x + 0.5
-    court_h = pad_y * 2 + pad_size_y + 0.5
+    court_w = pad_x * 2 + pad_size_x + _BODY_MARGIN_MM
+    court_h = pad_y * 2 + pad_size_y + _BODY_MARGIN_MM
     graphics = _courtyard_rect(court_w, court_h)
     texts = (
-        _ref_text(ref, -(court_h / 2.0 + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, court_h / 2.0 + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(court_h / 2.0 + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, court_h / 2.0 + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     lib_id = "Button_Switch_SMD:SW_SPST_TL3305A"
     model = Footprint3DModel(
@@ -1236,7 +1242,7 @@ def make_relay_spdt(
         ),
     )
     texts = (
-        _ref_text(ref, cy - (body_h / 2.0 + 1.5), LAYER_F_SILKSCREEN),
+        _ref_text(ref, cy - (body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
         _val_text(value, cy + body_h / 2.0 + 1.5, LAYER_F_FAB),
     )
     lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
@@ -1326,7 +1332,7 @@ def make_esp32_wroom(
 
     graphics = _courtyard_rect(body_w, body_h)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.5), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
     )
     lib_id = "RF_Module:ESP32-S3-WROOM-1"
@@ -1376,7 +1382,7 @@ def make_crystal_smd(
     pads = tuple(pads_list)
     graphics = _courtyard_rect(size_w, size_h)
     texts = (
-        _ref_text(ref, -(size_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(size_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
         _val_text(value, size_h / 2.0 + 1.0, LAYER_F_FAB),
     )
     pin_suffix = "4Pin" if has_shield else "2Pin"
@@ -1433,8 +1439,8 @@ def make_sot23(
 
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     sot_lib_id = f"Package_TO_SOT_SMD:{variant}"
     model = _model_for_package(sot_lib_id)
@@ -1481,17 +1487,17 @@ def make_through_hole_2pin(
         _thru_pad("2", pitch_mm / 2.0, 0.0, pad_diameter_mm, drill_mm),
     )
     body_w = pitch_mm + pad_diameter_mm
-    body_h = pad_diameter_mm + 0.5
+    body_h = pad_diameter_mm + _BODY_MARGIN_MM
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(
             ref,
-            -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5),
+            -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM),
             LAYER_F_SILKSCREEN,
         ),
         _val_text(
             value,
-            body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5,
+            body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM,
             LAYER_F_FAB,
         ),
     )
@@ -1614,15 +1620,15 @@ def make_generic_smd_ic(
         pads.append(_smd_pad(str(pin_count + 1), 0.0, 0.0, ep_size, ep_size, LAYER_F_CU))
 
     body_w = col_pitch * 2.0 + pad_h
-    body_h = row_span + pad_w + 0.5
+    body_h = row_span + pad_w + _BODY_MARGIN_MM
     ic_pad_edge_x = col_pitch + pad_h / 2.0
     graphics: tuple[FootprintLine, ...] = (
         *_courtyard_rect(body_w, body_h),
         *_silk_side_marks(col_pitch * 1.6, body_h, pad_edge_x=ic_pad_edge_x),
     )
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     if not lib_id:
         lib_id = f"Package_SO:SOIC-{pin_count}_P{pitch_mm:.2f}mm"
@@ -1701,11 +1707,11 @@ def make_pin_header_socket(
     span_y = (cols - 1) * pitch_mm
     cx = span_x / 2.0  # center of pad span in X
     cy = span_y / 2.0  # center of pad span in Y
-    body_w = span_x + pad_diam + 1.5
-    body_h = span_y + pad_diam + 1.5
+    body_w = span_x + pad_diam + _TEXT_OFFSET_LARGE
+    body_h = span_y + pad_diam + _TEXT_OFFSET_LARGE
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy),)
-    ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)
-    val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)
+    ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     texts = (
         FootprintText(text_type="reference", text=ref,
                       position=Point(cx, ref_y), layer=silk_layer, effects_size=1.0),
@@ -1789,8 +1795,8 @@ def make_terminal_block(
     # Center courtyard on the pad span
     cx = span / 2.0
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx),)
-    ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)
-    val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5
+    ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
         FootprintText(text_type="reference", text=ref,
                       position=Point(cx, ref_y), layer=LAYER_F_SILKSCREEN, effects_size=1.0),
@@ -1857,15 +1863,15 @@ def make_dip_switch(
     span_y = (half - 1) * pitch_mm
     cx = row_pitch / 2.0
     cy = span_y / 2.0
-    body_w = row_pitch + pad_diam + 0.5
-    body_h = span_y + pad_diam + 0.5
+    body_w = row_pitch + pad_diam + _BODY_MARGIN_MM
+    body_h = span_y + pad_diam + _BODY_MARGIN_MM
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
     texts = (
         FootprintText(text_type="reference", text=ref,
-                      position=Point(cx, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5)),
+                      position=Point(cx, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)),
                       layer=LAYER_F_SILKSCREEN, effects_size=1.0),
         FootprintText(text_type="value", text=value,
-                      position=Point(cx, cy + body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5),
+                      position=Point(cx, cy + body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM),
                       layer=LAYER_F_FAB, effects_size=1.0),
     )
     lib_id = (
@@ -1912,8 +1918,8 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
     body_h = _USBC_BODY_H
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     lib_id = "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     model = _model_for_package(lib_id)
@@ -1986,8 +1992,8 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     body_h = _RJ45_COURTYARD_H
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
     texts = (
-        _ref_text(ref, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_FAB),
+        _ref_text(ref, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_FAB),
     )
     lib_id = "Connector_RJ:RJ45_Amphenol_RJHSE538X"
     model = _model_for_package(lib_id)
@@ -2040,8 +2046,8 @@ def make_mounting_hole(
     crtyd_size = drill_diameter + 2 * PCB_COURTYARD_CLEARANCE_MM
     graphics = _courtyard_rect(crtyd_size, crtyd_size)
     texts = (
-        _ref_text(ref, -(crtyd_size / 2.0 + 0.5), LAYER_F_FAB),
-        _val_text("MountingHole", crtyd_size / 2.0 + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(crtyd_size / 2.0 + _TEXT_MARGIN_MM), LAYER_F_FAB),
+        _val_text("MountingHole", crtyd_size / 2.0 + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     return Footprint(
         lib_id="MountingHole:MountingHole_2.7mm_M2.5",
@@ -2088,7 +2094,7 @@ def make_sod323(
         *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
     )
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
     )
     lib_id = "Diode_SMD:D_SOD-323"
@@ -2137,12 +2143,12 @@ def make_dip_package(
         y = (half - 1 - i) * pitch_mm - (half - 1) * pitch_mm / 2.0
         pads.append(_thru_pad(str(half + i + 1), row_spacing_mm / 2.0, y, pad_diam, drill_mm))
 
-    body_w = row_spacing_mm + pad_diam + 0.5
-    body_h = max((half - 1) * pitch_mm + pad_diam + 0.5, 3.0)
+    body_w = row_spacing_mm + pad_diam + _BODY_MARGIN_MM
+    body_h = max((half - 1) * pitch_mm + pad_diam + _BODY_MARGIN_MM, 3.0)
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     if not lib_id:
         lib_id = f"Package_DIP:DIP-{pin_count}_W{row_spacing_mm:.2f}mm"
@@ -2176,8 +2182,8 @@ def make_test_point(
     crtyd_size = pad_size + 2 * PCB_COURTYARD_CLEARANCE_MM
     graphics = _courtyard_rect(crtyd_size, crtyd_size)
     texts = (
-        _ref_text(ref, -(crtyd_size / 2.0 + 0.5), LAYER_F_SILKSCREEN),
-        _val_text(value, crtyd_size / 2.0 + 0.5, LAYER_F_FAB),
+        _ref_text(ref, -(crtyd_size / 2.0 + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, crtyd_size / 2.0 + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     lib_id = f"TestPoint:TestPoint_Pad_{pad_size:.1f}x{pad_size:.1f}mm"
     return Footprint(
@@ -2228,7 +2234,7 @@ def make_ws2812b(
     )
     graphics = (*_courtyard_rect(body_w, body_h),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
     )
     model = _model_for_package(lib_id)
@@ -2269,7 +2275,7 @@ def make_microsd_slot(
     body_h = _MICROSD_BODY_H
     graphics = (*_courtyard_rect(body_w, body_h),)
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
     )
     lib_id = "Connector_Card:microSD_HC_Hirose_DM3AT-SF-PEJM5"
@@ -3047,7 +3053,7 @@ def _estimate_smd_rc(fid: str, upper: str) -> tuple[float, float] | None:
             pkg = fid[len(prefix):].upper()
             if pkg in _SMD_RC_DIMS:
                 _, _, _pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
-                return (body_w + 0.5, body_h + 0.5)
+                return (body_w + _BODY_MARGIN_MM, body_h + _BODY_MARGIN_MM)
             return (2.5, 1.75)  # 0805 fallback
     return None
 
@@ -3059,7 +3065,7 @@ def _estimate_inductor(fid: str, upper: str) -> tuple[float, float] | None:
     pkg = fid[2:].upper()
     if pkg in _SMD_RC_DIMS:
         _, _, _pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
-        return (body_w + 0.5, body_h + 0.5)
+        return (body_w + _BODY_MARGIN_MM, body_h + _BODY_MARGIN_MM)
     return (4.0, 3.0)
 
 
@@ -3130,7 +3136,7 @@ def _estimate_crystal(fid: str, upper: str) -> tuple[float, float] | None:
     import re as _re
     dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
     if dim_m:
-        return (float(dim_m.group(1)) + 0.5, float(dim_m.group(2)) + 0.5)
+        return (float(dim_m.group(1)) + _BODY_MARGIN_MM, float(dim_m.group(2)) + _BODY_MARGIN_MM)
     return (4.0, 2.0)
 
 

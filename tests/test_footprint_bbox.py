@@ -21,13 +21,26 @@ from kicad_pipeline.pcb.footprints import (
     estimate_footprint_size,
 )
 
+# ---------------------------------------------------------------------------
+# Test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PAD_SX: float = 1.0
+_DEFAULT_PAD_SY: float = 0.6
+_DEFAULT_FP_X: float = 50.0
+_DEFAULT_FP_Y: float = 50.0
+_PIN_HEADER_PITCH: float = 2.54
+_PIN_HEADER_PAD_SIZE: float = 1.7
+_COLLISION_POS_X: float = 10.0
+_COLLISION_POS_Y: float = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Helper factories
 # ---------------------------------------------------------------------------
 
 
-def _make_pad(number: str, x: float, y: float, sx: float = 1.0, sy: float = 0.6) -> Pad:
+def _make_pad(number: str, x: float, y: float, sx: float = _DEFAULT_PAD_SX, sy: float = _DEFAULT_PAD_SY) -> Pad:
     """Create a minimal Pad for testing."""
     return Pad(
         number=number,
@@ -51,7 +64,7 @@ def _make_fp(
         lib_id=lib_id,
         ref=ref,
         value="test",
-        position=Point(x=50.0, y=50.0),
+        position=Point(x=_DEFAULT_FP_X, y=_DEFAULT_FP_Y),
         pads=pads,
         models=models,
     )
@@ -226,9 +239,9 @@ def _make_pin_header_pads(n_pins: int) -> tuple[Pad, ...]:
             number=str(i + 1),
             pad_type="thru_hole",
             shape="oval",
-            position=Point(x=0.0, y=i * 2.54),
-            size_x=1.7,
-            size_y=1.7,
+            position=Point(x=0.0, y=i * _PIN_HEADER_PITCH),
+            size_x=_PIN_HEADER_PAD_SIZE,
+            size_y=_PIN_HEADER_PAD_SIZE,
             layers=("*.Cu", "*.Mask"),
         )
         for i in range(n_pins)
@@ -252,8 +265,8 @@ class TestCourtyardCollisionBBox:
         bbox_j2 = compute_footprint_bbox(fp_j2)
 
         positions = {
-            "J1": Point(x=10.0, y=10.0),
-            "J2": Point(x=10.0, y=25.0),  # overlaps with J1 body
+            "J1": Point(x=_COLLISION_POS_X, y=_COLLISION_POS_Y),
+            "J2": Point(x=_COLLISION_POS_X, y=25.0),  # overlaps with J1 body
         }
         fp_sizes = {"J1": (2.0, 20.0), "J2": (2.0, 20.0)}
         bboxes = {"J1": bbox_j1, "J2": bbox_j2}
@@ -271,8 +284,8 @@ class TestCourtyardCollisionBBox:
         bbox = compute_footprint_bbox(fp)
 
         positions = {
-            "J1": Point(x=10.0, y=10.0),
-            "J2": Point(x=30.0, y=10.0),
+            "J1": Point(x=_COLLISION_POS_X, y=_COLLISION_POS_Y),
+            "J2": Point(x=30.0, y=_COLLISION_POS_Y),
         }
         fp_sizes = {"J1": (2.0, 10.0), "J2": (2.0, 10.0)}
         bboxes = {"J1": bbox, "J2": bbox}
@@ -294,8 +307,8 @@ class TestCourtyardCollisionBBox:
 
         # At 0° rotation: wide in X → no collision at Y=5
         positions_0 = {
-            "U1": Point(x=10.0, y=10.0),
-            "U2": Point(x=10.0, y=15.0),
+            "U1": Point(x=_COLLISION_POS_X, y=_COLLISION_POS_Y),
+            "U2": Point(x=_COLLISION_POS_X, y=15.0),
         }
         violations_0 = check_courtyard_collisions(
             positions_0,

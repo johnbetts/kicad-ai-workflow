@@ -24,6 +24,7 @@ from kicad_pipeline.pcb.footprints import (
     footprint_for_component,
     validate_3d_model_orientation,
 )
+from kicad_pipeline.pcb.keepout_builder import RF_KEYWORDS as _RF_KEYWORDS
 from kicad_pipeline.pcb.pin_map import FootprintPinMap, compute_pin_map
 
 if TYPE_CHECKING:
@@ -33,12 +34,6 @@ if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import ProjectRequirements
 
 _log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# RF keyword set (reused from builder.py conventions)
-# ---------------------------------------------------------------------------
-
-_RF_KEYWORDS: frozenset[str] = frozenset({"esp32", "esp8266", "nrf", "cc3200", "rf"})
 
 # ---------------------------------------------------------------------------
 # Enumerations

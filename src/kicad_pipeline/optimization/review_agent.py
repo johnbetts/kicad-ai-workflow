@@ -48,6 +48,13 @@ SUBCIRCUIT_MAX_SPREAD_MM = 20.0
 VOLTAGE_DOMAIN_MIN_GAP_MM = 2.0
 CRYSTAL_MAX_DISTANCE_MM = 10.0
 
+# Collision resolution defaults
+_COLLISION_GAP_MM: float = 0.5
+"""Clearance gap added when suggesting collision resolution positions."""
+
+_DEFAULT_FP_SIZE: tuple[float, float] = (2.0, 2.0)
+"""Fallback footprint size (w, h) when actual size is unknown."""
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -450,8 +457,8 @@ def _check_collisions(
         suggested: tuple[float, float] | None = None
         if len(refs) >= 2 and refs[0] in positions and refs[1] in positions:
             r1, r2 = refs[0], refs[1]
-            s1 = fp_sizes.get(r1, (2.0, 2.0))
-            s2 = fp_sizes.get(r2, (2.0, 2.0))
+            s1 = fp_sizes.get(r1, _DEFAULT_FP_SIZE)
+            s2 = fp_sizes.get(r2, _DEFAULT_FP_SIZE)
 
             # Move the smaller component
             if s1[0] * s1[1] <= s2[0] * s2[1]:
@@ -469,7 +476,7 @@ def _check_collisions(
             if dist < 0.01:
                 dx, dy, dist = 1.0, 0.0, 1.0
             # Push away: enough to clear half-widths + gap
-            needed = (ms[0] + as_[0]) / 2.0 + 0.5
+            needed = (ms[0] + as_[0]) / 2.0 + _COLLISION_GAP_MM
             scale = needed / dist
             suggested = (ax + dx * scale, ay + dy * scale)
 

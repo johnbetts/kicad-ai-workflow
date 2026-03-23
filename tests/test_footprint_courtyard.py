@@ -6,6 +6,25 @@ from __future__ import annotations
 from kicad_pipeline.models.pcb import Footprint, FootprintLine, Pad, Point
 from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
 
+# ---------------------------------------------------------------------------
+# Test constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PAD_SIZE: float = 0.6
+_ESP32_PAD_HALF_X: float = 8.0
+_ESP32_PAD_Y_RANGE: range = range(-9, 10)
+_ESP32_PAD_SIZE: float = 0.5
+_ESP32_MIN_WIDTH: float = 17.0
+_ESP32_MIN_HEIGHT: float = 25.0
+_W5500_PAD_SIZE: float = 0.4
+_W5500_PAD_HALF: float = 6.0
+_TERMINAL_BLOCK_PITCH: float = 5.08
+_TERMINAL_BLOCK_PAD_SIZE: float = 1.7
+_QFN_PAD_SIZE: float = 0.3
+_QFN_PAD_HALF: float = 3.0
+_RELAY_PAD_HALF_X: float = 5.0
+_RELAY_PAD_SIZE: float = 1.5
+
 
 def _make_fp(
     lib_id: str,
@@ -24,7 +43,7 @@ def _make_fp(
     )
 
 
-def _make_pad(x: float, y: float, sx: float = 0.6, sy: float = 0.6) -> Pad:
+def _make_pad(x: float, y: float, sx: float = _DEFAULT_PAD_SIZE, sy: float = _DEFAULT_PAD_SIZE) -> Pad:
     return Pad(
         number="1",
         pad_type="smd",
@@ -43,23 +62,23 @@ class TestModuleCourtyards:
         """ESP32 courtyard from pads-only heuristic should be ≥25mm tall."""
         # ESP32 pads: roughly 16mm wide, 18mm tall pad field (no graphics)
         pads = tuple(
-            _make_pad(x, y, 0.5, 0.5)
-            for x in (-8.0, 8.0)
-            for y in range(-9, 10)
+            _make_pad(x, y, _ESP32_PAD_SIZE, _ESP32_PAD_SIZE)
+            for x in (-_ESP32_PAD_HALF_X, _ESP32_PAD_HALF_X)
+            for y in _ESP32_PAD_Y_RANGE
         )
         fp = _make_fp("ESP32-S3-WROOM-1", pads=pads)
         w, h = estimate_courtyard_mm(fp)
         # Module extension: 0.5mm/side width + 3.5mm/side height + 0.25 clearance
         # pad_w=16.5, pad_h=18.5 → w≈18.0, h≈26.0
-        assert w >= 17.0, f"ESP32 width {w} too small (expected ≥17mm)"
-        assert h >= 25.0, f"ESP32 height {h} too small (expected ≥25mm)"
+        assert w >= _ESP32_MIN_WIDTH, f"ESP32 width {w} too small (expected ≥{_ESP32_MIN_WIDTH}mm)"
+        assert h >= _ESP32_MIN_HEIGHT, f"ESP32 height {h} too small (expected ≥{_ESP32_MIN_HEIGHT}mm)"
 
     def test_esp32_wroom_courtyard_from_graphics(self) -> None:
         """ESP32 courtyard from CrtYd graphics should use actual body dimensions."""
         pads = tuple(
-            _make_pad(x, y, 0.5, 0.5)
-            for x in (-8.0, 8.0)
-            for y in range(-9, 10)
+            _make_pad(x, y, _ESP32_PAD_SIZE, _ESP32_PAD_SIZE)
+            for x in (-_ESP32_PAD_HALF_X, _ESP32_PAD_HALF_X)
+            for y in _ESP32_PAD_Y_RANGE
         )
         # Courtyard graphics matching real 18x25.5mm body + 0.25mm clearance
         hw, hh = 9.25, 13.0  # 18.5 x 26.0
@@ -78,9 +97,9 @@ class TestModuleCourtyards:
     def test_esp32_wroom_courtyard_from_fab(self) -> None:
         """ESP32 courtyard from F.Fab body outline should add clearance."""
         pads = tuple(
-            _make_pad(x, y, 0.5, 0.5)
-            for x in (-8.0, 8.0)
-            for y in range(-9, 10)
+            _make_pad(x, y, _ESP32_PAD_SIZE, _ESP32_PAD_SIZE)
+            for x in (-_ESP32_PAD_HALF_X, _ESP32_PAD_HALF_X)
+            for y in _ESP32_PAD_Y_RANGE
         )
         # Fab body outline: 18x25.5mm (no courtyard graphics)
         hw, hh = 9.0, 12.75  # 18 x 25.5
@@ -99,9 +118,9 @@ class TestModuleCourtyards:
     def test_w5500_module_courtyard(self) -> None:
         """W5500 module should get module-class body extension."""
         pads = tuple(
-            _make_pad(x, y, 0.4, 0.4)
-            for x in (-6.0, 6.0)
-            for y in (-6.0, 6.0)
+            _make_pad(x, y, _W5500_PAD_SIZE, _W5500_PAD_SIZE)
+            for x in (-_W5500_PAD_HALF, _W5500_PAD_HALF)
+            for y in (-_W5500_PAD_HALF, _W5500_PAD_HALF)
         )
         fp = _make_fp("W5500_QFN-48", pads=pads)
         w, h = estimate_courtyard_mm(fp)
@@ -161,7 +180,7 @@ class TestConnectorCourtyards:
     def test_6pin_terminal_block(self) -> None:
         """6-pin screw terminal courtyard should be ~30x10mm."""
         pads = tuple(
-            _make_pad(i * 5.08, 0.0, 1.7, 1.7)
+            _make_pad(i * _TERMINAL_BLOCK_PITCH, 0.0, _TERMINAL_BLOCK_PAD_SIZE, _TERMINAL_BLOCK_PAD_SIZE)
             for i in range(6)
         )
         fp = _make_fp("TerminalBlock_01x06_P5.08mm", pads=pads, ref="J1")
@@ -185,9 +204,9 @@ class TestClassification:
     def test_qfn_not_module(self) -> None:
         """QFN packages should not get module-class extension."""
         pads = tuple(
-            _make_pad(x, y, 0.3, 0.3)
-            for x in (-3.0, 3.0)
-            for y in (-3.0, 3.0)
+            _make_pad(x, y, _QFN_PAD_SIZE, _QFN_PAD_SIZE)
+            for x in (-_QFN_PAD_HALF, _QFN_PAD_HALF)
+            for y in (-_QFN_PAD_HALF, _QFN_PAD_HALF)
         )
         fp_qfn = _make_fp("QFN-48_7x7mm", pads=pads)
         fp_mod = _make_fp("ESP32-S3-WROOM-1", pads=pads)
@@ -198,8 +217,8 @@ class TestClassification:
 
     def test_relay_gets_relay_extension(self) -> None:
         pads = (
-            _make_pad(-5.0, 0.0, 1.5, 1.5),
-            _make_pad(5.0, 0.0, 1.5, 1.5),
+            _make_pad(-_RELAY_PAD_HALF_X, 0.0, _RELAY_PAD_SIZE, _RELAY_PAD_SIZE),
+            _make_pad(_RELAY_PAD_HALF_X, 0.0, _RELAY_PAD_SIZE, _RELAY_PAD_SIZE),
         )
         fp = _make_fp("Relay_SPDT_Omron_G6K", pads=pads, ref="K1")
         w, h = estimate_courtyard_mm(fp)
