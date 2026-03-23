@@ -32,6 +32,9 @@ packages = ["src/kicad_pipeline"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-x --tb=short"
+markers = [
+    "slow: marks tests that build full PCBs or run routing (deselect with '-m \"not slow\"')",
+]
 
 [tool.mypy]
 strict = true

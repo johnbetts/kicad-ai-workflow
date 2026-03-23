@@ -144,61 +144,67 @@ def _make_requirements(
 
 
 # ---------------------------------------------------------------------------
+# Shared fixture — build the default PCB once and reuse across tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def default_req() -> ProjectRequirements:
+    """Shared default requirements fixture."""
+    return _make_requirements()
+
+
+@pytest.fixture(scope="module")
+def default_pcb(default_req: ProjectRequirements) -> PCBDesign:
+    """Build default PCB once for the module — shared across all basic tests."""
+    return build_pcb(default_req)
+
+
+# ---------------------------------------------------------------------------
 # build_pcb tests
 # ---------------------------------------------------------------------------
 
 
-def test_build_pcb_minimal() -> None:
+def test_build_pcb_minimal(default_pcb: PCBDesign) -> None:
     """build_pcb returns a PCBDesign from minimal requirements."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    assert isinstance(design, PCBDesign)
+    assert isinstance(default_pcb, PCBDesign)
 
 
-def test_build_pcb_has_footprints() -> None:
+def test_build_pcb_has_footprints(
+    default_pcb: PCBDesign, default_req: ProjectRequirements,
+) -> None:
     """PCBDesign has one footprint per component + mounting holes."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    component_fps = [fp for fp in design.footprints if not fp.ref.startswith("H")]
-    assert len(component_fps) == len(req.components)
+    component_fps = [fp for fp in default_pcb.footprints if not fp.ref.startswith("H")]
+    assert len(component_fps) == len(default_req.components)
 
 
-def test_build_pcb_has_nets() -> None:
+def test_build_pcb_has_nets(default_pcb: PCBDesign) -> None:
     """PCBDesign.nets has at least GND."""
-    req = _make_requirements()
-    design = build_pcb(req)
+    design = default_pcb
     net_names = {n.name for n in design.nets}
     assert "GND" in net_names
 
 
-def test_build_pcb_gnd_is_net_one() -> None:
+def test_build_pcb_gnd_is_net_one(default_pcb: PCBDesign) -> None:
     """GND net always has number 1."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    gnd_num = design.get_net_number("GND")
+    gnd_num = default_pcb.get_net_number("GND")
     assert gnd_num == 1
 
 
-def test_build_pcb_has_board_outline() -> None:
+def test_build_pcb_has_board_outline(default_pcb: PCBDesign) -> None:
     """PCBDesign.outline polygon is non-empty."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    assert len(design.outline.polygon) > 0
+    assert len(default_pcb.outline.polygon) > 0
 
 
-def test_build_pcb_has_zones() -> None:
+def test_build_pcb_has_zones(default_pcb: PCBDesign) -> None:
     """PCBDesign has GND zone on B.Cu (back only — F.Cu used for routing)."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    layers = {z.layer for z in design.zones}
+    layers = {z.layer for z in default_pcb.zones}
     assert "B.Cu" in layers
 
 
-def test_build_pcb_zone_clearance_adequate() -> None:
+def test_build_pcb_zone_clearance_adequate(default_pcb: PCBDesign) -> None:
     """GND zones should have clearance >= 0.2mm (not min_thickness)."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    for zone in design.zones:
+    for zone in default_pcb.zones:
         assert zone.clearance_mm >= 0.2, (
             f"Zone {zone.name} clearance {zone.clearance_mm} < 0.2mm"
         )
@@ -207,12 +213,10 @@ def test_build_pcb_zone_clearance_adequate() -> None:
         )
 
 
-def test_build_pcb_has_netclasses() -> None:
+def test_build_pcb_has_netclasses(default_pcb: PCBDesign) -> None:
     """PCBDesign should have netclasses after build."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    assert len(design.netclasses) >= 1
-    names = {nc.name for nc in design.netclasses}
+    assert len(default_pcb.netclasses) >= 1
+    names = {nc.name for nc in default_pcb.netclasses}
     assert "Default" in names
 
 
@@ -241,20 +245,16 @@ def test_build_pcb_no_gnd_stitching_vias_when_routing_disabled() -> None:
         assert v.drill == 0.6, "Expected RF fence via drill size"
 
 
-def test_build_pcb_has_keepouts() -> None:
+def test_build_pcb_has_keepouts(default_pcb: PCBDesign) -> None:
     """PCBDesign has at least the corner mounting-hole keepouts."""
-    req = _make_requirements()
-    design = build_pcb(req)
     # 4 mounting-hole keepouts (one per corner)
-    assert len(design.keepouts) >= 4
+    assert len(default_pcb.keepouts) >= 4
 
 
-def test_build_pcb_rf_module_adds_antenna_keepout() -> None:
+def test_build_pcb_rf_module_adds_antenna_keepout(default_pcb: PCBDesign) -> None:
     """ESP32 design gets an extra antenna keepout."""
-    req = _make_requirements()
-    design = build_pcb(req)
     # U1 is ESP32-S3-WROOM-1 → RF module detected → 5 keepouts (4 corners + 1 antenna)
-    assert len(design.keepouts) == 5
+    assert len(default_pcb.keepouts) == 5
 
 
 def test_build_pcb_no_components_raises() -> None:
@@ -305,75 +305,68 @@ def test_board_dimensions_override_mechanical() -> None:
     assert max(ys) == pytest.approx(30.0)
 
 
-def test_build_pcb_footprints_have_silkscreen() -> None:
+def test_build_pcb_footprints_have_silkscreen(default_pcb: PCBDesign) -> None:
     """All footprints in built PCBDesign have silkscreen reference labels."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    for fp in design.footprints:
+    for fp in default_pcb.footprints:
         ref_texts = [t for t in fp.texts if t.text_type == "reference"]
         assert len(ref_texts) >= 1, f"Footprint {fp.ref} has no silkscreen reference label"
 
 
 # ---------------------------------------------------------------------------
-# pcb_to_sexp tests
+# pcb_to_sexp tests (share a single build via default_pcb fixture)
 # ---------------------------------------------------------------------------
 
 
-def test_pcb_to_sexp_is_list() -> None:
+@pytest.fixture(scope="module")
+def default_sexp(default_pcb: PCBDesign) -> list[object]:
+    """Shared S-expression fixture — generated once from default_pcb."""
+    return pcb_to_sexp(default_pcb)
+
+
+def test_pcb_to_sexp_is_list(default_sexp: list[object]) -> None:
     """pcb_to_sexp returns a list (SExpNode)."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    sexp = pcb_to_sexp(design)
-    assert isinstance(sexp, list)
+    assert isinstance(default_sexp, list)
 
 
-def test_pcb_to_sexp_starts_with_kicad_pcb() -> None:
+def test_pcb_to_sexp_starts_with_kicad_pcb(default_sexp: list[object]) -> None:
     """First element of the S-expression is 'kicad_pcb'."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    sexp = pcb_to_sexp(design)
-    assert isinstance(sexp, list)
-    assert sexp[0] == "kicad_pcb"
+    assert isinstance(default_sexp, list)
+    assert default_sexp[0] == "kicad_pcb"
 
 
-def test_pcb_to_sexp_contains_version() -> None:
+def test_pcb_to_sexp_contains_version(default_sexp: list[object]) -> None:
     """S-expression contains a version node."""
     from kicad_pipeline.constants import KICAD_PCB_VERSION
 
-    req = _make_requirements()
-    design = build_pcb(req)
-    sexp = pcb_to_sexp(design)
+    sexp = default_sexp
     assert isinstance(sexp, list)
     version_nodes = [n for n in sexp if isinstance(n, list) and n and n[0] == "version"]
     assert len(version_nodes) == 1
     assert version_nodes[0][1] == KICAD_PCB_VERSION
 
 
-def test_pcb_to_sexp_contains_nets() -> None:
+def test_pcb_to_sexp_contains_nets(default_pcb: PCBDesign, default_sexp: list[object]) -> None:
     """S-expression contains net nodes for all nets in design."""
-    req = _make_requirements()
-    design = build_pcb(req)
+    design = default_pcb
     sexp = pcb_to_sexp(design)
     assert isinstance(sexp, list)
     net_nodes = [n for n in sexp if isinstance(n, list) and n and n[0] == "net"]
     assert len(net_nodes) == len(design.nets)
 
 
-def test_pcb_to_sexp_contains_footprints() -> None:
+def test_pcb_to_sexp_contains_footprints(
+    default_pcb: PCBDesign, default_sexp: list[object],
+) -> None:
     """S-expression contains a footprint node for each footprint."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    sexp = pcb_to_sexp(design)
+    sexp = default_sexp
     assert isinstance(sexp, list)
     fp_nodes = [n for n in sexp if isinstance(n, list) and n and n[0] == "footprint"]
-    assert len(fp_nodes) == len(design.footprints)
+    assert len(fp_nodes) == len(default_pcb.footprints)
 
 
-def test_pcb_to_sexp_contains_edge_cuts() -> None:
+def test_pcb_to_sexp_contains_edge_cuts(default_sexp: list[object]) -> None:
     """S-expression contains gr_line nodes for the board outline."""
-    req = _make_requirements()
-    design = build_pcb(req)
-    sexp = pcb_to_sexp(design)
+    sexp = default_sexp
     assert isinstance(sexp, list)
     edge_lines = [
         n
@@ -391,26 +384,22 @@ def test_pcb_to_sexp_contains_edge_cuts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# write_pcb tests
+# write_pcb tests (these need tmp_path so can't use module fixture for file I/O)
 # ---------------------------------------------------------------------------
 
 
-def test_write_pcb_creates_file(tmp_path: Path) -> None:
+def test_write_pcb_creates_file(tmp_path: Path, default_pcb: PCBDesign) -> None:
     """write_pcb creates a .kicad_pcb file at the specified path."""
-    req = _make_requirements()
-    design = build_pcb(req)
     dest = tmp_path / "test_output.kicad_pcb"
-    write_pcb(design, dest)
+    write_pcb(default_pcb, dest)
     assert dest.exists()
     assert dest.stat().st_size > 0
 
 
-def test_write_pcb_parseable(tmp_path: Path) -> None:
+def test_write_pcb_parseable(tmp_path: Path, default_pcb: PCBDesign) -> None:
     """Written .kicad_pcb file can be parsed back by sexp.parser."""
-    req = _make_requirements()
-    design = build_pcb(req)
     dest = tmp_path / "parseable.kicad_pcb"
-    write_pcb(design, dest)
+    write_pcb(default_pcb, dest)
     text = dest.read_text(encoding="utf-8")
     parsed = parse(text)
     assert isinstance(parsed, list)
