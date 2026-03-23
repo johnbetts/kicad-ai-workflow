@@ -20,7 +20,7 @@ from kicad_pipeline.pcb.constraints import (
 )
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.requirements import ProjectRequirements
+    from kicad_pipeline.models.requirements import Component, ProjectRequirements
 
 _log = logging.getLogger(__name__)
 
@@ -221,6 +221,149 @@ def _ref_prefix(ref: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_tvs_or_led_diode(comp: Component | None) -> bool:
+    """Return True if *comp* looks like a TVS diode or LED (not a flyback diode)."""
+    if comp is None:
+        return False
+    dv = (comp.value or "").upper()
+    dd = (comp.description or "").upper()
+    return "TVS" in dv or "TVS" in dd or "LED" in dv
+
+
+def _find_flyback_diode(
+    relay_nets: set[str],
+    net_to_refs: dict[str, set[str]],
+    ref_to_nets: dict[str, set[str]],
+    comp_map: dict[str, Component],
+    claimed: set[str],
+    refs: list[str],
+) -> tuple[str | None, str | None]:
+    """Find the best flyback diode candidate for a relay.
+
+    Returns (diode_ref, net_name) or (None, None).
+    """
+    candidates: list[tuple[int, str, str]] = []
+    for net_name in sorted(relay_nets):
+        if _is_gnd_net(net_name):
+            continue
+        for r in sorted(net_to_refs.get(net_name, set())):
+            if _ref_prefix(r) != "D" or r in claimed or r in refs:
+                continue
+            if _is_tvs_or_led_diode(comp_map.get(r)):
+                continue
+            d_nets = ref_to_nets.get(r, set())
+            shared = len(d_nets & relay_nets)
+            candidates.append((shared, r, net_name))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda t: (-t[0], t[1]))
+    return candidates[0][1], candidates[0][2]
+
+
+def _find_collector_led(
+    transistor: str,
+    ref_to_nets: dict[str, set[str]],
+    net_to_refs: dict[str, set[str]],
+    comp_map: dict[str, Component],
+    claimed: set[str],
+    refs: list[str],
+) -> str | None:
+    """Find an LED on the transistor collector path."""
+    t_nets = ref_to_nets.get(transistor, set())
+    for net_name in t_nets:
+        if _is_gnd_net(net_name) or _is_power_net(net_name):
+            continue
+        for r in net_to_refs.get(net_name, set()):
+            if r in refs:
+                continue
+            if _ref_prefix(r) == "D" and r not in claimed:
+                comp = comp_map.get(r)
+                if comp and "LED" in (comp.value or "").upper():
+                    return r
+            elif _ref_prefix(r) == "LED" and r not in claimed:
+                return r
+    return None
+
+
+def _classify_relay_hierarchy_refs(
+    refs: list[str],
+    relay_ref: str,
+    transistor: str | None,
+    comp_map: dict[str, Component],
+    adj: dict[str, set[str]],
+) -> tuple[list[str], list[str], str | None, str | None]:
+    """Classify relay subcircuit refs into driver and LED subgroup lists.
+
+    Returns (driver_refs, led_node_refs, led_ref, flyback_ref).
+    """
+    driver_refs: list[str] = []
+    led_node_refs: list[str] = []
+    flyback_ref: str | None = None
+    gate_resistor_ref: str | None = None
+    led_ref: str | None = None
+    led_resistor_ref: str | None = None
+
+    for r in refs:
+        if r == relay_ref:
+            continue
+        prefix = _ref_prefix(r)
+        if prefix == "Q":
+            driver_refs.append(r)
+        elif prefix == "D":
+            comp = comp_map.get(r)
+            if comp and "LED" in (comp.value or "").upper():
+                led_ref = r
+            else:
+                flyback_ref = r
+        elif prefix == "LED":
+            led_ref = r
+        elif prefix == "R":
+            if transistor and r in adj.get(transistor, set()):
+                gate_resistor_ref = r
+            else:
+                led_resistor_ref = r
+
+    if flyback_ref:
+        driver_refs.append(flyback_ref)
+    if gate_resistor_ref:
+        driver_refs.append(gate_resistor_ref)
+    if led_ref:
+        led_node_refs.append(led_ref)
+    if led_resistor_ref:
+        led_node_refs.append(led_resistor_ref)
+
+    return driver_refs, led_node_refs, led_ref, flyback_ref
+
+
+def _build_relay_hierarchy(
+    relay_ref: str,
+    transistor: str | None,
+    driver_refs: list[str],
+    led_node_refs: list[str],
+    led_ref: str | None,
+) -> SubCircuitNode:
+    """Build hierarchical SubCircuitNode tree for a relay driver."""
+    children: list[SubCircuitNode] = []
+    if driver_refs:
+        children.append(SubCircuitNode(
+            role="driver",
+            refs=tuple(sorted(driver_refs)),
+            anchor_ref=transistor or driver_refs[0],
+        ))
+    if led_node_refs:
+        children.append(SubCircuitNode(
+            role="led_indicator",
+            refs=tuple(sorted(led_node_refs)),
+            anchor_ref=led_ref or led_node_refs[0],
+        ))
+    return SubCircuitNode(
+        role="relay_body",
+        refs=(relay_ref,),
+        anchor_ref=relay_ref,
+        children=tuple(children),
+    )
+
+
 def _detect_relay_drivers(
     requirements: ProjectRequirements,
     net_to_refs: dict[str, set[str]],
@@ -241,7 +384,7 @@ def _detect_relay_drivers(
         relay_nets = ref_to_nets.get(relay.ref, set())
         all_nets: set[str] = set(relay_nets)
 
-        # Find transistor driving the relay coil — connected via signal net
+        # Find transistor driving the relay coil
         signal_neighbours = adj.get(relay.ref, set())
         transistor: str | None = None
         for nb in signal_neighbours:
@@ -250,31 +393,14 @@ def _detect_relay_drivers(
                 refs.append(nb)
                 break
 
-        # Find flyback diode — shares a non-GND power/signal net with relay
-        # Exclude TVS diodes and LEDs (they're not flyback protection)
-        # Prefer diode with MOST shared nets with relay (deterministic)
-        _flyback_candidates: list[tuple[int, str, str]] = []
-        for net_name in sorted(relay_nets):
-            if _is_gnd_net(net_name):
-                continue
-            for r in sorted(net_to_refs.get(net_name, set())):
-                if _ref_prefix(r) == "D" and r not in claimed and r not in refs:
-                    dc = comp_map.get(r)
-                    if dc:
-                        dv = (dc.value or "").upper()
-                        dd = (dc.description or "").upper()
-                        if "TVS" in dv or "TVS" in dd or "LED" in dv:
-                            continue
-                    # Count shared nets between this diode and the relay
-                    d_nets = ref_to_nets.get(r, set())
-                    shared = len(d_nets & relay_nets)
-                    _flyback_candidates.append((shared, r, net_name))
-        if _flyback_candidates:
-            # Pick diode with most shared nets, break ties by ref name
-            _flyback_candidates.sort(key=lambda t: (-t[0], t[1]))
-            _, best_d, best_net = _flyback_candidates[0]
+        # Find flyback diode
+        best_d, best_net = _find_flyback_diode(
+            relay_nets, net_to_refs, ref_to_nets, comp_map, claimed, refs,
+        )
+        if best_d:
             refs.append(best_d)
-            all_nets.add(best_net)
+            if best_net:
+                all_nets.add(best_net)
 
         # Find gate resistor — connected to transistor
         if transistor:
@@ -286,22 +412,11 @@ def _detect_relay_drivers(
 
         # Find LED on collector path
         if transistor:
-            t_nets = ref_to_nets.get(transistor, set())
-            for net_name in t_nets:
-                if _is_gnd_net(net_name) or _is_power_net(net_name):
-                    continue
-                for r in net_to_refs.get(net_name, set()):
-                    if r in refs:
-                        continue
-                    if _ref_prefix(r) == "D" and r not in claimed:
-                        # Check if it looks like an LED
-                        comp = comp_map.get(r)
-                        if comp and "LED" in (comp.value or "").upper():
-                            refs.append(r)
-                            break
-                    elif _ref_prefix(r) == "LED" and r not in claimed:
-                        refs.append(r)
-                        break
+            led = _find_collector_led(
+                transistor, ref_to_nets, net_to_refs, comp_map, claimed, refs,
+            )
+            if led:
+                refs.append(led)
 
         # Find LED current-limiting resistor
         led_refs = [r for r in refs if _ref_prefix(r) in ("LED", "D")]
@@ -324,65 +439,11 @@ def _detect_relay_drivers(
             claimed.add(r)
 
         # Build hierarchical structure
-        driver_refs: list[str] = []
-        led_node_refs: list[str] = []
-        flyback_ref: str | None = None
-        gate_resistor_ref: str | None = None
-        led_ref: str | None = None
-        led_resistor_ref: str | None = None
-
-        for r in refs:
-            if r == relay.ref:
-                continue
-            prefix = _ref_prefix(r)
-            if prefix == "Q":
-                driver_refs.append(r)
-            elif prefix == "D":
-                comp = comp_map.get(r)
-                if comp and "LED" in (comp.value or "").upper():
-                    led_ref = r
-                else:
-                    flyback_ref = r
-            elif prefix == "LED":
-                led_ref = r
-            elif prefix == "R":
-                # Determine if gate resistor or LED resistor
-                if transistor and r in (adj.get(transistor, set())):
-                    gate_resistor_ref = r
-                else:
-                    led_resistor_ref = r
-
-        # Driver subgroup: Q + D_flyback + R_gate
-        if flyback_ref:
-            driver_refs.append(flyback_ref)
-        if gate_resistor_ref:
-            driver_refs.append(gate_resistor_ref)
-
-        # LED subgroup
-        if led_ref:
-            led_node_refs.append(led_ref)
-        if led_resistor_ref:
-            led_node_refs.append(led_resistor_ref)
-
-        children: list[SubCircuitNode] = []
-        if driver_refs:
-            children.append(SubCircuitNode(
-                role="driver",
-                refs=tuple(sorted(driver_refs)),
-                anchor_ref=transistor or driver_refs[0],
-            ))
-        if led_node_refs:
-            children.append(SubCircuitNode(
-                role="led_indicator",
-                refs=tuple(sorted(led_node_refs)),
-                anchor_ref=led_ref or led_node_refs[0],
-            ))
-
-        hierarchy = SubCircuitNode(
-            role="relay_body",
-            refs=(relay.ref,),
-            anchor_ref=relay.ref,
-            children=tuple(children),
+        driver_refs, led_node_refs, led_ref, _ = _classify_relay_hierarchy_refs(
+            refs, relay.ref, transistor, comp_map, adj,
+        )
+        hierarchy = _build_relay_hierarchy(
+            relay.ref, transistor, driver_refs, led_node_refs, led_ref,
         )
 
         results.append(DetectedSubCircuit(
@@ -398,6 +459,252 @@ def _detect_relay_drivers(
     return results
 
 
+def _build_ref_group_index(
+    requirements: ProjectRequirements,
+) -> dict[str, str]:
+    """Build ref -> FeatureBlock name index for same-group checks."""
+    index: dict[str, str] = {}
+    for feat in requirements.features:
+        for fc in feat.components:
+            r = fc.ref if hasattr(fc, "ref") else fc
+            index[r] = feat.name
+    return index
+
+
+_VIN_KEYWORDS = ("VIN", "IN")
+_VOUT_KEYWORDS = ("VOUT", "OUT")
+_V_TO_V_PATTERN = re.compile(
+    r"(\d+)(?:\s*[-/]\s*(\d+))?\s*V\s+TO\s+(\d+(?:\.\d+)?)\s*V",
+)
+
+
+def _domains_from_pin_names(
+    comp: Component,
+) -> tuple[VoltageDomain | None, VoltageDomain | None]:
+    """Infer input/output domains from VIN/VOUT pin net voltages."""
+    input_d: VoltageDomain | None = None
+    output_d: VoltageDomain | None = None
+    for pin in comp.pins:
+        if not pin.net:
+            continue
+        pname = (pin.name or "").upper()
+        v = _parse_voltage_from_net(pin.net)
+        if v is None or v <= 0:
+            continue
+        vd = _classify_voltage(v)
+        if any(kw in pname for kw in _VIN_KEYWORDS):
+            input_d = vd
+        elif any(kw in pname for kw in _VOUT_KEYWORDS):
+            output_d = vd
+    return input_d, output_d
+
+
+def _output_domain_from_fb_pin(comp: Component) -> VoltageDomain | None:
+    """Infer output domain from a feedback (FB) pin's net voltage."""
+    for pin in comp.pins:
+        if not pin.net:
+            continue
+        pname = (pin.name or "").upper()
+        if "FB" in pname:
+            v = _parse_voltage_from_net(pin.net)
+            if v is not None and v > 0:
+                return _classify_voltage(v)
+    return None
+
+
+def _domains_from_description(
+    desc: str,
+    input_domain: VoltageDomain | None,
+    output_domain: VoltageDomain | None,
+) -> tuple[VoltageDomain | None, VoltageDomain | None]:
+    """Infer input/output domains from description text like '8-32V to 5V'."""
+    m = _V_TO_V_PATTERN.search(desc.upper())
+    if not m:
+        return input_domain, output_domain
+    vin_v = float(m.group(2) or m.group(1))
+    vout_v = float(m.group(3))
+    if input_domain is None and vin_v > 0:
+        input_domain = _classify_voltage(vin_v)
+    if output_domain is None and vout_v > 0:
+        output_domain = _classify_voltage(vout_v)
+    return input_domain, output_domain
+
+
+def _input_domain_from_highest_net(
+    comp_nets: set[str],
+    exclude_net: str | None,
+) -> VoltageDomain | None:
+    """Fallback: infer input domain from the highest-voltage net."""
+    exclude = {exclude_net} if exclude_net else set()
+    best: VoltageDomain | None = None
+    for net_name in comp_nets - exclude:
+        v = _parse_voltage_from_net(net_name)
+        if v is not None and v > 0:
+            d = _classify_voltage(v)
+            if best is None or d == VoltageDomain.VIN_24V:
+                best = d
+    return best
+
+
+def _classify_regulator_domains(
+    comp: Component,
+    comp_nets: set[str],
+    inductor_output_net: str | None,
+) -> tuple[VoltageDomain | None, VoltageDomain | None, VoltageDomain]:
+    """Classify input/output voltage domains for a regulator IC.
+
+    Tries pin names, inductor output net, FB pin net, description text,
+    and falls back to highest-voltage net.
+
+    Returns (input_domain, output_domain, primary_domain).
+    """
+    domain = VoltageDomain.POWER_5V
+
+    # Strategy 1: pin names
+    input_domain, output_domain = _domains_from_pin_names(comp)
+    if output_domain is not None:
+        domain = output_domain
+
+    # Strategy 2: inductor output net
+    if output_domain is None and inductor_output_net:
+        v = _parse_voltage_from_net(inductor_output_net)
+        if v is not None and v > 0:
+            output_domain = _classify_voltage(v)
+            domain = output_domain
+
+    # Strategy 3: FB pin net
+    if output_domain is None:
+        fb_d = _output_domain_from_fb_pin(comp)
+        if fb_d is not None:
+            output_domain = fb_d
+            domain = output_domain
+
+    # Strategy 4: description text
+    if input_domain is None or output_domain is None:
+        input_domain, output_domain = _domains_from_description(
+            comp.description or "", input_domain, output_domain,
+        )
+        if output_domain is not None:
+            domain = output_domain
+
+    # Strategy 5: highest-voltage net
+    if input_domain is None:
+        input_domain = _input_domain_from_highest_net(comp_nets, inductor_output_net)
+
+    return input_domain, output_domain, domain
+
+
+_BUCK_IO_PIN_KEYWORDS = ("VIN", "VOUT", "IN", "OUT", "FB")
+_BUCK_BST_PIN_KEYWORDS = ("BST", "BOOT")
+
+
+def _collect_buck_signal_nets(comp: Component) -> set[str]:
+    """Collect signal nets from a buck converter's I/O and bootstrap pins.
+
+    Skips global power rails on VIN/VOUT/FB pins since they connect to
+    many unrelated components.
+    """
+    nets: set[str] = set()
+    for pin in comp.pins:
+        if not pin.net:
+            continue
+        pname = (pin.name or "").upper()
+        if any(kw in pname for kw in _BUCK_IO_PIN_KEYWORDS):
+            if not _is_power_net(pin.net):
+                nets.add(pin.net)
+        elif any(kw in pname for kw in _BUCK_BST_PIN_KEYWORDS):
+            nets.add(pin.net)
+    return nets
+
+
+def _find_buck_inductor(
+    comp: Component,
+    net_to_refs: dict[str, set[str]],
+    comp_map: dict[str, Component],
+    claimed: set[str],
+) -> tuple[str | None, str | None, set[str]]:
+    """Find inductor on SW pin and its output net.
+
+    Returns (inductor_ref, inductor_output_net, collected_nets).
+    """
+    collected: set[str] = set()
+    for pin in comp.pins:
+        if not pin.net:
+            continue
+        if not (pin.name and "SW" in pin.name.upper()):
+            continue
+        for r in net_to_refs.get(pin.net, set()):
+            if _ref_prefix(r) != "L" or r in claimed:
+                continue
+            collected.add(pin.net)
+            ind_comp = comp_map.get(r)
+            output_net: str | None = None
+            if ind_comp:
+                for ip in ind_comp.pins:
+                    if ip.net and ip.net != pin.net:
+                        output_net = ip.net
+                        collected.add(ip.net)
+            return r, output_net, collected
+    return None, None, collected
+
+
+_MAX_CAPS_PER_NET = 2
+_MAX_FB_RESISTORS = 2
+
+
+def _collect_buck_passives(
+    comp: Component,
+    inductor_output_net: str | None,
+    net_to_refs: dict[str, set[str]],
+    comp_map: dict[str, Component],
+    ref_group: dict[str, str],
+    claimed: set[str],
+    refs: list[str],
+) -> set[str]:
+    """Collect caps and feedback resistors on buck signal nets.
+
+    Mutates *refs* in place. Returns the set of nets that contributed refs.
+    """
+    signal_nets = _collect_buck_signal_nets(comp)
+    output_is_power = False
+    if inductor_output_net:
+        signal_nets.add(inductor_output_net)
+        output_is_power = _is_power_net(inductor_output_net)
+
+    collected_nets: set[str] = set()
+    buck_group = ref_group.get(comp.ref, "")
+
+    for net_name in sorted(signal_nets):
+        cap_count = 0
+        fb_r_count = 0
+        allow_resistors = not _is_power_net(net_name)
+        max_caps = 1 if (
+            net_name == inductor_output_net and output_is_power
+        ) else _MAX_CAPS_PER_NET
+
+        for r in sorted(net_to_refs.get(net_name, set())):
+            if r in refs or r in claimed:
+                continue
+            rc = comp_map.get(r)
+            if not rc:
+                continue
+            prefix = _ref_prefix(r)
+            if prefix == "C" and cap_count < max_caps:
+                if output_is_power and net_name == inductor_output_net:
+                    cap_group = ref_group.get(r, "")
+                    if cap_group and buck_group and cap_group != buck_group:
+                        continue
+                refs.append(r)
+                collected_nets.add(net_name)
+                cap_count += 1
+            elif prefix == "R" and allow_resistors and fb_r_count < _MAX_FB_RESISTORS:
+                refs.append(r)
+                collected_nets.add(net_name)
+                fb_r_count += 1
+
+    return collected_nets
+
+
 def _detect_buck_converters(
     requirements: ProjectRequirements,
     net_to_refs: dict[str, set[str]],
@@ -411,17 +718,10 @@ def _detect_buck_converters(
     buck_keywords = {"BUCK", "TPS54", "TPS56", "MP1584", "LM2596", "AP63",
                      "SY8089", "MT3608", "XL1509"}
 
-    # Build ref→FeatureBlock map to avoid cross-group cap claiming
-    _ref_group: dict[str, str] = {}
-    for feat in requirements.features:
-        for fc in feat.components:
-            r = fc.ref if hasattr(fc, "ref") else fc
-            _ref_group[r] = feat.name
+    ref_group: dict[str, str] = _build_ref_group_index(requirements)
 
     for comp in requirements.components:
-        if comp.ref in claimed:
-            continue
-        if not comp.ref.startswith("U"):
+        if comp.ref in claimed or not comp.ref.startswith("U"):
             continue
         val_desc = f"{comp.value} {comp.description or ''}".upper()
         is_buck = any(kw in val_desc for kw in buck_keywords)
@@ -436,155 +736,25 @@ def _detect_buck_converters(
         comp_nets = ref_to_nets.get(comp.ref, set())
         all_nets: set[str] = set()
 
-        # Find inductor on SW net and track inductor output net
-        inductor_output_net: str | None = None
-        for pin in comp.pins:
-            if not pin.net:
-                continue
-            if pin.name and "SW" in pin.name.upper():
-                for r in net_to_refs.get(pin.net, set()):
-                    if _ref_prefix(r) == "L" and r not in claimed:
-                        refs.append(r)
-                        all_nets.add(pin.net)
-                        # Find inductor's other net (output rail)
-                        ind_comp = comp_map.get(r)
-                        if ind_comp:
-                            for ip in ind_comp.pins:
-                                if ip.net and ip.net != pin.net:
-                                    inductor_output_net = ip.net
-                                    all_nets.add(ip.net)
-                        break
+        # Find inductor on SW net
+        ind_ref, inductor_output_net, ind_nets = _find_buck_inductor(
+            comp, net_to_refs, comp_map, claimed,
+        )
+        if ind_ref:
+            refs.append(ind_ref)
+        all_nets.update(ind_nets)
 
-        # Find caps/resistors on VIN/VOUT/FB nets. Skip global power rails
-        # (they connect to dozens of components) but allow the specific
-        # inductor output net and BST net even if they look like power.
-        _MAX_CAPS_PER_NET = 2
-        _MAX_FB_RESISTORS = 2
-        _buck_signal_nets: set[str] = set()
-        for pin in comp.pins:
-            if not pin.net:
-                continue
-            pname = (pin.name or "").upper()
-            if any(kw in pname for kw in ("VIN", "VOUT", "IN", "OUT", "FB")):
-                # Skip global power rails — they connect to everything
-                if _is_power_net(pin.net):
-                    continue
-                _buck_signal_nets.add(pin.net)
-            elif any(kw in pname for kw in ("BST", "BOOT")):
-                _buck_signal_nets.add(pin.net)
+        # Collect caps/resistors on signal nets
+        passive_nets = _collect_buck_passives(
+            comp, inductor_output_net, net_to_refs, comp_map,
+            ref_group, claimed, refs,
+        )
+        all_nets.update(passive_nets)
 
-        # Also include inductor output net (even if it's a power rail name
-        # like BUCK_5V or +3V3) — but only for caps (not resistors, which
-        # are pull-ups/dividers for other purposes).
-        # For power rails (+3V3, +5V etc), limit to 1 cap to avoid grabbing
-        # decoupling caps that belong to downstream ICs.
-        _output_net_is_power = False
-        if inductor_output_net:
-            _buck_signal_nets.add(inductor_output_net)
-            _output_net_is_power = _is_power_net(inductor_output_net)
-
-        for net_name in sorted(_buck_signal_nets):
-            cap_count = 0
-            fb_r_count = 0
-            # Only allow resistors on non-power feedback nets
-            allow_resistors = not _is_power_net(net_name)
-            # For the inductor output net on a power rail, limit to 1 cap
-            # to avoid claiming decoupling caps of downstream ICs
-            max_caps = 1 if (
-                net_name == inductor_output_net and _output_net_is_power
-            ) else _MAX_CAPS_PER_NET
-            buck_group = _ref_group.get(comp.ref, "")
-            for r in sorted(net_to_refs.get(net_name, set())):
-                if r in refs or r in claimed:
-                    continue
-                rc = comp_map.get(r)
-                is_cap = rc and _ref_prefix(r) == "C"
-                is_fb_r = rc and _ref_prefix(r) == "R" and allow_resistors
-                if is_cap:
-                    if cap_count >= max_caps:
-                        continue
-                    # On power rail output nets, only claim caps from same
-                    # FeatureBlock to avoid stealing downstream IC decoupling
-                    if _output_net_is_power and net_name == inductor_output_net:
-                        cap_group = _ref_group.get(r, "")
-                        if cap_group and buck_group and cap_group != buck_group:
-                            continue
-                    refs.append(r)
-                    all_nets.add(net_name)
-                    cap_count += 1
-                elif is_fb_r:
-                    if fb_r_count >= _MAX_FB_RESISTORS:
-                        continue
-                    refs.append(r)
-                    all_nets.add(net_name)
-                    fb_r_count += 1
-
-        # Determine input/output domains from pin nets
-        input_domain: VoltageDomain | None = None
-        output_domain: VoltageDomain | None = None
-        domain = VoltageDomain.POWER_5V
-
-        for pin in comp.pins:
-            if not pin.net:
-                continue
-            pname = (pin.name or "").upper()
-            v = _parse_voltage_from_net(pin.net)
-            if v is not None and v > 0:
-                vd = _classify_voltage(v)
-                if any(kw in pname for kw in ("VIN", "IN")):
-                    input_domain = vd
-                elif any(kw in pname for kw in ("VOUT", "OUT")):
-                    output_domain = vd
-                    domain = vd
-
-        # Infer output domain from inductor output net (e.g. BUCK_5V, +3V3)
-        if output_domain is None and inductor_output_net:
-            v = _parse_voltage_from_net(inductor_output_net)
-            if v is not None and v > 0:
-                output_domain = _classify_voltage(v)
-                domain = output_domain
-
-        # Infer output domain from FB pin net as last resort
-        if output_domain is None:
-            for pin in comp.pins:
-                if not pin.net:
-                    continue
-                pname = (pin.name or "").upper()
-                if "FB" in pname:
-                    v = _parse_voltage_from_net(pin.net)
-                    if v is not None and v > 0:
-                        output_domain = _classify_voltage(v)
-                        domain = output_domain
-                        break
-
-        # Infer domains from component description (e.g. "8-32V to 5V")
-        # Must run BEFORE generic net fallback to avoid picking output net as input
-        desc_upper = (comp.description or "").upper()
-        if input_domain is None or output_domain is None:
-            # Match "X-YV to ZV" or "XV to ZV" patterns
-            m = re.search(
-                r"(\d+)(?:\s*[-/]\s*(\d+))?\s*V\s+TO\s+(\d+(?:\.\d+)?)\s*V",
-                desc_upper,
-            )
-            if m:
-                # Use max of range for input (e.g. "8-32V" → 32)
-                vin_v = float(m.group(2) or m.group(1))
-                vout_v = float(m.group(3))
-                if input_domain is None and vin_v > 0:
-                    input_domain = _classify_voltage(vin_v)
-                if output_domain is None and vout_v > 0:
-                    output_domain = _classify_voltage(vout_v)
-                    domain = output_domain
-
-        if input_domain is None:
-            # Fall back to highest-voltage net (exclude output net to avoid confusion)
-            exclude = {inductor_output_net} if inductor_output_net else set()
-            for net_name in comp_nets - exclude:
-                v = _parse_voltage_from_net(net_name)
-                if v is not None and v > 0:
-                    d = _classify_voltage(v)
-                    if input_domain is None or (v > 0 and d == VoltageDomain.VIN_24V):
-                        input_domain = d
+        # Determine input/output domains
+        input_domain, output_domain, domain = _classify_regulator_domains(
+            comp, comp_nets, inductor_output_net,
+        )
 
         for r in refs:
             claimed.add(r)
@@ -645,29 +815,12 @@ def _detect_ldo_regulators(
                         all_nets.add(pin.net)
 
         # Determine input/output domains
-        input_domain: VoltageDomain | None = None
-        output_domain: VoltageDomain | None = None
-        domain = VoltageDomain.DIGITAL_3V3
-
-        for pin in comp.pins:
-            if not pin.net:
-                continue
-            pname = (pin.name or "").upper()
-            v = _parse_voltage_from_net(pin.net)
-            if v is not None and v > 0:
-                vd = _classify_voltage(v)
-                if any(kw in pname for kw in ("VIN", "IN")):
-                    input_domain = vd
-                elif any(kw in pname for kw in ("VOUT", "OUT")):
-                    output_domain = vd
-                    domain = vd
-
-        if input_domain is None:
-            for net_name in comp_nets:
-                v = _parse_voltage_from_net(net_name)
-                if v is not None and v > 0:
-                    input_domain = _classify_voltage(v)
-                    break
+        input_domain, output_domain, domain = _classify_regulator_domains(
+            comp, comp_nets, None,
+        )
+        # LDO default domain is 3V3 if not inferred
+        if output_domain is None:
+            domain = VoltageDomain.DIGITAL_3V3
 
         for r in refs:
             claimed.add(r)
@@ -729,6 +882,50 @@ def _detect_crystals(
     return results
 
 
+def _find_best_decoupling_ic(
+    cap_power: set[str],
+    cap_group: str,
+    ics: list[Component],
+    ic_power_nets: dict[str, set[str]],
+    ref_group: dict[str, str],
+    claimed: set[str],
+) -> tuple[str | None, int]:
+    """Find the IC with the best power-net overlap for a decoupling cap.
+
+    Prefers ICs in the same FeatureBlock, then highest overlap count.
+    Returns (ic_ref, overlap_count).
+    """
+    best_ic: str | None = None
+    best_overlap = 0
+    best_same_group = False
+    for ic in ics:
+        if ic.ref in claimed:
+            continue
+        overlap = len(cap_power & ic_power_nets.get(ic.ref, set()))
+        if overlap <= 0:
+            continue
+        same_group = ref_group.get(ic.ref, "") == cap_group
+        if same_group and not best_same_group:
+            best_ic = ic.ref
+            best_overlap = overlap
+            best_same_group = True
+        elif same_group == best_same_group and overlap > best_overlap:
+            best_ic = ic.ref
+            best_overlap = overlap
+    return best_ic, best_overlap
+
+
+def _domain_from_power_nets(shared_nets: set[str]) -> VoltageDomain:
+    """Determine voltage domain from a set of shared power nets."""
+    for net_name in shared_nets:
+        if _is_gnd_net(net_name):
+            continue
+        v = _parse_voltage_from_net(net_name)
+        if v is not None:
+            return _classify_voltage(v)
+    return VoltageDomain.DIGITAL_3V3
+
+
 def _detect_decoupling_pairs(
     requirements: ProjectRequirements,
     net_to_refs: dict[str, set[str]],
@@ -748,18 +945,10 @@ def _detect_decoupling_pairs(
     # Build IC -> power nets mapping
     ic_power_nets: dict[str, set[str]] = {}
     for ic in ics:
-        pnets: set[str] = set()
-        for net_name in ref_to_nets.get(ic.ref, set()):
-            if _is_power_net(net_name):
-                pnets.add(net_name)
+        pnets = {n for n in ref_to_nets.get(ic.ref, set()) if _is_power_net(n)}
         ic_power_nets[ic.ref] = pnets
 
-    # Build ref -> FeatureBlock group map for same-group preference
-    _ref_group: dict[str, str] = {}
-    for feat in requirements.features:
-        for comp in feat.components:
-            r = comp.ref if hasattr(comp, "ref") else comp
-            _ref_group[r] = feat.name
+    ref_group = _build_ref_group_index(requirements)
 
     # Collect caps per IC anchor
     ic_caps: dict[str, list[str]] = {}
@@ -770,27 +959,11 @@ def _detect_decoupling_pairs(
             continue
         cap_nets = ref_to_nets.get(cap.ref, set())
         cap_power = {n for n in cap_nets if _is_power_net(n)}
-        cap_group = _ref_group.get(cap.ref, "")
+        cap_group = ref_group.get(cap.ref, "")
 
-        # Find the IC sharing the most power nets, preferring same FeatureBlock
-        best_ic: str | None = None
-        best_overlap = 0
-        best_same_group = False
-        for ic in ics:
-            if ic.ref in claimed:
-                continue
-            overlap = len(cap_power & ic_power_nets.get(ic.ref, set()))
-            if overlap <= 0:
-                continue
-            same_group = _ref_group.get(ic.ref, "") == cap_group
-            # Prefer same-group IC, then highest overlap
-            if same_group and not best_same_group:
-                best_ic = ic.ref
-                best_overlap = overlap
-                best_same_group = True
-            elif same_group == best_same_group and overlap > best_overlap:
-                best_ic = ic.ref
-                best_overlap = overlap
+        best_ic, best_overlap = _find_best_decoupling_ic(
+            cap_power, cap_group, ics, ic_power_nets, ref_group, claimed,
+        )
 
         if best_ic and best_overlap > 0:
             claimed.add(cap.ref)
@@ -799,22 +972,14 @@ def _detect_decoupling_pairs(
             ic_shared_nets.setdefault(best_ic, set()).update(shared)
 
     # Build one sub-circuit per IC with same-group decoupling caps only.
-    # Cross-group caps stay claimed (so they aren't picked up elsewhere)
-    # but are excluded from the subcircuit to avoid inflating spread metrics.
     results: list[DetectedSubCircuit] = []
     for ic_ref, cap_refs in ic_caps.items():
-        ic_grp = _ref_group.get(ic_ref, "")
-        same_group_caps = [c for c in cap_refs if _ref_group.get(c, "") == ic_grp]
+        ic_grp = ref_group.get(ic_ref, "")
+        same_group_caps = [c for c in cap_refs if ref_group.get(c, "") == ic_grp]
         if not same_group_caps:
-            continue  # No same-group caps — skip this subcircuit
+            continue
         shared = ic_shared_nets.get(ic_ref, set())
-        domain = VoltageDomain.DIGITAL_3V3
-        for net_name in shared:
-            if not _is_gnd_net(net_name):
-                v = _parse_voltage_from_net(net_name)
-                if v is not None:
-                    domain = _classify_voltage(v)
-                    break
+        domain = _domain_from_power_nets(shared)
 
         all_refs = tuple(sorted([ic_ref, *same_group_caps]))
         results.append(DetectedSubCircuit(
@@ -937,6 +1102,56 @@ _I2C_SPI_KEYWORDS: frozenset[str] = frozenset({
 })
 
 
+_DEBUG_DISPLAY_KEYWORDS: tuple[str, ...] = (
+    "DEBUG", "JTAG", "SWD", "DISPLAY", "OLED", "LCD", "UART", "SERIAL",
+)
+
+
+def _is_mcu_peripheral_connector(comp: Component) -> bool:
+    """Return True if *comp* is a debug/display or small signal connector."""
+    val_desc = f"{comp.value} {comp.description or ''}".upper()
+    if any(kw in val_desc for kw in _DEBUG_DISPLAY_KEYWORDS):
+        return True
+    pin_count = len(comp.pins) if comp.pins else 0
+    return 2 <= pin_count <= 6
+
+
+def _is_bus_pullup_resistor(
+    ref: str,
+    ref_to_nets: dict[str, set[str]],
+) -> bool:
+    """Return True if resistor *ref* is on an I2C/SPI bus net."""
+    r_nets = ref_to_nets.get(ref, set())
+    return any(
+        any(kw in n.upper() for kw in _I2C_SPI_KEYWORDS)
+        for n in r_nets
+    )
+
+
+def _collect_resistor_led_pair(
+    resistor_ref: str,
+    mcu_ref: str,
+    adj: dict[str, set[str]],
+    comp_map: dict[str, Component],
+    claimed: set[str],
+    peripheral_refs: list[str],
+) -> None:
+    """If *resistor_ref* drives an LED, append both to *peripheral_refs*."""
+    r_neighbours = adj.get(resistor_ref, set())
+    for rn in r_neighbours:
+        if rn in claimed or rn == mcu_ref:
+            continue
+        if _ref_prefix(rn) not in ("LED", "D"):
+            continue
+        comp = comp_map.get(rn)
+        if comp and "LED" in (comp.value or "").upper():
+            if resistor_ref not in peripheral_refs:
+                peripheral_refs.append(resistor_ref)
+            if rn not in peripheral_refs:
+                peripheral_refs.append(rn)
+            return
+
+
 def _detect_mcu_peripherals(
     requirements: ProjectRequirements,
     adj: dict[str, set[str]],
@@ -957,7 +1172,6 @@ def _detect_mcu_peripherals(
 
     comp_map = {c.ref: c for c in requirements.components}
 
-    # Walk 1-hop signal adjacency from MCU
     mcu_neighbours = adj.get(mcu_ref, set())
     peripheral_refs: list[str] = []
     peripheral_prefixes = {"SW", "LED", "BTN", "TP"}
@@ -969,43 +1183,18 @@ def _detect_mcu_peripherals(
         if prefix in peripheral_prefixes:
             peripheral_refs.append(nb)
             continue
-        # Check for debug/display/small connectors
         if prefix == "J":
             comp = comp_map.get(nb)
-            if comp:
-                val_desc = f"{comp.value} {comp.description or ''}".upper()
-                # Debug/display connectors
-                if any(kw in val_desc for kw in ("DEBUG", "JTAG", "SWD", "DISPLAY",
-                                                   "OLED", "LCD", "UART", "SERIAL")):
-                    peripheral_refs.append(nb)
-                    continue
-                # Small connectors (2-6 pins) on MCU signal nets
-                pin_count = len(comp.pins) if comp.pins else 0
-                if 2 <= pin_count <= 6 and nb not in peripheral_refs:
-                    peripheral_refs.append(nb)
-                    continue
-        # I2C/SPI pull-up resistors: R on SDA/SCL/MOSI/MISO nets connected to MCU
-        if prefix == "R":
-            r_nets = ref_to_nets.get(nb, set())
-            is_bus_pullup = any(
-                any(kw in n.upper() for kw in _I2C_SPI_KEYWORDS)
-                for n in r_nets
-            )
-            if is_bus_pullup and nb not in peripheral_refs:
+            if comp and _is_mcu_peripheral_connector(comp) and nb not in peripheral_refs:
                 peripheral_refs.append(nb)
                 continue
-            # Also pick up LEDs connected via resistor (2-hop)
-            r_neighbours = adj.get(nb, set())
-            for rn in r_neighbours:
-                if rn in claimed or rn == mcu_ref:
-                    continue
-                if _ref_prefix(rn) in ("LED", "D"):
-                    comp = comp_map.get(rn)
-                    if comp and "LED" in (comp.value or "").upper():
-                        if nb not in peripheral_refs:
-                            peripheral_refs.append(nb)
-                        if rn not in peripheral_refs:
-                            peripheral_refs.append(rn)
+        if prefix == "R":
+            if _is_bus_pullup_resistor(nb, ref_to_nets) and nb not in peripheral_refs:
+                peripheral_refs.append(nb)
+                continue
+            _collect_resistor_led_pair(
+                nb, mcu_ref, adj, comp_map, claimed, peripheral_refs,
+            )
 
     if not peripheral_refs:
         return []
@@ -1054,6 +1243,57 @@ def _detect_rf_antenna(
     return results
 
 
+def _find_divider_connector(
+    divider_nets: set[str],
+    net_to_refs: dict[str, set[str]],
+    divider_refs: tuple[str, ...],
+    claimed: set[str],
+) -> str | None:
+    """Find a connector (J*) on signal nets connected to a voltage divider."""
+    for net_name in divider_nets:
+        if _is_power_net(net_name) or _is_gnd_net(net_name):
+            continue
+        for ref in net_to_refs.get(net_name, set()):
+            if ref in claimed or ref in divider_refs:
+                continue
+            if _ref_prefix(ref) == "J":
+                return ref
+    return None
+
+
+def _divider_has_mcu_connection(
+    midpoint_nets: tuple[str, ...],
+    net_to_refs: dict[str, set[str]],
+    mcu_ref: str | None,
+) -> bool:
+    """Check if divider midpoint nets reach the MCU or an ADC-keyword net."""
+    for net_name in midpoint_nets:
+        for ref in net_to_refs.get(net_name, set()):
+            if ref == mcu_ref:
+                return True
+            if any(kw in net_name.upper() for kw in _ANALOG_KEYWORDS):
+                return True
+    return False
+
+
+def _collect_protection_components(
+    divider_nets: set[str],
+    net_to_refs: dict[str, set[str]],
+    claimed: set[str],
+    adc_refs: list[str],
+) -> None:
+    """Append TVS/zener protection components on signal nets to *adc_refs*."""
+    for net_name in divider_nets:
+        if _is_power_net(net_name) or _is_gnd_net(net_name):
+            continue
+        for ref in net_to_refs.get(net_name, set()):
+            if ref in claimed or ref in adc_refs:
+                continue
+            if _ref_prefix(ref) in ("D", "Z"):
+                adc_refs.append(ref)
+                claimed.add(ref)
+
+
 def _detect_adc_channels(
     requirements: ProjectRequirements,
     net_to_refs: dict[str, set[str]],
@@ -1072,63 +1312,29 @@ def _detect_adc_channels(
     results: list[DetectedSubCircuit] = []
     mcu_ref = _find_mcu_ref(requirements)
 
-    # Find voltage divider subcircuits
     dividers = [sc for sc in subcircuits
                 if sc.circuit_type == SubCircuitType.VOLTAGE_DIVIDER]
 
     for divider in dividers:
-        # Get all nets connected to divider components
         divider_nets: set[str] = set()
         for ref in divider.refs:
             divider_nets.update(ref_to_nets.get(ref, set()))
 
-        # Look for connected connector (J*) via shared signal nets
-        connector_ref: str | None = None
-        for net_name in divider_nets:
-            if _is_power_net(net_name) or _is_gnd_net(net_name):
-                continue
-            for ref in net_to_refs.get(net_name, set()):
-                if ref in claimed or ref in divider.refs:
-                    continue
-                if _ref_prefix(ref) == "J":
-                    connector_ref = ref
-                    break
-            if connector_ref:
-                break
-
-        # Look for MCU/ADC connection via divider midpoint net
-        has_mcu_connection = False
-        for net_name in divider.net_connections:
-            for ref in net_to_refs.get(net_name, set()):
-                if ref == mcu_ref:
-                    has_mcu_connection = True
-                    break
-                # Check for ADC keyword in net name
-                if any(kw in net_name.upper() for kw in _ANALOG_KEYWORDS):
-                    has_mcu_connection = True
-                    break
-            if has_mcu_connection:
-                break
-
-        if not connector_ref or not has_mcu_connection:
+        connector_ref = _find_divider_connector(
+            divider_nets, net_to_refs, divider.refs, claimed,
+        )
+        if not connector_ref:
+            continue
+        if not _divider_has_mcu_connection(
+            divider.net_connections, net_to_refs, mcu_ref,
+        ):
             continue
 
-        # Build ADC channel subcircuit
         adc_refs: list[str] = list(divider.refs)
         adc_refs.append(connector_ref)
         claimed.add(connector_ref)
 
-        # Look for protection components (e.g. TVS diode) on the divider nets
-        for net_name in divider_nets:
-            if _is_power_net(net_name) or _is_gnd_net(net_name):
-                continue
-            for ref in net_to_refs.get(net_name, set()):
-                if ref in claimed or ref in adc_refs:
-                    continue
-                prefix = _ref_prefix(ref)
-                if prefix in ("D", "Z"):  # TVS diodes, zener protection
-                    adc_refs.append(ref)
-                    claimed.add(ref)
+        _collect_protection_components(divider_nets, net_to_refs, claimed, adc_refs)
 
         results.append(DetectedSubCircuit(
             circuit_type=SubCircuitType.ADC_CHANNEL,
@@ -1254,6 +1460,23 @@ def compute_power_flow_topology(
 # ---------------------------------------------------------------------------
 
 
+_FEEDBACK_KEYWORDS: frozenset[str] = frozenset({"FB", "FEEDBACK", "SENSE"})
+_CONTROL_KEYWORDS: frozenset[str] = frozenset(
+    {"CTRL", "CONTROL", "EN", "ENABLE"},
+)
+
+
+def _classify_affinity_reason(net_name_upper: str) -> str | None:
+    """Classify cross-domain affinity reason from net name keywords."""
+    if any(kw in net_name_upper for kw in _ANALOG_KEYWORDS):
+        return "measurement"
+    if any(kw in net_name_upper for kw in _FEEDBACK_KEYWORDS):
+        return "feedback"
+    if any(kw in net_name_upper for kw in _CONTROL_KEYWORDS):
+        return "control"
+    return None
+
+
 def detect_cross_domain_affinities(
     requirements: ProjectRequirements,
     domain_map: dict[str, VoltageDomain],
@@ -1296,13 +1519,7 @@ def detect_cross_domain_affinities(
             continue
 
         # Classify affinity reason from net name
-        reason: str | None = None
-        if any(kw in net_name for kw in _ANALOG_KEYWORDS):
-            reason = "measurement"
-        elif any(kw in net_name for kw in ("FB", "FEEDBACK", "SENSE")):
-            reason = "feedback"
-        elif any(kw in net_name for kw in ("CTRL", "CONTROL", "EN", "ENABLE")):
-            reason = "control"
+        reason = _classify_affinity_reason(net_name)
 
         if reason is None:
             continue
@@ -1468,6 +1685,69 @@ def classify_voltage_domains(
     return result
 
 
+def _collect_active_domains(
+    domain_subcircuits: dict[VoltageDomain, list[DetectedSubCircuit]],
+    domain_loose: dict[VoltageDomain, list[str]],
+    topology: PowerFlowTopology | None,
+) -> list[VoltageDomain]:
+    """Return ordered list of domains that have components."""
+    active: list[VoltageDomain] = []
+
+    def _has_components(d: VoltageDomain) -> bool:
+        return d in domain_subcircuits or d in domain_loose
+
+    if topology is not None and len(topology.domain_order) > 0:
+        for d in topology.domain_order:
+            if _has_components(d):
+                active.append(d)
+        for d in VoltageDomain:
+            if d not in active and _has_components(d):
+                active.append(d)
+    else:
+        priority = [
+            VoltageDomain.VIN_24V, VoltageDomain.POWER_5V,
+            VoltageDomain.ANALOG, VoltageDomain.DIGITAL_3V3,
+            VoltageDomain.MIXED,
+        ]
+        for d in priority:
+            if _has_components(d):
+                active.append(d)
+    return active
+
+
+def _compute_zone_rects(
+    active_domains: list[VoltageDomain],
+    board_width: float,
+    board_height: float,
+    boundary_w: float,
+) -> dict[VoltageDomain, tuple[float, float, float, float]]:
+    """Compute rectangular zone areas for each domain.
+
+    Landscape boards use left-to-right strips; portrait/square use top-to-bottom.
+    """
+    n_zones = len(active_domains)
+    total_boundary = boundary_w * max(0, n_zones - 1)
+    is_landscape = board_width > board_height * 1.3
+    rects: dict[VoltageDomain, tuple[float, float, float, float]] = {}
+
+    if is_landscape:
+        usable = board_width - total_boundary
+        strip = usable / n_zones if n_zones > 0 else board_width
+        cursor = 0.0
+        for domain in active_domains:
+            rects[domain] = (cursor, 0.0, cursor + strip, board_height)
+            cursor += strip + boundary_w
+    else:
+        usable = board_height - total_boundary
+        strip = usable / n_zones if n_zones > 0 else board_height
+        cursor = 0.0
+        for domain in active_domains:
+            rects[domain] = (0.0, cursor, board_width, cursor + strip)
+            cursor += strip + boundary_w
+
+    return rects
+
+
 def assign_zones(
     subcircuits: tuple[DetectedSubCircuit, ...],
     domain_map: dict[str, VoltageDomain],
@@ -1503,72 +1783,27 @@ def assign_zones(
     for sc in subcircuits:
         subcircuit_refs.update(sc.refs)
 
-    # Group subcircuits by domain
+    # Group subcircuits and loose refs by domain
     domain_subcircuits: dict[VoltageDomain, list[DetectedSubCircuit]] = {}
     for sc in subcircuits:
         domain_subcircuits.setdefault(sc.domain, []).append(sc)
 
-    # Group loose refs (not in any subcircuit) by domain
     domain_loose: dict[VoltageDomain, list[str]] = {}
     for ref in all_refs:
-        if ref in subcircuit_refs:
-            continue
-        domain = domain_map.get(ref, VoltageDomain.MIXED)
-        domain_loose.setdefault(domain, []).append(ref)
+        if ref not in subcircuit_refs:
+            domain = domain_map.get(ref, VoltageDomain.MIXED)
+            domain_loose.setdefault(domain, []).append(ref)
 
-    # Determine which domains are active (have components)
-    active_domains: list[VoltageDomain] = []
-    if topology is not None and len(topology.domain_order) > 0:
-        # Use topology ordering, only including domains with components
-        for d in topology.domain_order:
-            if d in domain_subcircuits or d in domain_loose:
-                active_domains.append(d)
-        # Add any active domains not in topology
-        for d in VoltageDomain:
-            if d not in active_domains and (d in domain_subcircuits or d in domain_loose):
-                active_domains.append(d)
-    else:
-        # Fallback: voltage-magnitude ordering
-        priority = [
-            VoltageDomain.VIN_24V, VoltageDomain.POWER_5V,
-            VoltageDomain.ANALOG, VoltageDomain.DIGITAL_3V3,
-            VoltageDomain.MIXED,
-        ]
-        for d in priority:
-            if d in domain_subcircuits or d in domain_loose:
-                active_domains.append(d)
-
+    active_domains = _collect_active_domains(
+        domain_subcircuits, domain_loose, topology,
+    )
     if not active_domains:
         return ()
 
-    # Compute zone rectangles based on board aspect ratio and topology
-    is_landscape = board_width > board_height * 1.3
-    n_zones = len(active_domains)
-    boundary_w = ZONE_BOUNDARY_WIDTH_MM if n_zones > 1 else 0.0
-    total_boundary = boundary_w * max(0, n_zones - 1)
-
-    zone_rects: dict[VoltageDomain, tuple[float, float, float, float]] = {}
-
-    if is_landscape:
-        # Left-to-right zones following domain order
-        usable_w = board_width - total_boundary
-        strip_w = usable_w / n_zones if n_zones > 0 else board_width
-        cursor = 0.0
-        for domain in active_domains:
-            x1 = cursor
-            x2 = cursor + strip_w
-            zone_rects[domain] = (x1, 0.0, x2, board_height)
-            cursor = x2 + boundary_w
-    else:
-        # Top-to-bottom zones following domain order
-        usable_h = board_height - total_boundary
-        strip_h = usable_h / n_zones if n_zones > 0 else board_height
-        cursor = 0.0
-        for domain in active_domains:
-            y1 = cursor
-            y2 = cursor + strip_h
-            zone_rects[domain] = (0.0, y1, board_width, y2)
-            cursor = y2 + boundary_w
+    boundary_w = ZONE_BOUNDARY_WIDTH_MM if len(active_domains) > 1 else 0.0
+    zone_rects = _compute_zone_rects(
+        active_domains, board_width, board_height, boundary_w,
+    )
 
     assignments: list[BoardZoneAssignment] = []
     for domain in active_domains:
