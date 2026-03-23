@@ -242,3 +242,145 @@ def test_zones_cover_board() -> None:
     assert coverage >= 0.50, (
         f"Zone coverage {coverage:.1%} < 50% of board area"
     )
+
+
+# ---------------------------------------------------------------------------
+# zone_for_group — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_zone_for_group_empty_zones() -> None:
+    """Empty zone list → None."""
+    assert zone_for_group("MCU", []) is None
+
+
+def test_zone_for_group_multiple_groups_in_zone() -> None:
+    """Zone with multiple groups finds the correct one."""
+    z = BoardZone("power", (0, 0, 50, 50), "top", ("Power Supply", "Power Regulator"))
+    result = zone_for_group("Power Regulator", [z])
+    assert result is not None
+    assert result.name == "power"
+
+
+def test_zone_for_group_case_sensitive() -> None:
+    """Group name matching is case-sensitive."""
+    z = BoardZone("mcu", (0, 0, 50, 50), None, ("MCU",))
+    assert zone_for_group("mcu", [z]) is None  # lowercase doesn't match "MCU"
+
+
+# ---------------------------------------------------------------------------
+# zone_center — additional
+# ---------------------------------------------------------------------------
+
+
+def test_zone_center_zero_origin() -> None:
+    """Zone at origin gives expected center."""
+    z = BoardZone("test", (0.0, 0.0, 20.0, 10.0), None, ())
+    cx, cy = zone_center(z)
+    assert cx == pytest.approx(10.0)
+    assert cy == pytest.approx(5.0)
+
+
+def test_zone_center_offset() -> None:
+    """Zone with non-zero origin."""
+    z = BoardZone("test", (100.0, 200.0, 140.0, 240.0), None, ())
+    cx, cy = zone_center(z)
+    assert cx == pytest.approx(120.0)
+    assert cy == pytest.approx(220.0)
+
+
+# ---------------------------------------------------------------------------
+# _match_group_to_zone — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_match_group_to_zone_empty_string() -> None:
+    """Empty group name → mcu fallback."""
+    assert _match_group_to_zone("") == "mcu"
+
+
+def test_match_group_to_zone_case_insensitive() -> None:
+    """Keyword matching is case-insensitive."""
+    assert _match_group_to_zone("POWER SECTION") == "power"
+    assert _match_group_to_zone("relay OUTPUTS") == "relay"
+
+
+def test_match_group_to_zone_partial_keyword_match() -> None:
+    """Partial keyword match works (e.g., 'poe' in 'ethernet')."""
+    assert _match_group_to_zone("PoE Network") == "ethernet"
+
+
+def test_match_group_to_zone_first_match_wins() -> None:
+    """When multiple keywords could match, zone order determines winner."""
+    # "24v input connector" has both "input" (analog) and "input connector" (input_connectors)
+    result = _match_group_to_zone("24v input connector")
+    assert result in ("input_connectors", "analog", "power")  # depends on dict order
+
+
+# ---------------------------------------------------------------------------
+# partition_board — edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_partition_board_tiny_board() -> None:
+    """Very small board still produces valid zones with minimum size."""
+    groups = [_make_feature("Power Supply", 2)]
+    zones = partition_board((0.0, 0.0, 20.0, 20.0), groups)
+    assert len(zones) == 1
+    x1, y1, x2, y2 = zones[0].rect
+    # Minimum zone size is 10x10
+    assert x2 - x1 >= 10.0
+    assert y2 - y1 >= 10.0
+
+
+def test_partition_board_unknown_group_gets_mcu_zone() -> None:
+    """Unknown group name falls through to MCU zone."""
+    groups = [_make_feature("Completely Unknown Module", 5)]
+    zones = partition_board((0.0, 0.0, 100.0, 80.0), groups)
+    assert len(zones) == 1
+    assert zones[0].name == "mcu"
+
+
+def test_partition_board_zones_have_nonempty_groups() -> None:
+    """Every zone has at least one group assigned."""
+    groups = [
+        _make_feature("Power Supply", 5),
+        _make_feature("MCU Core", 10),
+    ]
+    zones = partition_board((0.0, 0.0, 100.0, 80.0), groups)
+    for z in zones:
+        assert len(z.groups) >= 1
+
+
+def test_partition_board_zones_have_positive_area() -> None:
+    """All zones have strictly positive area."""
+    groups = [
+        _make_feature("Power Supply", 5),
+        _make_feature("Relay Outputs", 8),
+        _make_feature("MCU", 10),
+    ]
+    zones = partition_board((0.0, 0.0, 100.0, 80.0), groups)
+    for z in zones:
+        x1, y1, x2, y2 = z.rect
+        area = (x2 - x1) * (y2 - y1)
+        assert area > 0, f"Zone '{z.name}' has zero or negative area"
+
+
+# ---------------------------------------------------------------------------
+# BoardZone frozen dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_board_zone_is_frozen() -> None:
+    """BoardZone is immutable."""
+    z = BoardZone("test", (0, 0, 10, 10), None, ("A",))
+    with pytest.raises((AttributeError, TypeError)):
+        z.name = "mutated"  # type: ignore[misc]
+
+
+def test_board_zone_edge_affinity_none() -> None:
+    """MCU zone has no edge affinity."""
+    groups = [_make_feature("MCU", 5)]
+    zones = partition_board((0.0, 0.0, 100.0, 80.0), groups)
+    mcu_zone = zones[0]
+    assert mcu_zone.edge_affinity is None

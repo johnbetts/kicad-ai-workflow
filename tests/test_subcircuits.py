@@ -436,3 +436,131 @@ def test_voltage_divider_vout_degenerate() -> None:
     """Both resistors zero raises ValueError."""
     with pytest.raises(ValueError):
         voltage_divider_vout(vin=5.0, r_top=0.0, r_bot=0.0)
+
+
+# ---------------------------------------------------------------------------
+# voltage_divider_vout — negative & large inputs
+# ---------------------------------------------------------------------------
+
+
+def test_voltage_divider_vout_negative_vin() -> None:
+    """Negative Vin produces negative Vout (mathematically valid)."""
+    vout = voltage_divider_vout(vin=-10.0, r_top=10_000.0, r_bot=10_000.0)
+    assert abs(vout - (-5.0)) < 1e-9
+
+
+def test_voltage_divider_vout_very_large_ratio() -> None:
+    """Extreme ratio: tiny bot / huge top → Vout near zero."""
+    vout = voltage_divider_vout(vin=100.0, r_top=1e9, r_bot=1.0)
+    assert vout < 1e-4
+
+
+def test_voltage_divider_vout_zero_vin() -> None:
+    """Zero Vin → zero Vout regardless of resistors."""
+    vout = voltage_divider_vout(vin=0.0, r_top=1_000.0, r_bot=1_000.0)
+    assert vout == 0.0
+
+
+# ---------------------------------------------------------------------------
+# led_limit_resistor — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_led_limit_resistor_nominal_value() -> None:
+    """Standard 3.3V/2.1V/10mA → 120 ohm."""
+    r = led_limit_resistor(vcc_v=3.3, vf_v=2.1, target_ma=10.0)
+    assert abs(r - 120.0) < 1e-6
+
+
+def test_led_limit_resistor_negative_current_raises() -> None:
+    """Negative current raises ValueError."""
+    with pytest.raises(ValueError):
+        led_limit_resistor(vcc_v=3.3, vf_v=2.1, target_ma=-5.0)
+
+
+def test_led_limit_resistor_high_vf_gives_negative_r() -> None:
+    """Vf > Vcc → negative R (mathematically valid, not physically)."""
+    r = led_limit_resistor(vcc_v=2.0, vf_v=3.0, target_ma=10.0)
+    assert r < 0
+
+
+def test_led_limit_resistor_high_current_gives_low_r() -> None:
+    """High current target → low resistance."""
+    r = led_limit_resistor(vcc_v=5.0, vf_v=2.0, target_ma=100.0)
+    assert abs(r - 30.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# voltage_divider — description field
+# ---------------------------------------------------------------------------
+
+
+def test_voltage_divider_description_contains_ratio() -> None:
+    """Description includes the voltage ratio."""
+    result = voltage_divider("R1", "R2", "VIN", "VOUT", r_top_ohms=10_000, r_bot_ohms=10_000)
+    assert "0.5" in result.description
+
+
+# ---------------------------------------------------------------------------
+# led_drive — internal net naming
+# ---------------------------------------------------------------------------
+
+
+def test_led_drive_internal_net_exists() -> None:
+    """Internal net connecting LED cathode to resistor is present."""
+    result = led_drive("D1", "R3", "+3V3", "GPIO1")
+    net_names = {n.name for n in result.nets}
+    assert "D1_K" in net_names
+
+
+# ---------------------------------------------------------------------------
+# npn_buzzer_drive — edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_npn_buzzer_drive_base_net_internal() -> None:
+    """Internal base net connects R_base pin 2 to Q base pin."""
+    result = npn_buzzer_drive("Q1", "R1", "D1", "BUZZ", "GPIO1", "VCC")
+    base_net = next((n for n in result.nets if "Q1_B" in n.name), None)
+    assert base_net is not None
+    refs_in_net = {c.ref for c in base_net.connections}
+    assert "Q1" in refs_in_net
+    assert "R1" in refs_in_net
+
+
+def test_npn_buzzer_drive_diode_cathode_to_vcc() -> None:
+    """Flyback diode cathode connects to VCC net."""
+    result = npn_buzzer_drive("Q1", "R1", "D1", "BUZZ", "GPIO1", "+5V")
+    diode = next(c for c in result.components if c.ref == "D1")
+    k_pin = next(p for p in diode.pins if p.name == "K")
+    assert k_pin.net == "+5V"
+
+
+# ---------------------------------------------------------------------------
+# usb_c_input — additional checks
+# ---------------------------------------------------------------------------
+
+
+def test_usb_c_input_cc_resistor_value_5k1() -> None:
+    """CC resistors are 5.1k for USB power sink identification."""
+    result = usb_c_input("J1", "R1", "R2")
+    r_cc1 = next(c for c in result.components if c.ref == "R1")
+    assert "5.1k" in r_cc1.value or "5100" in r_cc1.value
+
+
+def test_usb_c_input_custom_net_names() -> None:
+    """Custom net name arguments propagate correctly."""
+    result = usb_c_input(
+        "J1", "R1", "R2",
+        vbus_net="USB_5V", gnd_net="DGND",
+    )
+    net_names = {n.name for n in result.nets}
+    assert "USB_5V" in net_names
+    assert "DGND" in net_names
+
+
+def test_usb_c_input_connector_has_8_pins() -> None:
+    """USB-C connector has 8 pins (A1,A4,A5,A6,A7,B5,B6,B7)."""
+    result = usb_c_input("J1", "R1", "R2")
+    conn = next(c for c in result.components if c.ref == "J1")
+    assert len(conn.pins) == 8

@@ -517,3 +517,177 @@ def test_pad_facing_no_signal_nets_neutral() -> None:
     reqs = _minimal_requirements()
     score, issues = _score_pad_facing(pcb, reqs)
     assert score == 1.0
+
+
+# ---------------------------------------------------------------------------
+# score_to_grade — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_score_to_grade_exact_boundary_a() -> None:
+    """Exactly 0.9 → A."""
+    assert score_to_grade(0.9) == "A"
+
+
+def test_score_to_grade_just_below_a() -> None:
+    """0.8999 → B (not A)."""
+    assert score_to_grade(0.8999) == "B"
+
+
+def test_score_to_grade_negative() -> None:
+    """Negative score → F."""
+    assert score_to_grade(-0.5) == "F"
+
+
+def test_score_to_grade_above_one() -> None:
+    """Score > 1.0 → A."""
+    assert score_to_grade(1.5) == "A"
+
+
+# ---------------------------------------------------------------------------
+# _clamp01 — additional
+# ---------------------------------------------------------------------------
+
+
+def test_clamp01_exact_boundaries() -> None:
+    """0.0 and 1.0 pass through unchanged."""
+    assert _clamp01(0.0) == 0.0
+    assert _clamp01(1.0) == 1.0
+
+
+def test_clamp01_midpoint() -> None:
+    """0.5 passes through unchanged."""
+    assert _clamp01(0.5) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# _weighted_geometric_mean — edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_weighted_geometric_mean_zero_weight() -> None:
+    """Total weight of 0 returns 0."""
+    result = _weighted_geometric_mean(((0.5, 0.0),))
+    assert result == 0.0
+
+
+def test_weighted_geometric_mean_single_element() -> None:
+    """Single element with weight 1.0 returns the element score."""
+    result = _weighted_geometric_mean(((0.7, 1.0),))
+    assert abs(result - 0.7) < 1e-6
+
+
+def test_weighted_geometric_mean_floor_prevents_zero() -> None:
+    """Zero score is floored at 0.01 to prevent log(0)."""
+    result = _weighted_geometric_mean(((0.0, 1.0), (1.0, 1.0)))
+    # exp(0.5 * log(0.01) + 0.5 * log(1.0)) = exp(-2.3025...) = ~0.1
+    assert result > 0.0
+    assert result < 0.2
+
+
+# ---------------------------------------------------------------------------
+# compute_fast_placement_score — basic
+# ---------------------------------------------------------------------------
+
+
+def test_compute_fast_placement_score_empty_board() -> None:
+    """Empty board yields valid QualityScore."""
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score = compute_fast_placement_score(pcb, reqs)
+
+    assert 0.0 <= score.overall_score <= 1.0
+    assert score.grade in ("A", "B", "C", "D", "F")
+    assert len(score.breakdown) > 0
+
+
+def test_compute_fast_placement_score_has_breakdown_dimensions() -> None:
+    """Fast score has multiple breakdown dimensions (at least 10)."""
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score = compute_fast_placement_score(pcb, reqs)
+    assert len(score.breakdown) >= 10
+
+
+def test_compute_fast_placement_score_all_dimensions_valid_range() -> None:
+    """All breakdown dimensions are in [0, 1]."""
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score = compute_fast_placement_score(pcb, reqs)
+    for dim in score.breakdown:
+        assert 0.0 <= dim.score <= 1.0, f"{dim.category} score {dim.score} out of range"
+
+
+def test_compute_fast_placement_score_board_cost_zero() -> None:
+    """Fast placement score always has board_cost = 0 (no routing)."""
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score = compute_fast_placement_score(pcb, reqs)
+    assert score.board_cost == 0.0
+
+
+def test_compute_fast_placement_score_thermal_always_one() -> None:
+    """Thermal score is always 1.0 in fast path (not evaluated)."""
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+
+    pcb = _minimal_pcb()
+    reqs = _minimal_requirements()
+    score = compute_fast_placement_score(pcb, reqs)
+    assert score.thermal_score == 1.0
+
+
+# ---------------------------------------------------------------------------
+# _score_boundary
+# ---------------------------------------------------------------------------
+
+
+def test_score_boundary_all_inside() -> None:
+    """All footprints inside board → score 1.0."""
+    from kicad_pipeline.optimization.scoring import _score_boundary
+
+    fp = Footprint(
+        lib_id="test:R", ref="R1", value="10k",
+        position=Point(25.0, 20.0), pads=(),
+    )
+    pcb = _minimal_pcb(footprints=(fp,))
+    score, issues = _score_boundary(pcb)
+    assert score == 1.0
+    assert len(issues) == 0
+
+
+def test_score_boundary_outside_penalized() -> None:
+    """Footprint outside board → penalized score."""
+    from kicad_pipeline.optimization.scoring import _score_boundary
+
+    fp = Footprint(
+        lib_id="test:R", ref="R1", value="10k",
+        position=Point(200.0, 200.0), pads=(),
+    )
+    pcb = _minimal_pcb(footprints=(fp,))
+    score, issues = _score_boundary(pcb)
+    assert score < 1.0
+    assert len(issues) == 1
+    assert "R1" in issues[0]
+
+
+def test_score_boundary_no_outline() -> None:
+    """No board outline → score 1.0."""
+    from kicad_pipeline.optimization.scoring import _score_boundary
+
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=()),
+        design_rules=DesignRules(),
+        nets=(NetEntry(number=0, name=""),),
+        footprints=(),
+        tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    score, issues = _score_boundary(pcb)
+    assert score == 1.0

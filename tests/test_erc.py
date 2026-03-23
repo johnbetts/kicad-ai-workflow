@@ -453,3 +453,187 @@ def test_erc_power_symbol_overlap_ignored() -> None:
     report = run_erc(sch)
     overlaps = [v for v in report.violations if v.rule == "symbol_overlap"]
     assert len(overlaps) == 0
+
+
+# ---------------------------------------------------------------------------
+# ERCReport — additional property tests
+# ---------------------------------------------------------------------------
+
+
+def test_erc_report_empty_violations() -> None:
+    """Empty violations means passed, no errors, no warnings."""
+    report = ERCReport(violations=())
+    assert report.passed is True
+    assert report.errors == ()
+    assert report.warnings == ()
+
+
+def test_erc_report_info_severity_not_counted_as_error() -> None:
+    """INFO-severity violations don't affect passed property."""
+    info = ERCViolation(severity=ERCSeverity.INFO, rule="info_rule", message="info")
+    report = ERCReport(violations=(info,))
+    assert report.passed is True
+    assert len(report.errors) == 0
+    assert len(report.warnings) == 0
+
+
+def test_erc_report_multiple_errors() -> None:
+    """Multiple errors are all returned by errors property."""
+    e1 = ERCViolation(severity=ERCSeverity.ERROR, rule="r1", message="e1")
+    e2 = ERCViolation(severity=ERCSeverity.ERROR, rule="r2", message="e2")
+    w1 = ERCViolation(severity=ERCSeverity.WARNING, rule="r3", message="w1")
+    report = ERCReport(violations=(e1, w1, e2))
+    assert len(report.errors) == 2
+    assert len(report.warnings) == 1
+    assert report.passed is False
+
+
+# ---------------------------------------------------------------------------
+# no_lib_symbol check
+# ---------------------------------------------------------------------------
+
+
+def test_erc_no_lib_symbol_warns() -> None:
+    """Symbol referencing a missing lib_id → WARNING."""
+    sch = Schematic(
+        lib_symbols=(),  # no lib symbols
+        symbols=(_make_sym("R1", lib_id="Device:R"),),
+        power_symbols=(),
+        wires=(),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    missing = [v for v in report.warnings if v.rule == "no_lib_symbol"]
+    assert len(missing) == 1
+    assert "R1" in missing[0].message
+
+
+def test_erc_lib_symbol_present_passes() -> None:
+    """Symbol with matching lib_symbol → no no_lib_symbol violation."""
+    lib_r = LibSymbol(lib_id="Device:R", pins=(), shapes=())
+    sch = Schematic(
+        lib_symbols=(lib_r,),
+        symbols=(_make_sym("R1", lib_id="Device:R"),),
+        power_symbols=(),
+        wires=(),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    missing = [v for v in report.violations if v.rule == "no_lib_symbol"]
+    assert len(missing) == 0
+
+
+# ---------------------------------------------------------------------------
+# floating_wire check
+# ---------------------------------------------------------------------------
+
+
+def test_erc_floating_wire_warns() -> None:
+    """Wire with unique endpoint → WARNING for floating wire."""
+    w1 = Wire(start=Point(0.0, 0.0), end=Point(10.0, 0.0))
+    w2 = Wire(start=Point(10.0, 0.0), end=Point(20.0, 0.0))
+    # w1.start (0,0) is unique, w2.end (20,0) is unique → floating
+    sch = Schematic(
+        lib_symbols=(),
+        symbols=(),
+        power_symbols=(),
+        wires=(w1, w2),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    floating = [v for v in report.warnings if v.rule == "floating_wire"]
+    assert len(floating) == 2  # both unique endpoints flagged
+
+
+def test_erc_no_floating_wire_when_connected() -> None:
+    """Three wires sharing all endpoints → no floating_wire violations."""
+    # A chain: (0,0)→(10,0), (10,0)→(20,0), (20,0)→(0,0)
+    w1 = Wire(start=Point(0.0, 0.0), end=Point(10.0, 0.0))
+    w2 = Wire(start=Point(10.0, 0.0), end=Point(20.0, 0.0))
+    w3 = Wire(start=Point(20.0, 0.0), end=Point(0.0, 0.0))
+    sch = Schematic(
+        lib_symbols=(),
+        symbols=(),
+        power_symbols=(),
+        wires=(w1, w2, w3),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    floating = [v for v in report.warnings if v.rule == "floating_wire"]
+    assert len(floating) == 0
+
+
+def test_erc_single_wire_skipped() -> None:
+    """A single wire does not trigger floating_wire check."""
+    w = Wire(start=Point(0.0, 0.0), end=Point(10.0, 0.0))
+    sch = Schematic(
+        lib_symbols=(),
+        symbols=(),
+        power_symbols=(),
+        wires=(w,),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(),
+    )
+    report = run_erc(sch)
+    floating = [v for v in report.violations if v.rule == "floating_wire"]
+    assert len(floating) == 0
+
+
+# ---------------------------------------------------------------------------
+# ERCViolation frozen dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_erc_violation_is_frozen() -> None:
+    """ERCViolation is immutable."""
+    v = ERCViolation(severity=ERCSeverity.ERROR, rule="r", message="m")
+    import pytest as _pt
+    with _pt.raises((AttributeError, TypeError)):
+        v.rule = "mutated"  # type: ignore[misc]
+
+
+def test_erc_violation_ref_default_none() -> None:
+    """Default ref is None."""
+    v = ERCViolation(severity=ERCSeverity.WARNING, rule="r", message="m")
+    assert v.ref is None
+
+
+# ---------------------------------------------------------------------------
+# run_erc — combined checks
+# ---------------------------------------------------------------------------
+
+
+def test_erc_multiple_checks_combined() -> None:
+    """Multiple violations from different rules are all collected."""
+    sch = Schematic(
+        lib_symbols=(),
+        symbols=(
+            _make_sym("R1", value=""),  # missing_value
+            _make_sym("R1", x=10.0),   # duplicate_ref
+        ),
+        power_symbols=(),
+        wires=(),
+        junctions=(),
+        no_connects=(),
+        labels=(),
+        global_labels=(_make_global_label("ORPHAN"),),  # unmatched
+    )
+    report = run_erc(sch)
+    rules = {v.rule for v in report.violations}
+    assert "missing_value" in rules
+    assert "duplicate_ref" in rules
+    assert "unmatched_global_label" in rules
