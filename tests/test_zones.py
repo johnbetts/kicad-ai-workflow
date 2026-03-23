@@ -13,13 +13,19 @@ from kicad_pipeline.constants import (
     THERMAL_RELIEF_GAP_MM,
 )
 from kicad_pipeline.models.pcb import BoardOutline, ZoneFill, ZonePolygon
+from kicad_pipeline.models.pcb import Keepout, NetEntry
+from kicad_pipeline.pcb.netlist import Netlist, NetlistEntry
 from kicad_pipeline.pcb.zones import (
     _CIRCLE_SEGMENTS,
     gnd_pours_both_layers,
     make_antenna_keepout,
     make_board_outline,
+    make_edge_keepout,
     make_gnd_pour,
     make_mounting_hole_keepout,
+    make_power_pour,
+    make_standard_keepouts,
+    make_standard_zones,
 )
 
 # ---------------------------------------------------------------------------
@@ -252,3 +258,185 @@ def test_make_gnd_pour_has_filled_polygons() -> None:
     assert min(ys) > 0.0
     assert max(xs) < 50.0
     assert max(ys) < 30.0
+
+
+# ---------------------------------------------------------------------------
+# make_power_pour
+# ---------------------------------------------------------------------------
+
+
+def test_make_power_pour_layer() -> None:
+    """Power pour defaults to F.Cu."""
+    outline = make_board_outline(80.0, 60.0)
+    pour = make_power_pour(outline, net_number=5, net_name="+3V3")
+    assert pour.layer == LAYER_F_CU
+
+
+def test_make_power_pour_custom_layer() -> None:
+    """Power pour accepts a custom layer."""
+    outline = make_board_outline(80.0, 60.0)
+    pour = make_power_pour(outline, net_number=5, net_name="+5V", layer=LAYER_B_CU)
+    assert pour.layer == LAYER_B_CU
+
+
+def test_make_power_pour_net_info() -> None:
+    """Power pour carries correct net number and name."""
+    outline = make_board_outline(80.0, 60.0)
+    pour = make_power_pour(outline, net_number=7, net_name="+12V")
+    assert pour.net_number == 7
+    assert pour.net_name == "+12V"
+
+
+def test_make_power_pour_solid_fill() -> None:
+    outline = make_board_outline(50.0, 40.0)
+    pour = make_power_pour(outline, net_number=2, net_name="+5V")
+    assert pour.fill == ZoneFill.SOLID
+
+
+def test_make_power_pour_polygon_matches_outline() -> None:
+    outline = make_board_outline(60.0, 40.0)
+    pour = make_power_pour(outline, net_number=3, net_name="+3V3")
+    assert pour.polygon == outline.polygon
+
+
+def test_make_power_pour_thermal_relief() -> None:
+    outline = make_board_outline(50.0, 30.0)
+    pour = make_power_pour(outline, net_number=2, net_name="+5V")
+    assert pour.thermal_relief_gap == pytest.approx(THERMAL_RELIEF_GAP_MM)
+    assert pour.thermal_relief_bridge == pytest.approx(THERMAL_RELIEF_BRIDGE_MM)
+
+
+# ---------------------------------------------------------------------------
+# make_edge_keepout
+# ---------------------------------------------------------------------------
+
+
+def test_make_edge_keepout_rectangular() -> None:
+    """Edge keepout for a rectangular board returns an inset rectangle."""
+    outline = make_board_outline(100.0, 80.0)
+    ko = make_edge_keepout(outline, margin_mm=1.0)
+    assert isinstance(ko, Keepout)
+    xs = [p.x for p in ko.polygon]
+    ys = [p.y for p in ko.polygon]
+    assert min(xs) == pytest.approx(1.0)
+    assert min(ys) == pytest.approx(1.0)
+    assert max(xs) == pytest.approx(99.0)
+    assert max(ys) == pytest.approx(79.0)
+
+
+def test_make_edge_keepout_no_copper_false() -> None:
+    """Edge keepout does not block copper (only tracks)."""
+    outline = make_board_outline(50.0, 40.0)
+    ko = make_edge_keepout(outline)
+    assert ko.no_copper is False
+    assert ko.no_tracks is True
+
+
+def test_make_edge_keepout_default_margin() -> None:
+    """Default margin is 0.3mm."""
+    outline = make_board_outline(50.0, 40.0)
+    ko = make_edge_keepout(outline)
+    xs = [p.x for p in ko.polygon]
+    assert min(xs) == pytest.approx(0.3)
+    assert max(xs) == pytest.approx(49.7)
+
+
+def test_make_edge_keepout_non_rectangular() -> None:
+    """Non-rectangular outline reuses original polygon."""
+    from kicad_pipeline.models.pcb import Point
+
+    triangle = BoardOutline(
+        polygon=(Point(0.0, 0.0), Point(50.0, 0.0), Point(25.0, 40.0)),
+    )
+    ko = make_edge_keepout(triangle)
+    # Should use original polygon (3 points, not 5)
+    assert len(ko.polygon) == 3
+    assert ko.no_tracks is True
+
+
+def test_make_edge_keepout_both_layers() -> None:
+    """Edge keepout covers both copper layers."""
+    outline = make_board_outline(50.0, 40.0)
+    ko = make_edge_keepout(outline)
+    assert "F.Cu" in ko.layers
+    assert "B.Cu" in ko.layers
+
+
+# ---------------------------------------------------------------------------
+# make_standard_zones
+# ---------------------------------------------------------------------------
+
+
+def _make_netlist_with_entries(*entries: NetlistEntry) -> Netlist:
+    return Netlist(entries=tuple(entries))
+
+
+def test_make_standard_zones_gnd_only() -> None:
+    """With no power net, standard zones has exactly one GND pour."""
+    outline = make_board_outline(60.0, 40.0)
+    nl = _make_netlist_with_entries(
+        NetlistEntry(net=NetEntry(number=1, name="GND"), pad_refs=()),
+    )
+    zones = make_standard_zones(outline, nl)
+    assert len(zones) == 1
+    assert zones[0].net_name == "GND"
+
+
+def test_make_standard_zones_with_3v3() -> None:
+    """When +3V3 net exists, standard zones includes a power zone."""
+    outline = make_board_outline(60.0, 40.0)
+    nl = _make_netlist_with_entries(
+        NetlistEntry(net=NetEntry(number=1, name="GND"), pad_refs=()),
+        NetlistEntry(net=NetEntry(number=2, name="+3V3"), pad_refs=()),
+    )
+    zones = make_standard_zones(outline, nl)
+    assert len(zones) == 2
+    names = {z.net_name for z in zones}
+    assert "GND" in names
+    assert "+3V3" in names
+
+
+def test_make_standard_zones_with_3_3v() -> None:
+    """Alternative +3.3V naming also triggers power zone."""
+    outline = make_board_outline(60.0, 40.0)
+    nl = _make_netlist_with_entries(
+        NetlistEntry(net=NetEntry(number=1, name="GND"), pad_refs=()),
+        NetlistEntry(net=NetEntry(number=2, name="+3.3V"), pad_refs=()),
+    )
+    zones = make_standard_zones(outline, nl)
+    assert len(zones) == 2
+
+
+def test_make_standard_zones_empty_netlist() -> None:
+    """With empty netlist, still get the GND pour."""
+    outline = make_board_outline(60.0, 40.0)
+    nl = Netlist(entries=())
+    zones = make_standard_zones(outline, nl)
+    assert len(zones) == 1
+    assert zones[0].net_name == "GND"
+
+
+def test_make_standard_zones_returns_zone_polygons() -> None:
+    outline = make_board_outline(50.0, 30.0)
+    nl = Netlist(entries=())
+    zones = make_standard_zones(outline, nl)
+    assert all(isinstance(z, ZonePolygon) for z in zones)
+
+
+# ---------------------------------------------------------------------------
+# make_standard_keepouts
+# ---------------------------------------------------------------------------
+
+
+def test_make_standard_keepouts_returns_edge_keepout() -> None:
+    outline = make_board_outline(60.0, 40.0)
+    keepouts = make_standard_keepouts(outline)
+    assert len(keepouts) == 1
+    assert isinstance(keepouts[0], Keepout)
+    assert keepouts[0].no_tracks is True
+
+
+def test_make_standard_keepouts_returns_tuple() -> None:
+    outline = make_board_outline(50.0, 30.0)
+    keepouts = make_standard_keepouts(outline)
+    assert isinstance(keepouts, tuple)

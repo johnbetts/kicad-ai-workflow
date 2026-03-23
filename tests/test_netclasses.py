@@ -10,6 +10,7 @@ from kicad_pipeline.pcb.netclasses import (
     _voltage_clearance,
     _voltage_label,
     classify_nets,
+    net_clearance_map,
     net_width_map,
 )
 
@@ -358,3 +359,124 @@ def test_netclass_frozen() -> None:
 
     with pytest.raises(AttributeError):
         nc.name = "Changed"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# net_clearance_map
+# ---------------------------------------------------------------------------
+
+
+def test_net_clearance_map_basic() -> None:
+    """net_clearance_map should map each net to its class clearance."""
+    classes = (
+        NetClass(name="Default", clearance_mm=0.2, nets=("SIG",)),
+        NetClass(name="Power", clearance_mm=0.3, nets=("GND", "+5V")),
+    )
+    clearances = net_clearance_map(classes)
+    assert clearances["SIG"] == 0.2
+    assert clearances["GND"] == 0.3
+    assert clearances["+5V"] == 0.3
+
+
+def test_net_clearance_map_empty() -> None:
+    """Empty netclasses should produce empty map."""
+    assert net_clearance_map(()) == {}
+
+
+# ---------------------------------------------------------------------------
+# Additional _parse_voltage edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_parse_voltage_48v() -> None:
+    """+48V should parse to 48.0 volts."""
+    assert _parse_voltage("+48V") == 48.0
+
+
+def test_parse_voltage_24v() -> None:
+    assert _parse_voltage("+24V") == 24.0
+
+
+def test_parse_voltage_1v8() -> None:
+    assert _parse_voltage("+1V8") == 1.8
+
+
+def test_parse_voltage_signal_name() -> None:
+    """Non-power net names should return None."""
+    assert _parse_voltage("SPI_CLK") is None
+
+
+def test_parse_voltage_empty() -> None:
+    assert _parse_voltage("") is None
+
+
+# ---------------------------------------------------------------------------
+# Additional _voltage_label edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_voltage_label_12v() -> None:
+    assert _voltage_label("+12V") == "12V"
+
+
+def test_voltage_label_48v() -> None:
+    assert _voltage_label("+48V") == "48V"
+
+
+def test_voltage_label_1v8() -> None:
+    assert _voltage_label("+1V8") == "1V8"
+
+
+# ---------------------------------------------------------------------------
+# Additional classify_nets edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_classify_nets_single_signal_net() -> None:
+    """A single unmatched net goes to Default."""
+    entries = (NetEntry(number=1, name="MY_SIGNAL"),)
+    result = classify_nets(entries)
+    assert len(result) == 1
+    assert result[0].name == "Default"
+    assert "MY_SIGNAL" in result[0].nets
+
+
+def test_classify_nets_high_voltage_power() -> None:
+    """+48V gets its own Power_48V class with higher clearance."""
+    entries = (
+        NetEntry(number=0, name=""),
+        NetEntry(number=1, name="+48V"),
+    )
+    result = classify_nets(entries)
+    names = {nc.name for nc in result}
+    assert "Power_48V" in names
+    p48 = next(nc for nc in result if nc.name == "Power_48V")
+    assert p48.clearance_mm >= 0.2  # Should be >= low-voltage clearance
+
+
+def test_classify_nets_v_bat() -> None:
+    """VBAT should be classified as Power."""
+    entries = (NetEntry(number=1, name="VBAT"),)
+    result = classify_nets(entries)
+    power_classes = [nc for nc in result if nc.name == "Power"]
+    assert len(power_classes) == 1
+    assert "VBAT" in power_classes[0].nets
+
+
+def test_classify_nets_v_underscore() -> None:
+    """V_RAIL style nets should be classified as Power."""
+    entries = (NetEntry(number=1, name="V_MOTOR"),)
+    result = classify_nets(entries)
+    power_classes = [nc for nc in result if nc.name == "Power"]
+    assert len(power_classes) == 1
+    assert "V_MOTOR" in power_classes[0].nets
+
+
+def test_classify_nets_always_has_default() -> None:
+    """Default class is always present even with only power nets."""
+    entries = (
+        NetEntry(number=1, name="GND"),
+        NetEntry(number=2, name="+5V"),
+    )
+    result = classify_nets(entries)
+    assert any(nc.name == "Default" for nc in result)

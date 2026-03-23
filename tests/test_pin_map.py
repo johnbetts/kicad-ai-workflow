@@ -8,12 +8,14 @@ from kicad_pipeline.models.pcb import Footprint, Pad, Point
 from kicad_pipeline.pcb.pin_map import (
     CardinalSide,
     FootprintPinMap,
+    PadSideEntry,
     centroid_to_origin,
     classify_pad_side,
     compute_centroid_offset,
     compute_pin_map,
     compute_pin_map_for_component,
     origin_to_centroid,
+    pad_extent_in_board_space,
     rotate_side,
 )
 
@@ -343,3 +345,213 @@ class TestOriginCentroidConversion:
         cx90, cy90 = origin_to_centroid(fp, 0.0, 0.0, 90.0)
         assert abs(cx90) == pytest.approx(3.81, abs=0.01)
         assert cy90 == pytest.approx(0.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# pad_extent_in_board_space
+# ---------------------------------------------------------------------------
+
+
+class TestPadExtentInBoardSpace:
+    """Tests for pad_extent_in_board_space()."""
+
+    def test_no_rotation(self) -> None:
+        """Pad extent at 0 degrees matches local pad positions + origin."""
+        pads = (
+            _make_pad("1", -1.0, -0.5),
+            _make_pad("2", 1.0, 0.5),
+        )
+        fp = _make_footprint("R1", pads)
+        min_x, min_y, max_x, max_y = pad_extent_in_board_space(fp, 10.0, 20.0, 0.0)
+        assert min_x == pytest.approx(9.0)
+        assert min_y == pytest.approx(19.5)
+        assert max_x == pytest.approx(11.0)
+        assert max_y == pytest.approx(20.5)
+
+    def test_90_degree_rotation(self) -> None:
+        """At 90 degrees, X and Y extents swap."""
+        pads = (
+            _make_pad("1", -2.0, 0.0),
+            _make_pad("2", 2.0, 0.0),
+        )
+        fp = _make_footprint("R1", pads)
+        min_x, min_y, max_x, max_y = pad_extent_in_board_space(fp, 0.0, 0.0, 90.0)
+        # Originally -2..2 on X, after 90 CW should become -2..2 on Y
+        assert max_y - min_y == pytest.approx(4.0, abs=0.01)
+        assert max_x - min_x == pytest.approx(0.0, abs=0.01)
+
+    def test_no_pads_returns_origin_point(self) -> None:
+        fp = _make_footprint("X1", ())
+        min_x, min_y, max_x, max_y = pad_extent_in_board_space(fp, 5.0, 10.0, 0.0)
+        assert min_x == pytest.approx(5.0)
+        assert max_x == pytest.approx(5.0)
+        assert min_y == pytest.approx(10.0)
+        assert max_y == pytest.approx(10.0)
+
+    def test_single_pad(self) -> None:
+        pads = (_make_pad("1", 0.0, 0.0),)
+        fp = _make_footprint("R1", pads)
+        min_x, min_y, max_x, max_y = pad_extent_in_board_space(fp, 20.0, 30.0, 0.0)
+        assert min_x == pytest.approx(20.0)
+        assert max_x == pytest.approx(20.0)
+
+    def test_180_degree_rotation(self) -> None:
+        """180 degrees should mirror but keep same extent."""
+        pads = (
+            _make_pad("1", -1.0, 0.0),
+            _make_pad("2", 3.0, 0.0),
+        )
+        fp = _make_footprint("R1", pads)
+        min_x0, _, max_x0, _ = pad_extent_in_board_space(fp, 0.0, 0.0, 0.0)
+        min_x180, _, max_x180, _ = pad_extent_in_board_space(fp, 0.0, 0.0, 180.0)
+        # Width should be the same
+        assert (max_x0 - min_x0) == pytest.approx(max_x180 - min_x180, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# classify_pad_side — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyPadSideEdgeCases:
+    """Edge case tests for classify_pad_side()."""
+
+    def test_zero_offset_is_center(self) -> None:
+        assert classify_pad_side(0.0, 0.0, 5.0, 5.0) == CardinalSide.CENTER
+
+    def test_both_half_extents_zero(self) -> None:
+        """Degenerate footprint with both extents zero should not crash."""
+        result = classify_pad_side(1.0, 1.0, 0.0, 0.0)
+        assert isinstance(result, CardinalSide)
+
+    def test_negative_half_extents_treated_as_small(self) -> None:
+        """Negative extents clamped to 0.01, should still classify."""
+        result = classify_pad_side(1.0, 0.0, -1.0, 1.0)
+        assert result == CardinalSide.EAST
+
+
+# ---------------------------------------------------------------------------
+# rotate_side — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestRotateSideEdgeCases:
+    """Additional edge cases for rotate_side()."""
+
+    def test_negative_angle(self) -> None:
+        """Negative rotation should still work (e.g. -90 = 270)."""
+        assert rotate_side(CardinalSide.NORTH, -90.0) == CardinalSide.WEST
+
+    def test_large_angle(self) -> None:
+        """720 degrees = two full turns, should equal 0."""
+        assert rotate_side(CardinalSide.EAST, 720.0) == CardinalSide.EAST
+
+    def test_west_90(self) -> None:
+        assert rotate_side(CardinalSide.WEST, 90.0) == CardinalSide.NORTH
+
+    def test_east_270(self) -> None:
+        assert rotate_side(CardinalSide.EAST, 270.0) == CardinalSide.NORTH
+
+
+# ---------------------------------------------------------------------------
+# FootprintPinMap — additional method tests
+# ---------------------------------------------------------------------------
+
+
+class TestFootprintPinMapMethods:
+    """Additional tests for FootprintPinMap query methods."""
+
+    def test_pads_on_side_empty(self) -> None:
+        pm = FootprintPinMap(ref="U1", rotation=0.0, entries=())
+        assert pm.pads_on_side(CardinalSide.NORTH) == ()
+
+    def test_nets_on_side_empty(self) -> None:
+        pm = FootprintPinMap(ref="U1", rotation=0.0, entries=())
+        assert pm.nets_on_side(CardinalSide.WEST) == frozenset()
+
+    def test_side_for_pad_empty_entries(self) -> None:
+        pm = FootprintPinMap(ref="U1", rotation=0.0, entries=())
+        assert pm.side_for_pad("1") is None
+
+    def test_nets_on_side_excludes_empty_net_name(self) -> None:
+        entry = PadSideEntry(
+            pad_number="1", side=CardinalSide.EAST,
+            local_position=(1.0, 0.0), rotated_position=(1.0, 0.0),
+            net_name="",
+        )
+        pm = FootprintPinMap(ref="U1", rotation=0.0, entries=(entry,))
+        assert pm.nets_on_side(CardinalSide.EAST) == frozenset()
+
+    def test_multiple_pads_on_same_side(self) -> None:
+        entries = (
+            PadSideEntry("1", CardinalSide.WEST, (-3.0, 0.0), (-3.0, 0.0), "A"),
+            PadSideEntry("2", CardinalSide.WEST, (-3.0, 1.0), (-3.0, 1.0), "B"),
+            PadSideEntry("3", CardinalSide.EAST, (3.0, 0.0), (3.0, 0.0), "C"),
+        )
+        pm = FootprintPinMap(ref="U1", rotation=0.0, entries=entries)
+        assert len(pm.pads_on_side(CardinalSide.WEST)) == 2
+        assert len(pm.pads_on_side(CardinalSide.EAST)) == 1
+
+
+# ---------------------------------------------------------------------------
+# compute_centroid_offset — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestComputeCentroidOffsetEdge:
+    """Additional edge/negative tests for compute_centroid_offset()."""
+
+    def test_single_pad_at_origin(self) -> None:
+        pads = (_make_pad("1", 0.0, 0.0),)
+        fp = _make_footprint("R1", pads)
+        cx, cy = compute_centroid_offset(fp)
+        assert cx == pytest.approx(0.0)
+        assert cy == pytest.approx(0.0)
+
+    def test_asymmetric_pads(self) -> None:
+        """Pads at (0,0) and (10,0) → centroid offset is (5,0)."""
+        pads = (_make_pad("1", 0.0, 0.0), _make_pad("2", 10.0, 0.0))
+        fp = _make_footprint("J1", pads)
+        cx, cy = compute_centroid_offset(fp)
+        assert cx == pytest.approx(5.0)
+        assert cy == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# origin_to_centroid / centroid_to_origin — additional tests
+# ---------------------------------------------------------------------------
+
+
+class TestOriginCentroidEdgeCases:
+    """Additional origin/centroid conversion tests."""
+
+    def test_roundtrip_at_180_degrees(self) -> None:
+        pads = tuple(_make_pad(str(i + 1), 0.0, i * 2.54) for i in range(4))
+        fp = _make_footprint("J1", pads)
+        ox, oy = 10.0, 20.0
+        cx, cy = origin_to_centroid(fp, ox, oy, 180.0)
+        ox2, oy2 = centroid_to_origin(fp, cx, cy, 180.0)
+        assert ox2 == pytest.approx(ox)
+        assert oy2 == pytest.approx(oy)
+
+    def test_roundtrip_at_270_degrees(self) -> None:
+        pads = tuple(_make_pad(str(i + 1), 0.0, i * 2.54) for i in range(4))
+        fp = _make_footprint("J1", pads)
+        ox, oy = 15.0, 25.0
+        cx, cy = origin_to_centroid(fp, ox, oy, 270.0)
+        ox2, oy2 = centroid_to_origin(fp, cx, cy, 270.0)
+        assert ox2 == pytest.approx(ox)
+        assert oy2 == pytest.approx(oy)
+
+    def test_no_pads_identity(self) -> None:
+        """No pads → centroid = origin regardless of rotation."""
+        fp = _make_footprint("X1", ())
+        cx, cy = origin_to_centroid(fp, 42.0, 13.0, 45.0)
+        assert cx == pytest.approx(42.0)
+        assert cy == pytest.approx(13.0)
+
+    def test_centroid_to_origin_no_pads(self) -> None:
+        fp = _make_footprint("X1", ())
+        ox, oy = centroid_to_origin(fp, 42.0, 13.0, 90.0)
+        assert ox == pytest.approx(42.0)
+        assert oy == pytest.approx(13.0)

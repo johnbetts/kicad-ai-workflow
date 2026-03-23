@@ -167,3 +167,91 @@ def test_detect_template_no_match() -> None:
 def test_detect_template_none_input() -> None:
     """detect_template returns None for None input."""
     assert detect_template(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Additional detect_template edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_detect_template_explicit_with_hyphens() -> None:
+    """board_template with hyphens and spaces is normalized."""
+    mc = MechanicalConstraints(
+        board_width_mm=100.0, board_height_mm=100.0,
+        board_template="rpi-hat",
+    )
+    tmpl = detect_template(mc)
+    assert tmpl is not None
+    assert tmpl.name == "RPI_HAT"
+
+
+def test_detect_template_explicit_unknown_returns_none() -> None:
+    """Explicit board_template that doesn't match returns None (falls through)."""
+    mc = MechanicalConstraints(
+        board_width_mm=100.0, board_height_mm=100.0,
+        board_template="UNKNOWN_TEMPLATE_XYZ",
+    )
+    tmpl = detect_template(mc)
+    # Falls through explicit match but still checks notes/dimensions
+    assert tmpl is None
+
+
+def test_detect_template_dimensions_just_outside_tolerance() -> None:
+    """Dimensions 0.6mm off should NOT match (tolerance is 0.5mm)."""
+    mc = MechanicalConstraints(
+        board_width_mm=65.6,  # 0.6mm off from RPI_HAT's 65.0
+        board_height_mm=56.0,
+    )
+    tmpl = detect_template(mc)
+    assert tmpl is None
+
+
+def test_detect_template_no_notes_no_template_field() -> None:
+    """No notes, no board_template, non-matching dimensions → None."""
+    mc = MechanicalConstraints(
+        board_width_mm=123.0,
+        board_height_mm=456.0,
+    )
+    assert detect_template(mc) is None
+
+
+# ---------------------------------------------------------------------------
+# Additional get_template tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_template_error_message_lists_available() -> None:
+    """ConfigurationError message should list available templates."""
+    with pytest.raises(ConfigurationError, match="ARDUINO_UNO"):
+        get_template("NONEXISTENT")
+
+
+def test_list_templates_is_sorted() -> None:
+    """list_templates returns sorted names."""
+    names = list_templates()
+    assert names == sorted(names)
+
+
+def test_list_templates_at_least_three() -> None:
+    """At least 3 built-in templates exist."""
+    assert len(list_templates()) >= 3
+
+
+# ---------------------------------------------------------------------------
+# template_to_mechanical_constraints edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_template_to_mechanical_constraints_generic() -> None:
+    tmpl = get_template("GENERIC_50X50")
+    mc = template_to_mechanical_constraints(tmpl)
+    assert mc.board_width_mm == 50.0
+    assert mc.board_height_mm == 50.0
+    assert mc.mounting_hole_diameter_mm == pytest.approx(3.2)
+
+def test_template_to_mechanical_constraints_notes() -> None:
+    """Converted constraints carry the template description as notes."""
+    tmpl = get_template("RPI_HAT")
+    mc = template_to_mechanical_constraints(tmpl)
+    assert mc.notes is not None
+    assert "HAT" in mc.notes.upper() or "Raspberry" in mc.notes

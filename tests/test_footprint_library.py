@@ -280,3 +280,120 @@ class TestWriteFpLibTable:
         assert '"test-project"' in content
         assert "${KIPRJMOD}/test-project.pretty" in content
         assert '"KiCad"' in content
+
+
+# ---------------------------------------------------------------------------
+# footprint_name_from_lib_id — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestFootprintNameEdgeCases:
+    def test_multiple_colons(self) -> None:
+        """Only splits on the last colon."""
+        assert footprint_name_from_lib_id("a:b:c") == "c"
+
+    def test_empty_string(self) -> None:
+        assert footprint_name_from_lib_id("") == ""
+
+    def test_colon_only(self) -> None:
+        assert footprint_name_from_lib_id(":") == ""
+
+    def test_jlcpcb_prefix(self) -> None:
+        assert footprint_name_from_lib_id("jlcpcb:SOT-23-5") == "SOT-23-5"
+
+
+# ---------------------------------------------------------------------------
+# remap_footprint_lib_ids — edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestRemapEdgeCases:
+    def test_empty_components(self) -> None:
+        req = _minimal_requirements()
+        mapping = remap_footprint_lib_ids(req, "proj")
+        assert mapping == {}
+
+    def test_deduplicates_same_footprint(self) -> None:
+        """Two components with same footprint produce one mapping entry."""
+        r1 = Component(ref="R1", value="10k", footprint="R_0805", pins=())
+        r2 = Component(ref="R2", value="4.7k", footprint="R_0805", pins=())
+        req = _minimal_requirements(r1, r2)
+        mapping = remap_footprint_lib_ids(req, "proj")
+        assert len(mapping) == 1
+        assert mapping["R_0805"] == "proj:R_0805"
+
+
+# ---------------------------------------------------------------------------
+# footprint_to_kicad_mod — additional edge/error cases
+# ---------------------------------------------------------------------------
+
+
+class TestFootprintToKicadModEdge:
+    def test_minimal_sexp(self) -> None:
+        """Minimal S-expression with just a name and layer."""
+        sexp = ["footprint", "test:R_0805", ["layer", "F.Cu"]]
+        result = footprint_to_kicad_mod(sexp, "R_0805")
+        assert '(footprint "R_0805"' in result
+        assert "(version " in result
+
+    def test_no_properties(self) -> None:
+        """S-expression without property nodes should not crash."""
+        sexp = [
+            "footprint", "test:C_0402",
+            ["layer", "F.Cu"],
+            ["pad", "1", "smd", "rect", ["at", 0, 0], ["size", 0.5, 0.5]],
+        ]
+        result = footprint_to_kicad_mod(sexp, "C_0402")
+        assert '(footprint "C_0402"' in result
+
+    def test_does_not_modify_original(self) -> None:
+        """footprint_to_kicad_mod should not mutate the input list."""
+        import copy
+        sexp = [
+            "footprint", "test:R_0805",
+            ["layer", "F.Cu"],
+            ["at", 50.0, 30.0, 0],
+        ]
+        original = copy.deepcopy(sexp)
+        footprint_to_kicad_mod(sexp, "R_0805")
+        assert sexp == original
+
+
+# ---------------------------------------------------------------------------
+# build_footprint_library — additional edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestBuildFootprintLibraryEdge:
+    def test_empty_requirements(self, tmp_path: Path) -> None:
+        """No components -> empty .pretty directory."""
+        req = _minimal_requirements()
+        pretty_dir = build_footprint_library(req, tmp_path, "empty-proj")
+        assert pretty_dir.exists()
+        mod_files = list(pretty_dir.glob("*.kicad_mod"))
+        assert len(mod_files) == 0
+
+    def test_returns_path(self, tmp_path: Path) -> None:
+        req = _minimal_requirements(_resistor())
+        result = build_footprint_library(req, tmp_path, "proj")
+        assert str(result).endswith(".pretty")
+
+
+# ---------------------------------------------------------------------------
+# write_fp_lib_table — edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFpLibTableEdge:
+    def test_overwrites_existing(self, tmp_path: Path) -> None:
+        """Writing twice overwrites the file."""
+        write_fp_lib_table(tmp_path, "first")
+        write_fp_lib_table(tmp_path, "second")
+        content = (tmp_path / "fp-lib-table").read_text()
+        assert '"second"' in content
+        assert '"first"' not in content
+
+    def test_returns_path_type(self, tmp_path: Path) -> None:
+        from pathlib import Path as P
+        result = write_fp_lib_table(tmp_path, "test")
+        assert isinstance(result, P)

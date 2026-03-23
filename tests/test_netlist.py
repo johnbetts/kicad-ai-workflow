@@ -322,3 +322,63 @@ def test_build_netlist_basic_entry_count() -> None:
     req = _make_requirements(comps, nets)
     nl = build_netlist(req)
     assert len(nl.entries) == 2
+
+
+# ---------------------------------------------------------------------------
+# Additional netlist edge case tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_netlist_no_gnd_net() -> None:
+    """When there's no GND net, numbering starts from 2 (slot 1 reserved)."""
+    comps = [_simple_component("R1", ["1"])]
+    nets = [Net(name="SIG", connections=(NetConnection(ref="R1", pin="1"),))]
+    req = _make_requirements(comps, nets)
+    nl = build_netlist(req)
+    assert nl.entries[0].net.number == 2
+
+
+def test_build_netlist_pad_refs_are_tuples() -> None:
+    """pad_refs should be a tuple of tuples, not lists."""
+    comps = [_simple_component("R1", ["1"])]
+    nets = [Net(name="GND", connections=(NetConnection(ref="R1", pin="1"),))]
+    req = _make_requirements(comps, nets)
+    nl = build_netlist(req)
+    assert isinstance(nl.entries[0].pad_refs, tuple)
+    assert isinstance(nl.entries[0].pad_refs[0], tuple)
+
+
+def test_assign_net_numbers_empty_netlist() -> None:
+    """Footprints with empty netlist get all pads unconnected (net 0)."""
+    nl = Netlist(entries=())
+    footprints = [_smd_footprint("R1", ["1", "2"])]
+    result = assign_net_numbers_to_footprints(footprints, nl)
+    for pad in result[0].pads:
+        assert pad.net_number == 0
+        assert pad.net_name is None
+
+
+def test_netlist_net_for_pad_with_alpha_pin() -> None:
+    """net_for_pad works with alphanumeric pad numbers like 'A2'."""
+    nl = Netlist(entries=(
+        NetlistEntry(
+            net=NetEntry(number=5, name="SIG"),
+            pad_refs=(("U1", "A2"),),
+        ),
+    ))
+    assert nl.net_for_pad("U1", "A2") is not None
+    assert nl.net_for_pad("U1", "A2").name == "SIG"  # type: ignore[union-attr]
+
+
+def test_assign_net_numbers_with_empty_pads_footprint() -> None:
+    """Footprint with zero pads should pass through without error."""
+    nl = Netlist(entries=(
+        NetlistEntry(net=NetEntry(number=1, name="GND"), pad_refs=()),
+    ))
+    fp = Footprint(
+        lib_id="test:test", ref="MH1", value="MountHole",
+        position=Point(0.0, 0.0), pads=(),
+    )
+    result = assign_net_numbers_to_footprints([fp], nl)
+    assert len(result) == 1
+    assert result[0].pads == ()
