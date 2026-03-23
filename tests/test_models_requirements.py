@@ -7,18 +7,14 @@ import pytest
 from kicad_pipeline.models.requirements import (
     BoardContext,
     Component,
-    FeatureBlock,
     MechanicalConstraints,
     Net,
     NetConnection,
     Pin,
     PinFunction,
     PinType,
-    PowerBudget,
-    PowerRail,
     ProjectInfo,
     ProjectRequirements,
-    Recommendation,
 )
 
 # ---------------------------------------------------------------------------

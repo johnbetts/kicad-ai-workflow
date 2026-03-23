@@ -385,7 +385,6 @@ def test_requirements_from_dict_missing_project_key_raises() -> None:
 
 def test_save_and_load_invalid_json(tmp_path: Path) -> None:
     """load_requirements raises for invalid JSON content."""
-    from pathlib import Path as Pt
 
     bad_file = tmp_path / "bad.json"
     bad_file.write_text("not json {{{", encoding="utf-8")

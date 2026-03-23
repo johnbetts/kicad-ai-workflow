@@ -257,7 +257,6 @@ from kicad_pipeline.pcb.layout_templates import (
     auto_generate_ic_template,
     get_ic_template,
     get_subcircuit_template,
-    get_subcircuit_template_by_type,
     register_ic_template,
     register_subcircuit_template,
 )

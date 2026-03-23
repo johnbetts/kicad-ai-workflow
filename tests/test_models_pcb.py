@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 import pytest
 
@@ -12,7 +11,6 @@ from kicad_pipeline.models.pcb import (
     Footprint,
     FootprintBBox,
     NetEntry,
-    Pad,
     PCBDesign,
     Point,
 )
