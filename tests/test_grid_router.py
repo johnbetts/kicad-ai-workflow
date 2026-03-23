@@ -19,6 +19,7 @@ from kicad_pipeline.routing.grid_router import (
     _PadInfo,
     _prepare_bcu_grid,
     _prepare_grid,
+    _BcuEndpoint,
     _route_on_bcu,
     _route_stub_on_fcu,
     _score_route,
@@ -516,7 +517,7 @@ def test_route_on_bcu_produces_tracks_and_vias() -> None:
     bcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
     # No obstacles — should route easily
     result = _route_on_bcu(
-        5.0, 15.0, 25.0, 15.0,
+        _BcuEndpoint(5.0, 15.0), _BcuEndpoint(25.0, 15.0),
         bcu_grid, net_number=1, net_name="SIG",
         width_mm=0.25, clearance_mm=0.2,
     )
@@ -534,7 +535,7 @@ def test_route_on_bcu_via_properties() -> None:
 
     bcu_grid = _Grid.create(30.0, 30.0, grid_step_mm=0.5)
     result = _route_on_bcu(
-        5.0, 15.0, 25.0, 15.0,
+        _BcuEndpoint(5.0, 15.0), _BcuEndpoint(25.0, 15.0),
         bcu_grid, net_number=42, net_name="I2C_SDA",
         width_mm=0.25, clearance_mm=0.2,
     )
@@ -756,7 +757,7 @@ def test_bcu_fallback_generates_fcu_stub() -> None:
             fcu_grid.mark(tc + dc, tr + dr)
 
     result = _route_on_bcu(
-        5.0, 15.0, 25.0, 15.0,
+        _BcuEndpoint(5.0, 15.0), _BcuEndpoint(25.0, 15.0),
         bcu_grid, net_number=1, net_name="SIG",
         width_mm=0.25, clearance_mm=0.2,
         fcu_grid=fcu_grid,
@@ -871,7 +872,7 @@ def test_bcu_stubs_marked_on_fcu_grid() -> None:
             fcu_grid.mark(tc + dc, tr + ddr)
 
     result = _route_on_bcu(
-        5.0, 15.0, 25.0, 15.0,
+        _BcuEndpoint(5.0, 15.0), _BcuEndpoint(25.0, 15.0),
         bcu_grid, net_number=1, net_name="SIG",
         width_mm=0.25, clearance_mm=0.2,
         fcu_grid=fcu_grid,
