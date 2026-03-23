@@ -263,33 +263,67 @@ def _build_default_netclass() -> dict[str, Any]:
     }
 
 
-def build_project_file(
-    project_name: str,
-    root_uuid: str = "",
-    netclasses: tuple[NetClass, ...] | None = None,
-    drc_exclusions: tuple[str, ...] | None = None,
-    layer_count: int = 2,
-) -> dict[str, Any]:
-    """Build a minimal KiCad 9 project file structure.
+def _netclass_to_dict(nc: NetClass) -> dict[str, Any]:
+    """Convert a NetClass to a project-file class entry dict."""
+    return {
+        "bus_width": 12,
+        "clearance": nc.clearance_mm,
+        "diff_pair_gap": nc.diff_pair_gap_mm,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": nc.diff_pair_width_mm,
+        "line_style": 0,
+        "microvia_diameter": 0.508,
+        "microvia_drill": 0.127,
+        "name": nc.name,
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": nc.trace_width_mm,
+        "via_diameter": nc.via_diameter_mm,
+        "via_drill": nc.via_drill_mm,
+        "wire_width": 6,
+    }
 
-    Args:
-        project_name: Project name (used for filename field).
-        root_uuid: UUID of the root schematic sheet. If empty,
-            KiCad will assign one on first open.
-        netclasses: Optional netclass definitions to include in
-            the project file's net_settings section.
-        drc_exclusions: Optional list of DRC exclusion strings
-            (e.g. intra-footprint clearance exclusions).
-        layer_count: Number of copper layers (2 or 4).
 
-    Returns:
-        A dictionary suitable for JSON serialisation as a .kicad_pro file.
-    """
+def _inject_netclasses(
+    data: dict[str, Any],
+    netclasses: tuple[NetClass, ...],
+) -> None:
+    """Inject netclass definitions and assignments into project data."""
+    classes = data["net_settings"]["classes"]
+    assignments: dict[str, str] = {}
+    for nc in netclasses:
+        if nc.name == "Default":
+            classes[0]["track_width"] = nc.trace_width_mm
+            classes[0]["clearance"] = nc.clearance_mm
+            classes[0]["via_diameter"] = nc.via_diameter_mm
+            classes[0]["via_drill"] = nc.via_drill_mm
+            continue
+        classes.append(_netclass_to_dict(nc))
+        for net_name in nc.nets:
+            assignments[net_name] = nc.name
+
+    if assignments:
+        data["net_settings"]["netclass_assignments"] = assignments
+
+
+def _inject_4layer_stackup(data: dict[str, Any]) -> None:
+    """Inject layer definitions for a 4-layer stackup."""
+    data["board"]["design_settings"]["layers"] = {
+        "F.Cu": {"name": "F.Cu", "type": 0},
+        "In1.Cu": {"name": "In1.Cu", "type": 1},
+        "In2.Cu": {"name": "In2.Cu", "type": 1},
+        "B.Cu": {"name": "B.Cu", "type": 0},
+    }
+
+
+def _build_base_project_data(project_name: str, root_uuid: str) -> dict[str, Any]:
+    """Build the base project file data structure."""
     sheets: list[list[str]] = []
     if root_uuid:
         sheets.append([root_uuid, "Root"])
 
-    data: dict[str, Any] = {
+    return {
         "board": {
             "3dviewports": [],
             "design_settings": _build_design_settings(),
@@ -333,54 +367,39 @@ def build_project_file(
         "text_variables": {},
     }
 
-    # Inject DRC exclusions
+
+def build_project_file(
+    project_name: str,
+    root_uuid: str = "",
+    netclasses: tuple[NetClass, ...] | None = None,
+    drc_exclusions: tuple[str, ...] | None = None,
+    layer_count: int = 2,
+) -> dict[str, Any]:
+    """Build a minimal KiCad 9 project file structure.
+
+    Args:
+        project_name: Project name (used for filename field).
+        root_uuid: UUID of the root schematic sheet. If empty,
+            KiCad will assign one on first open.
+        netclasses: Optional netclass definitions to include in
+            the project file's net_settings section.
+        drc_exclusions: Optional list of DRC exclusion strings
+            (e.g. intra-footprint clearance exclusions).
+        layer_count: Number of copper layers (2 or 4).
+
+    Returns:
+        A dictionary suitable for JSON serialisation as a .kicad_pro file.
+    """
+    data = _build_base_project_data(project_name, root_uuid)
+
     if drc_exclusions:
         data["board"]["design_settings"]["drc_exclusions"] = list(drc_exclusions)
 
-    # Inject additional netclass definitions and assignments
     if netclasses:
-        classes = data["net_settings"]["classes"]
-        assignments: dict[str, str] = {}
-        for nc in netclasses:
-            if nc.name == "Default":
-                # Update the existing Default class values
-                classes[0]["track_width"] = nc.trace_width_mm
-                classes[0]["clearance"] = nc.clearance_mm
-                classes[0]["via_diameter"] = nc.via_diameter_mm
-                classes[0]["via_drill"] = nc.via_drill_mm
-                continue
-            classes.append({
-                "bus_width": 12,
-                "clearance": nc.clearance_mm,
-                "diff_pair_gap": nc.diff_pair_gap_mm,
-                "diff_pair_via_gap": 0.25,
-                "diff_pair_width": nc.diff_pair_width_mm,
-                "line_style": 0,
-                "microvia_diameter": 0.508,
-                "microvia_drill": 0.127,
-                "name": nc.name,
-                "pcb_color": "rgba(0, 0, 0, 0.000)",
-                "priority": 2147483647,
-                "schematic_color": "rgba(0, 0, 0, 0.000)",
-                "track_width": nc.trace_width_mm,
-                "via_diameter": nc.via_diameter_mm,
-                "via_drill": nc.via_drill_mm,
-                "wire_width": 6,
-            })
-            for net_name in nc.nets:
-                assignments[net_name] = nc.name
+        _inject_netclasses(data, netclasses)
 
-        if assignments:
-            data["net_settings"]["netclass_assignments"] = assignments
-
-    # Inject layer definitions for 4-layer stackup
     if layer_count >= 4:
-        data["board"]["design_settings"]["layers"] = {
-            "F.Cu": {"name": "F.Cu", "type": 0},
-            "In1.Cu": {"name": "In1.Cu", "type": 1},
-            "In2.Cu": {"name": "In2.Cu", "type": 1},
-            "B.Cu": {"name": "B.Cu", "type": 0},
-        }
+        _inject_4layer_stackup(data)
 
     return data
 

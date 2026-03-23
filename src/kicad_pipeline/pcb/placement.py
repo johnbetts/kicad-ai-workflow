@@ -357,6 +357,57 @@ def _scale_zones(
     return scaled
 
 
+def _estimate_group_areas(
+    groups: dict[str, list[str]],
+    footprint_sizes: dict[str, tuple[float, float]] | None,
+) -> dict[str, float]:
+    """Estimate placement area needed per group based on component footprints."""
+    _default_area = 7.0 * 7.0  # default 7x7mm per component
+    areas: dict[str, float] = {}
+    for gname, refs in groups.items():
+        if footprint_sizes:
+            area = sum(
+                (footprint_sizes[ref][0] + 3.0) * (footprint_sizes[ref][1] + 3.0)
+                if ref in footprint_sizes else _default_area
+                for ref in refs
+            )
+        else:
+            area = len(refs) * _default_area
+        areas[gname] = area
+    return areas
+
+
+def _split_into_rows(
+    group_areas: dict[str, float],
+    usable_h: float,
+) -> tuple[list[list[str]], list[float]]:
+    """Split groups into up to two rows and compute row heights."""
+    total_area = max(sum(group_areas.values()), 1.0)
+    sorted_groups = sorted(group_areas, key=lambda g: -group_areas[g])
+
+    row1_groups: list[str] = []
+    row2_groups: list[str] = []
+    row1_area = 0.0
+    half_area = total_area / 2.0
+    for gname in sorted_groups:
+        if row1_area < half_area or not row1_groups:
+            row1_groups.append(gname)
+            row1_area += group_areas[gname]
+        else:
+            row2_groups.append(gname)
+
+    if not row2_groups:
+        return [row1_groups], [usable_h]
+
+    row1_frac = row1_area / total_area
+    row1_h = max(usable_h * row1_frac, 15.0)
+    row2_h = max(usable_h - row1_h, 15.0)
+    total_rh = row1_h + row2_h
+    row1_h = usable_h * row1_h / total_rh
+    row2_h = usable_h - row1_h
+    return [row1_groups, row2_groups], [row1_h, row2_h]
+
+
 def _dynamic_zones(
     groups: dict[str, list[str]],
     board_width: float,
@@ -389,66 +440,17 @@ def _dynamic_zones(
         usable_h = max(usable_h, board_height * 0.8)
         margin = (board_width - usable_w) / 2.0
 
-    # Estimate area needed per group
-    _default_area = 7.0 * 7.0  # default 7x7mm per component
-    group_areas: dict[str, float] = {}
-    for gname, refs in groups.items():
-        if footprint_sizes:
-            area = sum(
-                (footprint_sizes[ref][0] + 3.0) * (footprint_sizes[ref][1] + 3.0)
-                if ref in footprint_sizes else _default_area
-                for ref in refs
-            )
-        else:
-            area = len(refs) * _default_area
-        group_areas[gname] = area
-
-    total_area = sum(group_areas.values())
-    if total_area < 1.0:
-        total_area = 1.0
-
-    # Lay out groups in rows, allocating width proportional to area
-    sorted_groups = sorted(groups.keys(), key=lambda g: -group_areas[g])
-
-    # Use up to 2 rows; put largest groups in row 1
-    row1_groups: list[str] = []
-    row2_groups: list[str] = []
-    row1_area = 0.0
-    half_area = total_area / 2.0
-    for gname in sorted_groups:
-        if row1_area < half_area or not row1_groups:
-            row1_groups.append(gname)
-            row1_area += group_areas[gname]
-        else:
-            row2_groups.append(gname)
-
-    # If only 1 row needed, give it full height
-    if not row2_groups:
-        row_heights = [usable_h]
-        rows_list = [row1_groups]
-    else:
-        # Split height proportionally
-        row1_frac = row1_area / total_area
-        row1_h = max(usable_h * row1_frac, 15.0)
-        row2_h = max(usable_h - row1_h, 15.0)
-        # Redistribute if one row is too small
-        total_rh = row1_h + row2_h
-        row1_h = usable_h * row1_h / total_rh
-        row2_h = usable_h - row1_h
-        row_heights = [row1_h, row2_h]
-        rows_list = [row1_groups, row2_groups]
+    group_areas = _estimate_group_areas(groups, footprint_sizes)
+    rows_list, row_heights = _split_into_rows(group_areas, usable_h)
 
     result: dict[str, PCBZone] = {}
     y_offset = margin
     for row_groups, row_h in zip(rows_list, row_heights, strict=True):
-        row_total = sum(group_areas[g] for g in row_groups)
-        if row_total < 1.0:
-            row_total = 1.0
+        row_total = max(sum(group_areas[g] for g in row_groups), 1.0)
         x_offset = margin
         for gname in row_groups:
             frac = group_areas[gname] / row_total
             zone_w = max(usable_w * frac, 10.0)
-            # Clamp to remaining width
             zone_w = min(zone_w, board_width - x_offset - margin)
             result[gname] = PCBZone(
                 name=gname,
@@ -1608,6 +1610,71 @@ def _layout_group(
     return layout
 
 
+def _compute_group_layouts(
+    groups: dict[str, list[str]],
+    full_constraints: object,
+    footprint_sizes: dict[str, tuple[float, float]],
+    requirements: ProjectRequirements,
+) -> tuple[dict[str, dict[str, tuple[float, float, float]]], dict[str, tuple[float, float]]]:
+    """Build subcircuit-aware internal layouts and bounding boxes per group."""
+    group_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
+    group_dimensions: dict[str, tuple[float, float]] = {}
+
+    for group_name, group_refs in groups.items():
+        if not group_refs:
+            continue
+
+        layout = _layout_group(
+            group_refs, full_constraints, footprint_sizes, requirements,
+        )
+        group_layouts[group_name] = layout
+
+        if layout:
+            min_x = min(pos[0] - footprint_sizes.get(ref, (5.0, 5.0))[0] / 2.0
+                        for ref, pos in layout.items())
+            max_x = max(pos[0] + footprint_sizes.get(ref, (5.0, 5.0))[0] / 2.0
+                        for ref, pos in layout.items())
+            min_y = min(pos[1] - footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
+                        for ref, pos in layout.items())
+            max_y = max(pos[1] + footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
+                        for ref, pos in layout.items())
+            group_dimensions[group_name] = (max_x - min_x + 4.0, max_y - min_y + 4.0)
+        else:
+            group_dimensions[group_name] = (20.0, 20.0)
+
+    return group_layouts, group_dimensions
+
+
+def _arrange_groups_offboard(
+    group_layouts: dict[str, dict[str, tuple[float, float, float]]],
+    group_dimensions: dict[str, tuple[float, float]],
+    board_height_mm: float,
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+) -> None:
+    """Arrange group layouts below the board in rows."""
+    start_y = board_height_mm + _GROUP_START_OFFSET_MM
+    cursor_x = 0.0
+    cursor_y = start_y
+    row_max_h = 0.0
+
+    for group_name in sorted(group_layouts.keys()):
+        layout = group_layouts[group_name]
+        gw, gh = group_dimensions[group_name]
+
+        if cursor_x + gw > _GROUP_ROW_MAX_WIDTH_MM and cursor_x > 0.0:
+            cursor_y += row_max_h + _GROUP_GAP_MM
+            cursor_x = 0.0
+            row_max_h = 0.0
+
+        for ref, (rx, ry, rrot) in layout.items():
+            positions[ref] = Point(x=cursor_x + rx, y=cursor_y + ry)
+            rotations[ref] = rrot
+
+        cursor_x += gw + _GROUP_GAP_MM
+        row_max_h = max(row_max_h, gh)
+
+
 def place_groups_off_board(
     footprints: tuple[object, ...],
     features: tuple[object, ...],
@@ -1676,55 +1743,14 @@ def place_groups_off_board(
         refs.sort()
 
     # 5. For each group, use subcircuit-aware layout
-    group_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
-    group_dimensions: dict[str, tuple[float, float]] = {}
-
-    for group_name, group_refs in groups.items():
-        if not group_refs:
-            continue
-
-        layout = _layout_group(
-            group_refs, full_constraints, footprint_sizes, requirements,
-        )
-        group_layouts[group_name] = layout
-
-        # Compute bounding box
-        if layout:
-            min_x = min(pos[0] - footprint_sizes.get(ref, (5.0, 5.0))[0] / 2.0
-                        for ref, pos in layout.items())
-            max_x = max(pos[0] + footprint_sizes.get(ref, (5.0, 5.0))[0] / 2.0
-                        for ref, pos in layout.items())
-            min_y = min(pos[1] - footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
-                        for ref, pos in layout.items())
-            max_y = max(pos[1] + footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
-                        for ref, pos in layout.items())
-            group_dimensions[group_name] = (max_x - min_x + 4.0, max_y - min_y + 4.0)
-        else:
-            group_dimensions[group_name] = (20.0, 20.0)
+    group_layouts, group_dimensions = _compute_group_layouts(
+        groups, full_constraints, footprint_sizes, requirements,
+    )
 
     # 6. Arrange groups below the real board
-    start_y = board_height_mm + _GROUP_START_OFFSET_MM
-    cursor_x = 0.0
-    cursor_y = start_y
-    row_max_h = 0.0
-
-    for group_name in sorted(group_layouts.keys()):
-        layout = group_layouts[group_name]
-        gw, gh = group_dimensions[group_name]
-
-        # Wrap to next row if needed
-        if cursor_x + gw > _GROUP_ROW_MAX_WIDTH_MM and cursor_x > 0.0:
-            cursor_y += row_max_h + _GROUP_GAP_MM
-            cursor_x = 0.0
-            row_max_h = 0.0
-
-        # Translate group positions to final off-board coordinates
-        for ref, (rx, ry, rrot) in layout.items():
-            positions[ref] = Point(x=cursor_x + rx, y=cursor_y + ry)
-            rotations[ref] = rrot
-
-        cursor_x += gw + _GROUP_GAP_MM
-        row_max_h = max(row_max_h, gh)
+    _arrange_groups_offboard(
+        group_layouts, group_dimensions, board_height_mm, positions, rotations,
+    )
 
     log.info(
         "place_groups_off_board: placed %d components in %d groups below board",

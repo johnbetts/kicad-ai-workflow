@@ -83,6 +83,69 @@ class SymbolExtent:
         return self.top + self.bottom
 
 
+@dataclass(frozen=True)
+class _PinSideInfo:
+    """Aggregated pin reach info per side of a lib symbol."""
+
+    has_left: bool
+    has_right: bool
+    has_top: bool
+    has_bottom: bool
+    max_pin_left: float
+    max_pin_right: float
+    max_pin_top: float
+    max_pin_bottom: float
+    has_power_top: bool
+    has_power_bottom: bool
+
+
+def _classify_pin_sides(lib_sym: LibSymbol) -> _PinSideInfo:
+    """Classify pins by side and compute max reach per side."""
+    has_left = has_right = has_top = has_bottom = False
+    max_left = max_right = max_top = max_bottom = 0.0
+    pwr_top = pwr_bottom = False
+
+    for pin in lib_sym.pins:
+        rot = pin.rotation % 360.0
+        is_power = pin.pin_type in ("power_in", "power_out")
+
+        if abs(rot) < 1.0:
+            has_left = True
+            max_left = max(max_left, abs(pin.at.x))
+        elif abs(rot - 180.0) < 1.0:
+            has_right = True
+            max_right = max(max_right, abs(pin.at.x))
+        elif abs(rot - 270.0) < 1.0:
+            has_top = True
+            max_top = max(max_top, abs(pin.at.y))
+            if is_power:
+                pwr_top = True
+        elif abs(rot - 90.0) < 1.0:
+            has_bottom = True
+            max_bottom = max(max_bottom, abs(pin.at.y))
+            if is_power:
+                pwr_bottom = True
+
+    return _PinSideInfo(
+        has_left=has_left, has_right=has_right,
+        has_top=has_top, has_bottom=has_bottom,
+        max_pin_left=max_left, max_pin_right=max_right,
+        max_pin_top=max_top, max_pin_bottom=max_bottom,
+        has_power_top=pwr_top, has_power_bottom=pwr_bottom,
+    )
+
+
+def _body_half_extents(lib_sym: LibSymbol) -> tuple[float, float]:
+    """Return (half_width, half_height) from the symbol body rectangles."""
+    half_w: float = 0.0
+    half_h: float = 0.0
+    for shape in lib_sym.shapes:
+        if isinstance(shape, LibRectangle):
+            half_w = max(half_w, abs(shape.start.x), abs(shape.end.x))
+            half_h = max(half_h, abs(shape.start.y), abs(shape.end.y))
+    return half_w, half_h
+
+
 def compute_symbol_extent(
     lib_sym: LibSymbol,
     ref_text: str,
@@ -105,94 +168,34 @@ def compute_symbol_extent(
     Returns:
         A :class:`SymbolExtent` describing the full visual bounding box.
     """
-    # --- Body extent from LibRectangle shapes ---
-    body_half_w: float = 0.0
-    body_half_h: float = 0.0
-    for shape in lib_sym.shapes:
-        if isinstance(shape, LibRectangle):
-            body_half_w = max(
-                body_half_w,
-                abs(shape.start.x),
-                abs(shape.end.x),
-            )
-            body_half_h = max(
-                body_half_h,
-                abs(shape.start.y),
-                abs(shape.end.y),
-            )
+    body_half_w, body_half_h = _body_half_extents(lib_sym)
+    ps = _classify_pin_sides(lib_sym)
 
-    # --- Pin tip positions per side (in lib-symbol coords: Y-up) ---
-    has_left = False
-    has_right = False
-    has_top = False
-    has_bottom = False
-    max_pin_left: float = 0.0
-    max_pin_right: float = 0.0
-    max_pin_top: float = 0.0
-    max_pin_bottom: float = 0.0
-    has_power_top = False
-    has_power_bottom = False
-
-    for pin in lib_sym.pins:
-        rot = pin.rotation % 360.0
-        tip_x = pin.at.x
-        tip_y = pin.at.y
-        is_power = pin.pin_type in ("power_in", "power_out")
-
-        if abs(rot) < 1.0:
-            # Left-side pin (extends right from negative X)
-            has_left = True
-            max_pin_left = max(max_pin_left, abs(tip_x))
-        elif abs(rot - 180.0) < 1.0:
-            # Right-side pin
-            has_right = True
-            max_pin_right = max(max_pin_right, abs(tip_x))
-        elif abs(rot - 270.0) < 1.0:
-            # Top pin
-            has_top = True
-            max_pin_top = max(max_pin_top, abs(tip_y))
-            if is_power:
-                has_power_top = True
-        elif abs(rot - 90.0) < 1.0:
-            # Bottom pin
-            has_bottom = True
-            max_pin_bottom = max(max_pin_bottom, abs(tip_y))
-            if is_power:
-                has_power_bottom = True
-
-    # --- Wire stub + label text on sides with pins ---
-    wire_stub = 7.62  # mm (standard wire stub from pin tip)
+    wire_stub = 7.62
     label_chars = max(len(ref_text), len(value_text), SCHEMATIC_MAX_LABEL_CHARS)
     label_width = label_chars * SCHEMATIC_LABEL_CHAR_WIDTH_MM
 
-    left_extent = max_pin_left if has_left else body_half_w
-    right_extent = max_pin_right if has_right else body_half_w
-
-    if has_left:
+    left_extent = ps.max_pin_left if ps.has_left else body_half_w
+    right_extent = ps.max_pin_right if ps.has_right else body_half_w
+    if ps.has_left:
         left_extent += wire_stub + label_width
-    if has_right:
+    if ps.has_right:
         right_extent += wire_stub + label_width
 
-    # --- Vertical: body + ref/value labels ---
-    # In schematic coords (Y-down), top extent = body_half_h + ref label clearance
-    ref_label_clearance = 2.54  # mm above body for ref designator
-    value_label_clearance = 2.54  # mm below body for value
-
+    ref_label_clearance = 2.54
+    value_label_clearance = 2.54
     top_extent = body_half_h + ref_label_clearance
     bottom_extent = body_half_h + value_label_clearance
 
-    # Power pins extend vertically: pin tip + wire stub + power symbol body (~5mm)
-    power_extra = wire_stub + 5.08  # wire stub + power symbol body
-    if has_power_top:
-        top_extent = max(top_extent, max_pin_top + power_extra)
-    if has_power_bottom:
-        bottom_extent = max(bottom_extent, max_pin_bottom + power_extra)
-
-    # Top/bottom pins also extend vertically (pin tip already included)
-    if has_top:
-        top_extent = max(top_extent, max_pin_top + wire_stub)
-    if has_bottom:
-        bottom_extent = max(bottom_extent, max_pin_bottom + wire_stub)
+    power_extra = wire_stub + 5.08
+    if ps.has_power_top:
+        top_extent = max(top_extent, ps.max_pin_top + power_extra)
+    if ps.has_power_bottom:
+        bottom_extent = max(bottom_extent, ps.max_pin_bottom + power_extra)
+    if ps.has_top:
+        top_extent = max(top_extent, ps.max_pin_top + wire_stub)
+    if ps.has_bottom:
+        bottom_extent = max(bottom_extent, ps.max_pin_bottom + wire_stub)
 
     return SymbolExtent(
         left=left_extent,

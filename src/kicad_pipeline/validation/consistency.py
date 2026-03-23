@@ -319,6 +319,101 @@ def footprints_match(sch_fp: str, pcb_fp: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_MECHANICAL_VALUES = frozenset({"MountingHole", "MountingHole_Pad"})
+
+
+def _find_missing_in_pcb(
+    sch_by_ref: dict[str, SchematicComponent],
+    pcb_by_ref: dict[str, PCBComponent],
+) -> list[DRCViolation]:
+    """Find components in schematic but missing from PCB."""
+    violations: list[DRCViolation] = []
+    for ref in sorted(sch_by_ref):
+        if ref in pcb_by_ref:
+            continue
+        sch_comp = sch_by_ref[ref]
+        violations.append(
+            DRCViolation(
+                rule="consistency_missing_in_pcb",
+                message=(
+                    f"{ref} ({sch_comp.value}) present in schematic "
+                    f"({sch_comp.source_file}) but missing from PCB"
+                ),
+                severity=Severity.ERROR,
+                ref=ref,
+            )
+        )
+    return violations
+
+
+def _find_missing_in_schematic(
+    sch_by_ref: dict[str, SchematicComponent],
+    pcb_by_ref: dict[str, PCBComponent],
+) -> list[DRCViolation]:
+    """Find components in PCB but missing from schematic."""
+    violations: list[DRCViolation] = []
+    for ref in sorted(pcb_by_ref):
+        if ref in sch_by_ref:
+            continue
+        pcb_comp = pcb_by_ref[ref]
+        if pcb_comp.value in _MECHANICAL_VALUES:
+            continue
+        violations.append(
+            DRCViolation(
+                rule="consistency_missing_in_schematic",
+                message=(
+                    f"{ref} ({pcb_comp.value}) present in PCB "
+                    f"but missing from schematic"
+                ),
+                severity=Severity.ERROR,
+                ref=ref,
+            )
+        )
+    return violations
+
+
+def _find_mismatches(
+    sch_by_ref: dict[str, SchematicComponent],
+    pcb_by_ref: dict[str, PCBComponent],
+) -> list[DRCViolation]:
+    """Find footprint and value mismatches between schematic and PCB."""
+    violations: list[DRCViolation] = []
+    for ref in sorted(set(sch_by_ref) & set(pcb_by_ref)):
+        sch_comp = sch_by_ref[ref]
+        pcb_comp = pcb_by_ref[ref]
+
+        if (
+            sch_comp.footprint
+            and pcb_comp.lib_id
+            and not footprints_match(sch_comp.footprint, pcb_comp.lib_id)
+        ):
+            violations.append(
+                DRCViolation(
+                    rule="consistency_footprint_mismatch",
+                    message=(
+                        f"{ref} footprint mismatch: schematic has "
+                        f"'{sch_comp.footprint}', PCB has '{pcb_comp.lib_id}'"
+                    ),
+                    severity=Severity.ERROR,
+                    ref=ref,
+                )
+            )
+
+        if sch_comp.value and pcb_comp.value and sch_comp.value != pcb_comp.value:
+            violations.append(
+                DRCViolation(
+                    rule="consistency_value_mismatch",
+                    message=(
+                        f"{ref} value mismatch: schematic has "
+                        f"'{sch_comp.value}', PCB has '{pcb_comp.value}'"
+                    ),
+                    severity=Severity.WARNING,
+                    ref=ref,
+                )
+            )
+    return violations
+
+
 def check_consistency(
     sch_path: Path,
     pcb_path: Path,
@@ -343,7 +438,6 @@ def check_consistency(
 
     sch_by_ref: dict[str, SchematicComponent] = {}
     for comp in sch_comps:
-        # Keep first occurrence (in case of duplicates across sheets)
         if comp.ref not in sch_by_ref:
             sch_by_ref[comp.ref] = comp
 
@@ -353,88 +447,14 @@ def check_consistency(
             pcb_by_ref[pcb_comp.ref] = pcb_comp
 
     violations: list[DRCViolation] = []
-
-    # Components in schematic but not PCB
-    for ref in sorted(sch_by_ref):
-        if ref not in pcb_by_ref:
-            sch_comp = sch_by_ref[ref]
-            violations.append(
-                DRCViolation(
-                    rule="consistency_missing_in_pcb",
-                    message=(
-                        f"{ref} ({sch_comp.value}) present in schematic "
-                        f"({sch_comp.source_file}) but missing from PCB"
-                    ),
-                    severity=Severity.ERROR,
-                    ref=ref,
-                )
-            )
-
-    # Components in PCB but not schematic
-    # Skip mechanical-only components (mounting holes) which are added by the
-    # PCB builder and have no schematic representation.
-    _MECHANICAL_VALUES = {"MountingHole", "MountingHole_Pad"}
-    for ref in sorted(pcb_by_ref):
-        if ref not in sch_by_ref:
-            pcb_comp = pcb_by_ref[ref]
-            if pcb_comp.value in _MECHANICAL_VALUES:
-                continue
-            violations.append(
-                DRCViolation(
-                    rule="consistency_missing_in_schematic",
-                    message=(
-                        f"{ref} ({pcb_comp.value}) present in PCB "
-                        f"but missing from schematic"
-                    ),
-                    severity=Severity.ERROR,
-                    ref=ref,
-                )
-            )
-
-    # Check matched refs for footprint / value mismatches
-    for ref in sorted(set(sch_by_ref) & set(pcb_by_ref)):
-        sch_comp = sch_by_ref[ref]
-        pcb_comp = pcb_by_ref[ref]
-
-        # Footprint mismatch
-        if (
-            sch_comp.footprint
-            and pcb_comp.lib_id
-            and not footprints_match(sch_comp.footprint, pcb_comp.lib_id)
-        ):
-                violations.append(
-                    DRCViolation(
-                        rule="consistency_footprint_mismatch",
-                        message=(
-                            f"{ref} footprint mismatch: schematic has "
-                            f"'{sch_comp.footprint}', PCB has '{pcb_comp.lib_id}'"
-                        ),
-                        severity=Severity.ERROR,
-                        ref=ref,
-                    )
-                )
-
-        # Value mismatch
-        if sch_comp.value and pcb_comp.value and sch_comp.value != pcb_comp.value:
-                violations.append(
-                    DRCViolation(
-                        rule="consistency_value_mismatch",
-                        message=(
-                            f"{ref} value mismatch: schematic has "
-                            f"'{sch_comp.value}', PCB has '{pcb_comp.value}'"
-                        ),
-                        severity=Severity.WARNING,
-                        ref=ref,
-                    )
-                )
-
-    sch_refs = tuple(sorted(sch_by_ref))
-    pcb_refs = tuple(sorted(pcb_by_ref))
+    violations.extend(_find_missing_in_pcb(sch_by_ref, pcb_by_ref))
+    violations.extend(_find_missing_in_schematic(sch_by_ref, pcb_by_ref))
+    violations.extend(_find_mismatches(sch_by_ref, pcb_by_ref))
 
     return ConsistencyReport(
         violations=tuple(violations),
-        schematic_refs=sch_refs,
-        pcb_refs=pcb_refs,
+        schematic_refs=tuple(sorted(sch_by_ref)),
+        pcb_refs=tuple(sorted(pcb_by_ref)),
     )
 
 

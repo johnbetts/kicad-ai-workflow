@@ -257,6 +257,84 @@ def _parse_fp_text(node: list[_SNode], text_type: str) -> FootprintText | None:
     )
 
 
+def _validate_kicad_mod_tree(
+    tree: object,
+    path: Path,
+) -> tuple[str, str]:
+    """Validate and extract lib_id and attr from a parsed .kicad_mod tree.
+
+    Returns:
+        Tuple of (lib_id, attr).
+    """
+    if not isinstance(tree, list) or len(tree) < 2:
+        msg = f"Invalid .kicad_mod structure in {path}"
+        raise ValueError(msg)
+
+    root_tag = tree[0]
+    if root_tag not in ("module", "footprint"):
+        msg = f"Expected 'module' or 'footprint' root, got {root_tag!r} in {path}"
+        raise ValueError(msg)
+
+    lib_name = str(tree[1]) if len(tree) > 1 else "unknown"
+    lib_id = lib_name if ":" in lib_name else f"jlcpcb:{lib_name}"
+
+    attr_node = _find_node(tree, "attr")
+    attr = "smd"
+    if attr_node is not None and len(attr_node) > 1:
+        attr = str(attr_node[1])
+
+    return lib_id, attr
+
+
+def _parse_graphics(
+    tree: list[object],
+) -> list[FootprintLine | FootprintArc | FootprintCircle]:
+    """Parse all graphic elements (lines, circles, arcs) from a footprint tree."""
+    _graphic_parsers: list[
+        tuple[str, Callable[..., FootprintLine | FootprintArc | FootprintCircle | None]]
+    ] = [
+        ("fp_line", _parse_fp_line),
+        ("fp_circle", _parse_fp_circle),
+        ("fp_arc", _parse_fp_arc),
+    ]
+    graphics: list[FootprintLine | FootprintArc | FootprintCircle] = []
+    for tag, parser in _graphic_parsers:
+        for gnode in _find_nodes(tree, tag):
+            result = parser(gnode)
+            if result is not None:
+                graphics.append(result)
+    return graphics
+
+
+def _parse_texts_with_overrides(
+    tree: list[object],
+    overrides: dict[str, str],
+) -> list[FootprintText]:
+    """Parse fp_text nodes, applying text overrides for reference/value."""
+    texts: list[FootprintText] = []
+    for text_node in _find_nodes(tree, "fp_text"):
+        if len(text_node) <= 1:
+            continue
+        text_type_raw = str(text_node[1])
+        text_type = text_type_raw if text_type_raw in ("reference", "value", "user") else "user"
+        ft = _parse_fp_text(text_node, text_type)
+        if ft is None:
+            continue
+        override = overrides.get(text_type)
+        if override is not None:
+            ft = FootprintText(
+                text_type=text_type,
+                text=override,
+                position=ft.position,
+                layer=ft.layer,
+                rotation=ft.rotation,
+                effects_size=ft.effects_size,
+                hidden=ft.hidden,
+            )
+        texts.append(ft)
+    return texts
+
+
 def load_kicad_mod(
     path: Path,
     ref: str,
@@ -286,71 +364,10 @@ def load_kicad_mod(
     text = path.read_text(encoding="utf-8")
     tree = parse(text)
 
-    if not isinstance(tree, list) or len(tree) < 2:
-        msg = f"Invalid .kicad_mod structure in {path}"
-        raise ValueError(msg)
-
-    # Root tag is either "module" (easyeda2kicad / KiCad 7) or "footprint" (KiCad 9+)
-    root_tag = tree[0]
-    if root_tag not in ("module", "footprint"):
-        msg = f"Expected 'module' or 'footprint' root, got {root_tag!r} in {path}"
-        raise ValueError(msg)
-
-    # lib_id from module/footprint name
-    lib_name = str(tree[1]) if len(tree) > 1 else "unknown"
-    lib_id = lib_name if ":" in lib_name else f"jlcpcb:{lib_name}"
-
-    # Detect attr (smd / through_hole)
-    attr_node = _find_node(tree, "attr")
-    attr = "smd"
-    if attr_node is not None and len(attr_node) > 1:
-        attr = str(attr_node[1])
-        if attr == "through_hole":
-            attr = "through_hole"
-
-    # Parse pads
-    pads: list[Pad] = []
-    for pad_node in _find_nodes(tree, "pad"):
-        pads.append(_parse_pad(pad_node))
-
-    # Parse graphics
-    graphics: list[FootprintLine | FootprintArc | FootprintCircle] = []
-    _graphic_parsers: list[
-        tuple[str, Callable[..., FootprintLine | FootprintArc | FootprintCircle | None]]
-    ] = [
-        ("fp_line", _parse_fp_line),
-        ("fp_circle", _parse_fp_circle),
-        ("fp_arc", _parse_fp_arc),
-    ]
-    for tag, parser in _graphic_parsers:
-        for gnode in _find_nodes(tree, tag):
-            result = parser(gnode)
-            if result is not None:
-                graphics.append(result)
-
-    # Parse texts — override reference/value with caller-provided values
-    _text_overrides: dict[str, str] = {"reference": ref, "value": value}
-    texts: list[FootprintText] = []
-    for text_node in _find_nodes(tree, "fp_text"):
-        if len(text_node) <= 1:
-            continue
-        text_type_raw = str(text_node[1])
-        text_type = text_type_raw if text_type_raw in ("reference", "value", "user") else "user"
-        ft = _parse_fp_text(text_node, text_type)
-        if ft is None:
-            continue
-        override = _text_overrides.get(text_type)
-        if override is not None:
-            ft = FootprintText(
-                text_type=text_type,
-                text=override,
-                position=ft.position,
-                layer=ft.layer,
-                rotation=ft.rotation,
-                effects_size=ft.effects_size,
-                hidden=ft.hidden,
-            )
-        texts.append(ft)
+    lib_id, attr = _validate_kicad_mod_tree(tree, path)
+    pads = [_parse_pad(pad_node) for pad_node in _find_nodes(tree, "pad")]
+    graphics = _parse_graphics(tree)
+    texts = _parse_texts_with_overrides(tree, {"reference": ref, "value": value})
 
     _log.info(
         "Loaded .kicad_mod: %s → %d pads, %d graphics, %d texts",

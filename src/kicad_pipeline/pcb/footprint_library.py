@@ -74,6 +74,27 @@ def remap_footprint_lib_ids(
     return mapping
 
 
+def _is_list_with_tag(child: SExpNode, tag: str) -> bool:
+    """Return True if *child* is a list node whose first element matches *tag*."""
+    return isinstance(child, list) and len(child) >= 1 and child[0] == tag
+
+
+def _strip_tags_from_node(node: list[SExpNode], tags: frozenset[str]) -> None:
+    """Remove all top-level children whose tag is in *tags* (in-place)."""
+    node[:] = [
+        child for child in node
+        if not (isinstance(child, list) and len(child) >= 1 and child[0] in tags)
+    ]
+
+
+def _strip_pad_instance_data(child: list[SExpNode]) -> list[SExpNode]:
+    """Remove (net ...) and (uuid ...) sub-nodes from a pad node."""
+    return [
+        elem for elem in child
+        if not (isinstance(elem, list) and len(elem) >= 1 and elem[0] in ("net", "uuid"))
+    ]
+
+
 def footprint_to_kicad_mod(fp_sexp: list[SExpNode], footprint_name: str) -> str:
     """Convert a footprint S-expression to standalone ``.kicad_mod`` content.
 
@@ -93,34 +114,24 @@ def footprint_to_kicad_mod(fp_sexp: list[SExpNode], footprint_name: str) -> str:
     Returns:
         S-expression string for a standalone ``.kicad_mod`` file.
     """
-    # Deep-copy to avoid mutating the original
     import copy
 
     node = copy.deepcopy(fp_sexp)
-
-    # Replace lib_id (element 1) with bare footprint name
     node[1] = footprint_name
 
-    # Remove (at x y rot) from the top-level footprint
-    node[:] = [
-        child
-        for child in node
-        if not (isinstance(child, list) and len(child) >= 1 and child[0] == "at")
-    ]
+    _strip_tags_from_node(node, frozenset({"at"}))
 
     # Insert version/generator after the footprint name (element 1)
-    insert_idx = 2
     headers: list[SExpNode] = [
         ["version", KICAD_PCB_VERSION],
         ["generator", KICAD_GENERATOR],
         ["generator_version", KICAD_GENERATOR_VERSION],
     ]
-    for item in headers:
-        node.insert(insert_idx, item)
-        insert_idx += 1
+    for idx, item in enumerate(headers):
+        node.insert(2 + idx, item)
 
     # Property name -> replacement value mapping
-    _property_overrides: dict[str, str] = {
+    property_overrides: dict[str, str] = {
         "Reference": "REF**",
         "Value": footprint_name,
         "Footprint": "",
@@ -130,31 +141,15 @@ def footprint_to_kicad_mod(fp_sexp: list[SExpNode], footprint_name: str) -> str:
     for i, child in enumerate(node):
         if not isinstance(child, list) or not child:
             continue
-
         tag = child[0]
-
-        # Strip (net N "name") and instance UUIDs from pad nodes
         if tag == "pad":
-            node[i] = [
-                elem
-                for elem in child
-                if not (isinstance(elem, list) and len(elem) >= 1 and elem[0] in ("net", "uuid"))
-            ]
-
-        # Fix properties using dispatch dict
-        if tag == "property" and len(child) >= 3:
-            override = _property_overrides.get(str(child[1]))
+            node[i] = _strip_pad_instance_data(child)
+        elif tag == "property" and len(child) >= 3:
+            override = property_overrides.get(str(child[1]))
             if override is not None:
                 child[2] = override
 
-    # Remove top-level uuid (instance UUID)
-    node[:] = [
-        child
-        for child in node
-        if not (isinstance(child, list) and len(child) >= 1 and child[0] == "uuid")
-    ]
-
-    # Add embedded_fonts at the end
+    _strip_tags_from_node(node, frozenset({"uuid"}))
     node.append(["embedded_fonts", False])
 
     return write(node)

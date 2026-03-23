@@ -12,53 +12,50 @@ Provides two placement strategies:
 from __future__ import annotations
 
 import logging
-import math
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from kicad_pipeline.models.pcb import Point
 from kicad_pipeline.optimization.collision_resolver import (
-    _count_collisions,
+    _count_collisions,  # noqa: F401 - re-exported
     _fp_courtyard_sizes,
     _group_of_ref,  # noqa: F401 - re-exported
-    _PlacementGrid,
-    _resolve_collisions,
-    _rotation_aware_size,
+    _PlacementGrid,  # noqa: F401 - re-exported
+    _resolve_collisions,  # noqa: F401 - re-exported
+    _rotation_aware_size,  # noqa: F401 - re-exported
 )
 from kicad_pipeline.optimization.functional_grouper import (
-    SubCircuitType,
+    SubCircuitType,  # noqa: F401 - re-exported
 )
 from kicad_pipeline.optimization.group_helpers import (
-    _apply_review_fixes,
+    _apply_review_fixes,  # noqa: F401 - re-exported
     _assign_zone_position,  # noqa: F401 - re-exported
     _build_group_map,  # noqa: F401 - re-exported
     _centroid,  # noqa: F401 - re-exported
-    _extract_group_bboxes,
+    _extract_group_bboxes,  # noqa: F401 - re-exported
     _group_footprint_area,  # noqa: F401 - re-exported
     _place_subcircuit_group,  # noqa: F401 - re-exported
 )
 from kicad_pipeline.optimization.level3_phases import (
     _apply_cross_domain_affinity_overrides,  # noqa: F401 - re-exported
-    _apply_template_refinement,
+    _apply_template_refinement,  # noqa: F401 - re-exported
     _classify_connector_function,  # noqa: F401 - re-exported
-    _orient_connectors,
+    _orient_connectors,  # noqa: F401 - re-exported
     _pin_connectors_by_function,  # noqa: F401 - re-exported
-    _pin_rf_to_edge,
+    _pin_rf_to_edge,  # noqa: F401 - re-exported
     _place_adc_channels,  # noqa: F401 - re-exported
     _place_boundary_regulators,  # noqa: F401 - re-exported
-    _place_row_layout,
+    _place_row_layout,  # noqa: F401 - re-exported
     _pull_mcu_peripherals,  # noqa: F401 - re-exported
 )
 from kicad_pipeline.optimization.placement_guard import (
     PlacementGuardResult,  # noqa: F401 - re-exported
-    validate_placement,
+    validate_placement,  # noqa: F401 - re-exported
 )
 from kicad_pipeline.optimization.placement_types import (
     OptimizationConfig,  # noqa: F401 - re-exported
     PlacementCandidate,  # noqa: F401 - re-exported
-    _apply_positions,
+    _apply_positions,  # noqa: F401 - re-exported
     _board_bounds,
-    _dict_to_positions,
+    _dict_to_positions,  # noqa: F401 - re-exported
     _extract_positions,  # noqa: F401 - re-exported
     _get_movable_refs,  # noqa: F401 - re-exported
     _is_fixed,
@@ -74,7 +71,7 @@ from kicad_pipeline.optimization.sa_optimizer import (
     optimize_placement_sa,  # noqa: F401 - re-exported
 )
 from kicad_pipeline.pcb.pin_map import (
-    centroid_to_origin,
+    centroid_to_origin,  # noqa: F401 - re-exported
     compute_centroid_offset,
     origin_to_centroid,
 )

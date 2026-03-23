@@ -161,6 +161,127 @@ def _group_internal_origin(
     return (min_x, min_y)
 
 
+def _resolve_zone_target(
+    group_name: str,
+    zone_map: dict[str, BoardZone],
+    gw: float,
+    gh: float,
+    board_bounds: tuple[float, float, float, float],
+) -> tuple[float, float, str]:
+    """Determine placement target center and zone name for a group."""
+    bx1, by1, bx2, by2 = board_bounds
+    zone: BoardZone | None = zone_map.get(group_name)
+    if zone is not None:
+        zx1, zy1, zx2, zy2 = zone.rect
+        zone_w = zx2 - zx1
+        zone_h = zy2 - zy1
+        if gw > zone_w or gh > zone_h:
+            _log.warning(
+                "Group '%s' (%.0fx%.0fmm) exceeds zone '%s' "
+                "(%.0fx%.0fmm) -- components may be clamped",
+                group_name, gw, gh, zone.name, zone_w, zone_h,
+            )
+        return (zx1 + zx2) / 2.0, (zy1 + zy2) / 2.0, zone.name
+
+    return (bx1 + bx2) / 2.0, (by1 + by2) / 2.0, "unassigned"
+
+
+def _compute_absolute_positions(
+    layout: dict[str, tuple[float, float, float]],
+    cx: float,
+    cy: float,
+    gox: float,
+    goy: float,
+    gw: float,
+    gh: float,
+    fp_sizes: dict[str, tuple[float, float]],
+    board_bounds: tuple[float, float, float, float],
+) -> dict[str, tuple[float, float]]:
+    """Shift internal layout to absolute positions centered at (cx, cy)."""
+    bx1, by1, bx2, by2 = board_bounds
+    offset_x = cx - (gox + gw / 2.0)
+    offset_y = cy - (goy + gh / 2.0)
+
+    abs_positions: dict[str, tuple[float, float]] = {}
+    for ref, (rx, ry, _rot) in layout.items():
+        abs_x = rx + offset_x
+        abs_y = ry + offset_y
+        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        abs_x = max(bx1 + w / 2 + 1, min(bx2 - w / 2 - 1, abs_x))
+        abs_y = max(by1 + h / 2 + 1, min(by2 - h / 2 - 1, abs_y))
+        abs_positions[ref] = (abs_x, abs_y)
+    return abs_positions
+
+
+def _place_single_group(
+    group: FeatureBlock,
+    internal_layouts: dict[str, dict[str, tuple[float, float, float]]],
+    fp_sizes: dict[str, tuple[float, float]],
+    zone_map: dict[str, BoardZone],
+    grid: _GroupGrid,
+    board_bounds: tuple[float, float, float, float],
+) -> PlacedGroup | None:
+    """Place a single group and return the PlacedGroup, or None if skipped."""
+    layout = internal_layouts.get(group.name, {})
+    if not layout:
+        _log.warning("No internal layout for group '%s' -- skipping", group.name)
+        return None
+
+    gw, gh = _group_dimensions(layout, fp_sizes)
+    gox, goy = _group_internal_origin(layout, fp_sizes)
+
+    target_x, target_y, zone_name = _resolve_zone_target(
+        group.name, zone_map, gw, gh, board_bounds,
+    )
+
+    cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
+    grid.place(cx, cy, gw, gh)
+
+    abs_positions = _compute_absolute_positions(
+        layout, cx, cy, gox, goy, gw, gh, fp_sizes, board_bounds,
+    )
+
+    all_x = [p[0] for p in abs_positions.values()]
+    all_y = [p[1] for p in abs_positions.values()]
+    if all_x and all_y:
+        bbox = (min(all_x) - 1, min(all_y) - 1, max(all_x) + 1, max(all_y) + 1)
+    else:
+        bbox = (cx - gw / 2, cy - gh / 2, cx + gw / 2, cy + gh / 2)
+
+    _log.info(
+        "  Placed group '%s' in zone '%s' at (%.1f, %.1f) [%.0fx%.0fmm]",
+        group.name, zone_name, cx, cy, gw, gh,
+    )
+
+    return PlacedGroup(
+        name=group.name,
+        zone=zone_name,
+        origin=(cx - gw / 2.0, cy - gh / 2.0),
+        refs=tuple(sorted(abs_positions.keys())),
+        positions=abs_positions,
+        bbox=bbox,
+    )
+
+
+def _validate_off_board(
+    placed: list[PlacedGroup],
+    fp_sizes: dict[str, tuple[float, float]],
+    board_bounds: tuple[float, float, float, float],
+) -> None:
+    """Log warnings for components placed outside board boundaries."""
+    bx1, by1, bx2, by2 = board_bounds
+    off_board_count = 0
+    for pg in placed:
+        for ref, (px, py) in pg.positions.items():
+            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            if (px - w / 2 < bx1 - 0.5 or px + w / 2 > bx2 + 0.5
+                    or py - h / 2 < by1 - 0.5 or py + h / 2 > by2 + 0.5):
+                off_board_count += 1
+                _log.warning("  Off-board: %s at (%.1f, %.1f)", ref, px, py)
+    if off_board_count:
+        _log.warning("Group placement: %d components off-board", off_board_count)
+
+
 def place_groups(
     zones: list[BoardZone],
     groups: list[FeatureBlock],
@@ -196,90 +317,14 @@ def place_groups(
     sorted_groups = sorted(groups, key=lambda g: len(g.components), reverse=True)
 
     for group in sorted_groups:
-        layout = internal_layouts.get(group.name, {})
-        if not layout:
-            _log.warning("No internal layout for group '%s' — skipping", group.name)
-            continue
-
-        gw, gh = _group_dimensions(layout, fp_sizes)
-        gox, goy = _group_internal_origin(layout, fp_sizes)
-
-        # Find target zone
-        zone: BoardZone | None = zone_map.get(group.name)
-        if zone is not None:
-            zx1, zy1, zx2, zy2 = zone.rect
-            zone_w = zx2 - zx1
-            zone_h = zy2 - zy1
-            if gw > zone_w or gh > zone_h:
-                _log.warning(
-                    "Group '%s' (%.0fx%.0fmm) exceeds zone '%s' "
-                    "(%.0fx%.0fmm) — components may be clamped",
-                    group.name, gw, gh, zone.name, zone_w, zone_h,
-                )
-            # Target center of zone
-            target_x = (zx1 + zx2) / 2.0
-            target_y = (zy1 + zy2) / 2.0
-            zone_name = zone.name
-        else:
-            # No zone assigned — place in board center
-            target_x = (bx1 + bx2) / 2.0
-            target_y = (by1 + by2) / 2.0
-            zone_name = "unassigned"
-
-        # Find collision-free position for the group bounding box
-        cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
-        grid.place(cx, cy, gw, gh)
-
-        # Compute absolute positions: shift internal layout to center at (cx, cy)
-        # Internal layout origin is at (gox, goy), center is at (gox + gw/2, goy + gh/2)
-        offset_x = cx - (gox + gw / 2.0)
-        offset_y = cy - (goy + gh / 2.0)
-
-        abs_positions: dict[str, tuple[float, float]] = {}
-        for ref, (rx, ry, _rot) in layout.items():
-            abs_x = rx + offset_x
-            abs_y = ry + offset_y
-            # Clamp to board
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
-            abs_x = max(bx1 + w / 2 + 1, min(bx2 - w / 2 - 1, abs_x))
-            abs_y = max(by1 + h / 2 + 1, min(by2 - h / 2 - 1, abs_y))
-            abs_positions[ref] = (abs_x, abs_y)
-
-        # Compute bounding box
-        all_x = [p[0] for p in abs_positions.values()]
-        all_y = [p[1] for p in abs_positions.values()]
-        if all_x and all_y:
-            bbox = (min(all_x) - 1, min(all_y) - 1, max(all_x) + 1, max(all_y) + 1)
-        else:
-            bbox = (cx - gw / 2, cy - gh / 2, cx + gw / 2, cy + gh / 2)
-
-        origin = (cx - gw / 2.0, cy - gh / 2.0)
-
-        placed.append(PlacedGroup(
-            name=group.name,
-            zone=zone_name,
-            origin=origin,
-            refs=tuple(sorted(abs_positions.keys())),
-            positions=abs_positions,
-            bbox=bbox,
-        ))
-
-        _log.info(
-            "  Placed group '%s' in zone '%s' at (%.1f, %.1f) [%.0fx%.0fmm]",
-            group.name, zone_name, cx, cy, gw, gh,
+        result = _place_single_group(
+            group, internal_layouts, fp_sizes, zone_map, grid,
+            board_bounds,
         )
+        if result is not None:
+            placed.append(result)
 
-    # Validate: count off-board components
-    off_board_count = 0
-    for pg in placed:
-        for ref, (px, py) in pg.positions.items():
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
-            if (px - w / 2 < bx1 - 0.5 or px + w / 2 > bx2 + 0.5
-                    or py - h / 2 < by1 - 0.5 or py + h / 2 > by2 + 0.5):
-                off_board_count += 1
-                _log.warning("  Off-board: %s at (%.1f, %.1f)", ref, px, py)
-    if off_board_count:
-        _log.warning("Group placement: %d components off-board", off_board_count)
+    _validate_off_board(placed, fp_sizes, board_bounds)
 
     _log.info("Group placement complete: %d groups placed", len(placed))
     return placed

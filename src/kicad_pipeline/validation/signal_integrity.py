@@ -95,108 +95,93 @@ def _nets_containing(pcb: PCBDesign, keyword: str) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def run_si_checks(
-    pcb: PCBDesign,
-    requirements: ProjectRequirements | None = None,
-) -> SIReport:
-    """Run signal integrity checks on *pcb*.
-
-    Args:
-        pcb: The PCB design to check.
-        requirements: Optional project requirements (currently unused).
-
-    Returns:
-        A :class:`SIReport` with all detected violations.
-    """
-    violations: list[SIViolation] = []
-
-    # ------------------------------------------------------------------
-    # 1. usb_diff_pair_check
-    # ------------------------------------------------------------------
+def _check_usb_diff_pair(pcb: PCBDesign) -> list[SIViolation]:
+    """Check USB differential pair length skew."""
     dp_net = _net_number_by_name(pcb, "D+")
     dm_net = _net_number_by_name(pcb, "D-")
+    if dp_net is None or dm_net is None:
+        return []
 
-    if dp_net is not None and dm_net is not None:
-        len_dp = _net_total_length(pcb, dp_net)
-        len_dm = _net_total_length(pcb, dm_net)
-        if abs(len_dp - len_dm) > _USB_DIFF_MAX_SKEW_MM:
-            violations.append(
-                SIViolation(
-                    rule="usb_diff_pair_check",
-                    message=(
-                        f"USB differential pair length mismatch:"
-                        f" D+={len_dp:.2f}mm D-={len_dm:.2f}mm"
-                        f" (max skew {_USB_DIFF_MAX_SKEW_MM:.1f}mm)"
-                    ),
-                    severity=Severity.WARNING,
-                )
-            )
+    len_dp = _net_total_length(pcb, dp_net)
+    len_dm = _net_total_length(pcb, dm_net)
+    if abs(len_dp - len_dm) <= _USB_DIFF_MAX_SKEW_MM:
+        return []
 
-    # ------------------------------------------------------------------
-    # 2. analog_digital_parallel_check
-    # ------------------------------------------------------------------
+    return [
+        SIViolation(
+            rule="usb_diff_pair_check",
+            message=(
+                f"USB differential pair length mismatch:"
+                f" D+={len_dp:.2f}mm D-={len_dm:.2f}mm"
+                f" (max skew {_USB_DIFF_MAX_SKEW_MM:.1f}mm)"
+            ),
+            severity=Severity.WARNING,
+        )
+    ]
+
+
+def _check_analog_digital_parallel(pcb: PCBDesign) -> list[SIViolation]:
+    """Check for parallel coupling between analog and digital traces."""
     analog_nets = _nets_containing(pcb, "ANALOG") + _nets_containing(pcb, "ADC")
     analog_net_numbers = {num for num, _ in analog_nets}
 
     analog_tracks = [
-        t
-        for t in pcb.tracks
+        t for t in pcb.tracks
         if t.layer == "F.Cu" and t.net_number in analog_net_numbers
     ]
     other_tracks = [
-        t
-        for t in pcb.tracks
+        t for t in pcb.tracks
         if t.layer == "F.Cu" and t.net_number not in analog_net_numbers
     ]
 
-    if analog_tracks and other_tracks:
-        for a_track in analog_tracks:
-            a_y = (a_track.start.y + a_track.end.y) / 2.0
-            for o_track in other_tracks:
-                o_y = (o_track.start.y + o_track.end.y) / 2.0
-                if abs(a_y - o_y) < _ANALOG_PARALLEL_TOLERANCE_MM:
-                    violations.append(
-                        SIViolation(
-                            rule="analog_digital_parallel_check",
-                            message=(
-                                "Potential analog/digital parallel coupling detected"
-                            ),
-                            severity=Severity.WARNING,
-                        )
-                    )
-                    # Only report once
-                    break
-            else:
-                continue
-            break
+    if not (analog_tracks and other_tracks):
+        return []
 
-    # ------------------------------------------------------------------
-    # 3. antenna_keepout_check
-    # ------------------------------------------------------------------
+    for a_track in analog_tracks:
+        a_y = (a_track.start.y + a_track.end.y) / 2.0
+        for o_track in other_tracks:
+            o_y = (o_track.start.y + o_track.end.y) / 2.0
+            if abs(a_y - o_y) < _ANALOG_PARALLEL_TOLERANCE_MM:
+                return [
+                    SIViolation(
+                        rule="analog_digital_parallel_check",
+                        message="Potential analog/digital parallel coupling detected",
+                        severity=Severity.WARNING,
+                    )
+                ]
+    return []
+
+
+def _check_antenna_keepout(pcb: PCBDesign) -> list[SIViolation]:
+    """Check for antenna keepout zone on WiFi/ESP32 designs."""
     has_wifi_component = any(
         any(kw in fp.value for kw in _WIFI_COMPONENT_KEYWORDS)
         for fp in pcb.footprints
     )
+    if not has_wifi_component:
+        return []
 
-    if has_wifi_component:
-        has_antenna_keepout = any(
-            ko.no_copper and ko.no_vias for ko in pcb.keepouts
+    has_antenna_keepout = any(
+        ko.no_copper and ko.no_vias for ko in pcb.keepouts
+    )
+    if has_antenna_keepout:
+        return []
+
+    return [
+        SIViolation(
+            rule="antenna_keepout_check",
+            message=(
+                "No antenna keepout zone found"
+                " - ESP32/WiFi antenna area should be keepout"
+            ),
+            severity=Severity.WARNING,
         )
-        if not has_antenna_keepout:
-            violations.append(
-                SIViolation(
-                    rule="antenna_keepout_check",
-                    message=(
-                        "No antenna keepout zone found"
-                        " - ESP32/WiFi antenna area should be keepout"
-                    ),
-                    severity=Severity.WARNING,
-                )
-            )
+    ]
 
-    # ------------------------------------------------------------------
-    # 4. trace_length_check (SPI nets)
-    # ------------------------------------------------------------------
+
+def _check_spi_trace_lengths(pcb: PCBDesign) -> list[SIViolation]:
+    """Check SPI net trace lengths for impedance concerns."""
+    violations: list[SIViolation] = []
     for keyword in _SPI_NET_KEYWORDS:
         spi_nets = _nets_containing(pcb, keyword)
         for net_num, net_name in spi_nets:
@@ -212,5 +197,25 @@ def run_si_checks(
                         severity=Severity.WARNING,
                     )
                 )
+    return violations
 
+
+def run_si_checks(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements | None = None,
+) -> SIReport:
+    """Run signal integrity checks on *pcb*.
+
+    Args:
+        pcb: The PCB design to check.
+        requirements: Optional project requirements (currently unused).
+
+    Returns:
+        A :class:`SIReport` with all detected violations.
+    """
+    violations: list[SIViolation] = []
+    violations.extend(_check_usb_diff_pair(pcb))
+    violations.extend(_check_analog_digital_parallel(pcb))
+    violations.extend(_check_antenna_keepout(pcb))
+    violations.extend(_check_spi_trace_lengths(pcb))
     return SIReport(violations=tuple(violations))

@@ -266,6 +266,113 @@ class RequirementsBuilder:
 # ---------------------------------------------------------------------------
 
 
+def _pin_to_dict(pin: Pin) -> dict[str, object]:
+    """Serialize a Pin to a plain dict."""
+    return {
+        "number": pin.number,
+        "name": pin.name,
+        "pin_type": pin.pin_type.value,
+        "function": pin.function.value if pin.function is not None else None,
+        "net": pin.net,
+    }
+
+
+def _component_to_dict(comp: Component) -> dict[str, object]:
+    """Serialize a Component to a plain dict."""
+    return {
+        "ref": comp.ref,
+        "value": comp.value,
+        "footprint": comp.footprint,
+        "lcsc": comp.lcsc,
+        "description": comp.description,
+        "datasheet": comp.datasheet,
+        "pins": [_pin_to_dict(p) for p in comp.pins],
+    }
+
+
+def _net_to_dict(net: Net) -> dict[str, object]:
+    """Serialize a Net to a plain dict."""
+    return {
+        "name": net.name,
+        "connections": [
+            {"ref": c.ref, "pin": c.pin} for c in net.connections
+        ],
+    }
+
+
+def _feature_to_dict(f: FeatureBlock) -> dict[str, object]:
+    """Serialize a FeatureBlock to a plain dict."""
+    return {
+        "name": f.name,
+        "description": f.description,
+        "components": list(f.components),
+        "nets": list(f.nets),
+        "subcircuits": list(f.subcircuits),
+    }
+
+
+def _rec_to_dict(r: Recommendation) -> dict[str, object]:
+    """Serialize a Recommendation to a plain dict."""
+    return {
+        "severity": r.severity,
+        "category": r.category,
+        "message": r.message,
+        "affected_refs": list(r.affected_refs),
+    }
+
+
+def _pin_assignment_to_dict(pa: PinAssignment) -> dict[str, object]:
+    """Serialize a PinAssignment to a plain dict."""
+    return {
+        "mcu_ref": pa.mcu_ref,
+        "pin_number": pa.pin_number,
+        "pin_name": pa.pin_name,
+        "function": pa.function.value,
+        "net": pa.net,
+        "notes": pa.notes,
+    }
+
+
+def _pin_map_to_dict(pm: MCUPinMap) -> dict[str, object]:
+    """Serialize an MCUPinMap to a plain dict."""
+    return {
+        "mcu_ref": pm.mcu_ref,
+        "assignments": [_pin_assignment_to_dict(a) for a in pm.assignments],
+        "unassigned_gpio": list(pm.unassigned_gpio),
+    }
+
+
+def _rail_to_dict(r: PowerRail) -> dict[str, object]:
+    """Serialize a PowerRail to a plain dict."""
+    return {
+        "name": r.name,
+        "voltage": r.voltage,
+        "current_ma": r.current_ma,
+        "source_ref": r.source_ref,
+    }
+
+
+def _power_budget_to_dict(pb: PowerBudget) -> dict[str, object]:
+    """Serialize a PowerBudget to a plain dict."""
+    return {
+        "rails": [_rail_to_dict(r) for r in pb.rails],
+        "total_current_ma": pb.total_current_ma,
+        "notes": list(pb.notes),
+    }
+
+
+def _mechanical_to_dict(m: MechanicalConstraints) -> dict[str, object]:
+    """Serialize MechanicalConstraints to a plain dict."""
+    return {
+        "board_width_mm": m.board_width_mm,
+        "board_height_mm": m.board_height_mm,
+        "enclosure": m.enclosure,
+        "mounting_hole_diameter_mm": m.mounting_hole_diameter_mm,
+        "mounting_hole_positions": [list(pos) for pos in m.mounting_hole_positions],
+        "notes": m.notes,
+    }
+
+
 def requirements_to_dict(req: ProjectRequirements) -> dict[str, object]:
     """Serialize :class:`ProjectRequirements` to a plain, JSON-serializable dict.
 
@@ -289,94 +396,6 @@ def requirements_to_dict(req: ProjectRequirements) -> dict[str, object]:
     Returns:
         A plain dict suitable for passing to :func:`json.dumps`.
     """
-
-    def _pin_to_dict(pin: Pin) -> dict[str, object]:
-        return {
-            "number": pin.number,
-            "name": pin.name,
-            "pin_type": pin.pin_type.value,
-            "function": pin.function.value if pin.function is not None else None,
-            "net": pin.net,
-        }
-
-    def _component_to_dict(comp: Component) -> dict[str, object]:
-        return {
-            "ref": comp.ref,
-            "value": comp.value,
-            "footprint": comp.footprint,
-            "lcsc": comp.lcsc,
-            "description": comp.description,
-            "datasheet": comp.datasheet,
-            "pins": [_pin_to_dict(p) for p in comp.pins],
-        }
-
-    def _net_to_dict(net: Net) -> dict[str, object]:
-        return {
-            "name": net.name,
-            "connections": [
-                {"ref": c.ref, "pin": c.pin} for c in net.connections
-            ],
-        }
-
-    def _feature_to_dict(f: FeatureBlock) -> dict[str, object]:
-        return {
-            "name": f.name,
-            "description": f.description,
-            "components": list(f.components),
-            "nets": list(f.nets),
-            "subcircuits": list(f.subcircuits),
-        }
-
-    def _rec_to_dict(r: Recommendation) -> dict[str, object]:
-        return {
-            "severity": r.severity,
-            "category": r.category,
-            "message": r.message,
-            "affected_refs": list(r.affected_refs),
-        }
-
-    def _pin_assignment_to_dict(pa: PinAssignment) -> dict[str, object]:
-        return {
-            "mcu_ref": pa.mcu_ref,
-            "pin_number": pa.pin_number,
-            "pin_name": pa.pin_name,
-            "function": pa.function.value,
-            "net": pa.net,
-            "notes": pa.notes,
-        }
-
-    def _pin_map_to_dict(pm: MCUPinMap) -> dict[str, object]:
-        return {
-            "mcu_ref": pm.mcu_ref,
-            "assignments": [_pin_assignment_to_dict(a) for a in pm.assignments],
-            "unassigned_gpio": list(pm.unassigned_gpio),
-        }
-
-    def _rail_to_dict(r: PowerRail) -> dict[str, object]:
-        return {
-            "name": r.name,
-            "voltage": r.voltage,
-            "current_ma": r.current_ma,
-            "source_ref": r.source_ref,
-        }
-
-    def _power_budget_to_dict(pb: PowerBudget) -> dict[str, object]:
-        return {
-            "rails": [_rail_to_dict(r) for r in pb.rails],
-            "total_current_ma": pb.total_current_ma,
-            "notes": list(pb.notes),
-        }
-
-    def _mechanical_to_dict(m: MechanicalConstraints) -> dict[str, object]:
-        return {
-            "board_width_mm": m.board_width_mm,
-            "board_height_mm": m.board_height_mm,
-            "enclosure": m.enclosure,
-            "mounting_hole_diameter_mm": m.mounting_hole_diameter_mm,
-            "mounting_hole_positions": [list(pos) for pos in m.mounting_hole_positions],
-            "notes": m.notes,
-        }
-
     return {
         "project": {
             "name": req.project.name,
