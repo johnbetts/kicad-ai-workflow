@@ -889,6 +889,129 @@ def _find_free_via_position(
     return None
 
 
+def _find_via_endpoint(
+    pad_x: float,
+    pad_y: float,
+    is_tht: bool,
+    via_in_pad: bool,
+    via_radius: float,
+    clearance_mm: float,
+    width_mm: float,
+    fcu_grid: _Grid | None,
+    bcu_grid: _Grid,
+    net_name: str,
+    label: str,
+) -> tuple[tuple[float, float], bool] | None:
+    """Find a via position for one endpoint of a B.Cu route.
+
+    Returns ``(via_position, needs_astar_stub)`` or ``None`` if no free
+    position can be found.
+    """
+    if fcu_grid is None or is_tht or via_in_pad:
+        return (pad_x, pad_y), False
+
+    # Try with clear stub path on both layers
+    found = _find_free_via_position(
+        fcu_grid, pad_x, pad_y, via_radius, clearance_mm,
+        stub_origin=(pad_x, pad_y), stub_width_mm=width_mm,
+        bcu_grid=bcu_grid,
+    )
+    if found is None:
+        # Any free position, A* for stub
+        found = _find_free_via_position(
+            fcu_grid, pad_x, pad_y, via_radius, clearance_mm,
+            bcu_grid=bcu_grid,
+        )
+    if found is None:
+        # Last resort: F.Cu-only (accept B.Cu congestion)
+        found = _find_free_via_position(
+            fcu_grid, pad_x, pad_y, via_radius, clearance_mm,
+        )
+        if found is None:
+            _log.debug(
+                "B.Cu via search FAIL %s (%.1f,%.1f) net=%s",
+                label, pad_x, pad_y, net_name,
+            )
+            return None
+    return found, True
+
+
+def _build_bcu_tracks(
+    path: list[tuple[int, int]],
+    bcu_grid: _Grid,
+    width_mm: float,
+    net_number: int,
+) -> list[Track]:
+    """Convert an A* path on B.Cu into simplified track segments."""
+    tracks: list[Track] = []
+    sim_bcu = _simplify_path(path)
+    for j in range(len(sim_bcu) - 1):
+        x1, y1 = bcu_grid.to_mm(sim_bcu[j][0], sim_bcu[j][1])
+        x2, y2 = bcu_grid.to_mm(sim_bcu[j + 1][0], sim_bcu[j + 1][1])
+        tracks.append(
+            Track(
+                start=Point(x1, y1), end=Point(x2, y2),
+                width=width_mm, layer="B.Cu",
+                net_number=net_number, uuid="",
+            )
+        )
+    return tracks
+
+
+def _build_endpoint_via(
+    via_pos: tuple[float, float],
+    is_tht: bool,
+    via_drill: float,
+    via_size: float,
+    net_number: int,
+) -> Via | None:
+    """Create a via at *via_pos* unless the endpoint is THT."""
+    if is_tht:
+        return None
+    return Via(
+        position=Point(via_pos[0], via_pos[1]),
+        drill=via_drill, size=via_size,
+        layers=("F.Cu", "B.Cu"),
+        net_number=net_number, uuid="",
+    )
+
+
+def _build_stub_track(
+    pad_x: float, pad_y: float,
+    via_x: float, via_y: float,
+    needs_astar: bool,
+    fcu_grid: _Grid | None,
+    net_number: int,
+    width_mm: float,
+    clearance_mm: float,
+) -> list[Track]:
+    """Build F.Cu stub tracks bridging a pad to an offset via.
+
+    Uses A* routing when *needs_astar* is True and *fcu_grid* is available,
+    falling back to a direct diagonal stub.
+    """
+    is_offset = abs(via_x - pad_x) > 0.01 or abs(via_y - pad_y) > 0.01
+    if not is_offset:
+        return []
+
+    if needs_astar and fcu_grid is not None:
+        astar_stub = _route_stub_on_fcu(
+            fcu_grid, pad_x, pad_y, via_x, via_y,
+            net_number, width_mm, clearance_mm,
+        )
+        if astar_stub is not None:
+            return list(astar_stub)
+
+    # Direct stub as fallback
+    return [
+        Track(
+            start=Point(pad_x, pad_y), end=Point(via_x, via_y),
+            width=width_mm, layer="F.Cu",
+            net_number=net_number, uuid="",
+        )
+    ]
+
+
 def _route_on_bcu(
     start_x: float,
     start_y: float,
@@ -922,215 +1045,65 @@ def _route_on_bcu(
     then marks the path with exclusion.  Returns B.Cu tracks and two
     vias (at start and goal) on success, or ``None`` on failure.
     """
-    # Use smaller signal vias to reduce overlap in congested areas
     via_drill = VIA_DRILL_SIGNAL_MM
     via_size = VIA_DIAMETER_SIGNAL_MM
     via_radius = via_size / 2.0
 
-    # Find via positions that don't overlap F.Cu pads
-    via_start_pos: tuple[float, float] = (start_x, start_y)
-    via_goal_pos: tuple[float, float] = (goal_x, goal_y)
+    # Find via positions for start and goal
+    start_result = _find_via_endpoint(
+        start_x, start_y, start_is_tht, start_via_in_pad,
+        via_radius, clearance_mm, width_mm, fcu_grid, bcu_grid, net_name, "start",
+    )
+    if start_result is None:
+        return None
+    via_start_pos, _start_needs_astar_stub = start_result
 
-    # Track whether stubs need A*-routed paths instead of direct diagonals
-    _start_needs_astar_stub = False
-    _goal_needs_astar_stub = False
+    goal_result = _find_via_endpoint(
+        goal_x, goal_y, goal_is_tht, goal_via_in_pad,
+        via_radius, clearance_mm, width_mm, fcu_grid, bcu_grid, net_name, "goal",
+    )
+    if goal_result is None:
+        return None
+    via_goal_pos, _goal_needs_astar_stub = goal_result
 
-    if fcu_grid is not None:
-        # THT/via-in-pad: place via at pad without searching
-        if start_is_tht or start_via_in_pad:
-            via_start_pos = (start_x, start_y)
-        else:
-            # Try to find via position with clear stub path, checking BOTH
-            # F.Cu and B.Cu grids (via spans both layers).
-            found_start = _find_free_via_position(
-                fcu_grid, start_x, start_y, via_radius, clearance_mm,
-                stub_origin=(start_x, start_y), stub_width_mm=width_mm,
-                bcu_grid=bcu_grid,
-            )
-            if found_start is None:
-                # Fall back: find ANY free via position, use A* for stub
-                found_start = _find_free_via_position(
-                    fcu_grid, start_x, start_y, via_radius, clearance_mm,
-                    bcu_grid=bcu_grid,
-                )
-            if found_start is None:
-                # Last resort: F.Cu-only search (accept B.Cu congestion)
-                found_start = _find_free_via_position(
-                    fcu_grid, start_x, start_y, via_radius, clearance_mm,
-                )
-                if found_start is None:
-                    _log.debug(
-                        "B.Cu via search FAIL start (%.1f,%.1f) net=%s",
-                        start_x, start_y, net_name,
-                    )
-                    return None
-            _start_needs_astar_stub = True
-            via_start_pos = found_start
-
-        if goal_is_tht or goal_via_in_pad:
-            via_goal_pos = (goal_x, goal_y)
-        else:
-            found_goal = _find_free_via_position(
-                fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
-                stub_origin=(goal_x, goal_y), stub_width_mm=width_mm,
-                bcu_grid=bcu_grid,
-            )
-            if found_goal is None:
-                found_goal = _find_free_via_position(
-                    fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
-                    bcu_grid=bcu_grid,
-                )
-            if found_goal is None:
-                # Last resort: F.Cu-only search (accept B.Cu congestion)
-                found_goal = _find_free_via_position(
-                    fcu_grid, goal_x, goal_y, via_radius, clearance_mm,
-                )
-                if found_goal is None:
-                    _log.debug(
-                        "B.Cu via search FAIL goal (%.1f,%.1f) net=%s",
-                        goal_x, goal_y, net_name,
-                    )
-                    return None
-            _goal_needs_astar_stub = True
-            via_goal_pos = found_goal
-
-    # Route on B.Cu between via positions (not pad positions)
+    # Route on B.Cu between via positions
     sc, sr = bcu_grid.to_cell(via_start_pos[0], via_start_pos[1])
     gc, gr = bcu_grid.to_cell(via_goal_pos[0], via_goal_pos[1])
 
-    # Temporarily unmark start/goal so A* can enter them
     orig_start = not bcu_grid.is_free(sc, sr)
     orig_goal = not bcu_grid.is_free(gc, gr)
     bcu_grid.unmark(sc, sr)
     bcu_grid.unmark(gc, gr)
 
     path = _astar(bcu_grid, sc, sr, gc, gr)
-
     if path is None:
         _log.debug(
             "B.Cu A* FAIL via (%.1f,%.1f)->(%.1f,%.1f) net=%s",
             via_start_pos[0], via_start_pos[1],
             via_goal_pos[0], via_goal_pos[1], net_name,
         )
-        # Restore original state
         if orig_start:
             bcu_grid.mark(sc, sr)
         if orig_goal:
             bcu_grid.mark(gc, gr)
         return None
 
-    # Build B.Cu tracks (simplified to remove colinear intermediates)
-    tracks: list[Track] = []
-    sim_bcu = _simplify_path(path)
-    for j in range(len(sim_bcu) - 1):
-        x1, y1 = bcu_grid.to_mm(sim_bcu[j][0], sim_bcu[j][1])
-        x2, y2 = bcu_grid.to_mm(sim_bcu[j + 1][0], sim_bcu[j + 1][1])
-        tracks.append(
-            Track(
-                start=Point(x1, y1),
-                end=Point(x2, y2),
-                width=width_mm,
-                layer="B.Cu",
-                net_number=net_number,
-                uuid="",
-            )
-        )
+    # Build tracks, vias, and stubs
+    tracks = _build_bcu_tracks(path, bcu_grid, width_mm, net_number)
 
-    # Build vias at (possibly offset) positions — skip for THT endpoints
-    # (THT pads already provide plated through-hole layer transition)
-    via_start: Via | None = None
-    via_goal: Via | None = None
-    if not start_is_tht:
-        via_start = Via(
-            position=Point(via_start_pos[0], via_start_pos[1]),
-            drill=via_drill,
-            size=via_size,
-            layers=("F.Cu", "B.Cu"),
-            net_number=net_number,
-            uuid="",
-        )
-    if not goal_is_tht:
-        via_goal = Via(
-            position=Point(via_goal_pos[0], via_goal_pos[1]),
-            drill=via_drill,
-            size=via_size,
-            layers=("F.Cu", "B.Cu"),
-            net_number=net_number,
-            uuid="",
-        )
+    via_start = _build_endpoint_via(via_start_pos, start_is_tht, via_drill, via_size, net_number)
+    via_goal = _build_endpoint_via(via_goal_pos, goal_is_tht, via_drill, via_size, net_number)
 
-    # Add F.Cu stub tracks if vias were offset from pad positions.
-    # When the direct diagonal stub would cross existing F.Cu tracks,
-    # use A*-routed stubs instead (grid-aligned segments).
-    stub_tracks: list[Track] = []
-    start_offset = (
-        abs(via_start_pos[0] - start_x) > 0.01
-        or abs(via_start_pos[1] - start_y) > 0.01
+    stub_tracks = _build_stub_track(
+        start_x, start_y, via_start_pos[0], via_start_pos[1],
+        _start_needs_astar_stub, fcu_grid, net_number, width_mm, clearance_mm,
     )
-    goal_offset = (
-        abs(via_goal_pos[0] - goal_x) > 0.01
-        or abs(via_goal_pos[1] - goal_y) > 0.01
-    )
+    stub_tracks.extend(_build_stub_track(
+        goal_x, goal_y, via_goal_pos[0], via_goal_pos[1],
+        _goal_needs_astar_stub, fcu_grid, net_number, width_mm, clearance_mm,
+    ))
 
-    if start_offset:
-        if _start_needs_astar_stub and fcu_grid is not None:
-            astar_stub = _route_stub_on_fcu(
-                fcu_grid, start_x, start_y,
-                via_start_pos[0], via_start_pos[1],
-                net_number, width_mm, clearance_mm,
-            )
-            if astar_stub is not None:
-                stub_tracks.extend(astar_stub)
-            else:
-                # A* also failed — add direct stub as last resort
-                stub_tracks.append(
-                    Track(
-                        start=Point(start_x, start_y),
-                        end=Point(via_start_pos[0], via_start_pos[1]),
-                        width=width_mm, layer="F.Cu",
-                        net_number=net_number, uuid="",
-                    )
-                )
-        else:
-            stub_tracks.append(
-                Track(
-                    start=Point(start_x, start_y),
-                    end=Point(via_start_pos[0], via_start_pos[1]),
-                    width=width_mm, layer="F.Cu",
-                    net_number=net_number, uuid="",
-                )
-            )
-
-    if goal_offset:
-        if _goal_needs_astar_stub and fcu_grid is not None:
-            astar_stub = _route_stub_on_fcu(
-                fcu_grid, goal_x, goal_y,
-                via_goal_pos[0], via_goal_pos[1],
-                net_number, width_mm, clearance_mm,
-            )
-            if astar_stub is not None:
-                stub_tracks.extend(astar_stub)
-            else:
-                stub_tracks.append(
-                    Track(
-                        start=Point(goal_x, goal_y),
-                        end=Point(via_goal_pos[0], via_goal_pos[1]),
-                        width=width_mm, layer="F.Cu",
-                        net_number=net_number, uuid="",
-                    )
-                )
-        else:
-            stub_tracks.append(
-                Track(
-                    start=Point(goal_x, goal_y),
-                    end=Point(via_goal_pos[0], via_goal_pos[1]),
-                    width=width_mm, layer="F.Cu",
-                    net_number=net_number, uuid="",
-                )
-            )
-
-    # Mark F.Cu stub tracks on fcu_grid so subsequent F.Cu routes avoid them.
-    # A*-routed stubs are already marked by _route_stub_on_fcu; mark direct stubs.
+    # Mark F.Cu stub tracks on fcu_grid
     if fcu_grid is not None:
         for stub in stub_tracks:
             if stub.layer == "F.Cu":
@@ -2447,6 +2420,142 @@ def _mst_seed(pad_infos: list[_PadInfo]) -> int:
                key=lambda i: abs(pad_infos[i].x - cx) + abs(pad_infos[i].y - cy))
 
 
+def _find_mst_nearest_pair(
+    pad_infos: list[_PadInfo],
+    routed_set: set[int],
+    unrouted: set[int],
+) -> tuple[int, int]:
+    """Find the closest routed-to-unrouted pad pair (Manhattan distance)."""
+    best_from = 0
+    best_to = next(iter(unrouted))
+    best_dist = float("inf")
+    for ri in routed_set:
+        for ui in unrouted:
+            d = (abs(pad_infos[ri].x - pad_infos[ui].x)
+                 + abs(pad_infos[ri].y - pad_infos[ui].y))
+            if d < best_dist:
+                best_dist = d
+                best_from = ri
+                best_to = ui
+    return best_from, best_to
+
+
+def _emit_fcu_tracks(
+    path: list[tuple[int, int]],
+    ctx: _RouteContext,
+) -> None:
+    """Convert an F.Cu A* path into track segments and mark the grid."""
+    grid = ctx.grid
+    request = ctx.request
+    simplified = _simplify_path(path)
+    for j in range(len(simplified) - 1):
+        x1, y1 = grid.to_mm(simplified[j][0], simplified[j][1])
+        x2, y2 = grid.to_mm(simplified[j + 1][0], simplified[j + 1][1])
+        ctx.all_tracks.append(
+            Track(
+                start=Point(x1, y1), end=Point(x2, y2),
+                width=request.width_mm, layer=request.layer,
+                net_number=request.net_number, uuid="",
+            )
+        )
+
+    for cell_col, cell_row in path:
+        grid.mark_area(cell_col, cell_row, ctx.excl_cells)
+        grid.add_congestion(cell_col, cell_row, radius=2)
+
+    for pi in ctx.pad_infos:
+        _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, ctx.pad_cl)
+    _remark_other_pads(
+        grid, ctx.footprints, ctx.net_pad_set,
+        ctx.net_clearances, ctx.net_widths, _pad_cache=ctx.pad_cache,
+    )
+
+
+def _route_mst_pairs(
+    ctx: _RouteContext,
+    footprints: list[Footprint],
+    net_clearances: dict[str, float] | None,
+    net_widths: dict[str, float] | None,
+) -> RouteResult | None:
+    """Route pad pairs using MST ordering.
+
+    Returns a failed :class:`RouteResult` if any pair cannot be routed,
+    or ``None`` on success (results stored in *ctx*).
+    """
+    request = ctx.request
+    grid = ctx.grid
+    pad_infos = ctx.pad_infos
+    ic_refs_in_net = ctx.ic_refs_in_net
+
+    seed = _mst_seed(pad_infos)
+    routed_set: set[int] = {seed}
+    unrouted: set[int] = set(range(len(pad_infos))) - {seed}
+
+    while unrouted:
+        best_from, best_to = _find_mst_nearest_pair(pad_infos, routed_set, unrouted)
+        p1 = pad_infos[best_from]
+        p2 = pad_infos[best_to]
+        start_col, start_row = grid.to_cell(p1.x, p1.y)
+        goal_col, goal_row = grid.to_cell(p2.x, p2.y)
+
+        # Try F.Cu A*
+        path = _astar(grid, start_col, start_row, goal_col, goal_row)
+        if path is not None:
+            segs = _validate_path_segments(
+                path, grid, request, footprints, ctx.original_net_pad_set,
+            )
+            if not segs:
+                path = None
+        _log.debug(
+            "MST %s: (%s) (%.1f,%.1f)->(%s) (%.1f,%.1f) F.Cu=%s",
+            request.net_name,
+            request.pad_refs[best_from][0] + "." + request.pad_refs[best_from][1],
+            p1.x, p1.y,
+            request.pad_refs[best_to][0] + "." + request.pad_refs[best_to][1],
+            p2.x, p2.y,
+            "OK" if path is not None else "FAIL",
+        )
+
+        # THT sibling unmark retry
+        if path is None:
+            path = _try_tht_sibling_unmark(ctx, start_col, start_row, goal_col, goal_row)
+
+        # B.Cu fallback
+        if path is None:
+            _log.debug(
+                "MST %s: F.Cu FAIL, trying B.Cu (vias=%d/%d)",
+                request.net_name, len(ctx.all_vias), request.max_vias,
+            )
+            bcu_result = _try_bcu_fallback(ctx, p1, p2)
+            if bcu_result is not None:
+                bcu_tracks, bcu_vias = bcu_result
+                ctx.all_tracks.extend(bcu_tracks)
+                ctx.all_vias.extend(bcu_vias)
+                routed_set.add(best_to)
+                unrouted.discard(best_to)
+                continue
+
+        if path is None:
+            p2_ref = request.pad_refs[best_to][0] if best_to < len(request.pad_refs) else ""
+            p1_ref = request.pad_refs[best_from][0] if best_from < len(request.pad_refs) else ""
+            if p2_ref in ic_refs_in_net or p1_ref in ic_refs_in_net:
+                unrouted.discard(best_to)
+                continue
+            _restore_pad_marks(grid, footprints, net_clearances, net_widths,
+                               _pad_cache=ctx.pad_cache)
+            return RouteResult(
+                net_number=request.net_number, net_name=request.net_name,
+                tracks=tuple(ctx.all_tracks), vias=tuple(ctx.all_vias),
+                routed=False, reason=f"No path found for net {request.net_name}",
+            )
+
+        _emit_fcu_tracks(path, ctx)
+        routed_set.add(best_to)
+        unrouted.discard(best_to)
+
+    return None
+
+
 def route_net(
     request: RouteRequest,
     footprints: list[Footprint],
@@ -2567,103 +2676,9 @@ def route_net(
     )
 
     # MST-style routing
-    seed = _mst_seed(pad_infos)
-    routed_set: set[int] = {seed}
-    unrouted: set[int] = set(range(len(pad_infos))) - {seed}
-
-    while unrouted:
-        best_from = 0
-        best_to = next(iter(unrouted))
-        best_dist = float("inf")
-        for ri in routed_set:
-            for ui in unrouted:
-                d = (abs(pad_infos[ri].x - pad_infos[ui].x)
-                     + abs(pad_infos[ri].y - pad_infos[ui].y))
-                if d < best_dist:
-                    best_dist = d
-                    best_from = ri
-                    best_to = ui
-
-        p1 = pad_infos[best_from]
-        p2 = pad_infos[best_to]
-        start_col, start_row = grid.to_cell(p1.x, p1.y)
-        goal_col, goal_row = grid.to_cell(p2.x, p2.y)
-
-        # Try F.Cu A*
-        path = _astar(grid, start_col, start_row, goal_col, goal_row)
-        if path is not None:
-            segs = _validate_path_segments(
-                path, grid, request, footprints, ctx.original_net_pad_set,
-            )
-            if not segs:
-                path = None
-        _log.debug(
-            "MST %s: (%s) (%.1f,%.1f)->(%s) (%.1f,%.1f) F.Cu=%s",
-            request.net_name,
-            request.pad_refs[best_from][0] + "." + request.pad_refs[best_from][1],
-            p1.x, p1.y,
-            request.pad_refs[best_to][0] + "." + request.pad_refs[best_to][1],
-            p2.x, p2.y,
-            "OK" if path is not None else "FAIL",
-        )
-
-        # THT sibling unmark retry
-        if path is None:
-            path = _try_tht_sibling_unmark(ctx, start_col, start_row, goal_col, goal_row)
-
-        # B.Cu fallback
-        if path is None:
-            _log.debug(
-                "MST %s: F.Cu FAIL, trying B.Cu (vias=%d/%d)",
-                request.net_name, len(ctx.all_vias), request.max_vias,
-            )
-            bcu_result = _try_bcu_fallback(ctx, p1, p2)
-            if bcu_result is not None:
-                bcu_tracks, bcu_vias = bcu_result
-                ctx.all_tracks.extend(bcu_tracks)
-                ctx.all_vias.extend(bcu_vias)
-                routed_set.add(best_to)
-                unrouted.discard(best_to)
-                continue
-
-        if path is None:
-            p2_ref = request.pad_refs[best_to][0] if best_to < len(request.pad_refs) else ""
-            p1_ref = request.pad_refs[best_from][0] if best_from < len(request.pad_refs) else ""
-            if p2_ref in ic_refs_in_net or p1_ref in ic_refs_in_net:
-                unrouted.discard(best_to)
-                continue
-            _restore_pad_marks(grid, footprints, net_clearances, net_widths,
-                               _pad_cache=_pad_cache)
-            return RouteResult(
-                net_number=request.net_number, net_name=request.net_name,
-                tracks=tuple(ctx.all_tracks), vias=tuple(ctx.all_vias),
-                routed=False, reason=f"No path found for net {request.net_name}",
-            )
-
-        # Emit tracks from successful F.Cu path
-        simplified = _simplify_path(path)
-        for j in range(len(simplified) - 1):
-            x1, y1 = grid.to_mm(simplified[j][0], simplified[j][1])
-            x2, y2 = grid.to_mm(simplified[j + 1][0], simplified[j + 1][1])
-            ctx.all_tracks.append(
-                Track(
-                    start=Point(x1, y1), end=Point(x2, y2),
-                    width=request.width_mm, layer=request.layer,
-                    net_number=request.net_number, uuid="",
-                )
-            )
-
-        for cell_col, cell_row in path:
-            grid.mark_area(cell_col, cell_row, excl_cells)
-            grid.add_congestion(cell_col, cell_row, radius=2)
-
-        for pi in pad_infos:
-            _unmark_pad_area(grid, pi.x, pi.y, pi.half_w, pi.half_h, pad_cl)
-        _remark_other_pads(grid, footprints, ctx.net_pad_set, net_clearances, net_widths,
-                           _pad_cache=_pad_cache)
-
-        routed_set.add(best_to)
-        unrouted.discard(best_to)
+    failure = _route_mst_pairs(ctx, footprints, net_clearances, net_widths)
+    if failure is not None:
+        return failure
 
     # IC final-leg routing
     _route_ic_final_legs(ctx)
@@ -2814,80 +2829,41 @@ def _rip_up_and_retry(
                 results.append(new_result)
 
 
-def route_all_nets(
-    netlist: Netlist,
+def _estimated_route_length(
+    entry: NetlistEntry,
+    fp_by_ref: dict[str, Footprint],
+) -> float:
+    """Estimate max Manhattan distance between any two pads of *entry*."""
+    positions: list[tuple[float, float]] = []
+    for ref, pad_num in entry.pad_refs:
+        fp = fp_by_ref.get(ref)
+        if fp is None:
+            continue
+        for pad in fp.pads:
+            if pad.number == pad_num:
+                positions.append(_pad_abs_pos(fp, pad))
+                break
+    if len(positions) < 2:
+        return 0.0
+    max_d = 0.0
+    for i in range(len(positions)):
+        for j in range(i + 1, len(positions)):
+            d = abs(positions[i][0] - positions[j][0]) + abs(positions[i][1] - positions[j][1])
+            max_d = max(max_d, d)
+    return max_d
+
+
+def _sort_routable_nets(
+    routable: list[NetlistEntry],
     footprints: list[Footprint],
-    board_width_mm: float,
-    board_height_mm: float,
-    grid_step_mm: float = 0.25,
-    net_widths: dict[str, float] | None = None,
-    net_clearances: dict[str, float] | None = None,
-    keepouts: tuple[Keepout, ...] = (),
-    corner_radius_mm: float = 0.0,
-) -> tuple[RouteResult, ...]:
-    """Route all nets in the netlist using a shared occupancy grid.
-
-    A single grid is created and shared across all nets so that each
-    net's routed tracks become obstacles for subsequent nets, preventing
-    shorts.  Nets are sorted by pad count ascending (simpler nets first)
-    to improve overall routability.
-
-    Nets with fewer than two pads are skipped.  Trace widths are looked up
-    from *net_widths* when provided; otherwise Power/GND nets receive a
-    wider trace (0.5 mm) and all other nets use 0.25 mm.
-
-    Args:
-        netlist: The board netlist.
-        footprints: All placed footprints.
-        board_width_mm: Board width in mm.
-        board_height_mm: Board height in mm.
-        grid_step_mm: Grid resolution in mm.
-        net_widths: Optional mapping from net name to trace width in mm,
-            typically from :func:`~kicad_pipeline.pcb.netclasses.net_width_map`.
-        net_clearances: Optional mapping from net name to clearance in mm.
-        keepouts: Keepout zones to avoid during routing.
-
-    Returns:
-        Tuple of RouteResult, one per routed net entry.
-    """
-    # Filter to routable nets: skip GND (handled by copper pour) and single-pad nets
-    routable = [
-        e for e in netlist.entries
-        if len(e.pad_refs) >= 2 and e.net.name != "GND"
-    ]
-
-    # Sort by estimated route length: shortest first.  This minimises
-    # grid congestion — short, local nets consume few cells and leave
-    # space for longer nets.  Power nets route last.
-    fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
-
-    def _estimated_length(entry: NetlistEntry) -> float:
-        positions: list[tuple[float, float]] = []
-        for ref, pad_num in entry.pad_refs:
-            fp = fp_by_ref.get(ref)
-            if fp is None:
-                continue
-            for pad in fp.pads:
-                if pad.number == pad_num:
-                    positions.append(_pad_abs_pos(fp, pad))
-                    break
-        if len(positions) < 2:
-            return 0.0
-        max_d = 0.0
-        for i in range(len(positions)):
-            for j in range(i + 1, len(positions)):
-                d = abs(positions[i][0] - positions[j][0]) + abs(positions[i][1] - positions[j][1])
-                max_d = max(max_d, d)
-        return max_d
-
-    # Identify IC refs for routing priority
-    _ic_refs = {
+    fp_by_ref: dict[str, Footprint],
+) -> None:
+    """Sort *routable* in-place by routing priority tier and length."""
+    ic_refs = {
         fp.ref for fp in footprints
         if fp.ref.startswith("U") and len(fp.pads) >= 6
     }
-
-    # Identify connector refs for routing priority
-    _conn_refs = {
+    conn_refs = {
         fp.ref for fp in footprints
         if sum(1 for p in fp.pads if p.pad_type == "thru_hole") > 6
     }
@@ -2895,14 +2871,9 @@ def route_all_nets(
     def _sort_key(entry: NetlistEntry) -> tuple[int, float]:
         name = entry.net.name.upper()
         is_power = name.startswith("+") or "VDD" in name or "VCC" in name or "VBUS" in name
-        has_ic = any(ref in _ic_refs for ref, _ in entry.pad_refs)
-        has_conn = any(ref in _conn_refs for ref, _ in entry.pad_refs)
-        est_len = _estimated_length(entry)
-        # Tier 0: Power nets route first on a clean grid.
-        # Tier 1: Connector-to-IC nets (longest, need cleanest paths).
-        #         Sorted DESCENDING by length (longest first).
-        # Tier 2: IC-connected signal nets.
-        # Tier 3: All other signal nets.
+        has_ic = any(ref in ic_refs for ref, _ in entry.pad_refs)
+        has_conn = any(ref in conn_refs for ref, _ in entry.pad_refs)
+        est_len = _estimated_route_length(entry, fp_by_ref)
         if is_power:
             tier = 0
         elif has_ic and has_conn:
@@ -2916,25 +2887,19 @@ def route_all_nets(
 
     routable.sort(key=_sort_key)
 
-    # Create a shared grid and prepare it with pads, edge margins, keepouts
-    grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
-    _prepare_grid(
-        grid, list(footprints), keepouts=keepouts,
-        net_clearances=net_clearances, net_widths=net_widths,
-        corner_radius_mm=corner_radius_mm,
-    )
 
-    # Create B.Cu grid for dual-layer fallback routing
-    bcu_grid = _prepare_bcu_grid(
-        grid, list(footprints), keepouts=keepouts,
-        net_clearances=net_clearances, net_widths=net_widths,
-        corner_radius_mm=corner_radius_mm,
-    )
-
-    results: list[RouteResult] = []
-    # Track all placed via positions across nets to prevent via-in-pad
-    # shorts on adjacent IC pads.
-    all_placed_vias: list[tuple[float, float]] = []
+def _make_route_entry_fn(
+    footprints: list[Footprint],
+    board_width_mm: float,
+    board_height_mm: float,
+    grid_step_mm: float,
+    grid: _Grid,
+    bcu_grid: _Grid | None,
+    net_widths: dict[str, float] | None,
+    net_clearances: dict[str, float] | None,
+    all_placed_vias: list[tuple[float, float]],
+) -> object:
+    """Create a closure that routes a single :class:`NetlistEntry`."""
 
     def _route_entry(entry: NetlistEntry) -> RouteResult:
         net_name = entry.net.name
@@ -2943,11 +2908,10 @@ def route_all_nets(
         else:
             width = 0.5 if "GND" in net_name or "PWR" in net_name else 0.25
 
-        clearance = 0.2  # default netclass clearance
+        clearance = 0.2
         if net_clearances is not None:
             clearance = net_clearances.get(net_name, 0.2)
 
-        # Dynamic via budget: multi-pad nets need more vias for B.Cu segments
         n_pads = len(entry.pad_refs)
         if n_pads <= 2:
             via_budget = 2
@@ -2972,50 +2936,107 @@ def route_all_nets(
             placed_via_positions=all_placed_vias,
         )
 
+    return _route_entry
+
+
+def _pad_positions_for_entry(
+    entry: NetlistEntry,
+    fp_by_ref: dict[str, Footprint],
+) -> list[tuple[float, float]]:
+    """Return absolute pad positions for all pads in *entry*."""
+    positions: list[tuple[float, float]] = []
+    for ref, pad_num in entry.pad_refs:
+        fp = fp_by_ref.get(ref)
+        if fp is None:
+            continue
+        for pad in fp.pads:
+            if pad.number == pad_num:
+                positions.append(_pad_abs_pos(fp, pad))
+                break
+    return positions
+
+
+def route_all_nets(
+    netlist: Netlist,
+    footprints: list[Footprint],
+    board_width_mm: float,
+    board_height_mm: float,
+    grid_step_mm: float = 0.25,
+    net_widths: dict[str, float] | None = None,
+    net_clearances: dict[str, float] | None = None,
+    keepouts: tuple[Keepout, ...] = (),
+    corner_radius_mm: float = 0.0,
+) -> tuple[RouteResult, ...]:
+    """Route all nets in the netlist using a shared occupancy grid.
+
+    A single grid is created and shared across all nets so that each
+    net's routed tracks become obstacles for subsequent nets, preventing
+    shorts.  Nets are sorted by pad count ascending (simpler nets first)
+    to improve overall routability.
+
+    Returns:
+        Tuple of RouteResult, one per routed net entry.
+    """
+    routable = [
+        e for e in netlist.entries
+        if len(e.pad_refs) >= 2 and e.net.name != "GND"
+    ]
+
+    fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
+    _sort_routable_nets(routable, footprints, fp_by_ref)
+
+    # Create shared grids
+    grid = _Grid.create(board_width_mm, board_height_mm, grid_step_mm)
+    _prepare_grid(
+        grid, list(footprints), keepouts=keepouts,
+        net_clearances=net_clearances, net_widths=net_widths,
+        corner_radius_mm=corner_radius_mm,
+    )
+    bcu_grid = _prepare_bcu_grid(
+        grid, list(footprints), keepouts=keepouts,
+        net_clearances=net_clearances, net_widths=net_widths,
+        corner_radius_mm=corner_radius_mm,
+    )
+
+    results: list[RouteResult] = []
+    all_placed_vias: list[tuple[float, float]] = []
+
+    _route_entry = _make_route_entry_fn(
+        footprints, board_width_mm, board_height_mm, grid_step_mm,
+        grid, bcu_grid, net_widths, net_clearances, all_placed_vias,
+    )
+
     def _record_vias(result: RouteResult) -> None:
-        """Record via positions from a successful route."""
         for v in result.vias:
             all_placed_vias.append((v.position.x, v.position.y))
 
-    # First pass: route all nets
+    # First pass
     failed_entries: list[NetlistEntry] = []
     for entry in routable:
-        result = _route_entry(entry)
+        result = _route_entry(entry)  # type: ignore[operator]
         if result.routed:
             results.append(result)
             _record_vias(result)
         else:
             failed_entries.append(entry)
 
-    # Retry failed nets (standard retry + reversed pad ordering)
+    # Retry failed nets
     still_failed = _retry_failed_nets(
         failed_entries, _route_entry, _record_vias, results,
     )
 
-    # Last resort: relaxed clearance retry at JLCPCB minimum
+    # Relaxed clearance retry
     _retry_relaxed_clearance(
         still_failed, footprints, board_width_mm, board_height_mm,
         grid_step_mm, grid, bcu_grid, net_widths, net_clearances,
         all_placed_vias, results, _record_vias,
     )
 
-    # Rip-up-and-retry loop
-    def _pad_positions_for(entry: NetlistEntry) -> list[tuple[float, float]]:
-        positions: list[tuple[float, float]] = []
-        for ref, pad_num in entry.pad_refs:
-            fp = fp_by_ref.get(ref)
-            if fp is None:
-                continue
-            for pad in fp.pads:
-                if pad.number == pad_num:
-                    positions.append(_pad_abs_pos(fp, pad))
-                    break
-        return positions
-
+    # Rip-up-and-retry
     entry_by_name: dict[str, NetlistEntry] = {e.net.name: e for e in routable}
-
     _rip_up_and_retry(
-        results, entry_by_name, _route_entry, _pad_positions_for,
+        results, entry_by_name, _route_entry,
+        lambda e: _pad_positions_for_entry(e, fp_by_ref),
         grid, bcu_grid, grid_step_mm,
     )
 
@@ -3023,7 +3044,7 @@ def route_all_nets(
     results = _validate_track_clearances(
         results, grid, bcu_grid, grid_step_mm, entry_by_name,
         _route_entry, footprints, net_clearances, net_widths,
-        _pad_positions_for,
+        lambda e: _pad_positions_for_entry(e, fp_by_ref),
     )
 
     results = _drop_pad_crossing_tracks(results, footprints)

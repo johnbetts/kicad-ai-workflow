@@ -1163,6 +1163,133 @@ def _preserve_user_routing(
 
 
 # ---------------------------------------------------------------------------
+# build_pcb helpers
+# ---------------------------------------------------------------------------
+
+
+def _compute_footprint_sizes(
+    requirements: ProjectRequirements,
+) -> tuple[dict[str, tuple[float, float]], float]:
+    """Compute footprint sizes and total component area."""
+    fp_sizes: dict[str, tuple[float, float]] = {}
+    total_area = 0.0
+    for comp in requirements.components:
+        sz = estimate_footprint_size(comp.footprint)
+        fp_sizes[comp.ref] = sz
+        total_area += sz[0] * sz[1]
+    return fp_sizes, total_area
+
+
+def _compute_footprint_bboxes(
+    pre_footprints: list[Footprint],
+) -> dict[str, object]:
+    """Compute bounding boxes for all pre-placed footprints."""
+    fp_bboxes: dict[str, object] = {}
+    for fp in pre_footprints:
+        fp_bboxes[fp.ref] = compute_footprint_bbox(fp)
+    return fp_bboxes
+
+
+def _build_context(
+    board_width_mm: float,
+    board_height_mm: float,
+    origin_x: float,
+    origin_y: float,
+    corner_radius_mm: float,
+    layer_count: int,
+    project_name: str | None,
+    outline: BoardOutline,
+    nets: tuple[NetEntry, ...],
+    net_lookup: dict[str, int],
+    fixed_positions: dict[str, tuple[float, float, float]],
+    layer_overrides: dict[str, str],
+    template_mounting_positions: list[tuple[float, float]],
+    template_mounting_diameter: float,
+    tmpl_obj: object | None,
+    preserved_ref_text_positions: dict[str, tuple[float, float]],
+    requirements: ProjectRequirements,
+    fp_sizes: dict[str, tuple[float, float]],
+    fp_bboxes: dict[str, object],
+) -> _BuildContext:
+    """Create the shared build context for PCB assembly steps."""
+    return _BuildContext(
+        board_width_mm=board_width_mm,
+        board_height_mm=board_height_mm,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        corner_radius_mm=corner_radius_mm,
+        layer_count=layer_count,
+        project_name=project_name,
+        outline=outline,
+        nets=nets,
+        net_lookup=net_lookup,
+        keepouts=[],
+        zones=[],
+        fixed_positions=fixed_positions,
+        layer_overrides=layer_overrides,
+        template_mounting_positions=template_mounting_positions,
+        template_mounting_diameter=template_mounting_diameter,
+        tmpl_obj=tmpl_obj,
+        preserved_ref_text_positions=preserved_ref_text_positions,
+        has_rf=_has_rf_module(requirements),
+        rf_pos=None,
+        fp_sizes=fp_sizes,
+        fp_bboxes=fp_bboxes,
+    )
+
+
+def _assemble_pcb_design(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    final_footprints: list[Footprint],
+    nets: tuple[NetEntry, ...],
+    netclasses: tuple[object, ...],
+    all_tracks: tuple[Track, ...],
+    all_vias: tuple[Via, ...],
+) -> PCBDesign:
+    """Assign net numbers, generate DRC exclusions, and build the final design."""
+    from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints, build_netlist
+
+    netlist = build_netlist(requirements)
+    final_footprints = assign_net_numbers_to_footprints(final_footprints, netlist)
+
+    drc_exclusions = _generate_ic_drc_exclusions(final_footprints)
+    if drc_exclusions:
+        log.info(
+            "build_pcb: generated %d intra-footprint DRC exclusions",
+            len(drc_exclusions),
+        )
+
+    design_rules = DesignRules(layer_count=ctx.layer_count)
+
+    log.info(
+        "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "
+        "%d tracks, %d vias",
+        len(final_footprints), len(nets), len(ctx.zones), len(ctx.keepouts),
+        len(all_tracks), len(all_vias),
+    )
+
+    return PCBDesign(
+        outline=ctx.outline,
+        design_rules=design_rules,
+        nets=nets,
+        footprints=tuple(final_footprints),
+        tracks=all_tracks,
+        vias=all_vias,
+        zones=tuple(ctx.zones),
+        keepouts=tuple(ctx.keepouts),
+        netclasses=netclasses,
+        drc_exclusions=drc_exclusions,
+        version=KICAD_PCB_VERSION,
+        generator=KICAD_GENERATOR,
+        title=requirements.project.name,
+        date=datetime.date.today().isoformat(),
+        revision=requirements.project.revision,
+        company=requirements.project.author or "",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1270,12 +1397,7 @@ def build_pcb(
     )
 
     # Step 4b: Compute sizes and auto-size board
-    fp_sizes: dict[str, tuple[float, float]] = {}
-    total_area = 0.0
-    for comp in requirements.components:
-        sz = estimate_footprint_size(comp.footprint)
-        fp_sizes[comp.ref] = sz
-        total_area += sz[0] * sz[1]
+    fp_sizes, total_area = _compute_footprint_sizes(requirements)
 
     if tmpl_obj is None and not _explicit_dimensions:
         board_width_mm, board_height_mm, outline = _auto_size_board(
@@ -1286,34 +1408,16 @@ def build_pcb(
     _warn_board_size(board_width_mm, board_height_mm, total_area)
 
     # Step 4c: Compute bounding boxes
-    fp_bboxes: dict[str, object] = {}
-    for fp in pre_footprints:
-        fp_bboxes[fp.ref] = compute_footprint_bbox(fp)
+    fp_bboxes = _compute_footprint_bboxes(pre_footprints)
 
     # Build shared context for remaining steps
-    ctx = _BuildContext(
-        board_width_mm=board_width_mm,
-        board_height_mm=board_height_mm,
-        origin_x=origin_x,
-        origin_y=origin_y,
-        corner_radius_mm=corner_radius_mm,
-        layer_count=layer_count,
-        project_name=project_name,
-        outline=outline,
-        nets=nets,
-        net_lookup=net_lookup,
-        keepouts=[],
-        zones=[],
-        fixed_positions=fixed_positions,
-        layer_overrides=layer_overrides,
-        template_mounting_positions=template_mounting_positions,
-        template_mounting_diameter=template_mounting_diameter,
-        tmpl_obj=tmpl_obj,
-        preserved_ref_text_positions=preserved_ref_text_positions,
-        has_rf=_has_rf_module(requirements),
-        rf_pos=None,
-        fp_sizes=fp_sizes,
-        fp_bboxes=fp_bboxes,
+    ctx = _build_context(
+        board_width_mm, board_height_mm, origin_x, origin_y,
+        corner_radius_mm, layer_count, project_name, outline,
+        nets, net_lookup, fixed_positions, layer_overrides,
+        template_mounting_positions, template_mounting_diameter,
+        tmpl_obj, preserved_ref_text_positions,
+        requirements, fp_sizes, fp_bboxes,
     )
 
     # Step 4c: Create keepouts BEFORE placement
@@ -1360,45 +1464,10 @@ def build_pcb(
         all_tracks, all_vias,
     )
 
-    # Step 11: Assign net numbers to footprint pads
-    from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints, build_netlist
-    netlist = build_netlist(requirements)
-    final_footprints = assign_net_numbers_to_footprints(final_footprints, netlist)
-
-    # Step 12: DRC exclusions
-    drc_exclusions = _generate_ic_drc_exclusions(final_footprints)
-    if drc_exclusions:
-        log.info(
-            "build_pcb: generated %d intra-footprint DRC exclusions",
-            len(drc_exclusions),
-        )
-
-    design_rules = DesignRules(layer_count=layer_count)
-
-    log.info(
-        "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "
-        "%d tracks, %d vias",
-        len(final_footprints), len(nets), len(ctx.zones), len(ctx.keepouts),
-        len(all_tracks), len(all_vias),
-    )
-
-    return PCBDesign(
-        outline=outline,
-        design_rules=design_rules,
-        nets=nets,
-        footprints=tuple(final_footprints),
-        tracks=all_tracks,
-        vias=all_vias,
-        zones=tuple(ctx.zones),
-        keepouts=tuple(ctx.keepouts),
-        netclasses=netclasses,
-        drc_exclusions=drc_exclusions,
-        version=KICAD_PCB_VERSION,
-        generator=KICAD_GENERATOR,
-        title=requirements.project.name,
-        date=datetime.date.today().isoformat(),
-        revision=requirements.project.revision,
-        company=requirements.project.author or "",
+    # Step 11-12: Final assembly
+    return _assemble_pcb_design(
+        ctx, requirements, final_footprints, nets, netclasses,
+        all_tracks, all_vias,
     )
 
 

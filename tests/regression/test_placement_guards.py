@@ -804,24 +804,30 @@ class TestGroupIsolation:
 
         Verify the code actually implements this by checking the source.
         """
-        optimizer_path = (
+        opt_dir = (
             Path(__file__).resolve().parents[2]
-            / "src" / "kicad_pipeline" / "optimization" / "placement_optimizer.py"
+            / "src" / "kicad_pipeline" / "optimization"
         )
-        source = optimizer_path.read_text()
+        # The decoupling group filter may live in placement_optimizer.py
+        # or ee_phases_refinement.py (extracted helper).
+        source = ""
+        for fname in ("placement_optimizer.py", "ee_phases_refinement.py"):
+            fpath = opt_dir / fname
+            if fpath.exists():
+                source += fpath.read_text()
 
         # The fix for cross-group decoupling contamination is to check
         # that the cap and IC are in the same FeatureBlock/group.
         assert "ic_group" in source or "same.*group" in source.lower() or \
                "_ref_to_group" in source, (
             "Late decoupling phase must filter by FeatureBlock group "
-            "(look for ic_group or _ref_to_group in placement_optimizer.py)"
+            "(look for ic_group or _ref_to_group in optimization modules)"
         )
 
         # Verify the 3c-late phase checks group membership
         assert "3c-late" in source, (
             "Late decoupling re-tightening phase (3c-late) not found in "
-            "placement_optimizer.py"
+            "optimization modules"
         )
 
 
@@ -1113,11 +1119,17 @@ class TestPhaseOrdering:
         Phases: 3a (relay), 3b (relay driver), 3c (decoupling), 3d (crystal),
         3e (RF), 3f (orientation), 3h (template), 3c-late (final decoupling).
         """
-        optimizer_path = (
+        opt_dir = (
             Path(__file__).resolve().parents[2]
-            / "src" / "kicad_pipeline" / "optimization" / "placement_optimizer.py"
+            / "src" / "kicad_pipeline" / "optimization"
         )
-        source = optimizer_path.read_text()
+        # Phase markers may be spread across optimizer, phases, and refinement
+        source = ""
+        for fname in ("placement_optimizer.py", "ee_phases.py",
+                       "ee_phases_refinement.py"):
+            fpath = opt_dir / fname
+            if fpath.exists():
+                source += fpath.read_text()
 
         # Extract phase markers with line numbers
         import re

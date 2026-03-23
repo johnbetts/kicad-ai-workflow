@@ -539,156 +539,73 @@ def led_drive(
     )
 
 
-def relay_driver(
+def _relay_driver_nets(
     ref_q: str,
     ref_r_base: str,
     ref_d: str,
     ref_k: str,
-    ref_j: str | None,
     gpio_net: str,
-    vcc_net: str = "+5V",
-    gnd_net: str = "GND",
-    relay_type: str = "SPDT",
-    db: ComponentDB | None = None,
-) -> SubcircuitResult:
-    """Generate an NPN relay driver circuit with flyback protection.
-
-    Topology::
-
-        GPIO ─── R_base(1k) ─── Q_base
-        Q_collector ─── K_COIL- ; K_COIL+ ─── VCC
-        Q_emitter ─── GND
-        Flyback diode: anode → Q_collector, cathode → VCC
-        K_COM/NO/NC ─── J screw terminal (optional)
-
-    Args:
-        ref_q: Reference designator for the NPN transistor (e.g. ``'Q1'``).
-        ref_r_base: Reference designator for the base resistor (e.g. ``'R10'``).
-        ref_d: Reference designator for the flyback diode (e.g. ``'D6'``).
-        ref_k: Reference designator for the relay (e.g. ``'K1'``).
-        ref_j: Reference designator for the output screw terminal, or ``None``
-            to omit the terminal.
-        gpio_net: GPIO control signal net name.
-        vcc_net: Supply net for relay coil and diode cathode (default ``'+5V'``).
-        gnd_net: Ground net (default ``'GND'``).
-        relay_type: ``'SPDT'`` (3 contact pins) or ``'SPST'`` (2 contact pins).
-        db: Optional component database for LCSC lookup.
-
-    Returns:
-        :class:`SubcircuitResult` with transistor, base resistor, flyback diode,
-        relay, and optional screw terminal components plus their interconnecting nets.
-    """
-    base_net = f"{ref_q}_BASE"
-    coil_net = f"{ref_k}_COIL"
-
-    r_base_comp = _resistor_component(
-        ref_r_base, 1000.0, "0402", gpio_net, base_net, db,
-    )
-
-    q_comp = Component(
-        ref=ref_q,
-        value="BC817",
-        footprint="SOT-23",
-        description=f"Relay driver NPN transistor for {ref_k}",
-        pins=(
-            Pin(number="1", name="B", pin_type=PinType.INPUT, net=base_net),
-            Pin(number="2", name="C", pin_type=PinType.PASSIVE, net=coil_net),
-            Pin(number="3", name="E", pin_type=PinType.PASSIVE, net=gnd_net),
+    vcc_net: str,
+    gnd_net: str,
+    base_net: str,
+    coil_net: str,
+) -> list[Net]:
+    """Build the driver-side nets for a relay driver circuit."""
+    return [
+        Net(
+            name=gpio_net,
+            connections=(NetConnection(ref=ref_r_base, pin="1"),),
         ),
-    )
-
-    diode_comp = Component(
-        ref=ref_d,
-        value="1N4148",
-        footprint="SOD-123",
-        description=f"Flyback diode for {ref_k}",
-        pins=(
-            Pin(number="1", name="A", pin_type=PinType.PASSIVE, net=coil_net),
-            Pin(number="2", name="K", pin_type=PinType.PASSIVE, net=vcc_net),
+        Net(
+            name=base_net,
+            connections=(
+                NetConnection(ref=ref_r_base, pin="2"),
+                NetConnection(ref=ref_q, pin="1"),
+            ),
         ),
-    )
-
-    is_spdt = relay_type.upper() == "SPDT"
-    com_net = f"{ref_k}_COM"
-    no_net = f"{ref_k}_NO"
-    nc_net = f"{ref_k}_NC" if is_spdt else None
-
-    relay_pins: list[Pin] = [
-        Pin(number="1", name="COIL+", pin_type=PinType.PASSIVE, net=vcc_net),
-        Pin(number="2", name="COIL-", pin_type=PinType.PASSIVE, net=coil_net),
-        Pin(number="3", name="COM", pin_type=PinType.PASSIVE, net=com_net),
-        Pin(number="4", name="NO", pin_type=PinType.PASSIVE, net=no_net),
+        Net(
+            name=coil_net,
+            connections=(
+                NetConnection(ref=ref_q, pin="2"),
+                NetConnection(ref=ref_d, pin="1"),
+                NetConnection(ref=ref_k, pin="2"),
+            ),
+        ),
+        Net(
+            name=vcc_net,
+            connections=(
+                NetConnection(ref=ref_d, pin="2"),
+                NetConnection(ref=ref_k, pin="1"),
+            ),
+        ),
+        Net(
+            name=gnd_net,
+            connections=(NetConnection(ref=ref_q, pin="3"),),
+        ),
     ]
-    if is_spdt:
-        relay_pins.append(
-            Pin(number="5", name="NC", pin_type=PinType.PASSIVE, net=nc_net),
-        )
 
-    relay_footprint = "Relay_SPDT_SANYOU_SRD" if is_spdt else "Relay_SPST"
-    relay_comp = Component(
-        ref=ref_k,
-        value="SRD-05VDC-SL-C" if is_spdt else "SRD-05VDC-SL-A",
-        footprint=relay_footprint,
-        description=f"Relay {relay_type}",
-        pins=tuple(relay_pins),
-    )
 
-    components: list[Component] = [r_base_comp, q_comp, diode_comp, relay_comp]
-    nets: list[Net] = []
-
-    # GPIO net
-    nets.append(Net(
-        name=gpio_net,
-        connections=(NetConnection(ref=ref_r_base, pin="1"),),
-    ))
-
-    # Base net
-    nets.append(Net(
-        name=base_net,
-        connections=(
-            NetConnection(ref=ref_r_base, pin="2"),
-            NetConnection(ref=ref_q, pin="1"),
-        ),
-    ))
-
-    # Coil net
-    coil_conns: list[NetConnection] = [
-        NetConnection(ref=ref_q, pin="2"),
-        NetConnection(ref=ref_d, pin="1"),
-        NetConnection(ref=ref_k, pin="2"),
-    ]
-    nets.append(Net(name=coil_net, connections=tuple(coil_conns)))
-
-    # VCC net
-    nets.append(Net(
-        name=vcc_net,
-        connections=(
-            NetConnection(ref=ref_d, pin="2"),
-            NetConnection(ref=ref_k, pin="1"),
-        ),
-    ))
-
-    # GND net
-    nets.append(Net(
-        name=gnd_net,
-        connections=(NetConnection(ref=ref_q, pin="3"),),
-    ))
-
-    # Contact nets + optional screw terminal
-    terminal_pins: list[Pin] = []
+def _relay_contact_nets_and_terminal(
+    ref_k: str,
+    ref_j: str | None,
+    is_spdt: bool,
+    com_net: str,
+    no_net: str,
+    nc_net: str | None,
+) -> tuple[list[Net], Component | None]:
+    """Build contact nets and optional screw terminal component."""
     com_conns: list[NetConnection] = [NetConnection(ref=ref_k, pin="3")]
     no_conns: list[NetConnection] = [NetConnection(ref=ref_k, pin="4")]
     nc_conns: list[NetConnection] = []
     if is_spdt:
         nc_conns.append(NetConnection(ref=ref_k, pin="5"))
 
+    terminal_comp: Component | None = None
     if ref_j is not None:
-        terminal_pins.append(
+        terminal_pins: list[Pin] = [
             Pin(number="1", name="NO", pin_type=PinType.PASSIVE, net=no_net),
-        )
-        terminal_pins.append(
             Pin(number="2", name="COM", pin_type=PinType.PASSIVE, net=com_net),
-        )
+        ]
         no_conns.append(NetConnection(ref=ref_j, pin="1"))
         com_conns.append(NetConnection(ref=ref_j, pin="2"))
 
@@ -709,12 +626,103 @@ def relay_driver(
             description=f"Relay {ref_k} output connector",
             pins=tuple(terminal_pins),
         )
-        components.append(terminal_comp)
 
-    nets.append(Net(name=com_net, connections=tuple(com_conns)))
-    nets.append(Net(name=no_net, connections=tuple(no_conns)))
+    nets: list[Net] = [
+        Net(name=com_net, connections=tuple(com_conns)),
+        Net(name=no_net, connections=tuple(no_conns)),
+    ]
     if is_spdt and nc_net is not None:
         nets.append(Net(name=nc_net, connections=tuple(nc_conns)))
+
+    return nets, terminal_comp
+
+
+def relay_driver(
+    ref_q: str,
+    ref_r_base: str,
+    ref_d: str,
+    ref_k: str,
+    ref_j: str | None,
+    gpio_net: str,
+    vcc_net: str = "+5V",
+    gnd_net: str = "GND",
+    relay_type: str = "SPDT",
+    db: ComponentDB | None = None,
+) -> SubcircuitResult:
+    """Generate an NPN relay driver circuit with flyback protection.
+
+    Topology::
+
+        GPIO --- R_base(1k) --- Q_base
+        Q_collector --- K_COIL- ; K_COIL+ --- VCC
+        Q_emitter --- GND
+        Flyback diode: anode -> Q_collector, cathode -> VCC
+        K_COM/NO/NC --- J screw terminal (optional)
+    """
+    base_net = f"{ref_q}_BASE"
+    coil_net = f"{ref_k}_COIL"
+    is_spdt = relay_type.upper() == "SPDT"
+    com_net = f"{ref_k}_COM"
+    no_net = f"{ref_k}_NO"
+    nc_net = f"{ref_k}_NC" if is_spdt else None
+
+    # Driver components
+    r_base_comp = _resistor_component(
+        ref_r_base, 1000.0, "0402", gpio_net, base_net, db,
+    )
+    q_comp = Component(
+        ref=ref_q, value="BC817", footprint="SOT-23",
+        description=f"Relay driver NPN transistor for {ref_k}",
+        pins=(
+            Pin(number="1", name="B", pin_type=PinType.INPUT, net=base_net),
+            Pin(number="2", name="C", pin_type=PinType.PASSIVE, net=coil_net),
+            Pin(number="3", name="E", pin_type=PinType.PASSIVE, net=gnd_net),
+        ),
+    )
+    diode_comp = Component(
+        ref=ref_d, value="1N4148", footprint="SOD-123",
+        description=f"Flyback diode for {ref_k}",
+        pins=(
+            Pin(number="1", name="A", pin_type=PinType.PASSIVE, net=coil_net),
+            Pin(number="2", name="K", pin_type=PinType.PASSIVE, net=vcc_net),
+        ),
+    )
+
+    # Relay component
+    relay_pins: list[Pin] = [
+        Pin(number="1", name="COIL+", pin_type=PinType.PASSIVE, net=vcc_net),
+        Pin(number="2", name="COIL-", pin_type=PinType.PASSIVE, net=coil_net),
+        Pin(number="3", name="COM", pin_type=PinType.PASSIVE, net=com_net),
+        Pin(number="4", name="NO", pin_type=PinType.PASSIVE, net=no_net),
+    ]
+    if is_spdt:
+        relay_pins.append(
+            Pin(number="5", name="NC", pin_type=PinType.PASSIVE, net=nc_net),
+        )
+    relay_footprint = "Relay_SPDT_SANYOU_SRD" if is_spdt else "Relay_SPST"
+    relay_comp = Component(
+        ref=ref_k,
+        value="SRD-05VDC-SL-C" if is_spdt else "SRD-05VDC-SL-A",
+        footprint=relay_footprint,
+        description=f"Relay {relay_type}",
+        pins=tuple(relay_pins),
+    )
+
+    components: list[Component] = [r_base_comp, q_comp, diode_comp, relay_comp]
+
+    # Driver nets
+    nets = _relay_driver_nets(
+        ref_q, ref_r_base, ref_d, ref_k, gpio_net, vcc_net, gnd_net,
+        base_net, coil_net,
+    )
+
+    # Contact nets + terminal
+    contact_nets, terminal_comp = _relay_contact_nets_and_terminal(
+        ref_k, ref_j, is_spdt, com_net, no_net, nc_net,
+    )
+    nets.extend(contact_nets)
+    if terminal_comp is not None:
+        components.append(terminal_comp)
 
     contact_desc = "COM/NO/NC" if is_spdt else "COM/NO"
     terminal_desc = f" + {ref_j} terminal" if ref_j else ""

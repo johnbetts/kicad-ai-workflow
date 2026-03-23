@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from kicad_pipeline.constants import (
     DECOUPLING_CAP_MAX_DISTANCE_MM,
@@ -273,7 +272,7 @@ class TestSignalChainPlacement:
         """Components placed in reverse order: violation emitted."""
         reqs = _make_chain_requirements(4)
         # U1 → U2 → U3 → U4 but placed reversed: U1 far right, U4 far left
-        positions = {
+        {
             "U1": Point(x=40.0, y=20.0),
             "U2": Point(x=30.0, y=20.0),
             "U3": Point(x=20.0, y=20.0),

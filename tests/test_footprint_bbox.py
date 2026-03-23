@@ -10,7 +10,6 @@ from kicad_pipeline.models.pcb import (
     FootprintBBox,
     Footprint,
     Footprint3DModel,
-    FootprintLine,
     OriginType,
     Pad,
     Point,

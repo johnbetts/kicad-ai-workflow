@@ -646,6 +646,199 @@ def _edge_priority_sort(
     return groups
 
 
+def _layout_pcb_constraint_solver(
+    requirements: ProjectRequirements,
+    board: BoardOutline,
+    footprint_sizes: dict[str, tuple[float, float]],
+    fixed_positions: dict[str, tuple[float, float, float]] | None,
+    board_template: object,
+    keepouts: tuple[object, ...],
+    footprint_bboxes: dict[str, object] | None,
+) -> LayoutResult | None:
+    """Try constraint-based placement using board template.
+
+    Returns ``None`` if the template is not a recognised :class:`BoardTemplate`.
+    """
+    from kicad_pipeline.models.pcb import Keepout as KeepoutModel
+    from kicad_pipeline.pcb.board_templates import BoardTemplate as BTClass
+    from kicad_pipeline.pcb.constraints import solve_placement
+
+    if not isinstance(board_template, BTClass):
+        return None
+
+    log.info(
+        "layout_pcb: using constraint-based solver (template=%s)",
+        board_template.name,
+    )
+
+    constraint_list = _build_constraint_list(
+        requirements, board_template, footprint_sizes, fixed_positions,
+    )
+
+    typed_keepouts = tuple(k for k in keepouts if isinstance(k, KeepoutModel))
+    _bboxes = footprint_bboxes  # type: ignore[assignment]
+    result = solve_placement(
+        constraint_list, board, footprint_sizes,
+        keepouts=typed_keepouts, grid_mm=0.5,
+        requirements=requirements,
+        footprint_bboxes=_bboxes,
+    )
+    positions = dict(result.positions)
+    rotations = dict(result.rotations)
+
+    # Log violations
+    for violation in result.violations:
+        log.warning("layout_pcb: placement violation: %s", violation)
+
+    from kicad_pipeline.pcb.constraints import validate_placement_constraints
+    for pv in validate_placement_constraints(result.positions, constraint_list):
+        log.info("layout_pcb: post-placement: %s", pv)
+
+    # Place any refs the solver missed
+    _place_unplaced_refs(requirements, board, footprint_sizes, positions)
+
+    # Collect layer overrides
+    layer_overrides: dict[str, str] = {}
+    for c in constraint_list:
+        if c.layer is not None:
+            layer_overrides[c.ref] = c.layer
+
+    log.info("layout_pcb: placed %d components (constraint solver)", len(positions))
+    return LayoutResult(
+        positions=positions, rotations=rotations,
+        layers=layer_overrides if layer_overrides else None,
+    )
+
+
+def _build_constraint_list(
+    requirements: ProjectRequirements,
+    board_template: object,
+    footprint_sizes: dict[str, tuple[float, float]],
+    fixed_positions: dict[str, tuple[float, float, float]] | None,
+) -> tuple[object, ...]:
+    """Build placement constraints, merging fixed positions."""
+    from kicad_pipeline.models.pcb import PlacementConstraint, PlacementConstraintType
+    from kicad_pipeline.pcb.board_templates import BoardTemplate as BTClass
+    from kicad_pipeline.pcb.constraints import constraints_from_requirements
+
+    bt = board_template  # type: ignore[assignment]
+    assert isinstance(bt, BTClass)
+
+    extra_constraints: list[PlacementConstraint] = []
+    if fixed_positions:
+        for ref, (fx, fy, frot) in fixed_positions.items():
+            extra_constraints.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.FIXED,
+                x=fx, y=fy, rotation=frot, priority=100,
+            ))
+
+    if bt.name == "RPI_HAT":
+        from kicad_pipeline.pcb.constraints import rpi_hat_constraints
+        constraint_list = rpi_hat_constraints(requirements, bt, footprint_sizes)
+    else:
+        constraint_list = constraints_from_requirements(requirements, bt, footprint_sizes)
+
+    if extra_constraints:
+        extra_refs = {c.ref for c in extra_constraints}
+        constraint_list = tuple(
+            c for c in constraint_list if c.ref not in extra_refs
+        ) + tuple(extra_constraints)
+
+    return constraint_list
+
+
+def _place_unplaced_refs(
+    requirements: ProjectRequirements,
+    board: BoardOutline,
+    footprint_sizes: dict[str, tuple[float, float]],
+    positions: dict[str, Point],
+) -> None:
+    """Place any refs missing from *positions* into a fallback zone."""
+    all_refs = {c.ref for c in requirements.components}
+    unplaced = all_refs - set(positions.keys())
+    if not unplaced:
+        return
+    log.warning(
+        "layout_pcb: constraint solver missed %d refs, adding: %s",
+        len(unplaced), list(unplaced),
+    )
+    xs = [p.x for p in board.polygon]
+    ys = [p.y for p in board.polygon]
+    board_w = max(xs) - min(xs)
+    board_h = max(ys) - min(ys)
+    fallback = PCBZone("FALLBACK", 5.0, board_h * 0.6, board_w - 10.0, board_h * 0.35)
+    positions.update(place_pcb_components(
+        list(unplaced), fallback, footprint_sizes=footprint_sizes,
+    ))
+
+
+def _layout_pcb_zone_based(
+    requirements: ProjectRequirements,
+    board: BoardOutline,
+    footprint_sizes: dict[str, tuple[float, float]] | None,
+    fixed_positions: dict[str, tuple[float, float, float]] | None,
+) -> LayoutResult:
+    """Zone-based grid-fill placement (no template)."""
+    zone_positions: dict[str, Point] = {}
+    zone_rotations: dict[str, float] = {}
+    fixed_refs: set[str] = set()
+    if fixed_positions:
+        for ref, (fx, fy, frot) in fixed_positions.items():
+            zone_positions[ref] = Point(x=fx, y=fy)
+            zone_rotations[ref] = frot
+            fixed_refs.add(ref)
+            log.info("layout_pcb: fixed position for %s at (%.2f, %.2f)", ref, fx, fy)
+
+    # Build feature map
+    feature_map: dict[str, str] = {}
+    for fb in requirements.features:
+        for ref in fb.components:
+            feature_map[ref] = fb.name
+
+    zone_refs_list = [c.ref for c in requirements.components if c.ref not in fixed_refs]
+    tagged = [(ref, feature_map.get(ref, "Peripherals")) for ref in zone_refs_list]
+    zone_map = assign_pcb_zones(tagged)
+
+    groups: dict[str, list[str]] = {}
+    for ref, zone in zone_map.items():
+        groups.setdefault(zone.name, []).append(ref)
+
+    xs = [p.x for p in board.polygon]
+    ys = [p.y for p in board.polygon]
+    board_w = max(xs) - min(xs)
+    board_h = max(ys) - min(ys)
+
+    _edge_priority_sort(groups, requirements)
+    groups = {k: v for k, v in groups.items() if v}
+
+    dynamic_zones = _dynamic_zones(groups, board_w, board_h, footprint_sizes)
+
+    for zone_name, zone_refs in groups.items():
+        zone = dynamic_zones[zone_name]
+        sorted_refs = _subcircuit_sort(zone_refs, requirements)
+        zone_positions.update(place_pcb_components(
+            sorted_refs, zone, footprint_sizes=footprint_sizes,
+        ))
+
+    # Fallback for unplaced refs
+    unplaced_refs = [
+        c.ref for c in requirements.components if c.ref not in zone_positions
+    ]
+    if unplaced_refs:
+        log.warning(
+            "layout_pcb: %d refs not placed; adding fallback: %s",
+            len(unplaced_refs), unplaced_refs,
+        )
+        fallback = PCBZone("FALLBACK", 5.0, board_h * 0.6, board_w - 10.0, board_h * 0.35)
+        zone_positions.update(place_pcb_components(
+            unplaced_refs, fallback, footprint_sizes=footprint_sizes,
+        ))
+
+    log.info("layout_pcb: placed %d components", len(zone_positions))
+    return LayoutResult(positions=zone_positions, rotations=zone_rotations)
+
+
 def layout_pcb(
     requirements: ProjectRequirements,
     board: BoardOutline,
@@ -660,196 +853,18 @@ def layout_pcb(
     When *board_template* is provided, uses the constraint-based solver
     for intelligent placement. Otherwise falls back to the zone-based
     grid-fill approach for backward compatibility.
-
-    Args:
-        requirements: Fully-populated project requirements document.
-        board: The board outline used to validate that components fit.
-        footprint_sizes: Optional mapping from ref to ``(width, height)``
-            in mm.  Passed through to :func:`place_pcb_components`.
-        fixed_positions: Optional mapping from ref to ``(x, y, rotation)``
-            for components with fixed board positions (e.g. from a board
-            template).  These refs are excluded from dynamic placement.
-        board_template: Optional :class:`BoardTemplate` for constraint-based
-            placement. When provided, the constraint solver is used.
-        keepouts: Optional keepout zones to avoid during placement.
-
-    Returns:
-        :class:`LayoutResult` with positions and rotations for every
-        component in *requirements*.
     """
-    # Constraint-based path when template is available
     if board_template is not None and footprint_sizes is not None:
-        from kicad_pipeline.models.pcb import Keepout as KeepoutModel
-        from kicad_pipeline.pcb.board_templates import BoardTemplate as BTClass
-        from kicad_pipeline.pcb.constraints import (
-            constraints_from_requirements,
-            solve_placement,
+        result = _layout_pcb_constraint_solver(
+            requirements, board, footprint_sizes, fixed_positions,
+            board_template, keepouts, footprint_bboxes,
         )
+        if result is not None:
+            return result
 
-        if isinstance(board_template, BTClass):
-            log.info(
-                "layout_pcb: using constraint-based solver (template=%s)",
-                board_template.name,
-            )
-            # Inject fixed_positions as FIXED constraints
-            from kicad_pipeline.models.pcb import (
-                PlacementConstraint,
-                PlacementConstraintType,
-            )
-            extra_constraints: list[PlacementConstraint] = []
-            if fixed_positions:
-                for ref, (fx, fy, frot) in fixed_positions.items():
-                    extra_constraints.append(PlacementConstraint(
-                        ref=ref,
-                        constraint_type=PlacementConstraintType.FIXED,
-                        x=fx,
-                        y=fy,
-                        rotation=frot,
-                        priority=100,
-                    ))
-            # Use HAT-specific constraints for RPi HAT boards
-            if board_template.name == "RPI_HAT":
-                from kicad_pipeline.pcb.constraints import rpi_hat_constraints
-                constraint_list = rpi_hat_constraints(
-                    requirements, board_template, footprint_sizes,
-                )
-            else:
-                constraint_list = constraints_from_requirements(
-                    requirements, board_template, footprint_sizes,
-                )
-            if extra_constraints:
-                # Merge: extra_constraints override by ref
-                extra_refs = {c.ref for c in extra_constraints}
-                constraint_list = tuple(
-                    c for c in constraint_list if c.ref not in extra_refs
-                ) + tuple(extra_constraints)
-            typed_keepouts = tuple(
-                k for k in keepouts if isinstance(k, KeepoutModel)
-            )
-            # Pass bboxes through (typed loosely here; solver uses FootprintBBox)
-            _bboxes = footprint_bboxes  # type: ignore[assignment]
-            result = solve_placement(
-                constraint_list, board, footprint_sizes,
-                keepouts=typed_keepouts, grid_mm=0.5,
-                requirements=requirements,
-                footprint_bboxes=_bboxes,
-            )
-            positions = dict(result.positions)
-            rotations = dict(result.rotations)
-
-            # Log any placement violations
-            if result.violations:
-                for violation in result.violations:
-                    log.warning("layout_pcb: placement violation: %s", violation)
-
-            # Post-placement constraint validation
-            from kicad_pipeline.pcb.constraints import validate_placement_constraints
-
-            post_violations = validate_placement_constraints(
-                result.positions, constraint_list,
-            )
-            for pv in post_violations:
-                log.info("layout_pcb: post-placement: %s", pv)
-
-            # Ensure all component refs are placed
-            all_refs = {c.ref for c in requirements.components}
-            unplaced = all_refs - set(positions.keys())
-            if unplaced:
-                log.warning(
-                    "layout_pcb: constraint solver missed %d refs, adding: %s",
-                    len(unplaced), list(unplaced),
-                )
-                xs = [p.x for p in board.polygon]
-                ys = [p.y for p in board.polygon]
-                board_w = max(xs) - min(xs)
-                board_h = max(ys) - min(ys)
-                fallback = PCBZone("FALLBACK", 5.0, board_h * 0.6, board_w - 10.0, board_h * 0.35)
-                extra = place_pcb_components(
-                    list(unplaced), fallback, footprint_sizes=footprint_sizes,
-                )
-                positions.update(extra)
-
-            # Collect layer overrides from constraints
-            layer_overrides: dict[str, str] = {}
-            for c in constraint_list:
-                if c.layer is not None:
-                    layer_overrides[c.ref] = c.layer
-
-            log.info("layout_pcb: placed %d components (constraint solver)", len(positions))
-            return LayoutResult(
-                positions=positions, rotations=rotations,
-                layers=layer_overrides if layer_overrides else None,
-            )
-    # --- Zone-based fallback path (no template) ---
-    # Pre-populate positions from fixed_positions (board template)
-    zone_positions: dict[str, Point] = {}
-    zone_rotations: dict[str, float] = {}
-    fixed_refs: set[str] = set()
-    if fixed_positions:
-        for ref, (fx, fy, frot) in fixed_positions.items():
-            zone_positions[ref] = Point(x=fx, y=fy)
-            zone_rotations[ref] = frot
-            fixed_refs.add(ref)
-            log.info("layout_pcb: fixed position for %s at (%.2f, %.2f)", ref, fx, fy)
-
-    # Build feature map from FeatureBlocks
-    feature_map: dict[str, str] = {}
-    for fb in requirements.features:
-        for ref in fb.components:
-            feature_map[ref] = fb.name
-
-    zone_refs_list = [c.ref for c in requirements.components if c.ref not in fixed_refs]
-    tagged = [(ref, feature_map.get(ref, "Peripherals")) for ref in zone_refs_list]
-
-    zone_map = assign_pcb_zones(tagged)
-
-    # Group refs by zone name
-    groups: dict[str, list[str]] = {}
-    for ref, zone in zone_map.items():
-        groups.setdefault(zone.name, []).append(ref)
-
-    # Compute actual board dimensions
-    xs = [p.x for p in board.polygon]
-    ys = [p.y for p in board.polygon]
-    board_w = max(xs) - min(xs)
-    board_h = max(ys) - min(ys)
-
-    # Move edge-sensitive components to edge zones
-    _edge_priority_sort(groups, requirements)
-
-    # Remove empty groups
-    groups = {k: v for k, v in groups.items() if v}
-
-    # Create dynamic non-overlapping zones based on actual groups
-    dynamic_zones = _dynamic_zones(groups, board_w, board_h, footprint_sizes)
-
-    for zone_name, zone_refs in groups.items():
-        zone = dynamic_zones[zone_name]
-        # Sort components within zone to group related parts
-        sorted_refs = _subcircuit_sort(zone_refs, requirements)
-        zone_pos = place_pcb_components(
-            sorted_refs, zone, footprint_sizes=footprint_sizes,
-        )
-        zone_positions.update(zone_pos)
-
-    # Safety net: any refs not yet placed (check all components, not just dynamic)
-    all_component_refs = [c.ref for c in requirements.components]
-    unplaced_refs = [ref for ref in all_component_refs if ref not in zone_positions]
-    if unplaced_refs:
-        log.warning(
-            "layout_pcb: %d refs not placed; adding fallback placement: %s",
-            len(unplaced_refs),
-            unplaced_refs,
-        )
-        # Create a fallback zone from remaining board space
-        fallback = PCBZone("FALLBACK", 5.0, board_h * 0.6, board_w - 10.0, board_h * 0.35)
-        extra = place_pcb_components(
-            unplaced_refs, fallback, footprint_sizes=footprint_sizes,
-        )
-        zone_positions.update(extra)
-
-    log.info("layout_pcb: placed %d components", len(zone_positions))
-    return LayoutResult(positions=zone_positions, rotations=zone_rotations)
+    return _layout_pcb_zone_based(
+        requirements, board, footprint_sizes, fixed_positions,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1340,75 +1355,15 @@ def _resolve_overlaps(
             break
 
 
-def _layout_group(
-    group_refs: list[str],
-    all_constraints: tuple[object, ...],
+def _classify_anchor_pin_sides(
+    anchors: list[str],
     footprint_sizes: dict[str, tuple[float, float]],
-    requirements: ProjectRequirements,
-) -> dict[str, tuple[float, float, float]]:
-    """Lay out a feature group using pin-aware spatial placement.
-
-    Places each passive adjacent to the specific anchor pin it connects to,
-    rotated so connected pads face each other. Anchors are spaced apart with
-    secondary anchors (Q) placed pin-adjacent to the primaries they connect to.
-
-    Args:
-        group_refs: Component refs belonging to this group.
-        all_constraints: Full constraint list (used for subcircuit cluster
-            detection — ``_subcircuit_`` prefix GROUP constraints).
-        footprint_sizes: Mapping from ref to ``(width, height)`` in mm.
-        requirements: Full project requirements for net/pin connectivity.
-
-    Returns:
-        Mapping from ref to ``(relative_x, relative_y, rotation)``.
-    """
-    from kicad_pipeline.pcb.constraints import (
-        _build_pad_connectivity,
-        _get_component_pad_offsets,
-        _rotated_pad_offset,
-    )
-
-    group_ref_set = frozenset(group_refs)
-
-    # ------------------------------------------------------------------
-    # Step 1: Classify anchors vs passives
-    # ------------------------------------------------------------------
-    anchors: list[str] = []
-    passives: list[str] = []
-    for ref in group_refs:
-        if _is_anchor_ref(ref):
-            anchors.append(ref)
-        else:
-            passives.append(ref)
-
-    # Sort anchors by priority then ref for determinism
-    anchors.sort(key=lambda r: (_anchor_priority(r), r))
-
-    # ------------------------------------------------------------------
-    # Step 2: Build pin-level connectivity + cache pad offsets
-    # ------------------------------------------------------------------
-    pad_conn = _build_pad_connectivity(requirements)
-
-    pad_offsets_cache: dict[str, dict[str, tuple[float, float]] | None] = {}
-
-    def _cached_offsets(ref: str) -> dict[str, tuple[float, float]] | None:
-        if ref not in pad_offsets_cache:
-            pad_offsets_cache[ref] = _get_component_pad_offsets(ref, requirements)
-        return pad_offsets_cache[ref]
-
-    # ------------------------------------------------------------------
-    # Step 3: Assign passives to anchors
-    # ------------------------------------------------------------------
-    assignments, overflow = _assign_passives_to_anchors(
-        passives, pad_conn, group_ref_set, requirements,
-    )
-
-    # ------------------------------------------------------------------
-    # Step 4: Classify anchor pins into sides using pad geometry
-    # ------------------------------------------------------------------
+    cached_offsets_fn: object,
+) -> dict[str, dict[str, str]]:
+    """Classify each anchor pin as left/right/top/bottom."""
     anchor_pin_sides: dict[str, dict[str, str]] = {}
     for aref in anchors:
-        offsets = _cached_offsets(aref)
+        offsets = cached_offsets_fn(aref)  # type: ignore[operator]
         if offsets is None:
             anchor_pin_sides[aref] = {}
             continue
@@ -1418,24 +1373,21 @@ def _layout_group(
         for pin_num, (dx, dy) in offsets.items():
             sides[pin_num] = _classify_pin_side(dx, dy, half_w, half_h)
         anchor_pin_sides[aref] = sides
+    return anchor_pin_sides
 
-    # ------------------------------------------------------------------
-    # Step 5: Place anchors
-    # ------------------------------------------------------------------
-    primary_anchors = [a for a in anchors if _ref_prefix(a) in ("K", "U", "J", "Y")]
-    secondary_anchors = [a for a in anchors if _ref_prefix(a) not in ("K", "U", "J", "Y")]
 
-    is_relay_group = (
-        len(primary_anchors) >= 2
-        and all(_ref_prefix(a) == "K" for a in primary_anchors)
-    )
-
-    layout, cursor_x, _max_anchor_h = _place_primary_anchors(
-        primary_anchors, footprint_sizes, is_relay_group,
-    )
+def _place_secondary_anchors(
+    secondary_anchors: list[str],
+    primary_anchors: list[str],
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    requirements: ProjectRequirements,
+    layout: dict[str, tuple[float, float, float]],
+    footprint_sizes: dict[str, tuple[float, float]],
+    cached_offsets_fn: object,
+    cursor_x: float,
+) -> float:
+    """Place secondary anchors near connected primaries. Returns updated cursor_x."""
     anchor_y = _GROUP_MARGIN_MM
-
-    # Place secondary anchors (Q) near the primary they connect to
     for sref in secondary_anchors:
         connected_primary: str = ""
         connected_primary_pin: str = ""
@@ -1453,16 +1405,25 @@ def _layout_group(
         if connected_primary and connected_primary in layout:
             _place_secondary_near_pin(
                 sref, connected_primary, connected_primary_pin,
-                layout, footprint_sizes, _cached_offsets,
+                layout, footprint_sizes, cached_offsets_fn,
             )
         else:
             w, h = footprint_sizes.get(sref, (3.0, 3.0))
             layout[sref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
             cursor_x += w + _ANCHOR_GAP_MM
+    return cursor_x
 
-    # ------------------------------------------------------------------
-    # Step 6: Place passives at anchor pins
-    # ------------------------------------------------------------------
+
+def _place_passives_at_pins(
+    assignments: list[_PassiveAssignment],
+    layout: dict[str, tuple[float, float, float]],
+    footprint_sizes: dict[str, tuple[float, float]],
+    anchor_pin_sides: dict[str, dict[str, str]],
+    cached_offsets_fn: object,
+) -> None:
+    """Place assigned passives adjacent to their anchor pins."""
+    from kicad_pipeline.pcb.constraints import _rotated_pad_offset
+
     pin_assignments: dict[tuple[str, str], list[_PassiveAssignment]] = {}
     for asn in assignments:
         key = (asn.anchor_ref, asn.anchor_pin)
@@ -1473,7 +1434,7 @@ def _layout_group(
             continue
 
         anchor_x, anchor_y_pos, anchor_rot = layout[anchor_ref]
-        offsets = _cached_offsets(anchor_ref)
+        offsets = cached_offsets_fn(anchor_ref)  # type: ignore[operator]
         aw, ah = footprint_sizes.get(anchor_ref, (5.0, 5.0))
 
         if offsets and anchor_pin in offsets:
@@ -1493,45 +1454,114 @@ def _layout_group(
             )
             layout[asn.passive_ref] = (px, py, rot)
 
-    # ------------------------------------------------------------------
-    # Step 7: Relay group post-processing — support below relay row
-    # ------------------------------------------------------------------
+
+def _place_overflow_row(
+    overflow: set[str],
+    layout: dict[str, tuple[float, float, float]],
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> None:
+    """Place unassigned passives in a row below the existing layout."""
+    if not overflow:
+        return
+    if layout:
+        max_y = max(
+            pos[1] + footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
+            for ref, pos in layout.items()
+        )
+    else:
+        max_y = _GROUP_MARGIN_MM
+    overflow_y = max_y + _CLUSTER_ROW_GAP_MM
+    overflow_x = _GROUP_MARGIN_MM
+    for ref in sorted(overflow):
+        w, h = footprint_sizes.get(ref, (5.0, 5.0))
+        layout[ref] = (overflow_x + w / 2.0, overflow_y + h / 2.0, 0.0)
+        overflow_x += w + _CLUSTER_GAP_MM
+
+
+def _layout_group(
+    group_refs: list[str],
+    all_constraints: tuple[object, ...],
+    footprint_sizes: dict[str, tuple[float, float]],
+    requirements: ProjectRequirements,
+) -> dict[str, tuple[float, float, float]]:
+    """Lay out a feature group using pin-aware spatial placement.
+
+    Places each passive adjacent to the specific anchor pin it connects to,
+    rotated so connected pads face each other. Anchors are spaced apart with
+    secondary anchors (Q) placed pin-adjacent to the primaries they connect to.
+    """
+    from kicad_pipeline.pcb.constraints import (
+        _build_pad_connectivity,
+        _get_component_pad_offsets,
+    )
+
+    group_ref_set = frozenset(group_refs)
+
+    # Step 1: Classify anchors vs passives
+    anchors: list[str] = []
+    passives: list[str] = []
+    for ref in group_refs:
+        if _is_anchor_ref(ref):
+            anchors.append(ref)
+        else:
+            passives.append(ref)
+    anchors.sort(key=lambda r: (_anchor_priority(r), r))
+
+    # Step 2: Build connectivity + offset cache
+    pad_conn = _build_pad_connectivity(requirements)
+
+    pad_offsets_cache: dict[str, dict[str, tuple[float, float]] | None] = {}
+
+    def _cached_offsets(ref: str) -> dict[str, tuple[float, float]] | None:
+        if ref not in pad_offsets_cache:
+            pad_offsets_cache[ref] = _get_component_pad_offsets(ref, requirements)
+        return pad_offsets_cache[ref]
+
+    # Step 3: Assign passives to anchors
+    assignments, overflow = _assign_passives_to_anchors(
+        passives, pad_conn, group_ref_set, requirements,
+    )
+
+    # Step 4: Classify anchor pin sides
+    anchor_pin_sides = _classify_anchor_pin_sides(anchors, footprint_sizes, _cached_offsets)
+
+    # Step 5: Place anchors
+    primary_anchors = [a for a in anchors if _ref_prefix(a) in ("K", "U", "J", "Y")]
+    secondary_anchors = [a for a in anchors if _ref_prefix(a) not in ("K", "U", "J", "Y")]
+    is_relay_group = (
+        len(primary_anchors) >= 2
+        and all(_ref_prefix(a) == "K" for a in primary_anchors)
+    )
+
+    layout, cursor_x, _max_anchor_h = _place_primary_anchors(
+        primary_anchors, footprint_sizes, is_relay_group,
+    )
+
+    _place_secondary_anchors(
+        secondary_anchors, primary_anchors, pad_conn, requirements,
+        layout, footprint_sizes, _cached_offsets, cursor_x,
+    )
+
+    # Step 6: Place passives at anchor pins
+    _place_passives_at_pins(
+        assignments, layout, footprint_sizes, anchor_pin_sides, _cached_offsets,
+    )
+
+    # Step 7: Relay group post-processing
     if is_relay_group:
         relay_refs = sorted(
             [r for r in layout if _ref_prefix(r) == "K"],
             key=lambda r: layout[r][0],
         )
         if relay_refs:
-            ownership = _build_relay_ownership(
-                layout, relay_refs, pad_conn, requirements,
-            )
-            _place_relay_support_grid(
-                layout, relay_refs, ownership, footprint_sizes,
-            )
+            ownership = _build_relay_ownership(layout, relay_refs, pad_conn, requirements)
+            _place_relay_support_grid(layout, relay_refs, ownership, footprint_sizes)
 
-    # ------------------------------------------------------------------
     # Step 7.5: Resolve overlaps
-    # ------------------------------------------------------------------
     _resolve_overlaps(layout, footprint_sizes)
 
-    # ------------------------------------------------------------------
-    # Step 8: Overflow row for unassigned passives
-    # ------------------------------------------------------------------
-    if overflow:
-        # Place below all existing layout
-        if layout:
-            max_y = max(
-                pos[1] + footprint_sizes.get(ref, (5.0, 5.0))[1] / 2.0
-                for ref, pos in layout.items()
-            )
-        else:
-            max_y = _GROUP_MARGIN_MM
-        overflow_y = max_y + _CLUSTER_ROW_GAP_MM
-        overflow_x = _GROUP_MARGIN_MM
-        for ref in sorted(overflow):
-            w, h = footprint_sizes.get(ref, (5.0, 5.0))
-            layout[ref] = (overflow_x + w / 2.0, overflow_y + h / 2.0, 0.0)
-            overflow_x += w + _CLUSTER_GAP_MM
+    # Step 8: Overflow row
+    _place_overflow_row(overflow, layout, footprint_sizes)
 
     return layout
 

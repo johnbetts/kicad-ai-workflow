@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from kicad_pipeline.schematic.subcircuits import (
-    SubcircuitResult,
     decoupling_cap,
     instantiate_subcircuit,
     ldo_regulator,

@@ -91,7 +91,7 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
         _fp_courtyard_sizes,
         optimize_placement_ee,
     )
-    from kicad_pipeline.pcb.pin_map import compute_centroid_offset, origin_to_centroid
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
     from kicad_pipeline.optimization.scoring import compute_fast_placement_score
     from kicad_pipeline.pcb.builder import build_pcb
     from kicad_pipeline.visualization.placement_render import render_placement
