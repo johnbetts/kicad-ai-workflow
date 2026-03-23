@@ -1246,6 +1246,46 @@ def _mark_via_on_fcu(
 # ---------------------------------------------------------------------------
 
 
+def _reconstruct_path(
+    goal: tuple[int, int],
+    came_from: dict[tuple[int, int], tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Trace came_from links back from goal to start and return the path."""
+    path: list[tuple[int, int]] = [goal]
+    cur = goal
+    while cur in came_from:
+        cur = came_from[cur]
+        path.append(cur)
+    path.reverse()
+    return path
+
+
+def _astar_step_cost(
+    grid: _Grid,
+    nc: int,
+    nr: int,
+    dc: int,
+    dr: int,
+    prev_dc: int,
+    prev_dr: int,
+    bend_penalty: float,
+    use_congestion: bool,
+) -> float:
+    """Compute the cost of stepping to (nc, nr) from a cell with direction (prev_dc, prev_dr)."""
+    is_diag = dc != 0 and dr != 0
+    base = 1.4142 if is_diag else 1.0
+
+    step_cost = grid.get_cost(nc, nr) * base if use_congestion else base
+
+    # Bend penalty: direction change from parent costs extra
+    has_prev_dir = prev_dc != 0 or prev_dr != 0
+    changed_dir = dc != prev_dc or dr != prev_dr
+    if bend_penalty > 0 and has_prev_dir and changed_dir:
+        step_cost += bend_penalty
+
+    return step_cost
+
+
 def _astar(
     grid: _Grid,
     start_col: int,
@@ -1284,6 +1324,9 @@ def _astar(
     def heuristic(c: int, r: int) -> float:
         return float(abs(c - goal_col) + abs(r - goal_row))
 
+    start = (start_col, start_row)
+    goal = (goal_col, goal_row)
+
     # Priority queue: (f, g, col, row, prev_dc, prev_dr)
     open_heap: list[tuple[float, float, int, int, int, int]] = []
     heapq.heappush(open_heap, (
@@ -1292,7 +1335,7 @@ def _astar(
     ))
 
     came_from: dict[tuple[int, int], tuple[int, int]] = {}
-    g_score: dict[tuple[int, int], float] = {(start_col, start_row): 0.0}
+    g_score: dict[tuple[int, int], float] = {start: 0.0}
     closed: set[tuple[int, int]] = set()
 
     # Orthogonal + optional diagonal neighbors
@@ -1310,46 +1353,21 @@ def _astar(
             continue
         closed.add(node)
 
-        if col == goal_col and row == goal_row:
-            # Reconstruct path
-            path: list[tuple[int, int]] = [node]
-            cur = node
-            while cur in came_from:
-                cur = came_from[cur]
-                path.append(cur)
-            path.reverse()
-            return path
+        if node == goal:
+            return _reconstruct_path(node, came_from)
 
         for dc, dr in neighbors:
             nc, nr = col + dc, row + dr
-            if nc < 0 or nc >= grid.cols or nr < 0 or nr >= grid.rows:
-                continue
             neighbor = (nc, nr)
-            if neighbor in closed:
-                continue
-            is_start_or_goal = (
-                (nc == start_col and nr == start_row)
-                or (nc == goal_col and nr == goal_row)
-            )
-            if not (grid.is_free(nc, nr) or is_start_or_goal):
-                continue
-
-            # Diagonal moves cost sqrt(2), orthogonal cost 1
-            is_diag = (dc != 0 and dr != 0)
-            base = 1.4142 if is_diag else 1.0
-
-            # Base step cost with optional congestion weighting
-            step_cost = (
-                grid.get_cost(nc, nr) * base if use_congestion else base
-            )
-
-            # Bend penalty: direction change from parent costs extra
-            if (
-                bend_penalty > 0
-                and (prev_dc != 0 or prev_dr != 0)
-                and (dc != prev_dc or dr != prev_dr)
+            if not _astar_neighbor_valid(
+                grid, neighbor, start, goal, closed,
             ):
-                step_cost += bend_penalty
+                continue
+
+            step_cost = _astar_step_cost(
+                grid, nc, nr, dc, dr, prev_dc, prev_dr,
+                bend_penalty, use_congestion,
+            )
 
             tentative_g = g + step_cost
             if tentative_g < g_score.get(neighbor, math.inf):
@@ -1359,6 +1377,24 @@ def _astar(
                 heapq.heappush(open_heap, (f, tentative_g, nc, nr, dc, dr))
 
     return None
+
+
+def _astar_neighbor_valid(
+    grid: _Grid,
+    neighbor: tuple[int, int],
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    closed: set[tuple[int, int]],
+) -> bool:
+    """Return True if the neighbor cell is a valid candidate for expansion."""
+    nc, nr = neighbor
+    if nc < 0 or nc >= grid.cols or nr < 0 or nr >= grid.rows:
+        return False
+    if neighbor in closed:
+        return False
+    if grid.is_free(nc, nr):
+        return True
+    return neighbor in (start, goal)
 
 
 def _simplify_path(path: list[tuple[int, int]]) -> list[tuple[int, int]]:

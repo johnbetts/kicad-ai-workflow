@@ -491,6 +491,74 @@ def _is_edge_connector(value: str, footprint: str) -> bool:
     return any(kw in combined for kw in _EDGE_CONNECTOR_KEYWORDS)
 
 
+def _build_net_sharing(
+    requirements: ProjectRequirements,
+    ref_set: set[str],
+) -> dict[tuple[str, str], int]:
+    """Count shared nets between pairs of refs within *ref_set*."""
+    net_sharing: dict[tuple[str, str], int] = {}
+    for net in requirements.nets:
+        zone_refs_in_net = [c.ref for c in net.connections if c.ref in ref_set]
+        for i, r1 in enumerate(zone_refs_in_net):
+            for r2 in zone_refs_in_net[i + 1:]:
+                key = (min(r1, r2), max(r1, r2))
+                net_sharing[key] = net_sharing.get(key, 0) + 1
+    return net_sharing
+
+
+def _split_anchors_passives(
+    refs: list[str],
+) -> tuple[list[str], list[str]]:
+    """Classify refs into anchor components (ICs, connectors) and passives."""
+    anchor_prefixes = frozenset({"U", "J", "K", "Q", "Y"})
+    anchors: list[str] = []
+    passives: list[str] = []
+    for ref in refs:
+        prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
+        if prefix in anchor_prefixes:
+            anchors.append(ref)
+        else:
+            passives.append(ref)
+    return anchors, passives
+
+
+def _score_passive_to_anchor(
+    passives: list[str],
+    anchor_set: set[str],
+    ref_set: set[str],
+    net_sharing: dict[tuple[str, str], int],
+    adj: dict[str, set[str]],
+) -> dict[str, tuple[str, int]]:
+    """For each passive, find the best anchor by net-sharing + adjacency score."""
+    passive_best: dict[str, tuple[str, int]] = {}
+
+    # Score from net sharing
+    for (r1, r2), count in net_sharing.items():
+        if r1 in anchor_set and r2 not in anchor_set:
+            anchor, passive = r1, r2
+        elif r2 in anchor_set and r1 not in anchor_set:
+            anchor, passive = r2, r1
+        else:
+            continue
+        if passive not in ref_set:
+            continue
+        prev = passive_best.get(passive, ("", 0))
+        if count > prev[1]:
+            passive_best[passive] = (anchor, count)
+
+    # Factor in signal adjacency
+    for p in passives:
+        p_adj = adj.get(p, set())
+        for a in p_adj & anchor_set:
+            prev = passive_best.get(p, ("", 0))
+            key = (min(p, a), max(p, a))
+            total = net_sharing.get(key, 0) + 1
+            if total > prev[1]:
+                passive_best[p] = (a, total)
+
+    return passive_best
+
+
 def _subcircuit_sort(
     refs: list[str],
     requirements: ProjectRequirements,
@@ -514,56 +582,13 @@ def _subcircuit_sort(
 
     ref_set = set(refs)
     adj = build_signal_adjacency(requirements)
-
-    # Build net-based adjacency count between components in this zone
-    # Pre-filter connections to zone refs for O(zone_size) per net
-    net_sharing: dict[tuple[str, str], int] = {}
-    for net in requirements.nets:
-        zone_refs_in_net = [c.ref for c in net.connections if c.ref in ref_set]
-        for i, r1 in enumerate(zone_refs_in_net):
-            for r2 in zone_refs_in_net[i + 1:]:
-                key = (min(r1, r2), max(r1, r2))
-                net_sharing[key] = net_sharing.get(key, 0) + 1
-
-    # Identify ICs and connectors as "anchor" components
-    _anchor_prefixes = frozenset({"U", "J", "K", "Q", "Y"})
-    anchors: list[str] = []
-    passives: list[str] = []
-    for ref in refs:
-        prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
-        if prefix in _anchor_prefixes:
-            anchors.append(ref)
-        else:
-            passives.append(ref)
-
-    # Pre-build passive -> anchor scores using net_sharing + adjacency
-    # to avoid nested loop over all anchors for every passive
+    net_sharing = _build_net_sharing(requirements, ref_set)
+    anchors, passives = _split_anchors_passives(refs)
     anchor_set = set(anchors)
-    passive_best: dict[str, tuple[str, int]] = {}  # passive -> (best_anchor, score)
-    for (r1, r2), count in net_sharing.items():
-        # Only consider pairs where one is passive, other is anchor
-        if r1 in anchor_set and r2 not in anchor_set:
-            anchor, passive = r1, r2
-        elif r2 in anchor_set and r1 not in anchor_set:
-            anchor, passive = r2, r1
-        else:
-            continue
-        if passive not in ref_set:
-            continue
-        prev = passive_best.get(passive, ("", 0))
-        if count > prev[1]:
-            passive_best[passive] = (anchor, count)
 
-    # Also factor in signal adjacency for passives without net-sharing hits
-    for p in passives:
-        p_adj = adj.get(p, set())
-        for a in p_adj & anchor_set:
-            prev = passive_best.get(p, ("", 0))
-            # net_sharing bonus + 1 for adjacency
-            key = (min(p, a), max(p, a))
-            total = net_sharing.get(key, 0) + 1
-            if total > prev[1]:
-                passive_best[p] = (a, total)
+    passive_best = _score_passive_to_anchor(
+        passives, anchor_set, ref_set, net_sharing, adj,
+    )
 
     # Group each passive with its best anchor
     anchor_groups: dict[str, list[str]] = {a: [] for a in anchors}

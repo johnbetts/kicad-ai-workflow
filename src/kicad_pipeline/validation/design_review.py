@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import PCBDesign
-    from kicad_pipeline.models.requirements import ProjectRequirements
+    from kicad_pipeline.models.requirements import Component, ProjectRequirements
 
 # Patterns for identifying power nets.
 _POWER_NET_PREFIXES: tuple[str, ...] = ("+", "V")
@@ -218,6 +218,77 @@ def _match_cap_by_rail(
     return best_ic, best_score
 
 
+def _build_power_net_maps(
+    requirements: ProjectRequirements,
+) -> tuple[dict[str, set[str]], dict[str, int]]:
+    """Build ref-to-power-nets mapping and net-to-IC-count mapping."""
+    ref_power_nets: dict[str, set[str]] = {}
+    net_ic_count: dict[str, int] = {}
+    for net in requirements.nets:
+        if not _is_power_net(net.name):
+            continue
+        ic_count = 0
+        for conn in net.connections:
+            ref_power_nets.setdefault(conn.ref, set()).add(net.name)
+            if conn.ref.startswith("U"):
+                ic_count += 1
+        net_ic_count[net.name] = ic_count
+    return ref_power_nets, net_ic_count
+
+
+def _find_decoupling_caps(
+    cap_refs: list[str],
+    comp_map: dict[str, Component],
+) -> list[str]:
+    """Filter caps to those that look like decoupling (both pins on power nets)."""
+    result: list[str] = []
+    for cref in cap_refs:
+        comp = comp_map.get(cref)
+        if comp is None or len(comp.pins) != 2:
+            continue
+        pin_nets = [p.net for p in comp.pins if p.net]
+        if len(pin_nets) == 2 and all(_is_power_net(n) for n in pin_nets):
+            result.append(cref)
+    return result
+
+
+def _best_ic_for_cap(
+    cap: str,
+    comp_map: dict[str, Component],
+    ic_refs: list[str],
+    ref_power_nets: dict[str, set[str]],
+    net_ic_count: dict[str, int],
+    regulator_set: set[str],
+    ref_to_feature: dict[str, str],
+) -> str | None:
+    """Find the best IC match for a decoupling cap using tiered matching."""
+    cap_comp = comp_map.get(cap)
+    cap_nets = ref_power_nets.get(cap, set())
+    cap_rails = {n for n in cap_nets if n.upper() not in _GND_NET_NAMES}
+    desc = (cap_comp.description or "").upper() if cap_comp else ""
+    cap_feature = ref_to_feature.get(cap, "")
+
+    best_ic, best_score = _match_cap_by_description(desc, ic_refs, comp_map)
+
+    if best_score < 1000.0:
+        ic, score = _match_cap_by_regulator(
+            desc, cap_rails, cap_feature, ic_refs,
+            regulator_set, ref_power_nets, ref_to_feature,
+        )
+        if score > best_score:
+            best_ic, best_score = ic, score
+
+    if best_score < 500.0:
+        ic, score = _match_cap_by_rail(
+            cap_rails, cap_feature, ic_refs, comp_map,
+            ref_power_nets, net_ic_count, ref_to_feature,
+        )
+        if score > best_score:
+            best_ic = ic
+
+    return best_ic
+
+
 def _find_ic_decoupling_pairs(
     requirements: ProjectRequirements,
 ) -> list[tuple[str, str]]:
@@ -235,70 +306,28 @@ def _find_ic_decoupling_pairs(
        are not paired to avoid misleading recommendations.
     """
     comp_map = {c.ref: c for c in requirements.components}
-
-    # Build ref -> set of power nets, and net -> set of IC refs
-    ref_power_nets: dict[str, set[str]] = {}
-    net_ic_count: dict[str, int] = {}
-    for net in requirements.nets:
-        if not _is_power_net(net.name):
-            continue
-        ic_count = 0
-        for conn in net.connections:
-            ref_power_nets.setdefault(conn.ref, set()).add(net.name)
-            if conn.ref.startswith("U"):
-                ic_count += 1
-        net_ic_count[net.name] = ic_count
+    ref_power_nets, net_ic_count = _build_power_net_maps(requirements)
 
     ic_refs = [c.ref for c in requirements.components if c.ref.startswith("U")]
     cap_refs = [c.ref for c in requirements.components if c.ref.startswith("C")]
 
-    # Identify which ICs are regulators
     regulator_set: set[str] = set(_find_regulator_refs(requirements))
 
-    # Build ref-to-feature mapping for feature-local matching
     ref_to_feature: dict[str, str] = {}
     for fb in requirements.features:
         for ref in fb.components:
             ref_to_feature[ref] = fb.name
 
-    # Filter to caps that look like decoupling (both pins on power nets)
-    decoupling_caps: list[str] = []
-    for cref in cap_refs:
-        comp = comp_map.get(cref)
-        if comp is None or len(comp.pins) != 2:
-            continue
-        pin_nets = [p.net for p in comp.pins if p.net]
-        if len(pin_nets) == 2 and all(_is_power_net(n) for n in pin_nets):
-            decoupling_caps.append(cref)
+    decoupling_caps = _find_decoupling_caps(cap_refs, comp_map)
 
     pairs: list[tuple[str, str]] = []
     seen_caps: set[str] = set()
 
     for cap in decoupling_caps:
-        cap_comp = comp_map.get(cap)
-        cap_nets = ref_power_nets.get(cap, set())
-        cap_rails = {n for n in cap_nets if n.upper() not in _GND_NET_NAMES}
-        desc = (cap_comp.description or "").upper() if cap_comp else ""
-        cap_feature = ref_to_feature.get(cap, "")
-
-        best_ic, best_score = _match_cap_by_description(
-            desc, ic_refs, comp_map,
+        best_ic = _best_ic_for_cap(
+            cap, comp_map, ic_refs, ref_power_nets, net_ic_count,
+            regulator_set, ref_to_feature,
         )
-        if best_score < 1000.0:
-            ic, score = _match_cap_by_regulator(
-                desc, cap_rails, cap_feature, ic_refs,
-                regulator_set, ref_power_nets, ref_to_feature,
-            )
-            if score > best_score:
-                best_ic, best_score = ic, score
-        if best_score < 500.0:
-            ic, score = _match_cap_by_rail(
-                cap_rails, cap_feature, ic_refs, comp_map,
-                ref_power_nets, net_ic_count, ref_to_feature,
-            )
-            if score > best_score:
-                best_ic = ic
-
         if best_ic and cap not in seen_caps:
             pairs.append((best_ic, cap))
             seen_caps.add(cap)

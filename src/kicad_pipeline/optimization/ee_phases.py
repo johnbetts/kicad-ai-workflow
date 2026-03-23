@@ -194,6 +194,48 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
                 row_max_h = 0.0
 
 
+def _build_coil_net_to_relay(
+    requirements: ProjectRequirements,
+) -> dict[str, str]:
+    """Map coil net names to relay (K*) refs."""
+    coil_net_to_relay: dict[str, str] = {}
+    for net in requirements.nets:
+        if "_COIL" not in net.name.upper():
+            continue
+        for conn in net.connections:
+            if conn.ref.startswith("K"):
+                coil_net_to_relay[net.name] = conn.ref
+                break
+    return coil_net_to_relay
+
+
+def _find_relay_led_pairs(
+    requirements: ProjectRequirements,
+    coil_net_to_relay: dict[str, str],
+    relay_support_refs: set[str],
+) -> dict[str, list[str]]:
+    """Find LED+resistor refs per relay via coil and LED nets."""
+    relay_leds: dict[str, list[str]] = {}
+    for net in requirements.nets:
+        name_upper = net.name.upper()
+        if "_COIL" in name_upper:
+            k_ref = coil_net_to_relay.get(net.name)
+            if not k_ref:
+                continue
+            for conn in net.connections:
+                if conn.ref.startswith("D") and conn.ref not in relay_support_refs:
+                    relay_leds.setdefault(k_ref, []).append(conn.ref)
+        elif "_LED" in name_upper:
+            d_refs_in = [c.ref for c in net.connections if c.ref.startswith("D")]
+            r_refs_in = [c.ref for c in net.connections if c.ref.startswith("R")]
+            for d_ref in d_refs_in:
+                for _k_ref, led_list in relay_leds.items():
+                    if d_ref in led_list:
+                        led_list.extend(r_refs_in)
+                        break
+    return relay_leds
+
+
 def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[str]]:
     """3b2: Relay LED indicator placement — D_LED + R_LED below support grid.
 
@@ -204,33 +246,10 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
     relay_led_refs: set[str] = set()
     bounds = ctx.bounds
 
-    # Build relay coil net -> relay mapping
-    _coil_net_to_relay: dict[str, str] = {}
-    for net in ctx.requirements.nets:
-        if "_COIL" in net.name.upper():
-            for conn in net.connections:
-                if conn.ref.startswith("K"):
-                    _coil_net_to_relay[net.name] = conn.ref
-                    break
-
-    # Find LED+resistor pairs per relay via coil nets
-    _relay_leds: dict[str, list[str]] = {}
-    for net in ctx.requirements.nets:
-        if "_COIL" in net.name.upper():
-            k_ref = _coil_net_to_relay.get(net.name)
-            if not k_ref:
-                continue
-            for conn in net.connections:
-                if conn.ref.startswith("D") and conn.ref not in ctx.relay_support_refs:
-                    _relay_leds.setdefault(k_ref, []).append(conn.ref)
-        elif "_LED" in net.name.upper():
-            d_refs_in = [c.ref for c in net.connections if c.ref.startswith("D")]
-            r_refs_in = [c.ref for c in net.connections if c.ref.startswith("R")]
-            for d_ref in d_refs_in:
-                for k_ref, led_list in _relay_leds.items():
-                    if d_ref in led_list:
-                        led_list.extend(r_refs_in)
-                        break
+    coil_net_to_relay = _build_coil_net_to_relay(ctx.requirements)
+    _relay_leds = _find_relay_led_pairs(
+        ctx.requirements, coil_net_to_relay, ctx.relay_support_refs,
+    )
 
     # Place LED pairs below each relay's support row
     for k_ref in sorted(_relay_leds):
@@ -250,7 +269,7 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         led_col = 0
         led_cols_per_row = min(len(led_members), 2)
         for ref in led_members:
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+            _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
             px = kx - kw / 4.0 + led_col * (kw / 2.0)
             py = led_y_base + h / 2.0
             px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))

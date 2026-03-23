@@ -23,6 +23,7 @@ from kicad_pipeline.models.pcb import (
 from kicad_pipeline.sexp.parser import parse
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -314,54 +315,42 @@ def load_kicad_mod(
 
     # Parse graphics
     graphics: list[FootprintLine | FootprintArc | FootprintCircle] = []
-    for line_node in _find_nodes(tree, "fp_line"):
-        line = _parse_fp_line(line_node)
-        if line is not None:
-            graphics.append(line)
-    for circle_node in _find_nodes(tree, "fp_circle"):
-        circle = _parse_fp_circle(circle_node)
-        if circle is not None:
-            graphics.append(circle)
-    for arc_node in _find_nodes(tree, "fp_arc"):
-        arc = _parse_fp_arc(arc_node)
-        if arc is not None:
-            graphics.append(arc)
+    _graphic_parsers: list[
+        tuple[str, Callable[..., FootprintLine | FootprintArc | FootprintCircle | None]]
+    ] = [
+        ("fp_line", _parse_fp_line),
+        ("fp_circle", _parse_fp_circle),
+        ("fp_arc", _parse_fp_arc),
+    ]
+    for tag, parser in _graphic_parsers:
+        for gnode in _find_nodes(tree, tag):
+            result = parser(gnode)
+            if result is not None:
+                graphics.append(result)
 
-    # Parse texts
+    # Parse texts — override reference/value with caller-provided values
+    _text_overrides: dict[str, str] = {"reference": ref, "value": value}
     texts: list[FootprintText] = []
     for text_node in _find_nodes(tree, "fp_text"):
-        if len(text_node) > 1:
-            text_type_raw = str(text_node[1])
-            text_type_map = {
-                "reference": "reference",
-                "value": "value",
-                "user": "user",
-            }
-            text_type = text_type_map.get(text_type_raw, "user")
-            ft = _parse_fp_text(text_node, text_type)
-            if ft is not None:
-                # Override reference/value text with caller-provided values
-                if text_type == "reference":
-                    ft = FootprintText(
-                        text_type="reference",
-                        text=ref,
-                        position=ft.position,
-                        layer=ft.layer,
-                        rotation=ft.rotation,
-                        effects_size=ft.effects_size,
-                        hidden=ft.hidden,
-                    )
-                elif text_type == "value":
-                    ft = FootprintText(
-                        text_type="value",
-                        text=value,
-                        position=ft.position,
-                        layer=ft.layer,
-                        rotation=ft.rotation,
-                        effects_size=ft.effects_size,
-                        hidden=ft.hidden,
-                    )
-                texts.append(ft)
+        if len(text_node) <= 1:
+            continue
+        text_type_raw = str(text_node[1])
+        text_type = text_type_raw if text_type_raw in ("reference", "value", "user") else "user"
+        ft = _parse_fp_text(text_node, text_type)
+        if ft is None:
+            continue
+        override = _text_overrides.get(text_type)
+        if override is not None:
+            ft = FootprintText(
+                text_type=text_type,
+                text=override,
+                position=ft.position,
+                layer=ft.layer,
+                rotation=ft.rotation,
+                effects_size=ft.effects_size,
+                hidden=ft.hidden,
+            )
+        texts.append(ft)
 
     _log.info(
         "Loaded .kicad_mod: %s → %d pads, %d graphics, %d texts",

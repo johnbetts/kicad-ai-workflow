@@ -119,31 +119,33 @@ def footprint_to_kicad_mod(fp_sexp: list[SExpNode], footprint_name: str) -> str:
         node.insert(insert_idx, item)
         insert_idx += 1
 
+    # Property name -> replacement value mapping
+    _property_overrides: dict[str, str] = {
+        "Reference": "REF**",
+        "Value": footprint_name,
+        "Footprint": "",
+    }
+
     # Walk children to strip nets from pads and fix properties
     for i, child in enumerate(node):
         if not isinstance(child, list) or not child:
             continue
 
+        tag = child[0]
+
         # Strip (net N "name") and instance UUIDs from pad nodes
-        if child[0] == "pad":
-            stripped: list[SExpNode] = [
+        if tag == "pad":
+            node[i] = [
                 elem
                 for elem in child
                 if not (isinstance(elem, list) and len(elem) >= 1 and elem[0] in ("net", "uuid"))
             ]
-            node[i] = stripped
 
-        # Fix Reference property: replace instance ref with "REF**"
-        if child[0] == "property" and len(child) >= 3 and child[1] == "Reference":
-            child[2] = "REF**"
-
-        # Fix Value property: replace instance value with footprint name
-        if child[0] == "property" and len(child) >= 3 and child[1] == "Value":
-            child[2] = footprint_name
-
-        # Fix Footprint property: clear it (library footprints don't self-reference)
-        if child[0] == "property" and len(child) >= 3 and child[1] == "Footprint":
-            child[2] = ""
+        # Fix properties using dispatch dict
+        if tag == "property" and len(child) >= 3:
+            override = _property_overrides.get(str(child[1]))
+            if override is not None:
+                child[2] = override
 
     # Remove top-level uuid (instance UUID)
     node[:] = [

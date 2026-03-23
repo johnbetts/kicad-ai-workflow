@@ -664,6 +664,44 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
     )
 
 
+def _place_grid_below_anchor(
+    refs: list[str],
+    anchor_x: float,
+    anchor_w: float,
+    start_y: float,
+    cols_per_row: int,
+    bounds: tuple[float, float, float, float],
+    fp_sizes: dict[str, tuple[float, float]],
+    positions: dict[str, tuple[float, float, float]],
+) -> tuple[int, float, int, float]:
+    """Place refs in a grid below an anchor component.
+
+    Returns:
+        Tuple of (realigned_count, current_row_y, current_col, current_row_max_h).
+    """
+    realigned = 0
+    col = 0
+    row_y = start_y
+    row_max_h = 0.0
+    for ref in refs:
+        _w, h = fp_sizes.get(ref, (2.0, 2.0))
+        px = anchor_x - anchor_w / 2.0 + (col + 0.5) * (anchor_w / cols_per_row)
+        py = row_y + h / 2.0
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+        old_x, old_y, old_rot = positions[ref]
+        if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+            realigned += 1
+        positions[ref] = (px, py, old_rot)
+        row_max_h = max(row_max_h, h)
+        col += 1
+        if col >= cols_per_row:
+            col = 0
+            row_y += row_max_h + 0.5
+            row_max_h = 0.0
+    return realigned, row_y, col, row_max_h
+
+
 def _phase_late_relay_realignment(
     ctx: PlacementContext,
     _relay_leds: dict[str, list[str]],
@@ -708,48 +746,23 @@ def _phase_late_relay_realignment(
         )
 
         target_y_base = ky + kh / 2.0 + 1.0
-        col = 0
-        row_y = target_y_base
-        row_max_h = 0.0
         cols_per_row = 2
 
-        for ref in support_members:
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
-            py = row_y + h / 2.0
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-            old_x, old_y, old_rot = ctx.best_positions[ref]
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[ref] = (px, py, old_rot)
-            row_max_h = max(row_max_h, h)
-            col += 1
-            if col >= cols_per_row:
-                col = 0
-                row_y += row_max_h + 0.5
-                row_max_h = 0.0
+        count, row_y, col, row_max_h = _place_grid_below_anchor(
+            support_members, kx, kw, target_y_base, cols_per_row,
+            bounds, ctx.fp_sizes, ctx.best_positions,
+        )
+        _relay_realigned += count
 
+        # Advance to next row if support members ended mid-row
         if col > 0:
             row_y += row_max_h + 0.5
-            col = 0
-            row_max_h = 0.0
-        for ref in led_members:
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
-            py = row_y + h / 2.0
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-            old_x, old_y, old_rot = ctx.best_positions[ref]
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[ref] = (px, py, old_rot)
-            row_max_h = max(row_max_h, h)
-            col += 1
-            if col >= cols_per_row:
-                col = 0
-                row_y += row_max_h + 0.5
-                row_max_h = 0.0
+
+        count2, _, _, _ = _place_grid_below_anchor(
+            led_members, kx, kw, row_y, cols_per_row,
+            bounds, ctx.fp_sizes, ctx.best_positions,
+        )
+        _relay_realigned += count2
 
     if _relay_realigned:
         _log.info("    3b-late: re-aligned %d relay support components", _relay_realigned)
