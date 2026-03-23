@@ -490,6 +490,105 @@ def _check_connectivity(
     return items
 
 
+def _detect_subcircuit_types(
+    requirements: ProjectRequirements,
+) -> tuple[set[str], tuple[str, ...], tuple[str, ...]]:
+    """Detect subcircuit types from requirements.
+
+    Returns:
+        (detected_types, relay_refs, usb_c_refs)
+    """
+    detected_types: set[str] = set()
+
+    for fb in requirements.features:
+        detected_types.update(fb.subcircuits)
+
+    relay_refs = _find_relay_refs(requirements)
+    if relay_refs:
+        detected_types.add("relay_driver")
+
+    if _find_regulator_refs(requirements):
+        detected_types.add("ldo_regulator")
+
+    if _has_adc_component(requirements):
+        detected_types.add("voltage_divider_adc")
+
+    usb_c_refs = tuple(
+        c.ref for c in requirements.components
+        if "USB_C" in c.footprint.upper() or "USB-C" in c.value.upper()
+    )
+    if usb_c_refs:
+        detected_types.add("usb_c_input")
+
+    return detected_types, relay_refs, usb_c_refs
+
+
+def _subcircuit_note_relay(relay_refs: tuple[str, ...]) -> ReviewItem:
+    """Generate relay driver design note."""
+    return ReviewItem(
+        category="subcircuit",
+        severity="recommended",
+        title="Relay driver trace width",
+        description=(
+            "Relay coil traces should be >=0.5mm for coil current; "
+            "flyback diode must be adjacent to relay coil pins; "
+            "consider board slots between relay contacts and logic (>=10mm isolation)"
+        ),
+        affected_refs=relay_refs,
+    )
+
+
+def _subcircuit_note_ldo(requirements: ProjectRequirements) -> ReviewItem:
+    """Generate LDO regulator design note."""
+    return ReviewItem(
+        category="subcircuit",
+        severity="recommended",
+        title="LDO regulator layout",
+        description=(
+            "Add thermal vias under thermal pad; "
+            "input/output caps must be within 5mm; "
+            "verify dropout voltage vs input range"
+        ),
+        affected_refs=_find_regulator_refs(requirements),
+    )
+
+
+def _subcircuit_note_adc(requirements: ProjectRequirements) -> ReviewItem:
+    """Generate ADC voltage divider design note."""
+    adc_refs = tuple(
+        c.ref for c in requirements.components
+        if any(
+            p.function is not None and p.function.value in _ADC_PIN_FUNCTIONS
+            for p in c.pins
+        ) or any(kw in c.value.upper() for kw in _ADC_VALUE_KEYWORDS)
+    )
+    return ReviewItem(
+        category="subcircuit",
+        severity="optional",
+        title="ADC voltage divider routing",
+        description=(
+            "Keep traces short from divider output to ADC input; "
+            "consider guard ring for high-impedance inputs"
+        ),
+        affected_refs=adc_refs,
+    )
+
+
+def _subcircuit_note_usbc(usb_c_refs: tuple[str, ...]) -> ReviewItem:
+    """Generate USB-C design note."""
+    return ReviewItem(
+        category="subcircuit",
+        severity="recommended",
+        title="USB-C layout notes",
+        description=(
+            "CC resistor tolerance must be 1%; "
+            "add ESD protection on VBUS/D+/D-; "
+            "maintain impedance control on D+/D- differential pair"
+        ),
+        affected_refs=usb_c_refs,
+    )
+
+
 def _subcircuit_design_notes(
     requirements: ProjectRequirements,
 ) -> list[ReviewItem]:
@@ -504,93 +603,17 @@ def _subcircuit_design_notes(
     Returns:
         List of :class:`ReviewItem` design notes for subcircuit-specific concerns.
     """
+    detected_types, relay_refs, usb_c_refs = _detect_subcircuit_types(requirements)
+
     items: list[ReviewItem] = []
-    detected_types: set[str] = set()
-
-    # Collect declared subcircuit types from feature blocks
-    for fb in requirements.features:
-        detected_types.update(fb.subcircuits)
-
-    # Infer subcircuit types from components
-    relay_refs = _find_relay_refs(requirements)
-    if relay_refs:
-        detected_types.add("relay_driver")
-
-    has_ldo = bool(_find_regulator_refs(requirements))
-    if has_ldo:
-        detected_types.add("ldo_regulator")
-
-    has_adc = _has_adc_component(requirements)
-    if has_adc:
-        detected_types.add("voltage_divider_adc")
-
-    # Check for USB-C connectors
-    usb_c_refs = tuple(
-        c.ref for c in requirements.components
-        if "USB_C" in c.footprint.upper() or "USB-C" in c.value.upper()
-    )
-    if usb_c_refs:
-        detected_types.add("usb_c_input")
-
-    # Generate notes per subcircuit type
     if "relay_driver" in detected_types:
-        items.append(ReviewItem(
-            category="subcircuit",
-            severity="recommended",
-            title="Relay driver trace width",
-            description=(
-                "Relay coil traces should be >=0.5mm for coil current; "
-                "flyback diode must be adjacent to relay coil pins; "
-                "consider board slots between relay contacts and logic (>=10mm isolation)"
-            ),
-            affected_refs=relay_refs,
-        ))
-
+        items.append(_subcircuit_note_relay(relay_refs))
     if "ldo_regulator" in detected_types:
-        reg_refs = _find_regulator_refs(requirements)
-        items.append(ReviewItem(
-            category="subcircuit",
-            severity="recommended",
-            title="LDO regulator layout",
-            description=(
-                "Add thermal vias under thermal pad; "
-                "input/output caps must be within 5mm; "
-                "verify dropout voltage vs input range"
-            ),
-            affected_refs=reg_refs,
-        ))
-
+        items.append(_subcircuit_note_ldo(requirements))
     if "voltage_divider_adc" in detected_types:
-        adc_refs = tuple(
-            c.ref for c in requirements.components
-            if any(
-                p.function is not None and p.function.value in _ADC_PIN_FUNCTIONS
-                for p in c.pins
-            ) or any(kw in c.value.upper() for kw in _ADC_VALUE_KEYWORDS)
-        )
-        items.append(ReviewItem(
-            category="subcircuit",
-            severity="optional",
-            title="ADC voltage divider routing",
-            description=(
-                "Keep traces short from divider output to ADC input; "
-                "consider guard ring for high-impedance inputs"
-            ),
-            affected_refs=adc_refs,
-        ))
-
+        items.append(_subcircuit_note_adc(requirements))
     if "usb_c_input" in detected_types:
-        items.append(ReviewItem(
-            category="subcircuit",
-            severity="recommended",
-            title="USB-C layout notes",
-            description=(
-                "CC resistor tolerance must be 1%; "
-                "add ESD protection on VBUS/D+/D-; "
-                "maintain impedance control on D+/D- differential pair"
-            ),
-            affected_refs=usb_c_refs,
-        ))
+        items.append(_subcircuit_note_usbc(usb_c_refs))
 
     return items
 

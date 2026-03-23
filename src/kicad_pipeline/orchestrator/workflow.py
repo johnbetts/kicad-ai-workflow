@@ -62,6 +62,42 @@ def _stage_index(stage_id: StageId) -> int:
     raise OrchestrationError(f"Unknown stage: {stage_id}")  # pragma: no cover
 
 
+def _render_placement_pngs(
+    pcb: object,
+    req: object,
+    pcb_path: Path,
+    vdir: Path,
+    variant_name: str,
+) -> None:
+    """Render placement PNGs to project output directory (non-blocking)."""
+    try:
+        from kicad_pipeline.optimization.functional_grouper import classify_voltage_domains
+        from kicad_pipeline.optimization.placement_optimizer import _build_group_map
+        from kicad_pipeline.visualization.placement_render import render_placement
+
+        output_dir = vdir / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        group_map = _build_group_map(req)
+        render_placement(
+            pcb, req, output_dir / "placement_groups.png",
+            title=f"{variant_name} (Groups)", group_map=group_map,
+        )
+        domain_map = classify_voltage_domains(req)
+        render_placement(
+            pcb, req, output_dir / "placement_domains.png",
+            title=f"{variant_name} (Domains)", domain_map=domain_map,
+        )
+        log.info("Placement renders written: %s", output_dir)
+
+        try:
+            from kicad_pipeline.visualization.kicad_export import export_pcb_image
+            export_pcb_image(pcb_path, output_dir / "placement_hifi.png", pcb=pcb)
+        except Exception:
+            log.debug("kicad-cli hi-fi export unavailable (non-blocking)")
+    except Exception:
+        log.exception("Placement render failed (non-blocking)")
+
+
 def _report_footprint_provenance(pcb: object, vdir: Path) -> None:
     """Log and write a provenance report for footprint sources.
 
@@ -440,55 +476,40 @@ class WorkflowEngine:
         )
         log.info("Project file updated with netclasses: %s", vdir)
 
-        # Render placement PNGs to project directory
-        try:
-            from kicad_pipeline.optimization.functional_grouper import classify_voltage_domains
-            from kicad_pipeline.optimization.placement_optimizer import _build_group_map
-            from kicad_pipeline.visualization.placement_render import render_placement
+        _render_placement_pngs(pcb, req, pcb_path, vdir, variant_name)
+        self._check_drift_and_consistency(
+            variant_name, vdir, pcb_path,
+            check_requirements_hash, check_consistency, consistency_report_to_text,
+        )
 
-            output_dir = vdir / "output"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            group_map = _build_group_map(req)
-            render_placement(
-                pcb, req, output_dir / "placement_groups.png",
-                title=f"{variant_name} (Groups)", group_map=group_map,
-            )
-            domain_map = classify_voltage_domains(req)
-            render_placement(
-                pcb, req, output_dir / "placement_domains.png",
-                title=f"{variant_name} (Domains)", domain_map=domain_map,
-            )
-            log.info("Placement renders written: %s", output_dir)
-
-            # Hi-fi export via kicad-cli (non-blocking)
-            try:
-                from kicad_pipeline.visualization.kicad_export import export_pcb_image
-                export_pcb_image(pcb_path, output_dir / "placement_hifi.png", pcb=pcb)
-            except Exception:
-                log.debug("kicad-cli hi-fi export unavailable (non-blocking)")
-        except Exception:
-            log.exception("Placement render failed (non-blocking)")
-
-        # Check for requirements drift since schematic generation
+    def _check_drift_and_consistency(
+        self,
+        variant_name: str,
+        vdir: Path,
+        pcb_path: Path,
+        check_requirements_hash: object,
+        check_consistency: object,
+        consistency_report_to_text: object,
+    ) -> None:
+        """Check for requirements drift and schematic-PCB consistency."""
         req_path = vdir / "requirements.json"
         variant = self._get_variant(variant_name)
         sch_stage = self._get_stage(variant, StageId.SCHEMATIC)
         if sch_stage.requirements_hash and req_path.exists():
-            drift = check_requirements_hash(sch_stage.requirements_hash, req_path)
+            drift = check_requirements_hash(sch_stage.requirements_hash, req_path)  # type: ignore[operator]
             if drift is not None:
                 log.warning("Requirements drift: %s", drift.message)
 
-        # Run schematic-PCB consistency check (warnings only at PCB stage)
         sch_path = vdir / f"{variant_name}.kicad_sch"
         if sch_path.exists() and pcb_path.exists():
-            report = check_consistency(sch_path, pcb_path)
+            report = check_consistency(sch_path, pcb_path)  # type: ignore[operator]
             if not report.passed:
                 log.warning(
                     "Schematic-PCB consistency: %d errors, %d warnings",
                     len(report.errors),
                     len(report.warnings),
                 )
-                log.warning(consistency_report_to_text(report))
+                log.warning(consistency_report_to_text(report))  # type: ignore[operator]
 
     def _generate_validation(
         self, variant_name: str, vdir: Path, warnings: list[str]
