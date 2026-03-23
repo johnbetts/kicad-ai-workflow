@@ -421,3 +421,128 @@ def test_pcb_component_frozen() -> None:
     comp = PCBComponent(ref="R1", value="10k", lib_id="R_0805")
     with pytest.raises(AttributeError):
         comp.ref = "R2"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: normalize_footprint
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_footprint_empty() -> None:
+    """Empty string stays empty."""
+    assert normalize_footprint("") == ""
+
+
+def test_normalize_footprint_no_colon() -> None:
+    """No colon means no prefix to strip."""
+    assert normalize_footprint("R_0805_2012Metric") == "R_0805_2012Metric"
+
+
+def test_normalize_footprint_multiple_colons() -> None:
+    """Only the first colon is used as prefix separator."""
+    assert normalize_footprint("Lib:Sub:Pkg") == "Sub:Pkg"
+
+
+def test_footprints_match_both_empty() -> None:
+    """Two empty strings match."""
+    assert footprints_match("", "")
+
+
+def test_footprints_match_one_empty() -> None:
+    """Empty string is a prefix of anything."""
+    assert footprints_match("", "R_0805_2012Metric")
+    assert footprints_match("R_0805_2012Metric", "")
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: ConsistencyReport
+# ---------------------------------------------------------------------------
+
+
+def test_consistency_report_empty_violations_passes() -> None:
+    """A report with zero violations should pass."""
+    report = ConsistencyReport(violations=(), schematic_refs=(), pcb_refs=())
+    assert report.passed is True
+    assert len(report.errors) == 0
+    assert len(report.warnings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: extraction with empty files
+# ---------------------------------------------------------------------------
+
+
+def test_extract_schematic_empty_file(tmp_path: Path) -> None:
+    """An empty-body schematic returns no components."""
+    sch = tmp_path / "empty.kicad_sch"
+    sch.write_text(_wrap_sch(), encoding="utf-8")
+    comps = extract_schematic_components(sch)
+    assert comps == ()
+
+
+def test_extract_pcb_empty_file(tmp_path: Path) -> None:
+    """An empty-body PCB returns no components."""
+    pcb = tmp_path / "empty.kicad_pcb"
+    pcb.write_text(_wrap_pcb(), encoding="utf-8")
+    comps = extract_pcb_components(pcb)
+    assert comps == ()
+
+
+def test_extract_schematic_recursive_no_subsheets(tmp_path: Path) -> None:
+    """Recursive extraction of a flat schematic returns same as single."""
+    sch = tmp_path / "flat.kicad_sch"
+    sch.write_text(MINIMAL_SCH, encoding="utf-8")
+    comps = extract_schematic_components_recursive(sch)
+    assert len(comps) == 2
+
+
+def test_extract_schematic_recursive_missing_subsheet(tmp_path: Path) -> None:
+    """Missing sub-sheet file is silently skipped."""
+    root = tmp_path / "root.kicad_sch"
+    root.write_text(ROOT_WITH_SUBSHEET, encoding="utf-8")
+    # Deliberately not creating leds.kicad_sch
+    comps = extract_schematic_components_recursive(root)
+    # Only root-level component R1
+    assert len(comps) == 1
+    assert comps[0].ref == "R1"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: requirements hash
+# ---------------------------------------------------------------------------
+
+
+def test_requirements_hash_different_order_same_hash(tmp_path: Path) -> None:
+    """Key ordering difference should NOT affect the hash."""
+    p1 = tmp_path / "req1.json"
+    p1.write_text('{"b": 2, "a": 1}', encoding="utf-8")
+    p2 = tmp_path / "req2.json"
+    p2.write_text('{"a": 1, "b": 2}', encoding="utf-8")
+    assert compute_requirements_hash(p1) == compute_requirements_hash(p2)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: mechanical values in PCB
+# ---------------------------------------------------------------------------
+
+
+def test_consistency_mechanical_value_not_flagged(tmp_path: Path) -> None:
+    """PCB-only components with 'MountingHole' value should not be errors."""
+    sch = tmp_path / "test.kicad_sch"
+    sch.write_text(
+        _wrap_sch(
+            _sch_symbol("Device:R", "R1", "10k", "Resistor_SMD:R_0805_2012Metric"),
+        ),
+        encoding="utf-8",
+    )
+    pcb = tmp_path / "test.kicad_pcb"
+    pcb.write_text(
+        _wrap_pcb(
+            _pcb_fp("Resistor_SMD:R_0805_2012Metric", "R1", "10k"),
+            _pcb_fp("MountingHole:MountingHole_3.2mm", "H1", "MountingHole"),
+        ),
+        encoding="utf-8",
+    )
+    report = check_consistency(sch, pcb)
+    # H1 with MountingHole value should be excluded from "missing in schematic" errors
+    assert report.passed is True

@@ -388,3 +388,164 @@ def test_net_consistency_error() -> None:
     report = run_drc(pcb)
     net_errors = [v for v in report.errors if v.rule == "net_consistency"]
     assert net_errors, "Expected net_consistency ERROR for unknown net number"
+
+
+# ---------------------------------------------------------------------------
+# DRCReport property tests
+# ---------------------------------------------------------------------------
+
+
+def test_drc_report_warnings_property() -> None:
+    """warnings property filters correctly."""
+    violations = (
+        DRCViolation(rule="a", message="err", severity=Severity.ERROR),
+        DRCViolation(rule="b", message="warn", severity=Severity.WARNING),
+        DRCViolation(rule="c", message="info", severity=Severity.INFO),
+    )
+    report = DRCReport(violations=violations)
+    assert len(report.warnings) == 1
+    assert report.warnings[0].rule == "b"
+
+
+def test_drc_report_passed_no_errors() -> None:
+    """passed is True when only warnings/info exist."""
+    violations = (
+        DRCViolation(rule="a", message="warn", severity=Severity.WARNING),
+        DRCViolation(rule="b", message="info", severity=Severity.INFO),
+    )
+    report = DRCReport(violations=violations)
+    assert report.passed is True
+
+
+def test_drc_report_empty_violations() -> None:
+    """Empty violations tuple means passed with no errors/warnings."""
+    report = DRCReport(violations=())
+    assert report.passed is True
+    assert report.errors == ()
+    assert report.warnings == ()
+
+
+# ---------------------------------------------------------------------------
+# is_intra_footprint_violation
+# ---------------------------------------------------------------------------
+
+
+def test_is_intra_footprint_non_clearance_rule() -> None:
+    """Non-clearance violations return False."""
+    from kicad_pipeline.validation.drc import is_intra_footprint_violation
+
+    v = DRCViolation(rule="min_trace_width", message="test", severity=Severity.ERROR, ref="R1")
+    pcb = _make_clean_pcb()
+    assert is_intra_footprint_violation(v, pcb) is False
+
+
+def test_is_intra_footprint_clearance_with_ref() -> None:
+    """min_clearance with a valid footprint ref returns True."""
+    from kicad_pipeline.validation.drc import is_intra_footprint_violation
+
+    v = DRCViolation(rule="min_clearance", message="test", severity=Severity.WARNING, ref="R1")
+    pcb = _make_clean_pcb()
+    assert is_intra_footprint_violation(v, pcb) is True
+
+
+def test_is_intra_footprint_clearance_no_ref() -> None:
+    """min_clearance with empty ref returns False."""
+    from kicad_pipeline.validation.drc import is_intra_footprint_violation
+
+    v = DRCViolation(rule="min_clearance", message="test", severity=Severity.WARNING, ref="")
+    pcb = _make_clean_pcb()
+    assert is_intra_footprint_violation(v, pcb) is False
+
+
+def test_is_intra_footprint_clearance_unknown_ref() -> None:
+    """min_clearance with a ref not in footprints returns False."""
+    from kicad_pipeline.validation.drc import is_intra_footprint_violation
+
+    v = DRCViolation(rule="min_clearance", message="test", severity=Severity.WARNING, ref="X99")
+    pcb = _make_clean_pcb()
+    assert is_intra_footprint_violation(v, pcb) is False
+
+
+# ---------------------------------------------------------------------------
+# Design rules override
+# ---------------------------------------------------------------------------
+
+
+def test_run_drc_with_custom_design_rules() -> None:
+    """Explicit design_rules parameter overrides pcb.design_rules."""
+    # Create a PCB with a track narrower than default but wider than custom rules
+    track = Track(
+        start=Point(0.0, 0.0),
+        end=Point(10.0, 0.0),
+        width=0.2,
+        layer="F.Cu",
+        net_number=1,
+    )
+    base = _make_clean_pcb()
+    pcb = PCBDesign(
+        outline=base.outline,
+        design_rules=base.design_rules,
+        nets=base.nets,
+        footprints=base.footprints,
+        tracks=(track,),
+        vias=base.vias,
+        zones=base.zones,
+        keepouts=base.keepouts,
+    )
+    # Default rules: trace width 0.25mm, so 0.2mm should generate WARNING
+    report_default = run_drc(pcb)
+    width_warns_default = [
+        v for v in report_default.warnings if v.rule == "min_trace_width"
+    ]
+    assert len(width_warns_default) >= 1
+
+    # Custom rules: trace width 0.15mm, so 0.2mm should pass
+    custom_rules = DesignRules(default_trace_width_mm=0.15)
+    report_custom = run_drc(pcb, design_rules=custom_rules)
+    width_warns_custom = [
+        v for v in report_custom.warnings if v.rule == "min_trace_width"
+    ]
+    assert width_warns_custom == []
+
+
+# ---------------------------------------------------------------------------
+# np_thru_hole pads should not be flagged as unconnected
+# ---------------------------------------------------------------------------
+
+
+def test_np_thru_hole_pad_not_flagged() -> None:
+    """A non-plated through-hole pad with net 0 should NOT be unconnected."""
+    base = _make_clean_pcb()
+    np_pad = Pad(
+        number="1",
+        pad_type="np_thru_hole",
+        shape="circle",
+        position=Point(0.0, 0.0),
+        size_x=3.2,
+        size_y=3.2,
+        layers=("F.Cu", "B.Cu"),
+        net_number=0,
+    )
+    fp = Footprint(
+        lib_id="MH:MH_3.2",
+        ref="H1",
+        value="MountingHole",
+        position=Point(5.0, 5.0),
+        pads=(np_pad,),
+    )
+    pcb = PCBDesign(
+        outline=base.outline,
+        design_rules=base.design_rules,
+        nets=base.nets,
+        footprints=(*base.footprints, fp),
+        tracks=base.tracks,
+        vias=base.vias,
+        zones=base.zones,
+        keepouts=base.keepouts,
+    )
+    report = run_drc(pcb)
+    unconnected = [
+        v for v in report.violations
+        if v.rule == "unconnected_pads" and v.ref == "H1"
+    ]
+    assert unconnected == []

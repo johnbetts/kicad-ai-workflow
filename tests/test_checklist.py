@@ -190,3 +190,144 @@ class TestFormatChecklist:
         formatted = format_checklist(report)
         assert "NOT READY" in formatted
         assert "[FAIL]" in formatted
+
+    def test_format_with_details(self) -> None:
+        results = (
+            CheckResult(
+                "DRC", "KiCad DRC", CheckStatus.FAIL, "2 errors",
+                details="clearance violation at (10, 20)",
+            ),
+        )
+        report = ChecklistReport(results=results)
+        formatted = format_checklist(report)
+        assert "clearance violation" in formatted
+
+    def test_format_multiple_categories(self) -> None:
+        """Multiple categories should each get a header."""
+        results = (
+            CheckResult("Mechanical", "Board size", CheckStatus.PASS, "ok"),
+            CheckResult("Electrical", "Nets", CheckStatus.PASS, "ok"),
+        )
+        report = ChecklistReport(results=results)
+        formatted = format_checklist(report)
+        assert "[Mechanical]" in formatted
+        assert "[Electrical]" in formatted
+
+    def test_format_skip_status(self) -> None:
+        results = (
+            CheckResult("Manufacturing", "Via sizes", CheckStatus.SKIP, "No vias found"),
+        )
+        report = ChecklistReport(results=results)
+        formatted = format_checklist(report)
+        assert "[SKIP]" in formatted
+
+    def test_format_warn_status(self) -> None:
+        results = (
+            CheckResult("Electrical", "Nets", CheckStatus.WARN, "Low net count"),
+        )
+        report = ChecklistReport(results=results)
+        formatted = format_checklist(report)
+        assert "[WARN]" in formatted
+
+
+class TestChecklistReportCounts:
+    def test_warn_count(self) -> None:
+        results = (
+            CheckResult("A", "x", CheckStatus.WARN, "w1"),
+            CheckResult("A", "y", CheckStatus.WARN, "w2"),
+            CheckResult("A", "z", CheckStatus.PASS, "ok"),
+        )
+        report = ChecklistReport(results=results)
+        assert report.warn_count == 2
+
+    def test_counts_empty(self) -> None:
+        report = ChecklistReport(results=())
+        assert report.pass_count == 0
+        assert report.fail_count == 0
+        assert report.warn_count == 0
+        assert report.passed is True
+
+    def test_mixed_counts(self) -> None:
+        results = (
+            CheckResult("A", "a", CheckStatus.PASS, "ok"),
+            CheckResult("A", "b", CheckStatus.FAIL, "bad"),
+            CheckResult("A", "c", CheckStatus.WARN, "hmm"),
+            CheckResult("A", "d", CheckStatus.SKIP, "skipped"),
+        )
+        report = ChecklistReport(results=results)
+        assert report.pass_count == 1
+        assert report.fail_count == 1
+        assert report.warn_count == 1
+
+
+class TestRunChecklistEdgeCases:
+    def test_no_outline_fails(self) -> None:
+        """A board with empty outline polygon should fail."""
+        from types import SimpleNamespace
+
+        outline = SimpleNamespace(polygon=())
+        pcb = SimpleNamespace(
+            outline=outline, tracks=(), vias=(), nets=(), footprints=(),
+        )
+        report = run_checklist(pcb)  # type: ignore[arg-type]
+        outline_results = [r for r in report.results if "outline" in r.name.lower()]
+        assert any(r.status == CheckStatus.FAIL for r in outline_results)
+
+    def test_no_footprints_fails(self) -> None:
+        """A board with no footprints should fail."""
+        pcb = _make_minimal_pcb()
+        pcb.footprints = ()  # type: ignore[attr-defined]
+        report = run_checklist(pcb)  # type: ignore[arg-type]
+        comp_results = [r for r in report.results if "components" in r.name.lower()]
+        assert any(r.status == CheckStatus.FAIL for r in comp_results)
+
+    def test_no_vias_skips(self) -> None:
+        """A board with no vias should skip via checks."""
+        pcb = _make_minimal_pcb()
+        pcb.vias = ()  # type: ignore[attr-defined]
+        report = run_checklist(pcb)  # type: ignore[arg-type]
+        via_results = [r for r in report.results if "via" in r.name.lower()]
+        assert any(r.status == CheckStatus.SKIP for r in via_results)
+
+    def test_no_nets_warns(self) -> None:
+        """A board with no nets should warn."""
+        pcb = _make_minimal_pcb()
+        pcb.nets = ()  # type: ignore[attr-defined]
+        report = run_checklist(pcb)  # type: ignore[arg-type]
+        net_results = [r for r in report.results if "net" in r.name.lower()]
+        assert any(r.status == CheckStatus.WARN for r in net_results)
+
+    def test_small_board_fails(self) -> None:
+        """A 5x5mm board should fail minimum size check."""
+        from types import SimpleNamespace
+
+        outline_points = (
+            SimpleNamespace(x=0.0, y=0.0),
+            SimpleNamespace(x=5.0, y=0.0),
+            SimpleNamespace(x=5.0, y=5.0),
+            SimpleNamespace(x=0.0, y=5.0),
+            SimpleNamespace(x=0.0, y=0.0),
+        )
+        pcb = _make_minimal_pcb()
+        pcb.outline = SimpleNamespace(polygon=outline_points)  # type: ignore[attr-defined]
+        report = run_checklist(pcb)  # type: ignore[arg-type]
+        dim_results = [r for r in report.results if "minimum" in r.name.lower()]
+        assert any(r.status == CheckStatus.FAIL for r in dim_results)
+
+    def test_open_outline_fails(self) -> None:
+        """A board with an unclosed outline should fail closure check."""
+        from types import SimpleNamespace
+
+        outline_points = (
+            SimpleNamespace(x=0.0, y=0.0),
+            SimpleNamespace(x=50.0, y=0.0),
+            SimpleNamespace(x=50.0, y=30.0),
+            SimpleNamespace(x=0.0, y=30.0),
+            # deliberately not closed
+        )
+        pcb = _make_minimal_pcb()
+        pcb.outline = SimpleNamespace(polygon=outline_points)  # type: ignore[attr-defined]
+        report = run_checklist(pcb)  # type: ignore[arg-type]
+        closure = [r for r in report.results if "closure" in r.name.lower()]
+        assert len(closure) == 1
+        assert closure[0].status == CheckStatus.FAIL

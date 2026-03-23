@@ -535,3 +535,142 @@ def test_no_subcircuit_notes_for_minimal() -> None:
     review = generate_design_review(req)
     subcircuit_items = [i for i in review.items if i.category == "subcircuit"]
     assert len(subcircuit_items) == 0
+
+
+# ---------------------------------------------------------------------------
+# Board context items
+# ---------------------------------------------------------------------------
+
+
+def test_board_context_target_system() -> None:
+    """BoardContext.target_system should produce a system integration item."""
+    from kicad_pipeline.models.requirements import BoardContext
+
+    req = _minimal_requirements()
+    req = ProjectRequirements(
+        project=req.project,
+        features=req.features,
+        components=req.components,
+        nets=req.nets,
+        board_context=BoardContext(target_system="Vehicle CAN bus"),
+    )
+    review = generate_design_review(req)
+    context_items = [i for i in review.items if i.category == "context"]
+    assert any("Vehicle CAN bus" in i.description for i in context_items)
+
+
+def test_board_context_shared_grounds() -> None:
+    """BoardContext.shared_grounds should produce a ground topology item."""
+    from kicad_pipeline.models.requirements import BoardContext
+
+    req = _minimal_requirements()
+    req = ProjectRequirements(
+        project=req.project,
+        features=req.features,
+        components=req.components,
+        nets=req.nets,
+        board_context=BoardContext(shared_grounds=True),
+    )
+    review = generate_design_review(req)
+    context_items = [i for i in review.items if i.category == "context"]
+    assert any("star-ground" in i.description.lower() for i in context_items)
+
+
+def test_board_context_notes() -> None:
+    """BoardContext.notes should produce design note items."""
+    from kicad_pipeline.models.requirements import BoardContext
+
+    req = _minimal_requirements()
+    req = ProjectRequirements(
+        project=req.project,
+        features=req.features,
+        components=req.components,
+        nets=req.nets,
+        board_context=BoardContext(notes=("Consider EMI shielding",)),
+    )
+    review = generate_design_review(req)
+    note_items = [i for i in review.items if i.title == "Design note"]
+    assert len(note_items) == 1
+    assert "EMI shielding" in note_items[0].description
+
+
+def test_board_context_none_no_items() -> None:
+    """No board context should produce no context items."""
+    req = _minimal_requirements()
+    review = generate_design_review(req)
+    context_items = [i for i in review.items if i.category == "context"]
+    assert len(context_items) == 0
+
+
+# ---------------------------------------------------------------------------
+# USB-C detection
+# ---------------------------------------------------------------------------
+
+
+def test_usb_c_detection() -> None:
+    """A component with USB_C in footprint triggers USB-C design notes."""
+    components = (
+        Component(
+            ref="J1", value="USB-C Receptacle", footprint="USB_C_Receptacle",
+            pins=(
+                Pin("A1", "GND", PinType.POWER_IN, net="GND"),
+                Pin("A4", "VBUS", PinType.POWER_IN, net="VBUS"),
+            ),
+        ),
+    )
+    nets = (
+        Net(name="GND", connections=(NetConnection("J1", "A1"),)),
+        Net(name="VBUS", connections=(NetConnection("J1", "A4"),)),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="USBTest"),
+        features=(),
+        components=components,
+        nets=nets,
+    )
+    review = generate_design_review(req)
+    usbc_items = [
+        i for i in review.items
+        if i.category == "subcircuit" and "usb-c" in i.title.lower()
+    ]
+    assert len(usbc_items) >= 1
+    assert "J1" in usbc_items[0].affected_refs
+
+
+# ---------------------------------------------------------------------------
+# Edge: board summary with PCB design
+# ---------------------------------------------------------------------------
+
+
+def test_board_summary_from_pcb_design() -> None:
+    """BoardSummary should use PCB outline when no mechanical constraints."""
+    from kicad_pipeline.models.pcb import (
+        BoardOutline,
+        DesignRules,
+        PCBDesign,
+        Point,
+    )
+
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(
+            Point(0.0, 0.0), Point(60.0, 0.0),
+            Point(60.0, 40.0), Point(0.0, 40.0),
+        )),
+        design_rules=DesignRules(layer_count=4),
+        nets=(),
+        footprints=(),
+        tracks=(),
+        vias=(),
+        zones=(),
+        keepouts=(),
+    )
+    req = ProjectRequirements(
+        project=ProjectInfo(name="PCBTest"),
+        features=(),
+        components=(),
+        nets=(),
+        mechanical=None,
+    )
+    review = generate_design_review(req, pcb_design=pcb)
+    assert review.board_summary.board_size_mm == (60.0, 40.0)
+    assert review.board_summary.layer_count == 4

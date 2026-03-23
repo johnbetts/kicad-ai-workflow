@@ -243,3 +243,148 @@ def test_format_report_markdown_contains_sections() -> None:
     md = format_report_markdown(report)
     assert "## DRC" in md
     assert "## Electrical" in md
+
+
+# ---------------------------------------------------------------------------
+# Additional: report_to_dict with violations
+# ---------------------------------------------------------------------------
+
+
+def test_report_to_dict_with_violations() -> None:
+    """Violations should appear in the serialized dict."""
+    report = build_validation_report(
+        _drc_with_error(),
+        _clean_electrical(),
+        _manufacturing_with_warning(),
+        _clean_thermal(),
+        _si_with_warning(),
+    )
+    d = report_to_dict(report)
+    assert d["overall_status"] == "FAIL"
+    assert d["total_errors"] == 1
+    assert d["total_warnings"] == 2
+
+    drc_sub = d["drc"]
+    assert isinstance(drc_sub, dict)
+    assert drc_sub["error_count"] == 1
+    assert len(drc_sub["violations"]) == 1
+    assert drc_sub["violations"][0]["severity"] == "error"
+
+    mfg_sub = d["manufacturing"]
+    assert isinstance(mfg_sub, dict)
+    assert mfg_sub["warning_count"] == 1
+
+
+def test_report_to_dict_all_pass_zeros() -> None:
+    """All-pass report has zero counts everywhere."""
+    report = build_validation_report(
+        _clean_drc(),
+        _clean_electrical(),
+        _clean_manufacturing(),
+        _clean_thermal(),
+        _clean_si(),
+    )
+    d = report_to_dict(report)
+    assert d["total_errors"] == 0
+    assert d["total_warnings"] == 0
+    for key in ("drc", "electrical", "manufacturing", "thermal", "signal_integrity"):
+        sub = d[key]
+        assert isinstance(sub, dict)
+        assert sub["error_count"] == 0
+        assert sub["warning_count"] == 0
+        assert sub["violations"] == []
+
+
+# ---------------------------------------------------------------------------
+# Additional: format_report_markdown with violations
+# ---------------------------------------------------------------------------
+
+
+def test_format_report_markdown_with_violations() -> None:
+    """Violations in a sub-report should appear in the markdown."""
+    report = build_validation_report(
+        _drc_with_error(),
+        _clean_electrical(),
+        _clean_manufacturing(),
+        _clean_thermal(),
+        _clean_si(),
+    )
+    md = format_report_markdown(report)
+    assert "FAIL" in md
+    assert "clearance" in md.lower()
+    assert "[ERROR]" in md
+
+
+def test_format_report_markdown_pass_section() -> None:
+    """All-pass sub-report should show '- PASS'."""
+    report = build_validation_report(
+        _clean_drc(),
+        _clean_electrical(),
+        _clean_manufacturing(),
+        _clean_thermal(),
+        _clean_si(),
+    )
+    md = format_report_markdown(report)
+    assert "- PASS" in md
+
+
+# ---------------------------------------------------------------------------
+# Additional: multiple error sources
+# ---------------------------------------------------------------------------
+
+
+def test_build_report_multiple_error_sources() -> None:
+    """Errors from multiple sub-reports should sum correctly."""
+    drc_err = DRCReport(
+        violations=(
+            DRCViolation(rule="a", message="a", severity=Severity.ERROR),
+            DRCViolation(rule="b", message="b", severity=Severity.ERROR),
+        ),
+    )
+    elec_err = ElectricalReport(
+        violations=(
+            DRCViolation(rule="c", message="c", severity=Severity.ERROR),
+        ),
+    )
+    report = build_validation_report(
+        drc_err, elec_err, _clean_manufacturing(), _clean_thermal(), _clean_si(),
+    )
+    assert report.total_errors == 3
+    assert report.overall_status == OverallStatus.FAIL
+
+
+def test_build_report_thermal_error_counted() -> None:
+    """Thermal ERROR violations should increment total_errors."""
+    thermal = ThermalReport(
+        component_thermals=(),
+        violations=(
+            DRCViolation(rule="thermal", message="hot", severity=Severity.ERROR),
+        ),
+    )
+    report = build_validation_report(
+        _clean_drc(), _clean_electrical(), _clean_manufacturing(),
+        thermal, _clean_si(),
+    )
+    assert report.total_errors == 1
+    assert report.overall_status == OverallStatus.FAIL
+
+
+def test_validation_report_passed_property() -> None:
+    """passed is True for PASS and PASS_WITH_WARNINGS, False for FAIL."""
+    pass_report = build_validation_report(
+        _clean_drc(), _clean_electrical(), _clean_manufacturing(),
+        _clean_thermal(), _clean_si(),
+    )
+    assert pass_report.passed is True
+
+    warn_report = build_validation_report(
+        _clean_drc(), _clean_electrical(), _manufacturing_with_warning(),
+        _clean_thermal(), _clean_si(),
+    )
+    assert warn_report.passed is True
+
+    fail_report = build_validation_report(
+        _drc_with_error(), _clean_electrical(), _clean_manufacturing(),
+        _clean_thermal(), _clean_si(),
+    )
+    assert fail_report.passed is False

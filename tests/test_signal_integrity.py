@@ -189,3 +189,111 @@ def test_long_spi_trace_warning() -> None:
     assert len(spi_warnings) >= 1
     assert spi_warnings[0].severity == Severity.WARNING
     assert "150" in spi_warnings[0].message or "SPI" in spi_warnings[0].message
+
+
+# ---------------------------------------------------------------------------
+# SIReport property tests
+# ---------------------------------------------------------------------------
+
+
+def test_si_report_warnings_property() -> None:
+    """warnings property should filter to WARNING only."""
+    from kicad_pipeline.validation.signal_integrity import SIReport
+
+    violations = (
+        SIViolation(rule="a", message="err", severity=Severity.ERROR),
+        SIViolation(rule="b", message="warn", severity=Severity.WARNING),
+        SIViolation(rule="c", message="warn2", severity=Severity.WARNING),
+    )
+    report = SIReport(violations=violations)
+    assert len(report.warnings) == 2
+    assert len(report.errors) == 1
+
+
+def test_si_report_passed_with_error() -> None:
+    """passed should be False when ERROR violations exist."""
+    from kicad_pipeline.validation.signal_integrity import SIReport
+
+    violations = (
+        SIViolation(rule="a", message="err", severity=Severity.ERROR),
+    )
+    report = SIReport(violations=violations)
+    assert report.passed is False
+
+
+def test_si_report_passed_with_warnings_only() -> None:
+    """passed should be True when only WARNING violations exist."""
+    from kicad_pipeline.validation.signal_integrity import SIReport
+
+    violations = (
+        SIViolation(rule="a", message="warn", severity=Severity.WARNING),
+    )
+    report = SIReport(violations=violations)
+    assert report.passed is True
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: no WiFi = no antenna warning
+# ---------------------------------------------------------------------------
+
+
+def test_no_wifi_no_keepout_warning() -> None:
+    """Non-WiFi board should not trigger antenna keepout warning."""
+    fp = _make_footprint("U1", "STM32F4")
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_si_checks(pcb)
+    keepout_warnings = [v for v in report.violations if v.rule == "antenna_keepout_check"]
+    assert keepout_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: SPI short trace OK
+# ---------------------------------------------------------------------------
+
+
+def test_short_spi_trace_no_warning() -> None:
+    """A short SPI trace (50mm) should not trigger a warning."""
+    nets = (NetEntry(number=1, name="SPI_MOSI"),)
+    tracks = (
+        _make_track(start=Point(0.0, 0.0), end=Point(50.0, 0.0), net_number=1),
+    )
+    pcb = _make_pcb(nets=nets, tracks=tracks)
+    report = run_si_checks(pcb)
+    spi_warnings = [v for v in report.violations if v.rule == "trace_length_check"]
+    assert spi_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: USB diff pair missing nets
+# ---------------------------------------------------------------------------
+
+
+def test_usb_diff_pair_no_nets() -> None:
+    """No D+/D- nets = no USB diff pair check triggered."""
+    nets = (NetEntry(number=1, name="GND"),)
+    pcb = _make_pcb(nets=nets)
+    report = run_si_checks(pcb)
+    usb_warnings = [v for v in report.violations if v.rule == "usb_diff_pair_check"]
+    assert usb_warnings == []
+
+
+def test_usb_diff_pair_one_net_only() -> None:
+    """Only D+ net (no D-) = no USB diff pair check triggered."""
+    nets = (NetEntry(number=1, name="D+"),)
+    pcb = _make_pcb(nets=nets)
+    report = run_si_checks(pcb)
+    usb_warnings = [v for v in report.violations if v.rule == "usb_diff_pair_check"]
+    assert usb_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: empty board
+# ---------------------------------------------------------------------------
+
+
+def test_si_empty_board_passes() -> None:
+    """An empty board (no nets, tracks, footprints) should pass all SI checks."""
+    pcb = _make_pcb()
+    report = run_si_checks(pcb)
+    assert report.passed is True
+    assert report.violations == ()

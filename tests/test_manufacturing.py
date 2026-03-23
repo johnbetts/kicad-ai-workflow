@@ -248,3 +248,143 @@ def test_smt_both_sides_warning() -> None:
     smt_warnings = [v for v in report.warnings if v.rule == "smt_side_check"]
     assert len(smt_warnings) == 1
     assert "both sides" in smt_warnings[0].message.lower()
+
+
+# ---------------------------------------------------------------------------
+# ManufacturingReport property tests
+# ---------------------------------------------------------------------------
+
+
+def test_manufacturing_report_errors_property() -> None:
+    """errors property filters to ERROR-severity only."""
+    from kicad_pipeline.validation.manufacturing import ManufacturingReport
+
+    violations = (
+        ManufacturingViolation(rule="a", message="err", severity=Severity.ERROR),
+        ManufacturingViolation(rule="b", message="warn", severity=Severity.WARNING),
+    )
+    report = ManufacturingReport(violations=violations)
+    assert len(report.errors) == 1
+    assert len(report.warnings) == 1
+    assert report.passed is False
+
+
+def test_manufacturing_report_passed_warnings_only() -> None:
+    """passed should be True when only warnings exist."""
+    from kicad_pipeline.validation.manufacturing import ManufacturingReport
+
+    violations = (
+        ManufacturingViolation(rule="a", message="warn", severity=Severity.WARNING),
+    )
+    report = ManufacturingReport(violations=violations)
+    assert report.passed is True
+
+
+def test_manufacturing_report_empty_passed() -> None:
+    """Empty violations tuple means passed."""
+    from kicad_pipeline.validation.manufacturing import ManufacturingReport
+
+    report = ManufacturingReport(violations=())
+    assert report.passed is True
+    assert report.errors == ()
+    assert report.warnings == ()
+
+
+# ---------------------------------------------------------------------------
+# Acid trap detection
+# ---------------------------------------------------------------------------
+
+
+def test_acid_trap_zero_length_track() -> None:
+    """A zero-length track (start == end) should trigger an acid trap WARNING."""
+    track = Track(
+        start=Point(10.0, 20.0),
+        end=Point(10.0, 20.0),
+        width=0.25,
+        layer="F.Cu",
+        net_number=1,
+    )
+    pcb = _make_pcb(tracks=(track,))
+    report = run_manufacturing_checks(pcb)
+    acid_warnings = [v for v in report.warnings if v.rule == "acid_trap_check"]
+    assert len(acid_warnings) == 1
+    assert "10.00" in acid_warnings[0].message
+
+
+def test_no_acid_trap_normal_track() -> None:
+    """A normal-length track should not trigger acid trap."""
+    track = Track(
+        start=Point(0.0, 0.0),
+        end=Point(10.0, 10.0),
+        width=0.25,
+        layer="F.Cu",
+        net_number=1,
+    )
+    pcb = _make_pcb(tracks=(track,))
+    report = run_manufacturing_checks(pcb)
+    acid_warnings = [v for v in report.warnings if v.rule == "acid_trap_check"]
+    assert acid_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Board dimension edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_board_dimensions_empty_outline() -> None:
+    """An empty outline polygon should trigger a dimension ERROR."""
+    pcb = _make_pcb(outline=BoardOutline(polygon=()))
+    report = run_manufacturing_checks(pcb)
+    dim_errors = [v for v in report.errors if v.rule == "board_dimensions"]
+    assert len(dim_errors) == 1
+    assert "zero" in dim_errors[0].message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Paste aperture edge case
+# ---------------------------------------------------------------------------
+
+
+def test_paste_aperture_ok_large_pad() -> None:
+    """A sufficiently large paste pad should not trigger a warning."""
+    fp = _make_smd_footprint(pad_size_x=1.0, pad_size_y=1.0, has_paste=True)
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_manufacturing_checks(pcb)
+    paste_warnings = [v for v in report.warnings if v.rule == "paste_aperture_check"]
+    assert paste_warnings == []
+
+
+def test_paste_aperture_no_paste_layer() -> None:
+    """An SMD pad without paste layer should not trigger paste warning."""
+    fp = _make_smd_footprint(pad_size_x=0.1, pad_size_y=0.1, has_paste=False)
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_manufacturing_checks(pcb)
+    paste_warnings = [v for v in report.warnings if v.rule == "paste_aperture_check"]
+    assert paste_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# SMT single-side OK
+# ---------------------------------------------------------------------------
+
+
+def test_smt_single_side_no_warning() -> None:
+    """SMD footprints on only one side should not trigger a warning."""
+    fp = _make_smd_footprint(ref="U1", layer="F.Cu")
+    pcb = _make_pcb(footprints=(fp,))
+    report = run_manufacturing_checks(pcb)
+    smt_warnings = [v for v in report.warnings if v.rule == "smt_side_check"]
+    assert smt_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# BOM with no entries
+# ---------------------------------------------------------------------------
+
+
+def test_no_bom_entries_no_lcsc_warnings() -> None:
+    """None BOM entries should not produce any LCSC warnings."""
+    pcb = _make_pcb()
+    report = run_manufacturing_checks(pcb, bom_entries=None)
+    lcsc_warnings = [v for v in report.violations if v.rule == "lcsc_check"]
+    assert lcsc_warnings == []
