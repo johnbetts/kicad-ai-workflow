@@ -557,6 +557,74 @@ def _power_symbol_offset(
     return -stub, 0.0, (90.0 if not is_gnd else 270.0)
 
 
+def _make_consolidated_power_bus(
+    pin_list: list[tuple[str, Point]],
+    side: str,
+    dx: float, dy: float,
+    rotation: float,
+    lib_id: str,
+    net_name: str,
+    pwr_idx: int,
+    symbols: list[PowerSymbol],
+    wires: list[Wire],
+    junctions: list[Junction],
+) -> None:
+    """Create a consolidated power symbol with bus wire for multiple pins."""
+    is_vertical_stub = side in ("top", "bottom")
+    if is_vertical_stub:
+        pin_list.sort(key=lambda p: p[1].x)
+    else:
+        pin_list.sort(key=lambda p: p[1].y)
+
+    first_pos = pin_list[0][1]
+    bus_fixed = (first_pos.y + dy) if is_vertical_stub else (first_pos.x + dx)
+
+    if is_vertical_stub:
+        coords = [p.x for _, p in pin_list]
+        mid = (min(coords) + max(coords)) / 2.0
+        sym_x, sym_y = mid, bus_fixed
+    else:
+        coords = [p.y for _, p in pin_list]
+        mid = (min(coords) + max(coords)) / 2.0
+        sym_x, sym_y = bus_fixed, mid
+
+    symbols.append(PowerSymbol(
+        lib_id=lib_id,
+        position=Point(x=sym_x, y=sym_y),
+        ref=f"#PWR0{pwr_idx:02d}",
+        value=net_name,
+        rotation=rotation,
+        uuid=_new_uuid(),
+    ))
+
+    if is_vertical_stub:
+        bus_start = Point(x=pin_list[0][1].x, y=bus_fixed)
+        bus_end = Point(x=pin_list[-1][1].x, y=bus_fixed)
+    else:
+        bus_start = Point(x=bus_fixed, y=pin_list[0][1].y)
+        bus_end = Point(x=bus_fixed, y=pin_list[-1][1].y)
+
+    wires.append(Wire(
+        start=bus_start, end=bus_end,
+        stroke=Stroke(), uuid=_new_uuid(),
+    ))
+
+    for idx, (_pin_num, pin_pos) in enumerate(pin_list):
+        if is_vertical_stub:
+            stub_end = Point(x=pin_pos.x, y=bus_fixed)
+        else:
+            stub_end = Point(x=bus_fixed, y=pin_pos.y)
+        wires.append(Wire(
+            start=pin_pos, end=stub_end,
+            stroke=Stroke(), uuid=_new_uuid(),
+        ))
+        if 0 < idx < len(pin_list) - 1:
+            junctions.append(Junction(
+                position=stub_end,
+                uuid=_new_uuid(),
+            ))
+
+
 def _make_power_symbols_at_pins(
     power_net_names: list[str],
     pin_positions: dict[tuple[str, str], Point],
@@ -610,7 +678,6 @@ def _make_power_symbols_at_pins(
         dx, dy, rotation = _power_symbol_offset(side, stub, is_gnd)
 
         if len(pin_list) == 1:
-            # Single pin — original behaviour: one stub wire + one symbol
             _pin_num, pin_pos = pin_list[0]
             sx, sy = pin_pos.x + dx, pin_pos.y + dy
             wires.append(Wire(
@@ -628,70 +695,12 @@ def _make_power_symbols_at_pins(
             ))
             continue
 
-        # Multiple pins — consolidate: one symbol at midpoint, bus wire
-        # Sort pins by the axis perpendicular to the stub direction.
-        is_vertical_stub = side in ("top", "bottom")
-        if is_vertical_stub:
-            # Pins arranged horizontally; bus is horizontal
-            pin_list.sort(key=lambda p: p[1].x)
-        else:
-            # Pins arranged vertically; bus is vertical
-            pin_list.sort(key=lambda p: p[1].y)
-
-        # Compute bus line coordinate (offset from pins by stub distance)
-        first_pos = pin_list[0][1]
-        bus_fixed = (first_pos.y + dy) if is_vertical_stub else (first_pos.x + dx)
-
-        # Compute midpoint along the bus for the power symbol
-        if is_vertical_stub:
-            coords = [p.x for _, p in pin_list]
-            mid = (min(coords) + max(coords)) / 2.0
-            sym_x, sym_y = mid, bus_fixed
-        else:
-            coords = [p.y for _, p in pin_list]
-            mid = (min(coords) + max(coords)) / 2.0
-            sym_x, sym_y = bus_fixed, mid
-
+        # Multiple pins — consolidate via bus wire
         pwr_idx += 1
-        symbols.append(PowerSymbol(
-            lib_id=lib_id,
-            position=Point(x=sym_x, y=sym_y),
-            ref=f"#PWR0{pwr_idx:02d}",
-            value=net_name,
-            rotation=rotation,
-            uuid=_new_uuid(),
-        ))
-
-        # Draw bus wire spanning all pin stub endpoints
-        if is_vertical_stub:
-            bus_start = Point(x=pin_list[0][1].x, y=bus_fixed)
-            bus_end = Point(x=pin_list[-1][1].x, y=bus_fixed)
-        else:
-            bus_start = Point(x=bus_fixed, y=pin_list[0][1].y)
-            bus_end = Point(x=bus_fixed, y=pin_list[-1][1].y)
-
-        wires.append(Wire(
-            start=bus_start, end=bus_end,
-            stroke=Stroke(), uuid=_new_uuid(),
-        ))
-
-        # Draw horizontal/vertical stub wires from each pin to the bus,
-        # and add junctions at T-connections (all except first and last)
-        for idx, (_pin_num, pin_pos) in enumerate(pin_list):
-            if is_vertical_stub:
-                stub_end = Point(x=pin_pos.x, y=bus_fixed)
-            else:
-                stub_end = Point(x=bus_fixed, y=pin_pos.y)
-            wires.append(Wire(
-                start=pin_pos, end=stub_end,
-                stroke=Stroke(), uuid=_new_uuid(),
-            ))
-            # Add junction at T-connections (interior points on bus)
-            if 0 < idx < len(pin_list) - 1:
-                junctions.append(Junction(
-                    position=stub_end,
-                    uuid=_new_uuid(),
-                ))
+        _make_consolidated_power_bus(
+            pin_list, side, dx, dy, rotation, lib_id, net_name,
+            pwr_idx, symbols, wires, junctions,
+        )
 
     return symbols, wires, [], junctions
 

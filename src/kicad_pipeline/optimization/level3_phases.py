@@ -474,6 +474,71 @@ def _pull_mcu_peripherals(
     return positions
 
 
+def _nearest_edge_and_rotation(
+    cx: float, cy: float,
+    bounds: tuple[float, float, float, float],
+    is_wide: bool,
+) -> tuple[str, float]:
+    """Return (edge_name, rotation) for the nearest board edge."""
+    min_x, min_y, max_x, max_y = bounds
+    distances = {
+        "top": cy - min_y,
+        "bottom": max_y - cy,
+        "left": cx - min_x,
+        "right": max_x - cx,
+    }
+    target_edge = min(distances, key=lambda k: distances[k])
+    edge_rotations: dict[str, tuple[float, float]] = {
+        # (wide_rot, narrow_rot)
+        "top": (90.0, 0.0),
+        "bottom": (270.0, 0.0),
+        "left": (0.0, 270.0),
+        "right": (180.0, 90.0),
+    }
+    wide_rot, narrow_rot = edge_rotations[target_edge]
+    return target_edge, wide_rot if is_wide else narrow_rot
+
+
+def _shift_origin_to_edge(
+    target_edge: str,
+    origin_x: float, origin_y: float,
+    pad_extent: tuple[float, float, float, float],
+    bounds: tuple[float, float, float, float],
+    edge_margin: float,
+) -> tuple[float, float]:
+    """Shift origin so pads are flush to the target edge with margin."""
+    min_x, min_y, max_x, max_y = bounds
+    px0, py0, px1, py1 = pad_extent
+    if target_edge == "top":
+        origin_y += (min_y + edge_margin) - py0
+    elif target_edge == "bottom":
+        origin_y += (max_y - edge_margin) - py1
+    elif target_edge == "left":
+        origin_x += (min_x + edge_margin) - px0
+    else:  # right
+        origin_x += (max_x - edge_margin) - px1
+    return origin_x, origin_y
+
+
+def _clamp_origin_to_board(
+    origin_x: float, origin_y: float,
+    pad_extent: tuple[float, float, float, float],
+    bounds: tuple[float, float, float, float],
+) -> tuple[float, float]:
+    """Clamp origin so all pads stay within board bounds."""
+    min_x, min_y, max_x, max_y = bounds
+    px0, py0, px1, py1 = pad_extent
+    if px0 < min_x + 1.0:
+        origin_x += (min_x + 1.0) - px0
+    if px1 > max_x - 1.0:
+        origin_x -= px1 - (max_x - 1.0)
+    if py0 < min_y + 1.0:
+        origin_y += (min_y + 1.0) - py0
+    if py1 > max_y - 1.0:
+        origin_y -= py1 - (max_y - 1.0)
+    return origin_x, origin_y
+
+
 def _orient_connectors(
     positions: dict[str, tuple[float, float, float]],
     fp_sizes: dict[str, tuple[float, float]],
@@ -499,78 +564,31 @@ def _orient_connectors(
 
     for fp in pcb.footprints:
         ref = fp.ref
-        if ref in fixed_refs or not ref.startswith("J"):
-            continue
-        if ref not in positions:
+        if ref in fixed_refs or not ref.startswith("J") or ref not in positions:
             continue
         cx, cy, rot = positions[ref]
         w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
-        # Find nearest edge (using centroid position)
-        dist_left = cx - min_x
-        dist_right = max_x - cx
-        dist_top = cy - min_y
-        dist_bottom = max_y - cy
-        min_edge_dist = min(dist_left, dist_right, dist_top, dist_bottom)
-
+        # Find nearest edge distance
+        min_edge_dist = min(cx - min_x, max_x - cx, cy - min_y, max_y - cy)
         if min_edge_dist > 20.0:
             continue  # Too far from any edge -- not a board-edge connector
 
-        # Determine target edge and rotation
-        is_wide = w > h * 1.5  # Multi-pin in a row (native, unrotated)
+        is_wide = w > h * 1.5
+        target_edge, new_rot = _nearest_edge_and_rotation(cx, cy, bounds, is_wide)
 
-        if dist_top == min_edge_dist:
-            target_edge = "top"
-            new_rot = 90.0 if is_wide else 0.0
-        elif dist_bottom == min_edge_dist:
-            target_edge = "bottom"
-            new_rot = 270.0 if is_wide else 0.0
-        elif dist_left == min_edge_dist:
-            target_edge = "left"
-            new_rot = 0.0 if is_wide else 270.0
-        else:
-            target_edge = "right"
-            new_rot = 180.0 if is_wide else 90.0
-
-        # Use centroid_to_origin to find where origin would be at current
-        # centroid, then compute pad extent to find how far pads extend
         origin_x, origin_y = centroid_to_origin(fp, cx, cy, new_rot)
+        pad_ext = pad_extent_in_board_space(fp, origin_x, origin_y, new_rot)
 
-        # Get actual pad extent at this position and rotation
-        px0, py0, px1, py1 = pad_extent_in_board_space(
-            fp, origin_x, origin_y, new_rot,
+        origin_x, origin_y = _shift_origin_to_edge(
+            target_edge, origin_x, origin_y, pad_ext, bounds, edge_margin,
         )
 
-        # Shift origin so pads are flush to target edge with margin
-        if target_edge == "top":
-            # Move so topmost pad is at min_y + margin
-            shift_y = (min_y + edge_margin) - py0
-            origin_y += shift_y
-        elif target_edge == "bottom":
-            # Move so bottommost pad is at max_y - margin
-            shift_y = (max_y - edge_margin) - py1
-            origin_y += shift_y
-        elif target_edge == "left":
-            shift_x = (min_x + edge_margin) - px0
-            origin_x += shift_x
-        else:  # right
-            shift_x = (max_x - edge_margin) - px1
-            origin_x += shift_x
-
-        # Clamp: verify all pads are within board after shift
-        px0, py0, px1, py1 = pad_extent_in_board_space(
-            fp, origin_x, origin_y, new_rot,
+        pad_ext = pad_extent_in_board_space(fp, origin_x, origin_y, new_rot)
+        origin_x, origin_y = _clamp_origin_to_board(
+            origin_x, origin_y, pad_ext, bounds,
         )
-        if px0 < min_x + 1.0:
-            origin_x += (min_x + 1.0) - px0
-        if px1 > max_x - 1.0:
-            origin_x -= px1 - (max_x - 1.0)
-        if py0 < min_y + 1.0:
-            origin_y += (min_y + 1.0) - py0
-        if py1 > max_y - 1.0:
-            origin_y -= py1 - (max_y - 1.0)
 
-        # Convert back to centroid space for the optimizer
         new_cx, new_cy = origin_to_centroid(fp, origin_x, origin_y, new_rot)
         positions[ref] = (new_cx, new_cy, new_rot)
         _log.debug("  %s: edge=%s -> origin(%.1f,%.1f) centroid(%.1f,%.1f) rot=%.0f",

@@ -898,6 +898,51 @@ def _score_group_isolation(
     return (sum(scores) / len(scores), tuple(issues))
 
 
+def _build_signal_net_connections(
+    pcb: PCBDesign,
+    power_nets: set[str],
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, object]]:
+    """Build net-to-pad connections and footprint lookup, excluding power nets.
+
+    Returns (net_connections, fp_map).
+    """
+    net_connections: dict[str, list[tuple[str, str]]] = {}
+    fp_map: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name and pad.net_name.upper() not in power_nets:
+                net_connections.setdefault(pad.net_name, []).append(
+                    (fp.ref, pad.number)
+                )
+    return net_connections, fp_map
+
+
+def _score_pad_pair(
+    fp_a: object, fp_b: object,
+    side_a: object, side_b: object,
+    side_vectors: dict[object, tuple[float, float]],
+) -> float:
+    """Score a single pad pair's facing alignment. Returns score in [0, 1]."""
+    ax = fp_a.position.x  # type: ignore[union-attr]
+    ay = fp_a.position.y  # type: ignore[union-attr]
+    bx = fp_b.position.x  # type: ignore[union-attr]
+    by = fp_b.position.y  # type: ignore[union-attr]
+    dx, dy = bx - ax, by - ay
+    dist = math.sqrt(dx * dx + dy * dy)
+    if dist < 0.1:
+        return 1.0
+    dx /= dist
+    dy /= dist
+
+    va = side_vectors[side_a]
+    dot_a = va[0] * dx + va[1] * dy
+    vb = side_vectors[side_b]
+    dot_b = vb[0] * (-dx) + vb[1] * (-dy)
+    score_a = (dot_a + 1.0) / 2.0
+    score_b = (dot_b + 1.0) / 2.0
+    return (score_a + score_b) / 2.0
+
+
 def _score_pad_facing(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -915,17 +960,8 @@ def _score_pad_facing(
     from kicad_pipeline.pcb.pin_map import CardinalSide, compute_pin_map
     from kicad_pipeline.visualization.ratsnest import POWER_NETS
 
-    # Build net -> list of (ref, pad_number) pairs and fp lookup in single pass
-    net_connections: dict[str, list[tuple[str, str]]] = {}
-    fp_map: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
-    for fp in pcb.footprints:
-        for pad in fp.pads:
-            if pad.net_name and pad.net_name.upper() not in POWER_NETS:
-                net_connections.setdefault(pad.net_name, []).append(
-                    (fp.ref, pad.number)
-                )
+    net_connections, fp_map = _build_signal_net_connections(pcb, POWER_NETS)
 
-    # Direction vectors for each cardinal side
     side_vectors: dict[CardinalSide, tuple[float, float]] = {
         CardinalSide.NORTH: (0.0, -1.0),
         CardinalSide.SOUTH: (0.0, 1.0),
@@ -936,66 +972,36 @@ def _score_pad_facing(
 
     scores: list[float] = []
     issues: list[str] = []
-
-    # Cache pin maps per footprint
     pin_maps: dict[str, object] = {}
 
     for _net_name, connections in net_connections.items():
-        # Only score nets with exactly 2 connections (point-to-point)
         if len(connections) != 2:
             continue
         ref_a, pad_a = connections[0]
         ref_b, pad_b = connections[1]
         if ref_a == ref_b:
-            continue  # Same footprint — skip
+            continue
 
         fp_a = fp_map.get(ref_a)
         fp_b = fp_map.get(ref_b)
         if fp_a is None or fp_b is None:
             continue
 
-        # Get or compute pin maps
         if ref_a not in pin_maps:
             pin_maps[ref_a] = compute_pin_map(fp_a, fp_a.rotation)  # type: ignore[arg-type]
         if ref_b not in pin_maps:
             pin_maps[ref_b] = compute_pin_map(fp_b, fp_b.rotation)  # type: ignore[arg-type]
 
-        pm_a = pin_maps[ref_a]
-        pm_b = pin_maps[ref_b]
-        side_a = pm_a.side_for_pad(pad_a)  # type: ignore[union-attr]
-        side_b = pm_b.side_for_pad(pad_b)  # type: ignore[union-attr]
+        side_a = pin_maps[ref_a].side_for_pad(pad_a)  # type: ignore[union-attr]
+        side_b = pin_maps[ref_b].side_for_pad(pad_b)  # type: ignore[union-attr]
 
         if side_a is None or side_b is None:
             continue
         if side_a == CardinalSide.CENTER or side_b == CardinalSide.CENTER:
-            scores.append(1.0)  # Center pads are always OK
-            continue
-
-        # Direction from A to B
-        ax = fp_a.position.x  # type: ignore[union-attr]
-        ay = fp_a.position.y  # type: ignore[union-attr]
-        bx = fp_b.position.x  # type: ignore[union-attr]
-        by = fp_b.position.y  # type: ignore[union-attr]
-        dx, dy = bx - ax, by - ay
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist < 0.1:
             scores.append(1.0)
             continue
-        dx /= dist
-        dy /= dist
 
-        # Score pad A: its side vector should align with direction to B
-        va = side_vectors[side_a]
-        dot_a = va[0] * dx + va[1] * dy  # +1 = facing toward B, -1 = away
-
-        # Score pad B: its side vector should align with direction to A (opposite)
-        vb = side_vectors[side_b]
-        dot_b = vb[0] * (-dx) + vb[1] * (-dy)  # +1 = facing toward A
-
-        # Average alignment: map [-1, 1] to [0, 1]
-        score_a = (dot_a + 1.0) / 2.0
-        score_b = (dot_b + 1.0) / 2.0
-        pair_score = (score_a + score_b) / 2.0
+        pair_score = _score_pad_pair(fp_a, fp_b, side_a, side_b, side_vectors)
         scores.append(pair_score)
 
         if pair_score < 0.4:

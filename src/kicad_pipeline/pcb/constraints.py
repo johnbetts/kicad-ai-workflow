@@ -1586,6 +1586,62 @@ def _add_channel_grouping_constraints(
 # ---------------------------------------------------------------------------
 
 
+def _rpi_hat_ic_and_switch_constraints(
+    requirements: ProjectRequirements,
+    board_template: BoardTemplate,
+    extra: list[PlacementConstraint],
+) -> tuple[str | None, str | None]:
+    """Add IC-center and DIP switch constraints. Returns (ic_ref, sw_ref)."""
+    ic_ref: str | None = None
+    for comp in requirements.components:
+        if comp.ref.startswith("U"):
+            ic_ref = comp.ref
+            break
+    if ic_ref is not None:
+        cx = board_template.board_width_mm / 2.0
+        cy = board_template.board_height_mm * 0.55
+        extra.append(PlacementConstraint(
+            ref=ic_ref,
+            constraint_type=PlacementConstraintType.FIXED,
+            x=cx, y=cy, rotation=0.0, priority=60,
+        ))
+
+    sw_ref: str | None = None
+    for comp in requirements.components:
+        if comp.ref.startswith("SW") and ic_ref is not None:
+            sw_ref = comp.ref
+            extra.append(PlacementConstraint(
+                ref=comp.ref,
+                constraint_type=PlacementConstraintType.NEAR,
+                target_ref=ic_ref,
+                max_distance_mm=10.0, priority=32,
+            ))
+    return ic_ref, sw_ref
+
+
+def _rpi_hat_screw_terminal_constraints(
+    requirements: ProjectRequirements,
+    base: tuple[PlacementConstraint, ...],
+    extra: list[PlacementConstraint],
+) -> None:
+    """Add EDGE(BOTTOM) constraints for RPi HAT screw terminals."""
+    for comp in requirements.components:
+        if not _is_connector(comp.ref, comp.footprint):
+            continue
+        if not _is_screw_terminal(comp.footprint):
+            continue
+        if any(
+            c.ref == comp.ref and c.constraint_type == PlacementConstraintType.FIXED
+            for c in base
+        ):
+            continue
+        extra.append(PlacementConstraint(
+            ref=comp.ref,
+            constraint_type=PlacementConstraintType.EDGE,
+            edge=BoardEdge.BOTTOM, priority=55,
+        ))
+
+
 def rpi_hat_constraints(
     requirements: ProjectRequirements,
     board_template: BoardTemplate,
@@ -1616,60 +1672,16 @@ def rpi_hat_constraints(
     base = constraints_from_requirements(requirements, board_template, footprint_sizes)
     extra: list[PlacementConstraint] = []
 
-    # Place primary IC at board centre (between J1 at top and J2-J5 at bottom)
-    ic_ref: str | None = None
-    for comp in requirements.components:
-        if comp.ref.startswith("U"):
-            ic_ref = comp.ref
-            break
-    if ic_ref is not None:
-        cx = board_template.board_width_mm / 2.0
-        cy = board_template.board_height_mm * 0.55  # slightly below centre
-        extra.append(PlacementConstraint(
-            ref=ic_ref,
-            constraint_type=PlacementConstraintType.FIXED,
-            x=cx,
-            y=cy,
-            rotation=0.0,
-            priority=60,
-        ))
+    ic_ref, sw_ref = _rpi_hat_ic_and_switch_constraints(
+        requirements, board_template, extra,
+    )
 
-    # DIP switches -> NEAR(IC) — priority must be higher than its dependents
-    sw_ref: str | None = None
-    for comp in requirements.components:
-        if comp.ref.startswith("SW") and ic_ref is not None:
-            sw_ref = comp.ref
-            extra.append(PlacementConstraint(
-                ref=comp.ref,
-                constraint_type=PlacementConstraintType.NEAR,
-                target_ref=ic_ref,
-                max_distance_mm=10.0,
-                priority=32,
-            ))
-
-    # Pull-up/address resistors sharing nets with SW -> NEAR(SW or U1)
     if sw_ref is not None:
         _add_pullup_resistor_constraints(
             requirements, extra, sw_ref, ic_ref,
         )
 
-    # Screw terminals -> EDGE(BOTTOM) for RPi HATs (opposite GPIO header)
-    for comp in requirements.components:
-        if not _is_connector(comp.ref, comp.footprint):
-            continue
-        if _is_screw_terminal(comp.footprint):
-            # Skip if already FIXED by template
-            if any(
-                c.ref == comp.ref and c.constraint_type == PlacementConstraintType.FIXED
-                for c in base
-            ):
-                continue
-            extra.append(PlacementConstraint(
-                ref=comp.ref,
-                constraint_type=PlacementConstraintType.EDGE,
-                edge=BoardEdge.BOTTOM,
-                priority=55,
-            ))
+    _rpi_hat_screw_terminal_constraints(requirements, base, extra)
 
     # Channel grouping: trace signal nets from screw terminals through
     # voltage dividers to the ADC, placing each channel's passives near
@@ -2141,6 +2153,29 @@ def optimize_rotations(
 # ---------------------------------------------------------------------------
 
 
+def _check_keepout_collisions(
+    refs: list[str],
+    all_bounds: dict[str, tuple[float, float, float, float]],
+    keepouts: tuple[Keepout, ...],
+) -> list[str]:
+    """Check component bounding boxes against keepout zones."""
+    violations: list[str] = []
+    for ref in refs:
+        cx0, cy0, cx1, cy1 = all_bounds[ref]
+        for ko_idx, ko in enumerate(keepouts):
+            ko_xs = [p.x for p in ko.polygon]
+            ko_ys = [p.y for p in ko.polygon]
+            if not ko_xs:
+                continue
+            kx0, ky0 = min(ko_xs), min(ko_ys)
+            kx1, ky1 = max(ko_xs), max(ko_ys)
+            if cx0 < kx1 and cx1 > kx0 and cy0 < ky1 and cy1 > ky0:
+                violations.append(
+                    f"Courtyard collision: {ref} overlaps keepout zone {ko_idx}"
+                )
+    return violations
+
+
 def check_courtyard_collisions(
     positions: dict[str, Point],
     footprint_sizes: dict[str, tuple[float, float]],
@@ -2190,7 +2225,6 @@ def check_courtyard_collisions(
             pos.y + h / 2.0,
         )
 
-    # Pre-compute all bounds for O(1) access in the nested loop
     all_bounds = {ref: _bounds(ref) for ref in refs}
 
     # Component vs component collision
@@ -2204,23 +2238,7 @@ def check_courtyard_collisions(
                 )
 
     # Component vs keepout collision
-    for ref in refs:
-        cx0, cy0, cx1, cy1 = _bounds(ref)
-        for ko_idx, ko in enumerate(keepouts):
-            ko_xs = [p.x for p in ko.polygon]
-            ko_ys = [p.y for p in ko.polygon]
-            if not ko_xs:
-                continue
-            kx0 = min(ko_xs)
-            ky0 = min(ko_ys)
-            kx1 = max(ko_xs)
-            ky1 = max(ko_ys)
-
-            if cx0 < kx1 and cx1 > kx0 and cy0 < ky1 and cy1 > ky0:
-                violations.append(
-                    f"Courtyard collision: {ref} overlaps keepout zone {ko_idx}"
-                )
-
+    violations.extend(_check_keepout_collisions(refs, all_bounds, keepouts))
     return tuple(violations)
 
 

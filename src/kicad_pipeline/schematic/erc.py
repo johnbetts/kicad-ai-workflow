@@ -314,26 +314,8 @@ def _compute_pin_position(
 _WIRE_PIN_TOLERANCE_MM = 0.01
 
 
-def _check_wire_pin_alignment(schematic: Schematic) -> list[ERCViolation]:
-    """Check that every wire endpoint lands on a valid connection point.
-
-    Valid connection points include: symbol pin tips, power symbol positions,
-    label positions, global label positions, junction positions, no-connect
-    positions, and wire endpoints that appear more than once (wire-to-wire
-    junctions).
-
-    Args:
-        schematic: The schematic to validate.
-
-    Returns:
-        List of WARNING violations for wire endpoints not near any connection
-        point.
-    """
-    if not schematic.wires:
-        return []
-
-    # Build set of valid connection points ----------------------------------
-
+def _collect_valid_connection_points(schematic: Schematic) -> set[tuple[float, float]]:
+    """Build the set of valid connection points from all schematic elements."""
     valid_points: set[tuple[float, float]] = set()
 
     # Pin connection points from placed symbols
@@ -376,11 +358,31 @@ def _check_wire_pin_alignment(schematic: Schematic) -> list[ERCViolation]:
         if ecount > 1:
             valid_points.add(ekey)
 
-    # Check each wire endpoint against valid points -------------------------
+    return valid_points
+
+
+def _check_wire_pin_alignment(schematic: Schematic) -> list[ERCViolation]:
+    """Check that every wire endpoint lands on a valid connection point.
+
+    Valid connection points include: symbol pin tips, power symbol positions,
+    label positions, global label positions, junction positions, no-connect
+    positions, and wire endpoints that appear more than once (wire-to-wire
+    junctions).
+
+    Args:
+        schematic: The schematic to validate.
+
+    Returns:
+        List of WARNING violations for wire endpoints not near any connection
+        point.
+    """
+    if not schematic.wires:
+        return []
+
+    valid_points = _collect_valid_connection_points(schematic)
 
     violations: list[ERCViolation] = []
     reported: set[tuple[float, float]] = set()
-
     tol_sq = _WIRE_PIN_TOLERANCE_MM ** 2
 
     for wire in schematic.wires:
@@ -388,7 +390,6 @@ def _check_wire_pin_alignment(schematic: Schematic) -> list[ERCViolation]:
             key = (wep.x, wep.y)
             if key in reported or key in valid_points:
                 continue
-            # Tolerance match
             matched = any(
                 (key[0] - vp[0]) ** 2 + (key[1] - vp[1]) ** 2 <= tol_sq
                 for vp in valid_points

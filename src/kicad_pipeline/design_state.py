@@ -101,13 +101,8 @@ def write_project_readme(
     return path
 
 
-def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> Path:
-    """Write ``design/requirements.md`` from gathered requirements."""
-    d = _design_dir(project_dir)
-    path = d / "requirements.md"
-    lines: list[str] = ["# Requirements", ""]
-
-    # Project info
+def _append_project_info(lines: list[str], requirements: ProjectRequirements) -> None:
+    """Append project info and mechanical sections to *lines*."""
     proj = requirements.project
     lines.append(f"**Project**: {proj.name}")
     if proj.description:
@@ -117,7 +112,6 @@ def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> 
     lines.append(f"**Revision**: {proj.revision}")
     lines.append("")
 
-    # Mechanical
     mech = requirements.mechanical
     if mech:
         lines.append("## Mechanical")
@@ -134,7 +128,11 @@ def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> 
             lines.append(f"- Notes: {mech.notes}")
         lines.append("")
 
-    # Feature blocks
+
+def _append_features_and_components(
+    lines: list[str], requirements: ProjectRequirements,
+) -> None:
+    """Append features, components, and nets sections to *lines*."""
     if requirements.features:
         lines.append("## Features")
         for fb in requirements.features:
@@ -146,7 +144,6 @@ def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> 
                 lines.append(f"- Subcircuits: {', '.join(fb.subcircuits)}")
             lines.append("")
 
-    # Components
     lines.append("## Components")
     lines.append("")
     lines.append("| Ref | Value | Footprint | LCSC |")
@@ -155,7 +152,6 @@ def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> 
         lines.append(f"| {c.ref} | {c.value} | {c.footprint} | {c.lcsc or ''} |")
     lines.append("")
 
-    # Nets
     if requirements.nets:
         lines.append("## Nets")
         for net in requirements.nets:
@@ -163,7 +159,11 @@ def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> 
             lines.append(f"- **{net.name}**: {conns}")
         lines.append("")
 
-    # Power budget
+
+def _append_budget_and_recommendations(
+    lines: list[str], requirements: ProjectRequirements,
+) -> None:
+    """Append power budget and recommendations sections to *lines*."""
     if requirements.power_budget:
         pb = requirements.power_budget
         lines.append("## Power Budget")
@@ -175,12 +175,22 @@ def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> 
                 lines.append(f"- Note: {note}")
         lines.append("")
 
-    # Recommendations
     if requirements.recommendations:
         lines.append("## Recommendations")
         for rec in requirements.recommendations:
             lines.append(f"- [{rec.severity}] ({rec.category}) {rec.message}")
         lines.append("")
+
+
+def write_requirements(project_dir: Path, requirements: ProjectRequirements) -> Path:
+    """Write ``design/requirements.md`` from gathered requirements."""
+    d = _design_dir(project_dir)
+    path = d / "requirements.md"
+    lines: list[str] = ["# Requirements", ""]
+
+    _append_project_info(lines, requirements)
+    _append_features_and_components(lines, requirements)
+    _append_budget_and_recommendations(lines, requirements)
 
     path.write_text("\n".join(lines), encoding="utf-8")
     logger.info("Wrote %s", path)

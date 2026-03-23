@@ -276,6 +276,84 @@ def _feature_to_slot(feature: str) -> int | None:
     return None
 
 
+def _assign_features_to_slots(
+    feature_groups: dict[str, list[str]],
+) -> tuple[dict[str, str], set[int]]:
+    """Assign features to zone slots using keyword hints then round-robin.
+
+    Returns (feature_to_zone, used_slots).
+    """
+    feature_to_zone: dict[str, str] = {}
+    used_slots: set[int] = set()
+
+    # First pass: features with keyword hints get their preferred slot
+    for feature in feature_groups:
+        slot = _feature_to_slot(feature)
+        if slot is not None and slot not in used_slots:
+            feature_to_zone[feature] = _ZONE_SLOT_NAMES[slot]
+            used_slots.add(slot)
+
+    # Second pass: distribute remaining features to unused slots
+    available_slots = [i for i in (3, 2, 1, 0) if i not in used_slots]
+    for feature in feature_groups:
+        if feature in feature_to_zone:
+            continue
+        if available_slots:
+            slot = available_slots.pop(0)
+            feature_to_zone[feature] = _ZONE_SLOT_NAMES[slot]
+            used_slots.add(slot)
+        else:
+            zone_counts: dict[str, int] = {z: 0 for z in _ZONE_SLOT_NAMES}
+            for z in feature_to_zone.values():
+                zone_counts[z] = zone_counts.get(z, 0) + 1
+            least_used = min(zone_counts, key=lambda z: zone_counts[z])
+            feature_to_zone[feature] = least_used
+
+    return feature_to_zone, used_slots
+
+
+def _rebalance_overloaded_zones(
+    feature_groups: dict[str, list[str]],
+    feature_to_zone: dict[str, str],
+    adjacency: dict[str, set[str]] | None,
+) -> dict[str, str]:
+    """Split overloaded zones into empty zones. Returns ref-level overrides."""
+    zone_ref_counts: dict[str, int] = {z: 0 for z in _ZONE_SLOT_NAMES}
+    for feature, refs in feature_groups.items():
+        zone_ref_counts[feature_to_zone[feature]] += len(refs)
+
+    empty_zones = [z for z in _ZONE_SLOT_NAMES if zone_ref_counts[z] == 0]
+    if not empty_zones:
+        return {}
+
+    overloaded = max(_ZONE_SLOT_NAMES, key=lambda z: zone_ref_counts[z])
+    if zone_ref_counts[overloaded] <= 12:
+        return {}
+
+    overloaded_refs: list[str] = []
+    for feature, refs in feature_groups.items():
+        if feature_to_zone[feature] == overloaded:
+            overloaded_refs.extend(refs)
+
+    if adjacency is not None:
+        overloaded_refs = _sort_by_connectivity(overloaded_refs, adjacency)
+
+    adjacent_map = {"ANALOG": "POWER", "POWER": "ANALOG",
+                    "PERIPHERALS": "MCU", "MCU": "PERIPHERALS"}
+    preferred_target = adjacent_map.get(overloaded, "")
+    target_zone = preferred_target if preferred_target in empty_zones else empty_zones[0]
+
+    split_point = len(overloaded_refs) // 2
+    ref_overrides: dict[str, str] = {}
+    for ref in overloaded_refs[split_point:]:
+        ref_overrides[ref] = target_zone
+    log.debug(
+        "assign_zones: split %d refs from %s to %s (connectivity-aware)",
+        len(overloaded_refs) - split_point, overloaded, target_zone,
+    )
+    return ref_overrides
+
+
 def assign_zones(
     components: list[tuple[str, str]],
     paper: str = "A4",
@@ -303,76 +381,14 @@ def assign_zones(
     """
     active_zones = zones_for_page(paper)
 
-    # Group refs by feature name (preserving order)
     feature_groups: dict[str, list[str]] = {}
     for ref, feature in components:
         feature_groups.setdefault(feature, []).append(ref)
 
-    # Assign each feature group to a zone slot
-    feature_to_zone: dict[str, str] = {}
-    used_slots: set[int] = set()
-
-    # First pass: features with keyword hints get their preferred slot
-    for feature in feature_groups:
-        slot = _feature_to_slot(feature)
-        if slot is not None and slot not in used_slots:
-            feature_to_zone[feature] = _ZONE_SLOT_NAMES[slot]
-            used_slots.add(slot)
-
-    # Second pass: distribute remaining features to unused slots
-    # Prefer PERIPHERALS (3) first, then ANALOG (2), MCU (1), POWER (0)
-    available_slots = [i for i in (3, 2, 1, 0) if i not in used_slots]
-    for feature in feature_groups:
-        if feature not in feature_to_zone:
-            if available_slots:
-                slot = available_slots.pop(0)
-                feature_to_zone[feature] = _ZONE_SLOT_NAMES[slot]
-                used_slots.add(slot)
-            else:
-                # More features than zones: pick the zone with fewest refs
-                zone_counts = {z: 0 for z in _ZONE_SLOT_NAMES}
-                for z in feature_to_zone.values():
-                    zone_counts[z] = zone_counts.get(z, 0) + 1
-                least_used = min(zone_counts, key=lambda z: zone_counts[z])
-                feature_to_zone[feature] = least_used
-
-    # Rebalance: if any zone is empty and another is overloaded, redistribute.
-    zone_ref_counts: dict[str, int] = {z: 0 for z in _ZONE_SLOT_NAMES}
-    for feature, refs in feature_groups.items():
-        zone_ref_counts[feature_to_zone[feature]] += len(refs)
-
-    empty_zones = [z for z in _ZONE_SLOT_NAMES if zone_ref_counts[z] == 0]
-    ref_overrides: dict[str, str] = {}
-
-    if empty_zones:
-        overloaded = max(_ZONE_SLOT_NAMES, key=lambda z: zone_ref_counts[z])
-        if zone_ref_counts[overloaded] > 12:
-            # Collect all refs in the overloaded zone
-            overloaded_refs: list[str] = []
-            for feature, refs in feature_groups.items():
-                if feature_to_zone[feature] == overloaded:
-                    overloaded_refs.extend(refs)
-
-            # Sort by connectivity so connected components are adjacent
-            if adjacency is not None:
-                overloaded_refs = _sort_by_connectivity(overloaded_refs, adjacency)
-
-            # Split in half — second half goes to the empty zone.
-            # Choose target zone that's adjacent (same column = above/below).
-            # ANALOG(2) ↔ POWER(0) share left column
-            # PERIPHERALS(3) ↔ MCU(1) share right column
-            adjacent_map = {"ANALOG": "POWER", "POWER": "ANALOG",
-                            "PERIPHERALS": "MCU", "MCU": "PERIPHERALS"}
-            preferred_target = adjacent_map.get(overloaded, "")
-            target_zone = preferred_target if preferred_target in empty_zones else empty_zones[0]
-
-            split_point = len(overloaded_refs) // 2
-            for ref in overloaded_refs[split_point:]:
-                ref_overrides[ref] = target_zone
-            log.debug(
-                "assign_zones: split %d refs from %s to %s (connectivity-aware)",
-                len(overloaded_refs) - split_point, overloaded, target_zone,
-            )
+    feature_to_zone, _used = _assign_features_to_slots(feature_groups)
+    ref_overrides = _rebalance_overloaded_zones(
+        feature_groups, feature_to_zone, adjacency,
+    )
 
     # Build result: ref -> PlacementZone
     result: dict[str, PlacementZone] = {}

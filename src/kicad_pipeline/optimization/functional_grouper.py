@@ -677,6 +677,20 @@ _MAX_CAPS_PER_NET = 2
 _MAX_FB_RESISTORS = 2
 
 
+def _is_cross_group_output_cap(
+    r: str, net_name: str,
+    inductor_output_net: str | None,
+    output_is_power: bool,
+    ref_group: dict[str, str],
+    buck_group: str,
+) -> bool:
+    """Return True if *r* is a cap on the output net that belongs to a different group."""
+    if not (output_is_power and net_name == inductor_output_net):
+        return False
+    cap_group = ref_group.get(r, "")
+    return bool(cap_group and buck_group and cap_group != buck_group)
+
+
 def _collect_buck_passives(
     comp: Component,
     inductor_output_net: str | None,
@@ -708,17 +722,15 @@ def _collect_buck_passives(
         ) else _MAX_CAPS_PER_NET
 
         for r in sorted(net_to_refs.get(net_name, set())):
-            if r in refs or r in claimed:
-                continue
-            rc = comp_map.get(r)
-            if not rc:
+            if r in refs or r in claimed or not comp_map.get(r):
                 continue
             prefix = _ref_prefix(r)
             if prefix == "C" and cap_count < max_caps:
-                if output_is_power and net_name == inductor_output_net:
-                    cap_group = ref_group.get(r, "")
-                    if cap_group and buck_group and cap_group != buck_group:
-                        continue
+                if _is_cross_group_output_cap(
+                    r, net_name, inductor_output_net,
+                    output_is_power, ref_group, buck_group,
+                ):
+                    continue
                 refs.append(r)
                 collected_nets.add(net_name)
                 cap_count += 1
@@ -1389,6 +1401,78 @@ def _voltage_magnitude(domain: VoltageDomain) -> float:
     }.get(domain, 0.0)
 
 
+def _collect_regulator_graph(
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> tuple[
+    list[tuple[VoltageDomain, VoltageDomain, str]],
+    dict[VoltageDomain, set[VoltageDomain]],
+    set[VoltageDomain],
+]:
+    """Collect regulator edges and all voltage domains from subcircuits.
+
+    Returns (boundaries, edges, all_domains).
+    """
+    boundaries: list[tuple[VoltageDomain, VoltageDomain, str]] = []
+    edges: dict[VoltageDomain, set[VoltageDomain]] = {}
+    all_domains: set[VoltageDomain] = set()
+
+    for sc in subcircuits:
+        if sc.circuit_type not in (
+            SubCircuitType.BUCK_CONVERTER, SubCircuitType.LDO_REGULATOR,
+        ):
+            if sc.domain != VoltageDomain.MIXED:
+                all_domains.add(sc.domain)
+            continue
+
+        if sc.input_domain is not None and sc.output_domain is not None:
+            boundaries.append((sc.input_domain, sc.output_domain, sc.anchor_ref))
+            edges.setdefault(sc.input_domain, set()).add(sc.output_domain)
+            all_domains.add(sc.input_domain)
+            all_domains.add(sc.output_domain)
+        if sc.domain != VoltageDomain.MIXED:
+            all_domains.add(sc.domain)
+
+    all_domains.discard(VoltageDomain.MIXED)
+    return boundaries, edges, all_domains
+
+
+def _topo_sort_domains(
+    edges: dict[VoltageDomain, set[VoltageDomain]],
+    all_domains: set[VoltageDomain],
+) -> list[VoltageDomain]:
+    """Topological sort of voltage domains using Kahn's algorithm."""
+    in_degree: dict[VoltageDomain, int] = {d: 0 for d in all_domains}
+    for _src, dsts in edges.items():
+        for dst in dsts:
+            if dst in in_degree:
+                in_degree[dst] += 1
+
+    queue = sorted(
+        [d for d, deg in in_degree.items() if deg == 0],
+        key=_voltage_magnitude, reverse=True,
+    )
+    result: list[VoltageDomain] = []
+    visited: set[VoltageDomain] = set()
+
+    while queue:
+        node = queue.pop(0)
+        if node in visited:
+            continue
+        visited.add(node)
+        result.append(node)
+        for dst in sorted(edges.get(node, set()), key=_voltage_magnitude, reverse=True):
+            if dst in in_degree:
+                in_degree[dst] -= 1
+                if in_degree[dst] <= 0 and dst not in visited:
+                    queue.append(dst)
+        queue.sort(key=_voltage_magnitude, reverse=True)
+
+    # Add disconnected domains
+    for d in sorted(all_domains - visited, key=_voltage_magnitude, reverse=True):
+        result.append(d)
+    return result
+
+
 def compute_power_flow_topology(
     subcircuits: tuple[DetectedSubCircuit, ...],
 ) -> PowerFlowTopology:
@@ -1406,74 +1490,16 @@ def compute_power_flow_topology(
     Returns:
         PowerFlowTopology with ordered domains and boundary info.
     """
-    # Collect regulator edges: input_domain -> output_domain
-    boundaries: list[tuple[VoltageDomain, VoltageDomain, str]] = []
-    edges: dict[VoltageDomain, set[VoltageDomain]] = {}  # in -> {out, ...}
-    all_domains: set[VoltageDomain] = set()
-
-    for sc in subcircuits:
-        if sc.circuit_type not in (
-            SubCircuitType.BUCK_CONVERTER,
-            SubCircuitType.LDO_REGULATOR,
-        ):
-            # Collect domains from all subcircuits
-            if sc.domain != VoltageDomain.MIXED:
-                all_domains.add(sc.domain)
-            continue
-
-        if sc.input_domain is not None and sc.output_domain is not None:
-            boundaries.append((sc.input_domain, sc.output_domain, sc.anchor_ref))
-            edges.setdefault(sc.input_domain, set()).add(sc.output_domain)
-            all_domains.add(sc.input_domain)
-            all_domains.add(sc.output_domain)
-        if sc.domain != VoltageDomain.MIXED:
-            all_domains.add(sc.domain)
-
-    # Remove MIXED from ordering
-    all_domains.discard(VoltageDomain.MIXED)
+    boundaries, edges, all_domains = _collect_regulator_graph(subcircuits)
 
     if not boundaries:
-        # No regulators — sort by voltage magnitude (highest first)
         ordered = sorted(all_domains, key=_voltage_magnitude, reverse=True)
         return PowerFlowTopology(
             domain_order=tuple(ordered) if ordered else (VoltageDomain.MIXED,),
             regulator_boundaries=(),
         )
 
-    # Topological sort: Kahn's algorithm (highest voltage sources first)
-    in_degree: dict[VoltageDomain, int] = {d: 0 for d in all_domains}
-    for _src, dsts in edges.items():
-        for dst in dsts:
-            if dst in in_degree:
-                in_degree[dst] += 1
-
-    # Start with zero in-degree nodes, sorted by voltage magnitude descending
-    queue = sorted(
-        [d for d, deg in in_degree.items() if deg == 0],
-        key=_voltage_magnitude,
-        reverse=True,
-    )
-    result: list[VoltageDomain] = []
-    visited: set[VoltageDomain] = set()
-
-    while queue:
-        node = queue.pop(0)
-        if node in visited:
-            continue
-        visited.add(node)
-        result.append(node)
-        for dst in sorted(edges.get(node, set()), key=_voltage_magnitude, reverse=True):
-            if dst in in_degree:
-                in_degree[dst] -= 1
-                if in_degree[dst] <= 0 and dst not in visited:
-                    queue.append(dst)
-        # Re-sort queue by voltage magnitude
-        queue.sort(key=_voltage_magnitude, reverse=True)
-
-    # Add any domains not reached by topo-sort (disconnected from regulators)
-    for d in sorted(all_domains - visited, key=_voltage_magnitude, reverse=True):
-        result.append(d)
-
+    result = _topo_sort_domains(edges, all_domains)
     return PowerFlowTopology(
         domain_order=tuple(result),
         regulator_boundaries=tuple(boundaries),

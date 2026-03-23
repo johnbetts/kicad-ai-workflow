@@ -245,21 +245,9 @@ def _point_val(node: SExpNode, tag: str) -> tuple[float, float]:
     return 0.0, 0.0
 
 
-def _extract_net_map(tree: SExpNode) -> dict[int, str]:
-    """Build net_number → net_name map from the PCB file.
-
-    Handles both formats:
-    - KiCad 9: Top-level ``(net N "name")`` entries
-    - KiCad 10: Nets embedded in footprint pads ``(net "name")`` and zone
-      ``(net N)``/``(net_name "name")`` pairs.
-
-    Falls back to scanning pad and zone nodes if no top-level net entries found.
-    """
+def _extract_toplevel_nets(tree: list[object]) -> dict[int, str]:
+    """Extract net map from top-level (net N "name") entries (KiCad 9 format)."""
     result: dict[int, str] = {}
-    if not isinstance(tree, list):
-        return result
-
-    # Try top-level net declarations first (KiCad 9 format)
     for node in tree:
         if isinstance(node, list) and len(node) >= 3 and node[0] == "net":
             try:
@@ -268,40 +256,56 @@ def _extract_net_map(tree: SExpNode) -> dict[int, str]:
                 result[num] = name
             except (ValueError, IndexError):
                 continue
+    return result
 
-    if result:
-        return result
 
-    # KiCad 10 format: extract from footprint pad (net "name") and
-    # zone (net N) + (net_name "name") pairs
-    name_to_num: dict[str, int] = {}
-
-    # From zones: KiCad 9: (zone (net N) (net_name "name") ...)
-    #             KiCad 10: (zone (net "name") ...)
+def _extract_nets_from_zones(
+    tree: list[object],
+    result: dict[int, str],
+    name_to_num: dict[str, int],
+) -> None:
+    """Extract net mappings from zone nodes (KiCad 9 and 10 formats)."""
     for node in tree:
         if not isinstance(node, list) or not node or node[0] != "zone":
             continue
         net_child = _find_child(node, "net")
-        if net_child and len(net_child) >= 2:
-            val = str(net_child[1])
-            try:
-                net_num = int(float(val))
-                # KiCad 9: (net N) — get name from net_name
-                net_name = _str_val(node, "net_name")
-                if net_name and net_num > 0:
-                    result[net_num] = net_name
-                    name_to_num[net_name] = net_num
-            except ValueError:
-                # KiCad 10: (net "name") — name directly
-                net_name = val
-                if net_name and net_name not in name_to_num:
-                    next_num = max(result.keys(), default=0) + 1
-                    result[next_num] = net_name
-                    name_to_num[net_name] = next_num
+        if not (net_child and len(net_child) >= 2):
+            continue
+        val = str(net_child[1])
+        try:
+            net_num = int(float(val))
+            net_name = _str_val(node, "net_name")
+            if net_name and net_num > 0:
+                result[net_num] = net_name
+                name_to_num[net_name] = net_num
+        except ValueError:
+            net_name = val
+            if net_name and net_name not in name_to_num:
+                next_num = max(result.keys(), default=0) + 1
+                result[next_num] = net_name
+                name_to_num[net_name] = next_num
 
-    # From footprint pads: (pad ... (net N "name") ...)
+
+def _extract_net_map(tree: SExpNode) -> dict[int, str]:
+    """Build net_number -> net_name map from the PCB file.
+
+    Handles both formats:
+    - KiCad 9: Top-level ``(net N "name")`` entries
+    - KiCad 10: Nets embedded in footprint pads ``(net "name")`` and zone
+      ``(net N)``/``(net_name "name")`` pairs.
+
+    Falls back to scanning pad and zone nodes if no top-level net entries found.
+    """
+    if not isinstance(tree, list):
+        return {}
+
+    result = _extract_toplevel_nets(tree)
+    if result:
+        return result
+
+    name_to_num: dict[str, int] = {}
+    _extract_nets_from_zones(tree, result, name_to_num)
     _extract_nets_from_pads(tree, result, name_to_num)
-
     return result
 
 

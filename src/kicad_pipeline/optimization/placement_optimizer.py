@@ -116,6 +116,66 @@ def _optimize_placement_ee_v4(
     return initial_pcb, review
 
 
+def _build_placement_context(
+    requirements: ProjectRequirements,
+    initial_pcb: PCBDesign,
+    max_review_passes: int,
+) -> object:
+    """Build the shared PlacementContext for the optimizer."""
+    from kicad_pipeline.optimization.functional_grouper import detect_subcircuits
+    from kicad_pipeline.optimization.placement_types import PlacementContext
+
+    fp_sizes = _fp_courtyard_sizes(initial_pcb)
+    bounds = _board_bounds(initial_pcb)
+    fixed_refs: set[str] = {
+        fp.ref for fp in initial_pcb.footprints
+        if _is_fixed(fp.ref, requirements)
+    }
+    positions: dict[str, tuple[float, float, float]] = {}
+    for fp in initial_pcb.footprints:
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        positions[fp.ref] = (cx, cy, fp.rotation)
+
+    subcircuits = detect_subcircuits(requirements)
+    return PlacementContext(
+        positions=positions,
+        fp_sizes=fp_sizes,
+        bounds=bounds,
+        fixed_refs=fixed_refs,
+        requirements=requirements,
+        initial_pcb=initial_pcb,
+        zones=[],
+        subcircuits=list(subcircuits),
+        max_review_passes=max_review_passes,
+    )
+
+
+def _run_level3_phases(ctx: object, **phases: object) -> object:
+    """Execute all Level 3 intra-group refinement phases in order.
+
+    Returns relay_leds data for late-phase use.
+    """
+    phases["relay_rows"](ctx)  # type: ignore[operator]
+    phases["relay_drivers"](ctx)  # type: ignore[operator]
+    relay_leds, _relay_led_refs = phases["relay_leds"](ctx)  # type: ignore[operator]
+    phases["decoupling"](ctx)  # type: ignore[operator]
+    phases["power_group"](ctx)  # type: ignore[operator]
+    phases["adc_channels"](ctx)  # type: ignore[operator]
+    phases["adc_analog_cluster"](ctx)  # type: ignore[operator]
+    phases["crystal"](ctx)  # type: ignore[operator]
+    phases["rf_edge"](ctx)  # type: ignore[operator]
+    phases["connector_orient"](ctx)  # type: ignore[operator]
+    phases["top_edge_connectors"](ctx)  # type: ignore[operator]
+    phases["mcu_group"](ctx)  # type: ignore[operator]
+    phases["ethernet_group"](ctx)  # type: ignore[operator]
+    phases["template_refinement"](ctx)  # type: ignore[operator]
+    phases["late_decoupling"](ctx)  # type: ignore[operator]
+    phases["collision"](ctx)  # type: ignore[operator]
+    phases["first_clamp"](ctx)  # type: ignore[operator]
+    phases["review_loop"](ctx)  # type: ignore[operator]
+    return relay_leds
+
+
 def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
@@ -147,9 +207,6 @@ def optimize_placement_ee(
     Returns:
         Tuple of (optimized PCBDesign, final PlacementReview).
     """
-    from kicad_pipeline.optimization.functional_grouper import (
-        detect_subcircuits,
-    )
     from kicad_pipeline.optimization.ee_phases import (
         _phase_adc_analog_cluster,
         _phase_adc_channels,
@@ -177,121 +234,47 @@ def optimize_placement_ee(
         _phase_top_edge_connectors,
         _phase_zone_partitioning,
     )
-    from kicad_pipeline.optimization.placement_types import PlacementContext
 
-    fp_sizes = _fp_courtyard_sizes(initial_pcb)
-    bounds = _board_bounds(initial_pcb)
+    ctx = _build_placement_context(requirements, initial_pcb, max_review_passes)
 
-    fixed_refs: set[str] = {
-        fp.ref for fp in initial_pcb.footprints
-        if _is_fixed(fp.ref, requirements)
-    }
-
-    # Extract current positions — convert KiCad origin → centroid space.
-    positions: dict[str, tuple[float, float, float]] = {}
-    for fp in initial_pcb.footprints:
-        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
-        positions[fp.ref] = (cx, cy, fp.rotation)
-
-    subcircuits = detect_subcircuits(requirements)
-
-    # Build the shared mutable context
-    ctx = PlacementContext(
-        positions=positions,
-        fp_sizes=fp_sizes,
-        bounds=bounds,
-        fixed_refs=fixed_refs,
-        requirements=requirements,
-        initial_pcb=initial_pcb,
-        zones=[],
-        subcircuits=list(subcircuits),
-        max_review_passes=max_review_passes,
-    )
-
-    # ===================================================================
     # Level 1: Zone Partitioning
-    # ===================================================================
     _log.info("=== Level 1: Zone Partitioning ===")
     _phase_zone_partitioning(ctx)
 
-    # ===================================================================
     # Level 2: Group Placement (groups as rigid units)
-    # ===================================================================
     _log.info("=== Level 2: Group Placement ===")
     _phase_group_placement(ctx)
 
-    # ===================================================================
     # Level 3: Intra-Group Refinement
-    # ===================================================================
     _log.info("=== Level 3: Intra-Group Refinement ===")
+    _relay_leds = _run_level3_phases(
+        ctx,
+        relay_rows=_phase_relay_rows,
+        relay_drivers=_phase_relay_drivers,
+        relay_leds=_phase_relay_leds,
+        decoupling=_phase_decoupling,
+        power_group=_phase_power_group,
+        adc_channels=_phase_adc_channels,
+        adc_analog_cluster=_phase_adc_analog_cluster,
+        crystal=_phase_crystal_placement,
+        rf_edge=_phase_rf_edge,
+        connector_orient=_phase_connector_orientation,
+        top_edge_connectors=_phase_top_edge_connectors,
+        mcu_group=_phase_mcu_group,
+        ethernet_group=_phase_ethernet_group,
+        template_refinement=_phase_template_refinement,  # 3h template
+        late_decoupling=_phase_late_decoupling,  # 3c-late Late decoupling
+        collision=_phase_collision_resolution,
+        first_clamp=_phase_first_clamp,
+        review_loop=_phase_review_loop,
+    )
 
-    # 3a. Relay row formation
-    _phase_relay_rows(ctx)
-
-    # 3b. Relay driver subgroup tightening
-    _phase_relay_drivers(ctx)
-
-    # 3b2. Relay LED indicator placement
-    _relay_leds, _relay_led_refs = _phase_relay_leds(ctx)
-
-    # 3c. Decoupling cap tightening
-    _phase_decoupling(ctx)
-
-    # 3c1. Power group organization
-    _phase_power_group(ctx)
-
-    # 3c2. ADC channel formation
-    _phase_adc_channels(ctx)
-
-    # 3c3. Analog subcircuit clustering
-    _phase_adc_analog_cluster(ctx)
-
-    # 3d. Crystal-IC proximity
-    _phase_crystal_placement(ctx)
-
-    # 3e. RF edge pinning
-    _phase_rf_edge(ctx)
-
-    # 3f. Connector orientation
-    _phase_connector_orientation(ctx)
-
-    # 3f2. Top-edge screw terminal ordering
-    _phase_top_edge_connectors(ctx)
-
-    # 3c3. MCU peripheral tightening
-    _phase_mcu_group(ctx)
-
-    # 3c4. Ethernet group organization
-    _phase_ethernet_group(ctx)
-
-    # 3h. Template-guided refinement
-    _phase_template_refinement(ctx)
-
-    # 3c-late. Late decoupling re-tightening
-    _phase_late_decoupling(ctx)
-
-    # 3g. Collision resolution
-    _phase_collision_resolution(ctx)
-
-    # First board-edge clamp + post-clamp collision resolution
-    _phase_first_clamp(ctx)
-
-    # EE Review loop
-    _phase_review_loop(ctx)
-
-    # 3c2-late: ADC channel re-alignment
+    # Post-review late refinements
     _phase_late_adc_realignment(ctx)
-
-    # 3b-late: Relay driver re-alignment
     _phase_late_relay_realignment(ctx, _relay_leds)
-
-    # MCU decoupling re-pull
     _phase_mcu_decoupling_repull(ctx)
-
-    # Final clamp + crystal overlap fix
     _phase_final_clamp(ctx)
 
-    # Build final PCB, filter stale violations, validate
     return _phase_build_final(ctx)
 
 
