@@ -11,6 +11,12 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from kicad_pipeline.constants import (
+    BOARD_EDGE_MARGIN_MM,
+    CONNECTOR_EDGE_MARGIN_MM,
+    DEFAULT_FP_SIZE_MM,
+    DEFAULT_IC_SIZE_MM,
+)
 from kicad_pipeline.optimization.collision_resolver import (
     _PlacementGrid,
     _rotation_aware_size,
@@ -85,24 +91,24 @@ def _place_row_layout(
         # Compute row spacing based on anchor widths (swapped for 90 deg rotation)
         total_width = 0.0
         for _, _, sc in anchor_positions:
-            aw, ah = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
+            aw, ah = fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)
             # Swap w/h because relay is rotated 90 deg
             aw, ah = ah, aw
             total_width += aw + 2.0  # gap between relays
 
         # Place anchors in a row, constrained to relay zone if available
-        relay_zone_x1 = min_x + 2.0
+        relay_zone_x1 = min_x + BOARD_EDGE_MARGIN_MM
         relay_zone_x2 = max_x - 15.0  # leave room for edge connectors
         if zones:
             for z in zones:
                 if z.name == "relay":
-                    relay_zone_x1 = max(min_x + 2.0, z.rect[0])
+                    relay_zone_x1 = max(min_x + BOARD_EDGE_MARGIN_MM, z.rect[0])
                     relay_zone_x2 = min(max_x - 15.0, z.rect[2] - 5.0)
                     break
         # Ensure rightmost relay stays within board with margin
         # Each relay at 90 deg has X half-width = aw/2 ~ 8.8mm
         max_relay_half_w = max(
-            (fp_sizes.get(sc.anchor_ref, (5.0, 5.0))[1] for _, _, sc in anchor_positions),
+            (fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)[1] for _, _, sc in anchor_positions),
             default=8.8,
         ) / 2.0
         relay_zone_x2 = min(relay_zone_x2, max_x - max_relay_half_w - 1.5)
@@ -121,7 +127,7 @@ def _place_row_layout(
             row_refs.update(sc.refs)
         for ref, (ox, oy, _orot) in positions.items():
             if ref not in row_refs:
-                ow, oh = fp_sizes.get(ref, (2.0, 2.0))
+                ow, oh = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
                 row_grid.place(ox, oy, ow, oh)
 
         # Force all relay anchors to the same Y (avg_y) in a tight row
@@ -165,13 +171,13 @@ def _place_row_layout(
         cursor_x = start_x
         for _, _, sc in anchor_positions:
             anchor_ref = sc.anchor_ref
-            aw, ah = fp_sizes.get(anchor_ref, (5.0, 5.0))
+            aw, ah = fp_sizes.get(anchor_ref, DEFAULT_IC_SIZE_MM)
             # Swap w/h for 90 deg rotation
             aw, ah = ah, aw
             target_x = cursor_x + aw / 2.0
             # Leave 15mm margin on right for edge connectors (J14, J15)
-            target_x = max(min_x + 2.0, min(max_x - 15.0, target_x))
-            target_y = max(min_y + 2.0, min(max_y - 2.0, row_y))
+            target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - 15.0, target_x))
+            target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, row_y))
 
             # Place relay at 90 deg rotation for vertical coil orientation
             positions[anchor_ref] = (target_x, target_y, relay_rotation)
@@ -262,12 +268,12 @@ def _place_boundary_regulators(
             # Target: midpoint between domain centroids
             target_x = (in_centroid[0] + out_centroid[0]) / 2.0
             target_y = (in_centroid[1] + out_centroid[1]) / 2.0
-        target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
-        target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+        target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, target_x))
+        target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, target_y))
 
         # Check if moving is actually closer to boundary
         ax, ay, arot = positions[sc.anchor_ref]
-        aw, ah = fp_sizes.get(sc.anchor_ref, (2.0, 2.0))
+        aw, ah = fp_sizes.get(sc.anchor_ref, DEFAULT_FP_SIZE_MM)
         current_dist = math.sqrt((ax - target_x) ** 2 + (ay - target_y) ** 2)
 
         if current_dist < 3.0:
@@ -279,7 +285,7 @@ def _place_boundary_regulators(
         for ref, (ox, oy, _orot) in positions.items():
             if ref in sc_refs_set:
                 continue
-            ow, oh = fp_sizes.get(ref, (2.0, 2.0))
+            ow, oh = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
             move_grid.place(ox, oy, ow, oh)
 
         fx, fy = move_grid.find_free_pos(target_x, target_y, aw, ah)
@@ -293,7 +299,7 @@ def _place_boundary_regulators(
                 if ref == sc.anchor_ref or ref in fixed_refs or ref not in positions:
                     continue
                 rx, ry, rrot = positions[ref]
-                w, h = fp_sizes.get(ref, (2.0, 2.0))
+                w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
                 ideal_dist = (w + aw) / 2.0 + 1.0
                 rdist = math.sqrt((rx - fx) ** 2 + (ry - fy) ** 2)
                 if rdist <= ideal_dist + 1.0:
@@ -304,8 +310,8 @@ def _place_boundary_regulators(
                 dy = (fy - ry) / rdist
                 tx = fx - dx * ideal_dist
                 ty = fy - dy * ideal_dist
-                tx = max(min_x + 2.0, min(max_x - 2.0, tx))
-                ty = max(min_y + 2.0, min(max_y - 2.0, ty))
+                tx = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, tx))
+                ty = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, ty))
                 mrx, mry = move_grid.find_free_pos(tx, ty, w, h)
                 if math.sqrt((mrx - fx) ** 2 + (mry - fy) ** 2) < rdist:
                     move_grid.place(mrx, mry, w, h)
@@ -326,7 +332,7 @@ def _pin_rf_to_edge(
     Sets rotation so antenna faces outward.
     """
     min_x, min_y, max_x, max_y = bounds
-    edge_margin = 2.0
+    edge_margin = BOARD_EDGE_MARGIN_MM
 
     for sc in subcircuits:
         if sc.circuit_type != SubCircuitType.RF_ANTENNA:
@@ -335,7 +341,7 @@ def _pin_rf_to_edge(
             continue
 
         cx, cy, rot = positions[sc.anchor_ref]
-        w, h = fp_sizes.get(sc.anchor_ref, (5.0, 5.0))
+        w, h = fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)
 
         # Find nearest edge
         dist_left = cx - min_x
@@ -368,7 +374,7 @@ def _pin_rf_to_edge(
         for ref, (ox, oy, _orot) in positions.items():
             if ref == sc.anchor_ref:
                 continue
-            ow, oh = fp_sizes.get(ref, (2.0, 2.0))
+            ow, oh = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
             move_grid.place(ox, oy, ow, oh)
 
         fx, fy = move_grid.find_free_pos(target_x, target_y, w, h)
@@ -400,13 +406,13 @@ def _pull_mcu_peripherals(
         if anchor not in positions:
             continue
         ax, ay, _arot = positions[anchor]
-        aw, ah = fp_sizes.get(anchor, (5.0, 5.0))
+        aw, ah = fp_sizes.get(anchor, DEFAULT_IC_SIZE_MM)
 
         for ref in sc.refs:
             if ref == anchor or ref in fixed_refs or ref not in positions:
                 continue
             rx, ry, rrot = positions[ref]
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
             current_dist = math.sqrt((rx - ax) ** 2 + (ry - ay) ** 2)
 
             if current_dist <= MCU_PERIPHERAL_MAX_DISTANCE_MM:
@@ -420,14 +426,14 @@ def _pull_mcu_peripherals(
             dy = (ay - ry) / current_dist
             target_x = ax - dx * ideal_dist
             target_y = ay - dy * ideal_dist
-            target_x = max(min_x + 2.0, min(max_x - 2.0, target_x))
-            target_y = max(min_y + 2.0, min(max_y - 2.0, target_y))
+            target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, target_x))
+            target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, target_y))
 
             move_grid = _PlacementGrid(bounds)
             for other_ref, (ox, oy, _orot) in positions.items():
                 if other_ref == ref:
                     continue
-                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                ow, oh = fp_sizes.get(other_ref, DEFAULT_FP_SIZE_MM)
                 move_grid.place(ox, oy, ow, oh)
 
             fx, fy = move_grid.find_free_pos(target_x, target_y, w, h)
@@ -459,7 +465,7 @@ def _orient_connectors(
     from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
 
     min_x, min_y, max_x, max_y = bounds
-    edge_margin = 3.0  # mm from board edge to nearest pad
+    edge_margin = CONNECTOR_EDGE_MARGIN_MM
 
     for fp in pcb.footprints:
         ref = fp.ref
@@ -468,7 +474,7 @@ def _orient_connectors(
         if ref not in positions:
             continue
         cx, cy, rot = positions[ref]
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
         # Find nearest edge (using centroid position)
         dist_left = cx - min_x
@@ -623,7 +629,7 @@ def _pin_connectors_by_function(
     near their group's centroid (edge nearest to group, not global).
     """
     min_x, min_y, max_x, max_y = bounds
-    edge_margin = 3.0
+    edge_margin = CONNECTOR_EDGE_MARGIN_MM
 
     # Compute functional group centroids for edge targeting
     relay_centroid: tuple[float, float] | None = None
@@ -668,7 +674,7 @@ def _pin_connectors_by_function(
             continue
 
         cx, cy, rot = positions[ref]
-        w, h = fp_sizes.get(ref, (2.0, 2.0))
+        w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
         # Classify connector function
         func = _classify_connector_function(ref, subcircuits, adj, ref_to_nets)
@@ -772,13 +778,13 @@ def _place_adc_channels(
         if anchor not in positions or anchor in fixed_refs:
             continue
         ax, ay, _ = positions[anchor]
-        aw, ah = fp_sizes.get(anchor, (2.0, 2.0))
+        aw, ah = fp_sizes.get(anchor, DEFAULT_FP_SIZE_MM)
 
         for ref in sc.refs:
             if ref == anchor or ref in fixed_refs or ref not in positions:
                 continue
             rx, ry, rrot = positions[ref]
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
             current_dist = math.sqrt((rx - ax) ** 2 + (ry - ay) ** 2)
 
             from kicad_pipeline.constants import ADC_CHANNEL_MAX_SPREAD_MM
@@ -793,14 +799,14 @@ def _place_adc_channels(
             dy = (ay - ry) / current_dist
             tx = ax - dx * ideal_dist
             ty = ay - dy * ideal_dist
-            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
-            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+            tx = max(bounds[0] + BOARD_EDGE_MARGIN_MM, min(bounds[2] - BOARD_EDGE_MARGIN_MM, tx))
+            ty = max(bounds[1] + BOARD_EDGE_MARGIN_MM, min(bounds[3] - BOARD_EDGE_MARGIN_MM, ty))
 
             move_grid = _PlacementGrid(bounds)
             for oref, (ox, oy, _orot) in positions.items():
                 if oref == ref:
                     continue
-                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+                ow, oh = fp_sizes.get(oref, DEFAULT_FP_SIZE_MM)
                 move_grid.place(ox, oy, ow, oh)
 
             fx, fy = move_grid.find_free_pos(tx, ty, w, h)
@@ -846,7 +852,7 @@ def _apply_cross_domain_affinity_overrides(
             if ref in fixed_refs or ref not in result:
                 continue
             rx, ry, rot = result[ref]
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
             current_dist = math.sqrt((rx - target_cx) ** 2 + (ry - target_cy) ** 2)
             if current_dist < 10.0:
@@ -861,7 +867,7 @@ def _apply_cross_domain_affinity_overrides(
             for oref, (ox, oy, _orot) in result.items():
                 if oref == ref:
                     continue
-                ow, oh = fp_sizes.get(oref, (2.0, 2.0))
+                ow, oh = fp_sizes.get(oref, DEFAULT_FP_SIZE_MM)
                 move_grid.place(ox, oy, ow, oh)
 
             fx, fy = move_grid.find_free_pos(tx, ty, w, h)
@@ -953,14 +959,14 @@ def _apply_template_refinement(
             """Place ref at slot offset, skipping if it would collide."""
             nx = ax + slot.offset_x  # type: ignore[union-attr]
             ny = ay + slot.offset_y  # type: ignore[union-attr]
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
             nx = max(min_x + w / 2, min(max_x - w / 2, nx))
             ny = max(min_y + h / 2, min(max_y - h / 2, ny))
             # Check for collisions with existing positions
             for other_ref, (ox, oy, _orot) in positions.items():
                 if other_ref == ref:
                     continue
-                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                ow, oh = fp_sizes.get(other_ref, DEFAULT_FP_SIZE_MM)
                 gap_x = abs(nx - ox) - (w + ow) / 2
                 gap_y = abs(ny - oy) - (h + oh) / 2
                 if gap_x < 0.2 and gap_y < 0.2:

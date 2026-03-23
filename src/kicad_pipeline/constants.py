@@ -190,6 +190,30 @@ SCHEMATIC_VALUE_SIZE_MM: float = 1.27
 PCB_COURTYARD_CLEARANCE_MM: float = 0.25
 """Minimum clearance between a footprint courtyard and other features (mm)."""
 
+DEFAULT_FP_SIZE_MM: tuple[float, float] = (2.0, 2.0)
+"""Default footprint bounding-box size when actual size is unknown (mm)."""
+
+DEFAULT_IC_SIZE_MM: tuple[float, float] = (5.0, 5.0)
+"""Default IC footprint bounding-box size when actual size is unknown (mm)."""
+
+BOARD_EDGE_MARGIN_MM: float = 2.0
+"""Minimum margin from board edge for component placement (mm)."""
+
+COMPONENT_CLEARANCE_GAP_MM: float = 0.5
+"""Minimum clearance gap between component courtyards (mm)."""
+
+COLLISION_GROUP_EXPANSION_MM: float = 5.0
+"""Expansion margin around group bounding boxes during collision resolution (mm)."""
+
+SPIRAL_SEARCH_MAX_RINGS: int = 40
+"""Maximum number of concentric rings to search in spiral placement search."""
+
+COLLISION_MAX_PASSES: int = 12
+"""Maximum number of collision resolution passes before giving up."""
+
+CONNECTOR_EDGE_MARGIN_MM: float = 3.0
+"""Margin from board edge for connector pad placement (mm)."""
+
 PCB_SILKSCREEN_LINE_WIDTH_MM: float = 0.153
 """Default silkscreen line width on the PCB (mm)."""
 

@@ -10,6 +10,15 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from kicad_pipeline.constants import (
+    BOARD_EDGE_MARGIN_MM,
+    COLLISION_GROUP_EXPANSION_MM,
+    COLLISION_MAX_PASSES,
+    COMPONENT_CLEARANCE_GAP_MM,
+    DEFAULT_FP_SIZE_MM,
+    SPIRAL_SEARCH_MAX_RINGS,
+)
+
 if TYPE_CHECKING:
     from kicad_pipeline.optimization.placement_types import GroupBoundingBox
 
@@ -27,7 +36,7 @@ class _PlacementGrid:
         self.min_x, self.min_y, self.max_x, self.max_y = board_bounds
         # (cx, cy, half_w, half_h) for each placed component
         self._placed: list[tuple[float, float, float, float]] = []
-        self._margin = 0.5  # mm clearance between components (courtyard-safe)
+        self._margin = COMPONENT_CLEARANCE_GAP_MM
 
     def is_free(self, cx: float, cy: float, w: float, h: float) -> bool:
         """Check if placing a component here would overlap any existing one."""
@@ -58,11 +67,10 @@ class _PlacementGrid:
             max_radius: If > 0, limit search to within this distance of target.
                 Returns clamped target if no free position found within radius.
         """
-        margin = 2.0
-        bmin_x = self.min_x + margin
-        bmin_y = self.min_y + margin
-        bmax_x = self.max_x - margin
-        bmax_y = self.max_y - margin
+        bmin_x = self.min_x + BOARD_EDGE_MARGIN_MM
+        bmin_y = self.min_y + BOARD_EDGE_MARGIN_MM
+        bmax_x = self.max_x - BOARD_EDGE_MARGIN_MM
+        bmax_y = self.max_y - BOARD_EDGE_MARGIN_MM
 
         # Clamp target to board
         tx = max(bmin_x, min(bmax_x, target_x))
@@ -73,7 +81,7 @@ class _PlacementGrid:
 
         # Spiral search — try 8 directions at increasing radii
         step = max(w, h) * 0.5 + self._margin
-        max_rings = 40
+        max_rings = SPIRAL_SEARCH_MAX_RINGS
         if max_radius > 0:
             max_rings = min(max_rings, max(3, int(max_radius / step) + 1))
         for ring in range(1, max_rings):
@@ -120,7 +128,7 @@ def _rotation_aware_size(
     fp_sizes: dict[str, tuple[float, float]],
 ) -> tuple[float, float]:
     """Get rotation-aware bounding box for a component."""
-    w, h = fp_sizes.get(ref, (2.0, 2.0))
+    w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
     if ref in positions:
         rot = positions[ref][2]
         if rot % 180 in (90.0, 270.0):
@@ -137,13 +145,13 @@ def _count_collisions(
     refs = list(positions.keys())
     for i, ref_a in enumerate(refs):
         xa, ya, rot_a = positions[ref_a]
-        wa, ha = fp_sizes.get(ref_a, (2.0, 2.0))
+        wa, ha = fp_sizes.get(ref_a, DEFAULT_FP_SIZE_MM)
         if rot_a % 180 in (90.0, 270.0):
             wa, ha = ha, wa
 
         for ref_b in refs[i + 1:]:
             xb, yb, rot_b = positions[ref_b]
-            wb, hb = fp_sizes.get(ref_b, (2.0, 2.0))
+            wb, hb = fp_sizes.get(ref_b, DEFAULT_FP_SIZE_MM)
             if rot_b % 180 in (90.0, 270.0):
                 wb, hb = hb, wb
 
@@ -204,17 +212,17 @@ def _resolve_collisions(
             if r not in pos:
                 continue
             rx, ry, _rot = pos[r]
-            w, h = fp_sizes.get(r, (2.0, 2.0))
+            w, h = fp_sizes.get(r, DEFAULT_FP_SIZE_MM)
             gmin_x = min(gmin_x, rx - w / 2)
             gmin_y = min(gmin_y, ry - h / 2)
             gmax_x = max(gmax_x, rx + w / 2)
             gmax_y = max(gmax_y, ry + h / 2)
-        margin = 5.0  # allow 5mm expansion for collision resolution
+        margin = COLLISION_GROUP_EXPANSION_MM
         return (gmin_x - margin, gmin_y - margin,
                 gmax_x + margin, gmax_y + margin)
 
     # Iteratively relocate colliding components
-    for _pass in range(12):
+    for _pass in range(COLLISION_MAX_PASSES):
         # Recompute colliding refs each pass (relocations may create new collisions)
         current_collisions = _count_collisions(result, fp_sizes)
         if not current_collisions:
@@ -230,7 +238,7 @@ def _resolve_collisions(
         sorted_refs = sorted(
             colliding_refs,
             key=lambda r: (
-                fp_sizes.get(r, (2.0, 2.0))[0] * fp_sizes.get(r, (2.0, 2.0))[1]
+                fp_sizes.get(r, DEFAULT_FP_SIZE_MM)[0] * fp_sizes.get(r, DEFAULT_FP_SIZE_MM)[1]
             ),
         )
 

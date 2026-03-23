@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from kicad_pipeline.constants import COMPONENT_CLEARANCE_GAP_MM, DEFAULT_FP_SIZE_MM
 from kicad_pipeline.optimization.collision_resolver import _PlacementGrid
 from kicad_pipeline.optimization.placement_types import GroupBoundingBox
 
@@ -27,9 +28,9 @@ def _group_footprint_area(
     Arranges components in a tight 2-column layout to estimate area.
     Returns (width, height) in mm.
     """
-    sizes = [fp_sizes.get(r, (2.0, 2.0)) for r in refs]
+    sizes = [fp_sizes.get(r, DEFAULT_FP_SIZE_MM) for r in refs]
     if not sizes:
-        return (2.0, 2.0)
+        return DEFAULT_FP_SIZE_MM
     if len(sizes) == 1:
         return (sizes[0][0] + 1.0, sizes[0][1] + 1.0)
 
@@ -41,7 +42,7 @@ def _group_footprint_area(
     for i, (w, h) in enumerate(sizes):
         c = i % cols
         col_widths[c] = max(col_widths[c], w)
-        col_heights[c] += h + 0.5  # gap between rows
+        col_heights[c] += h + COMPONENT_CLEARANCE_GAP_MM
 
     total_w = sum(col_widths) + 1.0 * (cols - 1) + 1.0  # inter-col gap + margin
     total_h = max(col_heights) + 1.0  # margin
@@ -69,7 +70,7 @@ def _place_subcircuit_group(
     positions: dict[str, tuple[float, float]] = {}
 
     # Place anchor
-    aw, ah = fp_sizes.get(anchor_ref, (2.0, 2.0))
+    aw, ah = fp_sizes.get(anchor_ref, DEFAULT_FP_SIZE_MM)
     ax, ay = grid.find_free_pos(anchor_pos[0], anchor_pos[1], aw, ah)
     grid.place(ax, ay, aw, ah)
     positions[anchor_ref] = (ax, ay)
@@ -80,7 +81,7 @@ def _place_subcircuit_group(
 
     # Sort by size (largest first) so they get placed closer to anchor
     other_with_size = [
-        (ref, fp_sizes.get(ref, (2.0, 2.0))) for ref in other_refs
+        (ref, fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)) for ref in other_refs
     ]
     other_with_size.sort(key=lambda x: x[1][0] * x[1][1], reverse=True)
 
@@ -93,8 +94,8 @@ def _place_subcircuit_group(
         angle = angle_step * i
         cos_a, sin_a = math.cos(angle), math.sin(angle)
         # Minimum distance along this direction to clear anchor + component
-        clear_x = (w + aw) / 2.0 + 0.5
-        clear_y = (h + ah) / 2.0 + 0.5
+        clear_x = (w + aw) / 2.0 + COMPONENT_CLEARANCE_GAP_MM
+        clear_y = (h + ah) / 2.0 + COMPONENT_CLEARANCE_GAP_MM
         # Project clearance onto direction vector
         if abs(cos_a) > 0.01 or abs(sin_a) > 0.01:
             min_dist = math.sqrt(
@@ -190,14 +191,14 @@ def _apply_review_fixes(
                 continue
             old_x, old_y, rot = result[ref]
             sx, sy = violation.suggested_position
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
             # Build grid excluding this component
             fix_grid = _PlacementGrid(bounds)
             for other_ref, (ox, oy, _orot) in result.items():
                 if other_ref == ref:
                     continue
-                ow, oh = fp_sizes.get(other_ref, (2.0, 2.0))
+                ow, oh = fp_sizes.get(other_ref, DEFAULT_FP_SIZE_MM)
                 fix_grid.place(ox, oy, ow, oh)
 
             # Find nearest free position to suggested target
@@ -239,7 +240,7 @@ def _extract_group_bboxes(
         max_y = float("-inf")
         for ref in refs_in_pos:
             x, y, _rot = positions[ref]
-            w, h = fp_sizes.get(ref, (2.0, 2.0))
+            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
             min_x = min(min_x, x - w / 2)
             min_y = min(min_y, y - h / 2)
             max_x = max(max_x, x + w / 2)

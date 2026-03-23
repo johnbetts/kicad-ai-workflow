@@ -11,6 +11,11 @@ import math
 import random
 from typing import TYPE_CHECKING
 
+from kicad_pipeline.constants import (
+    BOARD_EDGE_MARGIN_MM,
+    COMPONENT_CLEARANCE_GAP_MM,
+    DEFAULT_FP_SIZE_MM,
+)
 from kicad_pipeline.optimization.placement_types import (
     OptimizationConfig,
     PlacementCandidate,
@@ -100,12 +105,12 @@ def _find_colliding_pairs(
     refs = list(positions.keys())
     for i, ref_a in enumerate(refs):
         xa, ya, rot_a = positions[ref_a]
-        wa, ha = fp_sizes.get(ref_a, (2.0, 2.0))
+        wa, ha = fp_sizes.get(ref_a, DEFAULT_FP_SIZE_MM)
         if rot_a % 180 in (90.0, 270.0):
             wa, ha = ha, wa
         for ref_b in refs[i + 1:]:
             xb, yb, rot_b = positions[ref_b]
-            wb, hb = fp_sizes.get(ref_b, (2.0, 2.0))
+            wb, hb = fp_sizes.get(ref_b, DEFAULT_FP_SIZE_MM)
             if rot_b % 180 in (90.0, 270.0):
                 wb, hb = hb, wb
             dx = abs(xa - xb)
@@ -136,8 +141,8 @@ def _perturbation_resolve_collision(
 
     # Pick the movable one (prefer moving the smaller component)
     if ref_a in movable_set and ref_b in movable_set:
-        sa = fp_sizes.get(ref_a, (2.0, 2.0))
-        sb = fp_sizes.get(ref_b, (2.0, 2.0))
+        sa = fp_sizes.get(ref_a, DEFAULT_FP_SIZE_MM)
+        sb = fp_sizes.get(ref_b, DEFAULT_FP_SIZE_MM)
         to_move = ref_a if (sa[0] * sa[1]) <= (sb[0] * sb[1]) else ref_b
         anchor = ref_b if to_move == ref_a else ref_a
     elif ref_a in movable_set:
@@ -151,8 +156,8 @@ def _perturbation_resolve_collision(
     xm, ym, rot_m = positions[to_move]
 
     # Push away from anchor: direction from anchor to movable, scaled by size
-    wa, ha = fp_sizes.get(anchor, (2.0, 2.0))
-    wm, hm = fp_sizes.get(to_move, (2.0, 2.0))
+    wa, ha = fp_sizes.get(anchor, DEFAULT_FP_SIZE_MM)
+    wm, hm = fp_sizes.get(to_move, DEFAULT_FP_SIZE_MM)
     dx = xm - xa
     dy = ym - ya
     dist = math.sqrt(dx * dx + dy * dy)
@@ -163,14 +168,14 @@ def _perturbation_resolve_collision(
         dist = 1.0
 
     # Move enough to clear overlap + small gap
-    needed = (wa + wm) / 2.0 + 0.5
+    needed = (wa + wm) / 2.0 + COMPONENT_CLEARANCE_GAP_MM
     scale = needed / dist
     new_x = xa + dx * scale
     new_y = ya + dy * scale
 
     # Clamp to board
-    new_x = max(board_min_x + 2.0, min(board_min_x + board_w - 2.0, new_x))
-    new_y = max(board_min_y + 2.0, min(board_min_y + board_h - 2.0, new_y))
+    new_x = max(board_min_x + BOARD_EDGE_MARGIN_MM, min(board_min_x + board_w - BOARD_EDGE_MARGIN_MM, new_x))
+    new_y = max(board_min_y + BOARD_EDGE_MARGIN_MM, min(board_min_y + board_h - BOARD_EDGE_MARGIN_MM, new_y))
 
     result = dict(positions)
     result[to_move] = (new_x, new_y, rot_m)
@@ -213,8 +218,8 @@ def _perturbation_pull_connected(
     new_x = x + (cx - x) * fraction
     new_y = y + (cy - y) * fraction
 
-    new_x = max(board_min_x + 2.0, min(board_min_x + board_w - 2.0, new_x))
-    new_y = max(board_min_y + 2.0, min(board_min_y + board_h - 2.0, new_y))
+    new_x = max(board_min_x + BOARD_EDGE_MARGIN_MM, min(board_min_x + board_w - BOARD_EDGE_MARGIN_MM, new_x))
+    new_y = max(board_min_y + BOARD_EDGE_MARGIN_MM, min(board_min_y + board_h - BOARD_EDGE_MARGIN_MM, new_y))
 
     result = dict(positions)
     result[ref] = (new_x, new_y, rot)
