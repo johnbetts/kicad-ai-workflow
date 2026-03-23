@@ -152,3 +152,78 @@ def test_mm_to_gerber_positive() -> None:
 
 def test_mm_to_gerber_negative() -> None:
     assert _mm_to_gerber(-1.0) == "-1000000"
+
+
+# ---------------------------------------------------------------------------
+# Edge / negative tests
+# ---------------------------------------------------------------------------
+
+
+def test_mm_to_gerber_zero() -> None:
+    assert _mm_to_gerber(0.0) == "0"
+
+
+def test_mm_to_gerber_fractional() -> None:
+    """Fractional mm rounds to nearest integer coordinate."""
+    result = _mm_to_gerber(0.5)
+    assert result == "500000"
+
+
+def test_gerber_empty_pcb_no_crash() -> None:
+    """generate_copper_layer on empty PCB produces valid gerber with header/footer."""
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=()),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(),
+        tracks=(),
+        vias=(),
+        zones=(),
+        keepouts=(),
+    )
+    result = generate_copper_layer(pcb, "F.Cu")
+    assert "%FSLAX46Y46*%" in result
+    assert "M02*" in result
+
+
+def test_edge_cuts_empty_polygon() -> None:
+    """generate_edge_cuts with no outline points produces header+footer only."""
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=()),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(),
+        tracks=(),
+        vias=(),
+        zones=(),
+        keepouts=(),
+    )
+    result = generate_edge_cuts(pcb)
+    assert "M02*" in result
+    # No D01/D02 moves since no points
+    assert "D01*" not in result
+
+
+def test_gerber_layer_file_function_default() -> None:
+    """Unknown layer gets 'Other,User' as file function in header."""
+    from kicad_pipeline.production.gerber import _make_gerber_header
+
+    header = _make_gerber_header("Custom.Layer")
+    header_text = "\n".join(header)
+    assert "Other,User" in header_text
+
+
+def test_generate_all_gerbers_custom_project_name() -> None:
+    """generate_all_gerbers uses project_name in filenames."""
+    pcb = _make_pcb()
+    result = generate_all_gerbers(pcb, project_name="myboard")
+    for key in result:
+        assert key.startswith("myboard-")
+
+
+def test_gerber_no_smd_pads_on_back() -> None:
+    """B.Cu gerber has no pad flashes when all pads are F.Cu only."""
+    pcb = _make_pcb()
+    result = generate_copper_layer(pcb, "B.Cu")
+    # Should not have D03 pad flash since pad is F.Cu only
+    assert "D03*" not in result

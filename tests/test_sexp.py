@@ -17,6 +17,19 @@ if TYPE_CHECKING:
 from kicad_pipeline.sexp.parser import parse, parse_file
 from kicad_pipeline.sexp.writer import SExpNode, atom, needs_quotes, write, write_file
 
+# ---------------------------------------------------------------------------
+# Test constants
+# ---------------------------------------------------------------------------
+
+_GRID_START: float = 10.16
+"""Standard KiCad 0.1-inch grid spacing -- commonly used start coordinate."""
+
+_GRID_END: float = 20.32
+"""Standard KiCad 0.1-inch grid spacing -- commonly used end coordinate."""
+
+_SCH_VERSION: int = 20231120
+"""KiCad schematic file version used in tests."""
+
 # ===========================================================================
 # atom() — scalar formatting
 # ===========================================================================
@@ -59,7 +72,7 @@ def test_atom_number_int() -> None:
 def test_atom_number_float() -> None:
     """A float is written as a bare decimal literal."""
     assert atom(3.14) == "3.14"
-    assert atom(10.16) == "10.16"
+    assert atom(_GRID_START) == "10.16"
     assert atom(0.0) == "0.0"
 
 
@@ -111,7 +124,7 @@ def test_simple_list() -> None:
 
 def test_list_atoms_only_on_one_line() -> None:
     """A list whose elements are all atoms is written on one line."""
-    node: SExpNode = ["start", 10.16, 10.16]
+    node: SExpNode = ["start", _GRID_START, _GRID_START]
     result = write(node)
     assert "\n" not in result.strip()
     assert result.strip() == "(start 10.16 10.16)"
@@ -121,8 +134,8 @@ def test_nested_list() -> None:
     """Nested lists produce correctly indented multi-line output."""
     node: SExpNode = [
         "wire",
-        ["start", 10.16, 10.16],
-        ["end", 20.32, 10.16],
+        ["start", _GRID_START, _GRID_START],
+        ["end", _GRID_END, _GRID_START],
     ]
     result = write(node)
     lines = result.splitlines()
@@ -168,8 +181,8 @@ def test_roundtrip_nested() -> None:
     """parse(write(node)) == node for a nested list."""
     node: SExpNode = [
         "wire",
-        ["start", 10.16, 10.16],
-        ["end", 20.32, 10.16],
+        ["start", _GRID_START, _GRID_START],
+        ["end", _GRID_END, _GRID_START],
         ["stroke", ["width", 0], ["type", "default"]],
     ]
     assert parse(write(node)) == node
@@ -265,10 +278,10 @@ def test_kicad_wire_fragment() -> None:
 
     assert isinstance(result, list)
     start = find("start", result)
-    assert start == ["start", 10.16, 10.16]
+    assert start == ["start", _GRID_START, _GRID_START]
 
     end = find("end", result)
-    assert end == ["end", 20.32, 10.16]
+    assert end == ["end", _GRID_END, _GRID_START]
 
     stroke = find("stroke", result)
     assert stroke is not None
@@ -290,10 +303,10 @@ def test_write_file_and_parse_file(tmp_path: Path) -> None:
     """Roundtrip through the filesystem: write_file → parse_file."""
     node: SExpNode = [
         "kicad_sch",
-        ["version", 20231120],
+        ["version", _SCH_VERSION],
         ["generator", "kicad-ai-pipeline"],
         ["paper", "A4"],
-        ["wire", ["start", 10.16, 10.16], ["end", 20.32, 10.16]],
+        ["wire", ["start", _GRID_START, _GRID_START], ["end", _GRID_END, _GRID_START]],
     ]
     dest = tmp_path / "test.kicad_sch"
     write_file(node, dest)
@@ -340,3 +353,143 @@ def test_parse_raises_on_unexpected_close_paren() -> None:
 
     with pytest.raises(SExpParseError):
         parse("(wire)) ")
+
+
+# ===========================================================================
+# Parser edge cases
+# ===========================================================================
+
+
+def test_parse_whitespace_only_raises() -> None:
+    """Whitespace-only input raises SExpParseError."""
+    from kicad_pipeline.exceptions import SExpParseError
+
+    with pytest.raises(SExpParseError):
+        parse("   \n\t  ")
+
+
+def test_parse_deeply_nested() -> None:
+    """Deeply nested lists parse correctly (10 levels)."""
+    depth = 10
+    text = "(" * depth + "leaf" + ")" * depth
+    result = parse(text)
+    # Walk down to the leaf
+    node = result
+    for _ in range(depth - 1):
+        assert isinstance(node, list)
+        assert len(node) == 1
+        node = node[0]
+    assert isinstance(node, list)
+    assert node[0] == "leaf"
+
+
+def test_parse_multiple_top_level_expressions() -> None:
+    """Multiple top-level expressions are wrapped in a list."""
+    result = parse("(a 1) (b 2)")
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0] == ["a", 1]
+    assert result[1] == ["b", 2]
+
+
+def test_parse_unterminated_string_raises() -> None:
+    """Unterminated double-quoted string raises SExpParseError."""
+    from kicad_pipeline.exceptions import SExpParseError
+
+    with pytest.raises(SExpParseError, match="Unterminated"):
+        parse('(label "never closed)')
+
+
+def test_parse_negative_number() -> None:
+    """Negative integers and floats parse correctly."""
+    result = parse("(offset -5 -3.14)")
+    assert result == ["offset", -5, -3.14]
+
+
+def test_parse_scientific_notation() -> None:
+    """Scientific notation floats parse correctly."""
+    result = parse("(val 1e-6)")
+    assert result == ["val", 1e-6]
+
+
+def test_parse_comment_only_raises() -> None:
+    """Input that is only comments raises SExpParseError."""
+    from kicad_pipeline.exceptions import SExpParseError
+
+    with pytest.raises(SExpParseError):
+        parse("; just a comment\n; another one\n")
+
+
+def test_parse_unknown_escape_passthrough() -> None:
+    r"""Unknown escape sequences like \x are passed through verbatim."""
+    result = parse(r'(label "foo\xbar")')
+    assert isinstance(result, list)
+    assert result[1] == "foo\\xbar"
+
+
+# ===========================================================================
+# Writer edge cases
+# ===========================================================================
+
+
+def test_write_empty_list() -> None:
+    """An empty list serialises to ``()``."""
+    result = write([])
+    assert result.strip() == "()"
+
+
+def test_write_scalar_string() -> None:
+    """A bare scalar string is written without enclosing parens."""
+    result = write("hello")  # type: ignore[arg-type]
+    assert result == '"hello"'
+
+
+def test_write_scalar_int() -> None:
+    """A bare scalar int is written without enclosing parens."""
+    result = write(42)  # type: ignore[arg-type]
+    assert result == "42"
+
+
+def test_atom_empty_string_quoted() -> None:
+    """Empty string must be quoted."""
+    result = atom("")
+    assert result == '""'
+
+
+def test_atom_string_with_parens_quoted() -> None:
+    """String with parentheses must be quoted."""
+    result = atom("foo(bar)")
+    assert '"' in result
+
+
+def test_atom_float_very_small() -> None:
+    """Very small float still has decimal point."""
+    result = atom(0.001)
+    assert "." in result or "e" in result
+
+
+def test_atom_float_large() -> None:
+    """Large float rendered correctly."""
+    result = atom(1e12)
+    assert "1" in result
+
+
+def test_needs_quotes_with_paren() -> None:
+    """String with parenthesis needs quoting."""
+    assert needs_quotes("foo(") is True
+
+
+def test_needs_quotes_with_double_quote() -> None:
+    """String with double-quote needs quoting."""
+    assert needs_quotes('foo"bar') is True
+
+
+def test_roundtrip_empty_list() -> None:
+    """parse(write([])) == []."""
+    assert parse(write([])) == []
+
+
+def test_roundtrip_unicode() -> None:
+    """Unicode strings survive a write->parse roundtrip."""
+    node: SExpNode = ["label", "réseau"]
+    assert parse(write(node)) == node

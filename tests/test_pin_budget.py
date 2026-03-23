@@ -164,3 +164,80 @@ def test_validate_pin_map_valid() -> None:
     pin_map = MCUPinMap(mcu_ref="U1", assignments=assignments, unassigned_gpio=())
     warnings = validate_pin_map(pin_map)
     assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Edge / negative tests
+# ---------------------------------------------------------------------------
+
+
+def test_validate_pin_map_duplicate_pins() -> None:
+    """validate_pin_map warns on duplicate pin_number assignments."""
+    assignments = (
+        _make_assignment("GPIO4", PinFunction.GPIO, "LED_CTRL"),
+        _make_assignment("GPIO4", PinFunction.SPI_CLK, "SPI_CLK"),
+    )
+    pin_map = MCUPinMap(mcu_ref="U1", assignments=assignments, unassigned_gpio=())
+    warnings = validate_pin_map(pin_map)
+    assert len(warnings) >= 1
+    assert any("Duplicate" in w for w in warnings)
+
+
+def test_validate_pin_map_usb_dp_only() -> None:
+    """validate_pin_map warns when USB_DP present but USB_DM missing."""
+    assignments = (
+        _make_assignment("GPIO20", PinFunction.USB_DP, "USB_DP"),
+    )
+    pin_map = MCUPinMap(mcu_ref="U1", assignments=assignments, unassigned_gpio=())
+    warnings = validate_pin_map(pin_map)
+    assert any("USB_DM" in w for w in warnings)
+
+
+def test_validate_pin_map_usb_dm_only() -> None:
+    """validate_pin_map warns when USB_DM present but USB_DP missing."""
+    assignments = (
+        _make_assignment("GPIO19", PinFunction.USB_DM, "USB_DM"),
+    )
+    pin_map = MCUPinMap(mcu_ref="U1", assignments=assignments, unassigned_gpio=())
+    warnings = validate_pin_map(pin_map)
+    assert any("USB_DP" in w for w in warnings)
+
+
+def test_validate_pin_map_empty() -> None:
+    """validate_pin_map on empty pin map returns no warnings."""
+    pin_map = MCUPinMap(mcu_ref="U1", assignments=(), unassigned_gpio=())
+    warnings = validate_pin_map(pin_map)
+    assert warnings == []
+
+
+def test_free_gpio_count_never_negative() -> None:
+    """free_gpio_count never goes below 0 even if more pins assigned than total."""
+    tracker = _make_tracker(total_pins=1)
+    tracker.assign("GPIO4", "IO4", PinFunction.GPIO, "LED1")
+    tracker.assign("GPIO5", "IO5", PinFunction.GPIO, "LED2")
+    assert tracker.free_gpio_count() == 0
+
+
+def test_build_empty_tracker() -> None:
+    """build() on tracker with no assignments returns empty pin map."""
+    tracker = _make_tracker(total_pins=40)
+    pin_map = tracker.build()
+    assert len(pin_map.assignments) == 0
+    assert pin_map.mcu_ref == "U1"
+
+
+def test_assign_with_notes() -> None:
+    """assign() correctly stores notes field."""
+    tracker = _make_tracker()
+    tracker.assign("GPIO4", "IO4", PinFunction.ADC, "SENSOR", notes="12-bit ADC")
+    a = tracker.get_assignment("GPIO4")
+    assert a is not None
+    assert a.notes == "12-bit ADC"
+
+
+def test_pins_by_function_empty() -> None:
+    """pins_by_function returns empty list when no matching function."""
+    tracker = _make_tracker()
+    tracker.assign("GPIO4", "IO4", PinFunction.GPIO, "LED")
+    result = tracker.pins_by_function(PinFunction.UART_TX)
+    assert result == []

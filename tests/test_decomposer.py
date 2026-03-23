@@ -321,3 +321,112 @@ def test_requirements_from_dict_malformed() -> None:
     """requirements_from_dict raises RequirementsError on malformed input."""
     with pytest.raises(RequirementsError):
         requirements_from_dict({"project": "not-a-dict"})
+
+
+# ---------------------------------------------------------------------------
+# requirements_to_dict edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_requirements_to_dict_minimal() -> None:
+    """requirements_to_dict produces valid dict for minimal requirements."""
+    req = _minimal_builder().build()
+    data = requirements_to_dict(req)
+    assert data["project"]["name"] == "test-board"
+    assert isinstance(data["components"], list)
+    assert len(data["components"]) == 1
+    assert isinstance(data["nets"], list)
+    assert data["pin_map"] is None
+    assert data["power_budget"] is None
+    assert data["mechanical"] is None
+
+
+def test_requirements_to_dict_has_all_keys() -> None:
+    """requirements_to_dict output includes all expected top-level keys."""
+    from kicad_pipeline.models.requirements import ProjectRequirements
+
+    req: ProjectRequirements = _make_full_requirements()  # type: ignore[assignment]
+    data = requirements_to_dict(req)
+    expected_keys = {"project", "features", "components", "nets",
+                     "pin_map", "power_budget", "mechanical", "recommendations"}
+    assert set(data.keys()) == expected_keys
+
+
+def test_requirements_from_dict_missing_components_raises() -> None:
+    """requirements_from_dict raises when no components are present."""
+    data = {
+        "project": {"name": "empty"},
+        "components": [],
+        "nets": [],
+    }
+    with pytest.raises(RequirementsError, match="no components"):
+        requirements_from_dict(data)
+
+
+def test_requirements_from_dict_invalid_pin_type_raises() -> None:
+    """requirements_from_dict raises for unknown pin type value."""
+    data = {
+        "project": {"name": "bad-pin"},
+        "components": [{
+            "ref": "R1", "value": "10k", "footprint": "R_0805",
+            "pins": [{"number": "1", "name": "~", "pin_type": "bogus"}],
+        }],
+        "nets": [],
+    }
+    with pytest.raises(RequirementsError):
+        requirements_from_dict(data)
+
+
+def test_requirements_from_dict_missing_project_key_raises() -> None:
+    """requirements_from_dict raises when 'project' key is missing."""
+    with pytest.raises(RequirementsError):
+        requirements_from_dict({"components": []})
+
+
+def test_save_and_load_invalid_json(tmp_path: Path) -> None:
+    """load_requirements raises for invalid JSON content."""
+    from pathlib import Path as Pt
+
+    bad_file = tmp_path / "bad.json"
+    bad_file.write_text("not json {{{", encoding="utf-8")
+    with pytest.raises(RequirementsError, match="not valid JSON"):
+        load_requirements(bad_file)
+
+
+# ---------------------------------------------------------------------------
+# RequirementsBuilder edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_builder_add_feature() -> None:
+    """add_feature correctly stores feature blocks."""
+    builder = _minimal_builder()
+    feat = FeatureBlock(
+        name="Power", description="Power supply",
+        components=("U1",), nets=("+3V3",), subcircuits=(),
+    )
+    builder.add_feature(feat)
+    req = builder.build()
+    assert len(req.features) == 1
+    assert req.features[0].name == "Power"
+
+
+def test_builder_set_power_budget() -> None:
+    """set_power_budget stores PowerBudget correctly."""
+    builder = _minimal_builder()
+    pb = PowerBudget(
+        rails=(PowerRail(name="+3V3", voltage=3.3, current_ma=200.0, source_ref="U1"),),
+        total_current_ma=200.0,
+        notes=("estimated",),
+    )
+    builder.set_power_budget(pb)
+    req = builder.build()
+    assert req.power_budget is not None
+    assert req.power_budget.total_current_ma == pytest.approx(200.0)
+
+
+def test_builder_validate_no_components() -> None:
+    """validate returns error when builder has no components."""
+    builder = RequirementsBuilder(ProjectInfo(name="empty"))
+    errors = builder.validate()
+    assert any("no components" in e.lower() for e in errors)

@@ -154,3 +154,92 @@ def test_generate_drill_file_no_holes() -> None:
     assert isinstance(result, str)
     assert "M48" in result
     assert "M30" in result
+
+
+# ---------------------------------------------------------------------------
+# Edge / negative tests
+# ---------------------------------------------------------------------------
+
+
+def test_drill_metric_header() -> None:
+    """Drill file contains METRIC,TZ header."""
+    pcb = _make_pcb_with_holes()
+    result = generate_drill_file(pcb)
+    assert "METRIC,TZ" in result
+
+
+def test_drill_pth_comment() -> None:
+    """PTH drill file has plated comment."""
+    pcb = _make_pcb_with_holes()
+    result = generate_drill_file(pcb, pth_only=True)
+    assert "Plated" in result
+
+
+def test_drill_npth_comment() -> None:
+    """NPTH drill file has non-plated comment."""
+    pcb = _make_pcb_with_holes()
+    result = generate_drill_file(pcb, pth_only=False)
+    assert "Non-plated" in result
+
+
+def test_drill_npth_no_tools_for_thru_hole() -> None:
+    """NPTH drill file doesn't include thru_hole pads."""
+    pcb = _make_pcb_with_holes()
+    result = generate_drill_file(pcb, pth_only=False)
+    # No tool table entries since no np_thru_hole pads
+    assert "T1C" not in result
+
+
+def test_drill_includes_vias() -> None:
+    """PTH drill file includes via hits."""
+    from kicad_pipeline.models.pcb import Via
+
+    pcb_with_holes = _make_pcb_with_holes()
+    via = Via(
+        position=Point(10.0, 10.0),
+        drill=0.4,
+        size=0.8,
+        layers=("F.Cu", "B.Cu"),
+        net_number=0,
+    )
+    pcb = PCBDesign(
+        outline=pcb_with_holes.outline,
+        design_rules=pcb_with_holes.design_rules,
+        nets=pcb_with_holes.nets,
+        footprints=pcb_with_holes.footprints,
+        tracks=(),
+        vias=(via,),
+        zones=(),
+        keepouts=(),
+    )
+    result = generate_drill_file(pcb, pth_only=True)
+    # Should have two tool sizes: 0.8 (pads) and 0.4 (via)
+    assert "T1C" in result
+    assert "T2C" in result
+
+
+def test_drill_multiple_sizes_sorted() -> None:
+    """Multiple drill sizes appear in sorted order in tool table."""
+    th_pad_small = Pad(
+        number="1", pad_type="thru_hole", shape="circle",
+        position=Point(0.0, 0.0), size_x=1.0, size_y=1.0,
+        layers=("F.Cu", "B.Cu"), drill_diameter=0.5,
+    )
+    th_pad_large = Pad(
+        number="2", pad_type="thru_hole", shape="circle",
+        position=Point(2.54, 0.0), size_x=2.0, size_y=2.0,
+        layers=("F.Cu", "B.Cu"), drill_diameter=1.2,
+    )
+    fp = Footprint(
+        lib_id="Connector:Conn", ref="J1", value="Conn",
+        position=Point(10.0, 10.0), layer="F.Cu",
+        pads=(th_pad_small, th_pad_large), attr="through_hole",
+    )
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(Point(0, 0), Point(50, 30))),
+        design_rules=DesignRules(), nets=(NetEntry(0, "GND"),),
+        footprints=(fp,), tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    result = generate_drill_file(pcb)
+    # T1 should be smaller (0.5), T2 should be larger (1.2)
+    assert result.index("T1C0.5000") < result.index("T2C1.2000")

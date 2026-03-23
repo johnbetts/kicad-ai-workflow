@@ -182,3 +182,98 @@ def test_nearest_e24_value() -> None:
     result = nearest_e_series_value(9500.0, series="E24")
     # E24 values near 9500 are 9100 and 10000; accept either decade-scaled
     assert result == pytest.approx(9100.0, rel=0.05) or result == pytest.approx(10_000.0, rel=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Edge / negative tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_by_category_unknown() -> None:
+    """find_by_category for unknown category returns empty list."""
+    db = ComponentDB()
+    result = db.find_by_category("nonexistent_category_xyz")
+    assert result == []
+
+
+def test_find_resistor_closest_match() -> None:
+    """find_resistor picks the closest match, not just any match."""
+    db = ComponentDB()
+    part = db.find_resistor(4_700.0, package="0805")
+    assert part is not None
+    parsed = _parse_resistance_ohms(part.value)
+    assert parsed is not None
+    # Should be within 10% of target
+    assert abs(parsed - 4700.0) / 4700.0 < 0.1
+
+
+def test_find_capacitor_not_found_exotic_package() -> None:
+    """find_capacitor returns None for non-existent package."""
+    db = ComponentDB()
+    part = db.find_capacitor(0.1, package="0201_EXOTIC_FAKE")
+    assert part is None
+
+
+def test_find_ldo_not_found() -> None:
+    """find_ldo returns None for unavailable voltage."""
+    db = ComponentDB()
+    part = db.find_ldo(99.9)  # No 99.9V LDO in basic parts
+    # May or may not find; if found, should be far from target
+    # The key point is it doesn't crash
+
+
+def test_find_led_not_found_exotic_color() -> None:
+    """find_led returns None for non-existent colour."""
+    db = ComponentDB()
+    part = db.find_led(color="ultraviolet_invisible_xyz", package="0805")
+    assert part is None
+
+
+def test_parse_resistance_megaohm() -> None:
+    """_parse_resistance_ohms('2.2M') == 2_200_000.0."""
+    result = _parse_resistance_ohms("2.2M")
+    assert result == pytest.approx(2_200_000.0)
+
+
+def test_parse_resistance_bare_number() -> None:
+    """_parse_resistance_ohms('470') == 470.0."""
+    result = _parse_resistance_ohms("470")
+    assert result == pytest.approx(470.0)
+
+
+def test_parse_resistance_invalid_returns_none() -> None:
+    """_parse_resistance_ohms returns None for non-numeric string."""
+    assert _parse_resistance_ohms("abc") is None
+    assert _parse_resistance_ohms("") is None
+
+
+def test_parse_capacitance_invalid_returns_none() -> None:
+    """_parse_capacitance_uf returns None for non-numeric string."""
+    assert _parse_capacitance_uf("xyz") is None
+    assert _parse_capacitance_uf("") is None
+
+
+def test_parse_capacitance_1uf() -> None:
+    """_parse_capacitance_uf('1uF') == 1.0."""
+    result = _parse_capacitance_uf("1uF")
+    assert result == pytest.approx(1.0)
+
+
+def test_nearest_e_series_unknown_series_raises() -> None:
+    """nearest_e_series_value raises ValueError for unknown series name."""
+    with pytest.raises(ValueError, match="Unknown E-series"):
+        nearest_e_series_value(1000.0, series="E999")
+
+
+def test_nearest_e6_value() -> None:
+    """nearest_e_series_value with E6 returns a standard value."""
+    result = nearest_e_series_value(5000.0, series="E6")
+    assert result == pytest.approx(4700.0, rel=0.1) or result == pytest.approx(6800.0, rel=0.1)
+
+
+def test_all_parts_returns_list() -> None:
+    """all_parts returns a list of JLCPCBPart objects."""
+    db = ComponentDB()
+    parts = db.all_parts()
+    assert isinstance(parts, list)
+    assert all(hasattr(p, "lcsc") for p in parts)

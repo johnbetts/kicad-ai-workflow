@@ -659,6 +659,22 @@ class TestRelayCOMCutout:
         assert max(all_y) > 0.0
         assert abs(abs(min(all_y)) - abs(max(all_y))) < 0.01
 
+    def test_cutout_dimensions_reasonable(self) -> None:
+        """Cutout slot width and height should be reasonable for relay COM wire."""
+        from kicad_pipeline.pcb.footprints import make_relay_spdt
+
+        fp = make_relay_spdt("K1", "SRD-05VDC-SL-C")
+        edge_cuts = [
+            g for g in fp.graphics
+            if hasattr(g, "layer") and g.layer == "Edge.Cuts"
+        ]
+        all_y = []
+        for line in edge_cuts:
+            all_y.extend([line.start.y, line.end.y])
+        span = max(all_y) - min(all_y)
+        # Cutout should be between 2mm and 10mm wide
+        assert 2.0 < span < 10.0
+
     def test_cutout_moves_with_footprint(self) -> None:
         """Edge.Cuts graphics are in local coords — they move with the footprint.
 
@@ -679,3 +695,132 @@ class TestRelayCOMCutout:
             assert abs(line.start.y) < 10.0
             assert abs(line.end.x) < 10.0
             assert abs(line.end.y) < 10.0
+
+
+# ---------------------------------------------------------------------------
+# Config helper edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestConfigHelpers:
+    """Test internal helper functions in board_config_generator."""
+
+    def test_is_gnd_net_matches(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _is_gnd_net
+
+        assert _is_gnd_net("GND") is True
+        assert _is_gnd_net("AGND") is True
+        assert _is_gnd_net("DGND") is True
+
+    def test_is_gnd_net_rejects(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _is_gnd_net
+
+        assert _is_gnd_net("+3V3") is False
+        assert _is_gnd_net("SPI_CLK") is False
+
+    def test_is_power_net_matches(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _is_power_net
+
+        assert _is_power_net("GND") is True
+        assert _is_power_net("+3V3") is True
+        assert _is_power_net("VIN") is True
+        assert _is_power_net("+5V") is True
+
+    def test_is_power_net_rejects(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _is_power_net
+
+        assert _is_power_net("SPI_CLK") is False
+        assert _is_power_net("RELAY_1") is False
+
+    def test_parse_voltage_valid(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _parse_voltage
+
+        assert _parse_voltage("+3V3") == 3.3
+        assert _parse_voltage("+5V") == 5.0
+        assert _parse_voltage("+1V8") == 1.8
+
+    def test_parse_voltage_invalid(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _parse_voltage
+
+        assert _parse_voltage("VIN") is None
+        assert _parse_voltage("GND") is None
+        assert _parse_voltage("SPI_CLK") is None
+
+    def test_is_mcu_component(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _is_mcu_component
+
+        mcu = Component(ref="U1", value="ESP32-S3-WROOM-1", footprint="ESP32")
+        assert _is_mcu_component(mcu) is True
+        resistor = Component(ref="R1", value="10k", footprint="R_0805")
+        assert _is_mcu_component(resistor) is False
+
+    def test_ref_prefix(self) -> None:
+        from kicad_pipeline.config.board_config_generator import _ref_prefix
+
+        assert _ref_prefix("R1") == "R"
+        assert _ref_prefix("U42") == "U"
+        assert _ref_prefix("K1") == "K"
+        assert _ref_prefix("123") == ""
+
+    def test_parse_resistance_r_suffix(self) -> None:
+        """_parse_resistance handles R suffix (e.g. '100R')."""
+        assert _parse_resistance("100R") == 100.0
+
+    def test_empty_requirements_no_crash(self) -> None:
+        """generate_board_config on empty requirements produces valid config."""
+        reqs = _make_requirements()
+        config = generate_board_config(reqs)
+        assert config.project_name == "TestBoard"
+        assert config.relays == ()
+        assert config.adc_channels == ()
+        assert config.buses == ()
+
+
+# ---------------------------------------------------------------------------
+# Ratsnest edge cases (additional to test_ratsnest.py)
+# ---------------------------------------------------------------------------
+
+
+class TestRatsnestEdgeCases:
+    """Additional edge cases for ratsnest utilities."""
+
+    def test_rotate_point_270_degrees(self) -> None:
+        from kicad_pipeline.visualization.ratsnest import rotate_point
+
+        x, y = rotate_point(1.0, 0.0, 270.0)
+        assert abs(x - 0.0) < 1e-9
+        assert abs(y - (-1.0)) < 1e-9
+
+    def test_rotate_point_45_degrees(self) -> None:
+        import math
+
+        from kicad_pipeline.visualization.ratsnest import rotate_point
+
+        x, y = rotate_point(1.0, 0.0, 45.0)
+        expected_x = math.cos(math.radians(45))
+        expected_y = math.sin(math.radians(45))
+        assert abs(x - expected_x) < 1e-9
+        assert abs(y - expected_y) < 1e-9
+
+    def test_mst_four_points_has_three_edges(self) -> None:
+        from kicad_pipeline.visualization.ratsnest import minimum_spanning_tree
+
+        points = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+        edges = minimum_spanning_tree(points)
+        assert len(edges) == 3
+
+    def test_mst_duplicate_points(self) -> None:
+        """MST with duplicate points still produces valid tree."""
+        from kicad_pipeline.visualization.ratsnest import minimum_spanning_tree
+
+        points = [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]
+        edges = minimum_spanning_tree(points)
+        assert len(edges) == 2
+
+    def test_power_nets_are_frozenset(self) -> None:
+        from kicad_pipeline.visualization.ratsnest import POWER_NETS
+
+        assert isinstance(POWER_NETS, frozenset)
+        assert "GND" in POWER_NETS
+        assert "+3V3" in POWER_NETS
+        assert "+5V" in POWER_NETS

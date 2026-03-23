@@ -147,3 +147,53 @@ def test_cpl_package_extraction() -> None:
     r1 = next(r for r in rows if r.designator == "R1")
     # lib_id "Device:R_0805" -> package "R_0805"
     assert r1.package == "R_0805"
+
+
+# ---------------------------------------------------------------------------
+# Edge / negative tests
+# ---------------------------------------------------------------------------
+
+
+def test_cpl_empty_pcb() -> None:
+    """generate_cpl on PCB with no footprints returns empty tuple."""
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(Point(0.0, 0.0), Point(10.0, 10.0))),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(),
+        tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    rows = generate_cpl(pcb)
+    assert rows == ()
+
+
+def test_cpl_to_csv_empty_rows() -> None:
+    """cpl_to_csv with empty tuple returns header only."""
+    csv_str = cpl_to_csv(())
+    lines = csv_str.strip().splitlines()
+    assert len(lines) == 1
+    assert "Designator" in lines[0]
+
+
+def test_cpl_unknown_layer_defaults_to_top() -> None:
+    """Unknown layer name maps to 'top'."""
+    from kicad_pipeline.production.cpl import _get_jlcpcb_layer
+
+    assert _get_jlcpcb_layer("Inner1.Cu") == "top"
+
+
+def test_cpl_package_no_colon() -> None:
+    """Footprint lib_id without colon uses full string as package."""
+    fp = Footprint(
+        lib_id="R_0805", ref="R1", value="10k",
+        position=Point(10.0, 20.0), rotation=0.0, layer="F.Cu",
+    )
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(Point(0.0, 0.0), Point(50.0, 30.0))),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(fp,),
+        tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    rows = generate_cpl(pcb)
+    assert rows[0].package == "R_0805"

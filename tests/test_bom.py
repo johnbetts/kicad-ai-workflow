@@ -176,3 +176,73 @@ def test_bom_to_csv_quoted_designators() -> None:
     csv_str = bom_to_csv(rows)
     # Row with two designators "R1 R2" should be quoted in CSV
     assert "R1 R2" in csv_str or '"R1 R2"' in csv_str
+
+
+# ---------------------------------------------------------------------------
+# Edge / negative tests
+# ---------------------------------------------------------------------------
+
+
+def test_bom_empty_pcb() -> None:
+    """generate_bom on PCB with no footprints returns empty tuple."""
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(Point(0.0, 0.0), Point(10.0, 10.0))),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(),
+        tracks=(),
+        vias=(),
+        zones=(),
+        keepouts=(),
+    )
+    rows = generate_bom(pcb)
+    assert rows == ()
+
+
+def test_bom_to_csv_empty_rows() -> None:
+    """bom_to_csv with empty tuple returns header only."""
+    csv_str = bom_to_csv(())
+    lines = csv_str.strip().splitlines()
+    assert len(lines) == 1
+    assert "Comment" in lines[0]
+
+
+def test_bom_excludes_bom_excluded_footprint() -> None:
+    """Footprints with exclude_from_bom attr are excluded from BOM."""
+    fp_normal = Footprint(
+        lib_id="Device:R_0805", ref="R1", value="10k",
+        position=Point(10.0, 10.0), layer="F.Cu", lcsc="C17414",
+    )
+    fp_excluded = Footprint(
+        lib_id="Mechanical:MountingHole", ref="H1", value="MountingHole",
+        position=Point(5.0, 5.0), layer="F.Cu",
+        attr="exclude_from_bom",
+    )
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(Point(0.0, 0.0), Point(50.0, 30.0))),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(fp_normal, fp_excluded),
+        tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    rows = generate_bom(pcb)
+    refs = " ".join(r.designator for r in rows)
+    assert "H1" not in refs
+
+
+def test_bom_footprint_lib_id_without_colon() -> None:
+    """Footprint with no colon in lib_id uses full lib_id as footprint name."""
+    fp = Footprint(
+        lib_id="R_0805", ref="R1", value="10k",
+        position=Point(10.0, 10.0), layer="F.Cu", lcsc="C17414",
+    )
+    pcb = PCBDesign(
+        outline=BoardOutline(polygon=(Point(0.0, 0.0), Point(50.0, 30.0))),
+        design_rules=DesignRules(),
+        nets=(),
+        footprints=(fp,),
+        tracks=(), vias=(), zones=(), keepouts=(),
+    )
+    rows = generate_bom(pcb)
+    assert len(rows) == 1
+    assert rows[0].footprint == "R_0805"
