@@ -8,11 +8,12 @@ injected into the rebuilt PCBDesign so manual work is not lost.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kicad_pipeline.models.pcb import Keepout, Point, Track, Via, ZonePolygon, ZoneFill
+from kicad_pipeline.models.pcb import Keepout, Point, Track, Via, ZoneFill, ZonePolygon
 from kicad_pipeline.sexp.parser import parse_file
 
 if TYPE_CHECKING:
@@ -28,7 +29,7 @@ class PreservedRouting:
     tracks: tuple[Track, ...]
     vias: tuple[Via, ...]
     zones: tuple[ZonePolygon, ...]
-    keepouts: tuple["Keepout", ...] = ()
+    keepouts: tuple[Keepout, ...] = ()
     edge_cuts: tuple[tuple[Point, Point, float], ...] = ()  # (start, end, width) segments
     net_map: dict[int, str] | None = None  # old_net_number → net_name (for remapping)
 
@@ -415,7 +416,7 @@ def _extract_vias(
         layers_child = _find_child(node, "layers")
         layers: tuple[str, ...] = ()
         if layers_child and len(layers_child) > 1:
-            layers = tuple(str(l) for l in layers_child[1:])
+            layers = tuple(str(layer) for layer in layers_child[1:])
         vias.append(Via(
             position=Point(x, y), drill=drill, size=size,
             layers=layers, net_number=net_num, uuid=uuid,
@@ -462,9 +463,7 @@ def _is_auto_generated_zone(node: SExpNode) -> bool:
         ("F.Cu", "GND"), ("B.Cu", "GND"),
         ("In1.Cu", "GND"), ("In2.Cu", "+5V"),
     }
-    if (layer, net_name) in auto_layer_net:
-        return True
-    return False
+    return (layer, net_name) in auto_layer_net
 
 
 def _extract_polygon_points(node: SExpNode) -> list[Point]:
@@ -480,6 +479,48 @@ def _extract_polygon_points(node: SExpNode) -> list[Point]:
         if isinstance(child, list) and child and child[0] == "xy":
             points.append(Point(float(str(child[1])), float(str(child[2]))))
     return points
+
+
+def _extract_zone_fill_settings(
+    node: SExpNode,
+) -> tuple[float, float, float]:
+    """Extract thermal relief and clearance settings from a zone node.
+
+    Returns:
+        ``(thermal_gap, thermal_bridge, clearance)`` with defaults applied.
+    """
+    fill_node = _find_child(node, "fill")
+    thermal_gap = 0.3
+    thermal_bridge = 0.5
+    if fill_node:
+        thermal_gap = _float_val(fill_node, "thermal_gap")
+        thermal_bridge = _float_val(fill_node, "thermal_bridge_width")
+    connect_pads = _find_child(node, "connect_pads")
+    clearance = 0.3
+    if connect_pads:
+        clearance = _float_val(connect_pads, "clearance")
+    return thermal_gap, thermal_bridge, clearance
+
+
+def _extract_filled_polygons(node: SExpNode) -> list[tuple[Point, ...]]:
+    """Extract filled_polygon data from a zone node."""
+    filled_polys: list[tuple[Point, ...]] = []
+    if not isinstance(node, list):
+        return filled_polys
+    for child in node:
+        if not isinstance(child, list) or not child or child[0] != "filled_polygon":
+            continue
+        fp_pts_node = _find_child(child, "pts")
+        if not fp_pts_node or not isinstance(fp_pts_node, list):
+            continue
+        fp_points = [
+            Point(float(str(sub[1])), float(str(sub[2])))
+            for sub in fp_pts_node[1:]
+            if isinstance(sub, list) and sub and sub[0] == "xy"
+        ]
+        if fp_points:
+            filled_polys.append(tuple(fp_points))
+    return filled_polys
 
 
 def _extract_user_zones(
@@ -510,34 +551,10 @@ def _extract_user_zones(
         uuid = _str_val(node, "uuid")
         # Extract polygon points
         points = _extract_polygon_points(node)
-        # Extract fill settings
-        fill_node = _find_child(node, "fill")
-        thermal_gap = 0.3
-        thermal_bridge = 0.5
-        if fill_node:
-            thermal_gap = _float_val(fill_node, "thermal_gap")
-            thermal_bridge = _float_val(fill_node, "thermal_bridge_width")
-        connect_pads = _find_child(node, "connect_pads")
-        clearance = 0.3
-        if connect_pads:
-            clearance = _float_val(connect_pads, "clearance")
+        thermal_gap, thermal_bridge, clearance = _extract_zone_fill_settings(node)
         min_thickness = _float_val(node, "min_thickness") or 0.25
         priority = int(_float_val(node, "priority") or 0)
-        # Extract filled_polygon data
-        filled_polys: list[tuple[Point, ...]] = []
-        for child in node:
-            if not isinstance(child, list) or not child or child[0] != "filled_polygon":
-                continue
-            fp_pts_node = _find_child(child, "pts")
-            if not fp_pts_node or not isinstance(fp_pts_node, list):
-                continue
-            fp_points = [
-                Point(float(str(sub[1])), float(str(sub[2])))
-                for sub in fp_pts_node[1:]
-                if isinstance(sub, list) and sub and sub[0] == "xy"
-            ]
-            if fp_points:
-                filled_polys.append(tuple(fp_points))
+        filled_polys = _extract_filled_polygons(node)
         if points:
             zones.append(ZonePolygon(
                 net_number=net_num, net_name=net_name, layer=layer,
@@ -674,6 +691,54 @@ def _touches_outline_edge(
     return False
 
 
+_MIN_SEGMENT_LENGTH_MM = 0.5
+
+
+def _filter_user_edge_cuts(
+    all_edge_cuts: list[tuple[Point, Point, float]],
+) -> list[tuple[Point, Point, float]]:
+    """Filter board outline segments, keeping only user-created slots/cutouts.
+
+    Removes segments that form the rectangular board outline and discards
+    micro-fragments (< 0.5mm) that are routing artefacts.
+    """
+    if not all_edge_cuts:
+        return []
+
+    all_x = [s.x for s, e, w in all_edge_cuts] + [e.x for s, e, w in all_edge_cuts]
+    all_y = [s.y for s, e, w in all_edge_cuts] + [e.y for s, e, w in all_edge_cuts]
+    if not all_x or not all_y:
+        return list(all_edge_cuts)
+
+    min_x, max_x = min(all_x), max(all_x)
+    min_y, max_y = min(all_y), max(all_y)
+    outline_pts = {
+        (min_x, min_y), (max_x, min_y),
+        (max_x, max_y), (min_x, max_y),
+    }
+    non_outline = [
+        seg for seg in all_edge_cuts
+        if not _is_outline_segment(seg, outline_pts)
+    ]
+
+    user_edge_cuts: list[tuple[Point, Point, float]] = []
+    filtered_count = 0
+    for seg in non_outline:
+        s, e, _w = seg
+        if math.hypot(e.x - s.x, e.y - s.y) < _MIN_SEGMENT_LENGTH_MM:
+            filtered_count += 1
+        else:
+            user_edge_cuts.append(seg)
+
+    if filtered_count:
+        log.info(
+            "Filtered %d micro Edge.Cuts fragments (< %.1fmm)",
+            filtered_count,
+            _MIN_SEGMENT_LENGTH_MM,
+        )
+    return user_edge_cuts
+
+
 def routing_from_pcb_file(path: str | Path) -> PreservedRouting:
     """Parse a ``.kicad_pcb`` file and extract all user routing and board features.
 
@@ -702,45 +767,7 @@ def routing_from_pcb_file(path: str | Path) -> PreservedRouting:
     user_keepouts = _extract_user_keepouts(tree)
     all_edge_cuts = _extract_edge_cuts(tree)
 
-    # Filter out board outline segments — keep only slots/cutouts
-    # Detect outline corners from the auto-generated rectangular outline
-    # (4 corners = min_x,min_y / max_x,min_y / max_x,max_y / min_x,max_y)
-    if all_edge_cuts:
-        all_x = [s.x for s, e, w in all_edge_cuts] + [e.x for s, e, w in all_edge_cuts]
-        all_y = [s.y for s, e, w in all_edge_cuts] + [e.y for s, e, w in all_edge_cuts]
-        if all_x and all_y:
-            min_x, max_x = min(all_x), max(all_x)
-            min_y, max_y = min(all_y), max(all_y)
-            outline_pts = {
-                (min_x, min_y), (max_x, min_y),
-                (max_x, max_y), (min_x, max_y),
-            }
-            non_outline = [
-                seg for seg in all_edge_cuts
-                if not _is_outline_segment(seg, outline_pts)
-            ]
-            # Keep all non-outline edge cuts (slots, isolation cuts, etc.).
-            # Only discard isolated micro-fragments (< 0.5mm) that are
-            # routing artefacts — not real board features.
-            import math as _math
-            user_edge_cuts = []
-            filtered_count = 0
-            for seg in non_outline:
-                s, e, w = seg
-                length = _math.hypot(e.x - s.x, e.y - s.y)
-                if length < 0.5:
-                    filtered_count += 1
-                else:
-                    user_edge_cuts.append(seg)
-            if filtered_count:
-                log.info(
-                    "Filtered %d micro Edge.Cuts fragments (< 0.5mm)",
-                    filtered_count,
-                )
-        else:
-            user_edge_cuts = all_edge_cuts
-    else:
-        user_edge_cuts = []
+    user_edge_cuts = _filter_user_edge_cuts(all_edge_cuts)
 
     log.info(
         "Preserved routing: %d tracks, %d vias, %d user zones, %d keepouts, %d edge cuts",

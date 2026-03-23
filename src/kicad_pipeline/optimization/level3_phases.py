@@ -191,6 +191,73 @@ def _place_row_layout(
     return positions
 
 
+def _boundary_target_from_zones(
+    sc: DetectedSubCircuit,
+    zone_rects: dict[VoltageDomain, tuple[float, float, float, float]],
+    domain_centroids: dict[VoltageDomain, tuple[float, float]],
+    min_x: float,
+    min_y: float,
+) -> tuple[float, float] | None:
+    """Compute boundary target position from zone rects or domain centroids.
+
+    Returns (target_x, target_y) or None if insufficient data.
+    """
+    assert sc.input_domain is not None and sc.output_domain is not None
+    in_rect = zone_rects.get(sc.input_domain)
+    out_rect = zone_rects.get(sc.output_domain)
+
+    if in_rect and out_rect:
+        ix1, iy1, ix2, iy2 = in_rect
+        ox1, oy1, ox2, oy2 = out_rect
+        if abs(ix2 - ox1) < 12.0:
+            return ((ix2 + ox1) / 2.0 + min_x,
+                    (max(iy1, oy1) + min(iy2, oy2)) / 2.0 + min_y)
+        if abs(iy2 - oy1) < 12.0:
+            return ((max(ix1, ox1) + min(ix2, ox2)) / 2.0 + min_x,
+                    (iy2 + oy1) / 2.0 + min_y)
+        # No clear shared edge -- fall through to centroid midpoint
+
+    in_c = domain_centroids.get(sc.input_domain)
+    out_c = domain_centroids.get(sc.output_domain)
+    if in_c is None or out_c is None:
+        return None
+    return ((in_c[0] + out_c[0]) / 2.0, (in_c[1] + out_c[1]) / 2.0)
+
+
+def _pull_members_toward_anchor(
+    sc: DetectedSubCircuit,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+    move_grid: _PlacementGrid,
+    fx: float,
+    fy: float,
+    aw: float,
+) -> None:
+    """Pull subcircuit members toward the new anchor position *fx, fy*."""
+    min_x, min_y, max_x, max_y = bounds
+    for ref in sc.refs:
+        if ref == sc.anchor_ref or ref in fixed_refs or ref not in positions:
+            continue
+        rx, ry, rrot = positions[ref]
+        w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
+        ideal_dist = (w + aw) / 2.0 + 1.0
+        rdist = math.sqrt((rx - fx) ** 2 + (ry - fy) ** 2)
+        if rdist <= ideal_dist + 1.0 or rdist < 0.01:
+            continue
+        dx = (fx - rx) / rdist
+        dy = (fy - ry) / rdist
+        tx = max(min_x + BOARD_EDGE_MARGIN_MM,
+                 min(max_x - BOARD_EDGE_MARGIN_MM, fx - dx * ideal_dist))
+        ty = max(min_y + BOARD_EDGE_MARGIN_MM,
+                 min(max_y - BOARD_EDGE_MARGIN_MM, fy - dy * ideal_dist))
+        mrx, mry = move_grid.find_free_pos(tx, ty, w, h)
+        if math.sqrt((mrx - fx) ** 2 + (mry - fy) ** 2) < rdist:
+            move_grid.place(mrx, mry, w, h)
+            positions[ref] = (mrx, mry, rrot)
+
+
 def _place_boundary_regulators(
     subcircuits: Sequence[DetectedSubCircuit],
     positions: dict[str, tuple[float, float, float]],
@@ -208,13 +275,11 @@ def _place_boundary_regulators(
     """
     min_x, min_y, max_x, max_y = bounds
 
-    # Build zone rect lookup
     zone_rects: dict[VoltageDomain, tuple[float, float, float, float]] = {}
     if zone_assignments:
         for za in zone_assignments:
             zone_rects[za.domain] = za.zone_rect
 
-    # Compute domain centroids (fallback)
     domain_positions: dict[VoltageDomain, list[tuple[float, float]]] = {}
     for ref, (x, y, _rot) in positions.items():
         d = domain_map.get(ref)
@@ -223,9 +288,10 @@ def _place_boundary_regulators(
 
     domain_centroids: dict[VoltageDomain, tuple[float, float]] = {}
     for d, pts in domain_positions.items():
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
-        domain_centroids[d] = (cx, cy)
+        domain_centroids[d] = (
+            sum(p[0] for p in pts) / len(pts),
+            sum(p[1] for p in pts) / len(pts),
+        )
 
     for sc in subcircuits:
         if sc.layout_hint != "boundary":
@@ -235,87 +301,38 @@ def _place_boundary_regulators(
         if sc.anchor_ref in fixed_refs or sc.anchor_ref not in positions:
             continue
 
-        # Try zone rects first: find shared edge between input/output zones
-        in_rect = zone_rects.get(sc.input_domain)
-        out_rect = zone_rects.get(sc.output_domain)
+        result = _boundary_target_from_zones(
+            sc, zone_rects, domain_centroids, min_x, min_y,
+        )
+        if result is None:
+            continue
+        target_x = max(min_x + BOARD_EDGE_MARGIN_MM,
+                       min(max_x - BOARD_EDGE_MARGIN_MM, result[0]))
+        target_y = max(min_y + BOARD_EDGE_MARGIN_MM,
+                       min(max_y - BOARD_EDGE_MARGIN_MM, result[1]))
 
-        if in_rect and out_rect:
-            # Find the shared boundary between the two zone rects
-            # Check if they share a vertical boundary (left-right layout)
-            ix1, iy1, ix2, iy2 = in_rect
-            ox1, oy1, ox2, oy2 = out_rect
-            # Input right edge meets output left edge
-            if abs(ix2 - ox1) < 12.0:
-                target_x = (ix2 + ox1) / 2.0 + min_x
-                target_y = (max(iy1, oy1) + min(iy2, oy2)) / 2.0 + min_y
-            # Input bottom edge meets output top edge
-            elif abs(iy2 - oy1) < 12.0:
-                target_x = (max(ix1, ox1) + min(ix2, ox2)) / 2.0 + min_x
-                target_y = (iy2 + oy1) / 2.0 + min_y
-            else:
-                # No clear shared edge -- use centroid midpoint
-                in_c = domain_centroids.get(sc.input_domain)
-                out_c = domain_centroids.get(sc.output_domain)
-                if in_c is None or out_c is None:
-                    continue
-                target_x = (in_c[0] + out_c[0]) / 2.0
-                target_y = (in_c[1] + out_c[1]) / 2.0
-        else:
-            in_centroid = domain_centroids.get(sc.input_domain)
-            out_centroid = domain_centroids.get(sc.output_domain)
-            if in_centroid is None or out_centroid is None:
-                continue
-            # Target: midpoint between domain centroids
-            target_x = (in_centroid[0] + out_centroid[0]) / 2.0
-            target_y = (in_centroid[1] + out_centroid[1]) / 2.0
-        target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, target_x))
-        target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, target_y))
-
-        # Check if moving is actually closer to boundary
         ax, ay, arot = positions[sc.anchor_ref]
         aw, ah = fp_sizes.get(sc.anchor_ref, DEFAULT_FP_SIZE_MM)
         current_dist = math.sqrt((ax - target_x) ** 2 + (ay - target_y) ** 2)
 
         if current_dist < 3.0:
-            continue  # Already near boundary
+            continue
 
-        # Build grid without this subcircuit's refs
         move_grid = _PlacementGrid(bounds)
         sc_refs_set = set(sc.refs)
         for ref, (ox, oy, _orot) in positions.items():
-            if ref in sc_refs_set:
-                continue
-            ow, oh = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
-            move_grid.place(ox, oy, ow, oh)
+            if ref not in sc_refs_set:
+                ow, oh = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
+                move_grid.place(ox, oy, ow, oh)
 
         fx, fy = move_grid.find_free_pos(target_x, target_y, aw, ah)
         new_dist = math.sqrt((fx - target_x) ** 2 + (fy - target_y) ** 2)
         if new_dist < current_dist:
             positions[sc.anchor_ref] = (fx, fy, arot)
             move_grid.place(fx, fy, aw, ah)
-
-            # Pull sub-circuit members toward new anchor position
-            for ref in sc.refs:
-                if ref == sc.anchor_ref or ref in fixed_refs or ref not in positions:
-                    continue
-                rx, ry, rrot = positions[ref]
-                w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
-                ideal_dist = (w + aw) / 2.0 + 1.0
-                rdist = math.sqrt((rx - fx) ** 2 + (ry - fy) ** 2)
-                if rdist <= ideal_dist + 1.0:
-                    continue
-                if rdist < 0.01:
-                    continue
-                dx = (fx - rx) / rdist
-                dy = (fy - ry) / rdist
-                tx = fx - dx * ideal_dist
-                ty = fy - dy * ideal_dist
-                tx = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, tx))
-                ty = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, ty))
-                mrx, mry = move_grid.find_free_pos(tx, ty, w, h)
-                if math.sqrt((mrx - fx) ** 2 + (mry - fy) ** 2) < rdist:
-                    move_grid.place(mrx, mry, w, h)
-                    positions[ref] = (mrx, mry, rrot)
+            _pull_members_toward_anchor(
+                sc, positions, fp_sizes, bounds, fixed_refs, move_grid, fx, fy, aw,
+            )
 
     return positions
 
@@ -604,6 +621,129 @@ def _classify_connector_function(
     return "general"
 
 
+def _nearest_edge(
+    cx: float,
+    cy: float,
+    bounds: tuple[float, float, float, float],
+) -> str:
+    """Return the name of the nearest board edge to (cx, cy)."""
+    min_x, min_y, max_x, max_y = bounds
+    dists = {
+        "left": cx - min_x,
+        "right": max_x - cx,
+        "top": cy - min_y,
+        "bottom": max_y - cy,
+    }
+    return min(dists, key=lambda k: dists[k])
+
+
+def _compute_group_centroids(
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    positions: dict[str, tuple[float, float, float]],
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """Compute relay and MCU centroids from subcircuit anchors.
+
+    Returns:
+        (relay_centroid, mcu_centroid)
+    """
+    relay_positions: list[tuple[float, float]] = []
+    mcu_centroid: tuple[float, float] | None = None
+
+    for sc in subcircuits:
+        if sc.circuit_type == SubCircuitType.RELAY_DRIVER and sc.anchor_ref in positions:
+            rx, ry, _ = positions[sc.anchor_ref]
+            relay_positions.append((rx, ry))
+        elif (sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER
+                and sc.anchor_ref in positions and mcu_centroid is None):
+            mx, my, _ = positions[sc.anchor_ref]
+            mcu_centroid = (mx, my)
+
+    relay_centroid: tuple[float, float] | None = None
+    if relay_positions:
+        relay_centroid = (
+            sum(p[0] for p in relay_positions) / len(relay_positions),
+            sum(p[1] for p in relay_positions) / len(relay_positions),
+        )
+
+    return relay_centroid, mcu_centroid
+
+
+def _target_edge_for_function(
+    func: str,
+    relay_edge: str,
+    mcu_centroid: tuple[float, float] | None,
+    relay_centroid: tuple[float, float] | None,
+    cx: float,
+    cy: float,
+    bounds: tuple[float, float, float, float],
+) -> str:
+    """Determine target board edge for a connector based on its function."""
+    min_x, _, max_x, _ = bounds
+    if func in ("relay_terminal", "analog_input"):
+        return relay_edge
+    if func == "mcu_peripheral" and mcu_centroid:
+        return _nearest_edge(*mcu_centroid, bounds)
+    if func == "power_input":
+        is_left = relay_centroid and relay_centroid[0] < (max_x + min_x) / 2
+        return "left" if is_left else "right"
+    return _nearest_edge(cx, cy, bounds)
+
+
+def _compute_edge_target_position(
+    target_edge: str,
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    bounds: tuple[float, float, float, float],
+    edge_margin: float,
+    group_cx: float | None,
+    group_cy: float | None,
+) -> tuple[float, float]:
+    """Compute the target (x, y) position on the given board edge."""
+    min_x, min_y, max_x, max_y = bounds
+    target_x, target_y = cx, cy
+    if target_edge == "left":
+        target_x = min_x + edge_margin + w / 2.0
+        if group_cy is not None:
+            target_y = group_cy
+    elif target_edge == "right":
+        target_x = max_x - edge_margin - w / 2.0
+        if group_cy is not None:
+            target_y = group_cy
+    elif target_edge == "top":
+        target_y = min_y + edge_margin + h / 2.0
+        if group_cx is not None:
+            target_x = group_cx
+    else:
+        target_y = max_y - edge_margin - h / 2.0
+        if group_cx is not None:
+            target_x = group_cx
+    return target_x, target_y
+
+
+def _group_centroid_for_ref(
+    ref: str,
+    group_map: dict[str, str] | None,
+    positions: dict[str, tuple[float, float, float]],
+) -> tuple[float | None, float | None]:
+    """Compute the group centroid for a connector ref, if group_map is available."""
+    if not group_map or ref not in group_map:
+        return None, None
+    gname = group_map[ref]
+    gpositions = [
+        (positions[r][0], positions[r][1])
+        for r, g in group_map.items()
+        if g == gname and r in positions
+    ]
+    if not gpositions:
+        return None, None
+    return (
+        sum(p[0] for p in gpositions) / len(gpositions),
+        sum(p[1] for p in gpositions) / len(gpositions),
+    )
+
+
 def _pin_connectors_by_function(
     subcircuits: tuple[DetectedSubCircuit, ...],
     positions: dict[str, tuple[float, float, float]],
@@ -631,129 +771,46 @@ def _pin_connectors_by_function(
     min_x, min_y, max_x, max_y = bounds
     edge_margin = CONNECTOR_EDGE_MARGIN_MM
 
-    # Compute functional group centroids for edge targeting
-    relay_centroid: tuple[float, float] | None = None
-    relay_positions = []
-    for sc in subcircuits:
-        if sc.circuit_type == SubCircuitType.RELAY_DRIVER and sc.anchor_ref in positions:
-            rx, ry, _ = positions[sc.anchor_ref]
-            relay_positions.append((rx, ry))
-    if relay_positions:
-        relay_centroid = (
-            sum(p[0] for p in relay_positions) / len(relay_positions),
-            sum(p[1] for p in relay_positions) / len(relay_positions),
-        )
-
-    mcu_centroid: tuple[float, float] | None = None
-    for sc in subcircuits:
-        if (sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER
-                and sc.anchor_ref in positions):
-            mx, my, _ = positions[sc.anchor_ref]
-            mcu_centroid = (mx, my)
-            break
-
-    # Find dominant edge for relay group (edge closest to relay centroid)
-    def _nearest_edge(
-        cx: float, cy: float,
-    ) -> str:
-        dists = {
-            "left": cx - min_x,
-            "right": max_x - cx,
-            "top": cy - min_y,
-            "bottom": max_y - cy,
-        }
-        return min(dists, key=lambda k: dists[k])
-
-    relay_edge = _nearest_edge(*relay_centroid) if relay_centroid else "left"
+    relay_centroid, mcu_centroid = _compute_group_centroids(subcircuits, positions)
+    relay_edge = _nearest_edge(*relay_centroid, bounds) if relay_centroid else "left"
 
     for fp in pcb.footprints:
         ref = fp.ref
-        if ref in fixed_refs or not ref.startswith("J"):
-            continue
-        if ref not in positions:
+        if ref in fixed_refs or not ref.startswith("J") or ref not in positions:
             continue
 
         cx, cy, rot = positions[ref]
         w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
-        # Classify connector function
         func = _classify_connector_function(ref, subcircuits, adj, ref_to_nets)
+        target_edge = _target_edge_for_function(
+            func, relay_edge, mcu_centroid, relay_centroid, cx, cy, bounds,
+        )
 
-        # Determine target edge based on function
-        if func == "relay_terminal":
-            target_edge = relay_edge
-        elif func == "analog_input":
-            target_edge = relay_edge  # analog inputs near relay terminals
-        elif func == "mcu_peripheral" and mcu_centroid:
-            target_edge = _nearest_edge(*mcu_centroid)
-        elif func == "power_input":
-            # Power connectors toward the high-voltage zone
-            is_left = relay_centroid and relay_centroid[0] < (max_x + min_x) / 2
-            target_edge = "left" if is_left else "right"
-        else:
-            # General: nearest edge to current position
-            target_edge = _nearest_edge(cx, cy)
+        group_cx, group_cy = _group_centroid_for_ref(ref, group_map, positions)
 
-        # When group_map is provided, use group centroid Y for the
-        # connector's secondary axis so it stays near its group
-        group_cy: float | None = None
-        group_cx: float | None = None
-        if group_map and ref in group_map:
-            gname = group_map[ref]
-            gpositions = [
-                (positions[r][0], positions[r][1])
-                for r, g in group_map.items()
-                if g == gname and r in positions
-            ]
-            if gpositions:
-                group_cx = sum(p[0] for p in gpositions) / len(gpositions)
-                group_cy = sum(p[1] for p in gpositions) / len(gpositions)
+        target_x, target_y = _compute_edge_target_position(
+            target_edge, cx, cy, w, h, bounds, edge_margin, group_cx, group_cy,
+        )
 
-        # Compute target position on target edge
-        target_x, target_y = cx, cy
-        if target_edge == "left":
-            target_x = min_x + edge_margin + w / 2.0
-            if group_cy is not None:
-                target_y = group_cy
-        elif target_edge == "right":
-            target_x = max_x - edge_margin - w / 2.0
-            if group_cy is not None:
-                target_y = group_cy
-        elif target_edge == "top":
-            target_y = min_y + edge_margin + h / 2.0
-            if group_cx is not None:
-                target_x = group_cx
-        else:
-            target_y = max_y - edge_margin - h / 2.0
-            if group_cx is not None:
-                target_x = group_cx
-
-        # Only move if not already on the target edge
         current_edge_dist = min(
             cx - min_x, max_x - cx, cy - min_y, max_y - cy,
         )
         if current_edge_dist <= 5.0:
-            # Already on an edge -- check if it's the right edge
-            current_edge = _nearest_edge(cx, cy)
-            if current_edge == target_edge:
-                continue  # Already on correct edge
+            if _nearest_edge(cx, cy, bounds) == target_edge:
+                continue
 
-        # Use grid-based collision-aware placement
         edge_grid = _PlacementGrid(bounds)
         for other_ref, (ox, oy, _orot) in positions.items():
-            if other_ref == ref:
-                continue
-            ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
-            edge_grid.place(ox, oy, ow, oh)
+            if other_ref != ref:
+                ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
+                edge_grid.place(ox, oy, ow, oh)
 
         rw, rh = _rotation_aware_size(ref, positions, fp_sizes)
         fx, fy = edge_grid.find_free_pos(target_x, target_y, rw, rh)
 
-        # Only accept if closer to target edge than before
-        new_edge_dist = min(
-            fx - min_x, max_x - fx, fy - min_y, max_y - fy,
-        )
-        if new_edge_dist < current_edge_dist or _nearest_edge(fx, fy) == target_edge:
+        new_edge_dist = min(fx - min_x, max_x - fx, fy - min_y, max_y - fy)
+        if new_edge_dist < current_edge_dist or _nearest_edge(fx, fy, bounds) == target_edge:
             positions[ref] = (fx, fy, rot)
 
     return positions

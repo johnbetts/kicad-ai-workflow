@@ -1554,6 +1554,107 @@ def _footprint_text_sexp(ft: FootprintText) -> SExpNode:
     return node
 
 
+def _hidden_property_sexp(
+    name: str,
+    value: str,
+    fab_layer: str,
+) -> list[SExpNode]:
+    """Build a hidden ``(property ...)`` node on the fab layer."""
+    return [
+        "property", name, value,
+        ["at", 0, 0, 0], ["layer", fab_layer],
+        ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+    ]
+
+
+def _fp_standard_properties(fp: Footprint) -> list[list[SExpNode]]:
+    """Build Reference, Value, Footprint, Datasheet, Description properties."""
+    fab = "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"
+
+    # Reference property — use position/layer from fp.texts if available
+    ref_text = next((t for t in fp.texts if t.text_type == "reference"), None)
+    ref_x = ref_text.position.x if ref_text else 0.0
+    ref_y = ref_text.position.y if ref_text else -2.5
+    default_silk = "B.SilkS" if fp.layer == LAYER_B_CU else "F.SilkS"
+    ref_layer = ref_text.layer if ref_text else default_silk
+    ref_size = ref_text.effects_size if ref_text else 1.0
+    ref_hidden = ref_text.hidden if ref_text else False
+    ref_rotation = ref_text.rotation if ref_text else 0.0
+    ref_effects: list[SExpNode] = [
+        "effects", ["font", ["size", ref_size, ref_size]],
+    ]
+    if ref_hidden:
+        ref_effects.append(["hide", "yes"])
+
+    val_text = next((t for t in fp.texts if t.text_type == "value"), None)
+    val_x = val_text.position.x if val_text else 0.0
+    val_y = val_text.position.y if val_text else 2.5
+
+    props: list[list[SExpNode]] = [
+        [
+            "property", "Reference", fp.ref,
+            ["at", ref_x, ref_y, ref_rotation],
+            ["layer", ref_layer],
+            ref_effects,
+        ],
+        [
+            "property", "Value", fp.value,
+            ["at", val_x, val_y, 0],
+            ["layer", fab],
+            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
+        ],
+        _hidden_property_sexp("Footprint", fp.lib_id, fab),
+        _hidden_property_sexp("Datasheet", fp.datasheet or "", fab),
+        _hidden_property_sexp("Description", fp.description or "", fab),
+    ]
+    return props
+
+
+def _fp_optional_properties(fp: Footprint) -> list[list[SExpNode]]:
+    """Build LCSC, MPN, Manufacturer properties if present."""
+    fab = "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"
+    props: list[list[SExpNode]] = []
+    if fp.lcsc:
+        props.append(_hidden_property_sexp("LCSC", fp.lcsc, fab))
+    if fp.mpn:
+        props.append(_hidden_property_sexp("MPN", fp.mpn, fab))
+    if fp.manufacturer:
+        props.append(_hidden_property_sexp("Manufacturer", fp.manufacturer, fab))
+    return props
+
+
+def _fp_graphic_sexp(graphic: FootprintLine | FootprintArc | FootprintCircle) -> list[SExpNode]:
+    """Serialise a single footprint graphic element."""
+    if isinstance(graphic, FootprintLine):
+        g: list[SExpNode] = [
+            "fp_line",
+            ["start", graphic.start.x, graphic.start.y],
+            ["end", graphic.end.x, graphic.end.y],
+            ["layer", graphic.layer],
+            ["width", graphic.width],
+        ]
+    elif isinstance(graphic, FootprintArc):
+        g = [
+            "fp_arc",
+            ["start", graphic.start.x, graphic.start.y],
+            ["mid", graphic.mid.x, graphic.mid.y],
+            ["end", graphic.end.x, graphic.end.y],
+            ["layer", graphic.layer],
+            ["width", graphic.width],
+        ]
+    else:  # FootprintCircle
+        g = [
+            "fp_circle",
+            ["center", graphic.center.x, graphic.center.y],
+            ["end", graphic.end.x, graphic.end.y],
+            ["layer", graphic.layer],
+            ["width", graphic.width],
+        ]
+    if graphic.uuid:
+        g.append(["uuid", graphic.uuid])
+    return g
+
+
 def _footprint_sexp(fp: Footprint) -> SExpNode:
     """Serialise a :class:`Footprint` to a KiCad ``(footprint ...)`` node.
 
@@ -1574,156 +1675,34 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
     if fp.uuid:
         node.append(["uuid", fp.uuid])
 
-    # Properties for ref and value — use positions/layer from fp.texts if available
-    ref_text = next((t for t in fp.texts if t.text_type == "reference"), None)
-    ref_x = ref_text.position.x if ref_text else 0.0
-    ref_y = ref_text.position.y if ref_text else -2.5
-    _default_silk = "B.SilkS" if fp.layer == LAYER_B_CU else "F.SilkS"
-    ref_layer = ref_text.layer if ref_text else _default_silk
-    ref_size = ref_text.effects_size if ref_text else 1.0
-    ref_hidden = ref_text.hidden if ref_text else False
-    ref_rotation = ref_text.rotation if ref_text else 0.0
-    val_text = next((t for t in fp.texts if t.text_type == "value"), None)
-    val_x = val_text.position.x if val_text else 0.0
-    val_y = val_text.position.y if val_text else 2.5
-    ref_effects: list[SExpNode] = [
-        "effects", ["font", ["size", ref_size, ref_size]],
-    ]
-    if ref_hidden:
-        ref_effects.append(["hide", "yes"])
-    node.append(
-        [
-            "property",
-            "Reference",
-            fp.ref,
-            ["at", ref_x, ref_y, ref_rotation],
-            ["layer", ref_layer],
-            ref_effects,
-        ]
-    )
-    node.append(
-        [
-            "property",
-            "Value",
-            fp.value,
-            ["at", val_x, val_y, 0],
-            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ]
-    )
-    # Footprint property (lib_id)
-    node.append(
-        [
-            "property",
-            "Footprint",
-            fp.lib_id,
-            ["at", 0, 0, 0],
-            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ]
-    )
-    # Datasheet property
-    node.append(
-        [
-            "property",
-            "Datasheet",
-            fp.datasheet or "",
-            ["at", 0, 0, 0],
-            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ]
-    )
-    # Description property
-    node.append(
-        [
-            "property",
-            "Description",
-            fp.description or "",
-            ["at", 0, 0, 0],
-            ["layer", "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ]
-    )
+    # Standard and optional properties
+    for prop in _fp_standard_properties(fp):
+        node.append(prop)
+    for prop in _fp_optional_properties(fp):
+        node.append(prop)
 
-    # LCSC part number (for JLCPCB assembly)
-    _fab = "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"
-    if fp.lcsc:
-        node.append([
-            "property", "LCSC", fp.lcsc,
-            ["at", 0, 0, 0], ["layer", _fab],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ])
-    # Manufacturer part number
-    if fp.mpn:
-        node.append([
-            "property", "MPN", fp.mpn,
-            ["at", 0, 0, 0], ["layer", _fab],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ])
-    # Manufacturer name
-    if fp.manufacturer:
-        node.append([
-            "property", "Manufacturer", fp.manufacturer,
-            ["at", 0, 0, 0], ["layer", _fab],
-            ["effects", ["font", ["size", 1.0, 1.0]], ["hide", "yes"]],
-        ])
-
-    # KiCad 9: fp_text replaced by property entries (already emitted above).
-    # Only emit fp_text for custom user text, not reference/value.
+    # Custom user text (not reference/value — those are properties now)
     for text in fp.texts:
         if text.text_type not in ("reference", "value"):
             node.append(_footprint_text_sexp(text))
 
     # Footprint graphics (courtyard, silkscreen, fab outlines)
     for graphic in fp.graphics:
-        if isinstance(graphic, FootprintLine):
-            g_line: list[SExpNode] = [
-                "fp_line",
-                ["start", graphic.start.x, graphic.start.y],
-                ["end", graphic.end.x, graphic.end.y],
-                ["layer", graphic.layer],
-                ["width", graphic.width],
-            ]
-            if graphic.uuid:
-                g_line.append(["uuid", graphic.uuid])
-            node.append(g_line)
-        elif isinstance(graphic, FootprintArc):
-            g_arc: list[SExpNode] = [
-                "fp_arc",
-                ["start", graphic.start.x, graphic.start.y],
-                ["mid", graphic.mid.x, graphic.mid.y],
-                ["end", graphic.end.x, graphic.end.y],
-                ["layer", graphic.layer],
-                ["width", graphic.width],
-            ]
-            if graphic.uuid:
-                g_arc.append(["uuid", graphic.uuid])
-            node.append(g_arc)
-        elif isinstance(graphic, FootprintCircle):
-            g_circ: list[SExpNode] = [
-                "fp_circle",
-                ["center", graphic.center.x, graphic.center.y],
-                ["end", graphic.end.x, graphic.end.y],
-                ["layer", graphic.layer],
-                ["width", graphic.width],
-            ]
-            if graphic.uuid:
-                g_circ.append(["uuid", graphic.uuid])
-            node.append(g_circ)
+        if isinstance(graphic, (FootprintLine, FootprintArc, FootprintCircle)):
+            node.append(_fp_graphic_sexp(graphic))
 
     for pad in fp.pads:
         node.append(_pad_sexp(pad))
 
     # 3D model references
     for model in fp.models:
-        model_node: list[SExpNode] = [
+        node.append([
             "model",
             model.path,
             ["offset", ["xyz", model.offset[0], model.offset[1], model.offset[2]]],
             ["scale", ["xyz", model.scale[0], model.scale[1], model.scale[2]]],
             ["rotate", ["xyz", model.rotate[0], model.rotate[1], model.rotate[2]]],
-        ]
-        node.append(model_node)
+        ])
 
     return node
 
@@ -1856,6 +1835,52 @@ def _keepout_sexp(keepout: Keepout) -> SExpNode:
     return node
 
 
+def _pcb_title_block_sexp(design: PCBDesign) -> list[SExpNode] | None:
+    """Build the PCB ``(title_block ...)`` node, or ``None`` if empty."""
+    if not (design.title or design.date or design.revision or design.company):
+        return None
+    tb: list[SExpNode] = ["title_block"]
+    if design.title:
+        tb.append(["title", design.title])
+    if design.date:
+        tb.append(["date", design.date])
+    if design.revision:
+        tb.append(["rev", design.revision])
+    if design.company:
+        tb.append(["company", design.company])
+    return tb
+
+
+def _track_sexp(track: Track) -> list[SExpNode]:
+    """Serialise a :class:`Track` to a ``(segment ...)`` node."""
+    seg: list[SExpNode] = [
+        "segment",
+        ["start", track.start.x, track.start.y],
+        ["end", track.end.x, track.end.y],
+        ["width", track.width],
+        ["layer", track.layer],
+        ["net", track.net_number],
+    ]
+    if track.uuid:
+        seg.append(["uuid", track.uuid])
+    return seg
+
+
+def _via_sexp(via: Via) -> list[SExpNode]:
+    """Serialise a :class:`Via` to a ``(via ...)`` node."""
+    node: list[SExpNode] = [
+        "via",
+        ["at", via.position.x, via.position.y],
+        ["size", via.size],
+        ["drill", via.drill],
+        ["layers", *via.layers],
+        ["net", via.net_number],
+    ]
+    if via.uuid:
+        node.append(["uuid", via.uuid])
+    return node
+
+
 def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     """Serialise a :class:`PCBDesign` to a KiCad S-expression tree.
 
@@ -1895,22 +1920,13 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     ]
 
     # Title block
-    if design.title or design.date or design.revision or design.company:
-        title_block: list[SExpNode] = ["title_block"]
-        if design.title:
-            title_block.append(["title", design.title])
-        if design.date:
-            title_block.append(["date", design.date])
-        if design.revision:
-            title_block.append(["rev", design.revision])
-        if design.company:
-            title_block.append(["company", design.company])
-        root.append(title_block)
+    tb = _pcb_title_block_sexp(design)
+    if tb is not None:
+        root.append(tb)
 
     # Layers
     layers_node: list[SExpNode] = ["layers"]
-    layer_table = _build_layer_table(design.design_rules.layer_count)
-    for layer_entry in layer_table:
+    for layer_entry in _build_layer_table(design.design_rules.layer_count):
         layer_node: list[SExpNode] = [layer_entry[0], layer_entry[1], layer_entry[2]]
         if len(layer_entry) > 3:
             layer_node.append(layer_entry[3])
@@ -1918,76 +1934,40 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     root.append(layers_node)
 
     # Setup
-    root.append(
-        [
-            "setup",
-            ["pad_to_mask_clearance", 0],
-            ["allow_soldermask_bridges_in_footprints", False],
-            [
-                "pcbplotparams",
-                ["layerselection", "0x00010fc_ffffffff"],
-                ["outputdirectory", ""],
-            ],
-        ]
-    )
+    root.append([
+        "setup",
+        ["pad_to_mask_clearance", 0],
+        ["allow_soldermask_bridges_in_footprints", False],
+        ["pcbplotparams", ["layerselection", "0x00010fc_ffffffff"], ["outputdirectory", ""]],
+    ])
 
-    # Nets
+    # Nets, footprints, outline
     for net in design.nets:
         root.append(["net", net.number, net.name])
-
-    # Footprints
     for fp in design.footprints:
         root.append(_footprint_sexp(fp))
-
-    # Board outline
     for line in _outline_sexp(design.outline):
         root.append(line)
 
-    # Preserved edge cuts (board slots, cutouts from previous builds)
+    # Preserved edge cuts
     for start, end, width in _preserved_edge_cuts:
         root.append([
             "gr_line",
-            ["start", start.x, start.y],
-            ["end", end.x, end.y],
-            ["layer", LAYER_EDGE_CUTS],
-            ["width", width],
+            ["start", start.x, start.y], ["end", end.x, end.y],
+            ["layer", LAYER_EDGE_CUTS], ["width", width],
         ])
 
-    # Copper zones
+    # Zones and keepouts
     for zone in design.zones:
         root.append(_zone_sexp(zone))
-
-    # Keepout zones
     for keepout in design.keepouts:
         root.append(_keepout_sexp(keepout))
 
-    # Tracks (segments)
+    # Tracks and vias
     for track in design.tracks:
-        seg: list[SExpNode] = [
-            "segment",
-            ["start", track.start.x, track.start.y],
-            ["end", track.end.x, track.end.y],
-            ["width", track.width],
-            ["layer", track.layer],
-            ["net", track.net_number],
-        ]
-        if track.uuid:
-            seg.append(["uuid", track.uuid])
-        root.append(seg)
-
-    # Vias
+        root.append(_track_sexp(track))
     for via in design.vias:
-        via_node: list[SExpNode] = [
-            "via",
-            ["at", via.position.x, via.position.y],
-            ["size", via.size],
-            ["drill", via.drill],
-            ["layers", *via.layers],
-            ["net", via.net_number],
-        ]
-        if via.uuid:
-            via_node.append(["uuid", via.uuid])
-        root.append(via_node)
+        root.append(_via_sexp(via))
 
     return root
 

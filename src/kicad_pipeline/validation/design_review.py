@@ -306,16 +306,64 @@ def _find_ic_decoupling_pairs(
     return pairs
 
 
+_ADC_VALUE_KEYWORDS: frozenset[str] = frozenset({"ADC", "ADS1", "MCP3"})
+_ADC_PIN_FUNCTIONS: frozenset[str] = frozenset({"adc", "analog_in"})
+
+
 def _has_adc_component(requirements: ProjectRequirements) -> bool:
     """Return True if any component has ADC-related pins or values."""
     for comp in requirements.components:
-        for pin in comp.pins:
-            if pin.function is not None and pin.function.value in ("adc", "analog_in"):
-                return True
+        has_adc_pin = any(
+            pin.function is not None and pin.function.value in _ADC_PIN_FUNCTIONS
+            for pin in comp.pins
+        )
+        if has_adc_pin:
+            return True
         upper_value = comp.value.upper()
-        if "ADC" in upper_value or "ADS1" in upper_value or "MCP3" in upper_value:
+        has_adc_value = any(kw in upper_value for kw in _ADC_VALUE_KEYWORDS)
+        if has_adc_value:
             return True
     return False
+
+
+def _check_partial_connectivity(
+    comp: object,
+    connectable_pins: list[object],
+    connected_pins: set[tuple[str, str]],
+) -> list[ReviewItem]:
+    """Check for partially unconnected signal pins on a component.
+
+    Returns a list containing at most one ReviewItem if floating signal
+    pins are detected.
+    """
+    unconnected = [
+        p.number for p in connectable_pins
+        if (comp.ref, p.number) not in connected_pins
+    ]
+    # Build a set of power pin numbers for fast lookup
+    power_pin_numbers = {
+        p.number for p in connectable_pins
+        if p.pin_type.value in ("power_in", "power_out")
+    }
+    signal_unconnected = [
+        p_num for p_num in unconnected
+        if p_num not in power_pin_numbers
+    ]
+    if not signal_unconnected:
+        return []
+    pin_list = ", ".join(signal_unconnected[:5])
+    extra = len(signal_unconnected) - 5
+    suffix = f" +{extra} more" if extra > 0 else ""
+    return [ReviewItem(
+        category="connectivity",
+        severity="recommended",
+        title="Partially unconnected component",
+        description=(
+            f"{comp.ref} ({comp.value}) has {len(signal_unconnected)} "
+            f"unconnected signal pins: {pin_list}{suffix}"
+        ),
+        affected_refs=(comp.ref,),
+    )]
 
 
 def _check_connectivity(
@@ -357,7 +405,10 @@ def _check_connectivity(
             1 for p in connectable_pins
             if (comp.ref, p.number) in connected_pins
         )
-        if connected_count == 0:
+        is_fully_unconnected = connected_count == 0
+        is_partially_connected = 0 < connected_count < len(connectable_pins)
+
+        if is_fully_unconnected:
             items.append(ReviewItem(
                 category="connectivity",
                 severity="required",
@@ -368,35 +419,10 @@ def _check_connectivity(
                 ),
                 affected_refs=(comp.ref,),
             ))
-        elif connected_count < len(connectable_pins):
-            # Some pins connected, some not — informational
-            unconnected = [
-                p.number for p in connectable_pins
-                if (comp.ref, p.number) not in connected_pins
-            ]
-            # Only flag non-power/non-NC pins that are truly floating
-            # (power pins often get connected via power symbols, not nets)
-            signal_unconnected = [
-                p_num for p_num in unconnected
-                if not any(
-                    p.number == p_num and p.pin_type.value in ("power_in", "power_out")
-                    for p in connectable_pins
-                )
-            ]
-            if signal_unconnected:
-                pin_list = ", ".join(signal_unconnected[:5])
-                extra = len(signal_unconnected) - 5
-                suffix = f" +{extra} more" if extra > 0 else ""
-                items.append(ReviewItem(
-                    category="connectivity",
-                    severity="recommended",
-                    title="Partially unconnected component",
-                    description=(
-                        f"{comp.ref} ({comp.value}) has {len(signal_unconnected)} "
-                        f"unconnected signal pins: {pin_list}{suffix}"
-                    ),
-                    affected_refs=(comp.ref,),
-                ))
+        elif is_partially_connected:
+            items.extend(
+                _check_partial_connectivity(comp, connectable_pins, connected_pins)
+            )
 
     # --- Check for orphaned components (not in any feature) ---
     if requirements.features:
@@ -509,9 +535,9 @@ def _subcircuit_design_notes(
         adc_refs = tuple(
             c.ref for c in requirements.components
             if any(
-                p.function is not None and p.function.value in ("adc", "analog_in")
+                p.function is not None and p.function.value in _ADC_PIN_FUNCTIONS
                 for p in c.pins
-            ) or "ADC" in c.value.upper() or "ADS1" in c.value.upper()
+            ) or any(kw in c.value.upper() for kw in _ADC_VALUE_KEYWORDS)
         )
         items.append(ReviewItem(
             category="subcircuit",
@@ -538,6 +564,94 @@ def _subcircuit_design_notes(
         ))
 
     return items
+
+
+def _find_ic_decoupling_subgroups(
+    fb_refs: set[str],
+    comp_map: dict[str, object],
+    ic_to_caps: dict[str, list[str]],
+) -> list[ComponentGroup]:
+    """Find IC + decoupling cap subgroups within a feature block."""
+    subgroups: list[ComponentGroup] = []
+    for ref in sorted(fb_refs):
+        comp = comp_map.get(ref)
+        if comp is None or not ref.startswith("U"):
+            continue
+        caps = ic_to_caps.get(ref, [])
+        caps_in_feature = [c for c in caps if c in fb_refs]
+        if caps_in_feature:
+            subgroups.append(ComponentGroup(
+                name=f"{ref} ({comp.value})",
+                description=f"{comp.value} + decoupling",
+                refs=(ref, *sorted(caps_in_feature)),
+            ))
+    return subgroups
+
+
+def _find_relay_subgroups(
+    fb_components: tuple[str, ...],
+    ref_nets: dict[str, set[str]],
+) -> list[ComponentGroup]:
+    """Find relay driver subgroups (relay + flyback diode + driver)."""
+    relay_refs = [r for r in fb_components if r.startswith("K")]
+    if not relay_refs:
+        return []
+    relay_associated: set[str] = set(relay_refs)
+    for relay_ref in relay_refs:
+        relay_nets = ref_nets.get(relay_ref, set())
+        for ref in fb_components:
+            if ref in relay_associated:
+                continue
+            is_support_component = ref.startswith(("D", "Q"))
+            shares_net = bool(ref_nets.get(ref, set()) & relay_nets)
+            if is_support_component and shares_net:
+                relay_associated.add(ref)
+    if len(relay_associated) > len(relay_refs):
+        return [ComponentGroup(
+            name="Relay Driver Circuit",
+            description="Relays with flyback diodes and drivers",
+            refs=tuple(sorted(relay_associated)),
+        )]
+    return []
+
+
+def _find_regulator_subgroups(
+    fb_components: tuple[str, ...],
+    comp_map: dict[str, object],
+    ref_nets: dict[str, set[str]],
+    cap_assigned: set[str],
+) -> list[ComponentGroup]:
+    """Find regulator + input/output passive subgroups."""
+    subgroups: list[ComponentGroup] = []
+    for ref in sorted(fb_components):
+        comp = comp_map.get(ref)
+        if comp is None or not ref.startswith("U"):
+            continue
+        upper_value = comp.value.upper()
+        upper_desc = (comp.description or "").upper()
+        is_regulator = any(
+            kw in upper_value or kw in upper_desc
+            for kw in _REGULATOR_KEYWORDS
+        )
+        if not is_regulator:
+            continue
+        reg_nets = ref_nets.get(ref, set())
+        reg_power = {n for n in reg_nets if _is_power_net(n)}
+        associated: list[str] = [ref]
+        for cref in sorted(fb_components):
+            if cref == ref or cref in cap_assigned:
+                continue
+            is_passive = cref.startswith(("C", "L"))
+            shares_power_net = bool(ref_nets.get(cref, set()) & reg_power)
+            if is_passive and shares_power_net:
+                associated.append(cref)
+        if len(associated) > 1:
+            subgroups.append(ComponentGroup(
+                name=f"{ref} Regulator ({comp.value})",
+                description=f"{comp.value} with input/output passives",
+                refs=tuple(associated),
+            ))
+    return subgroups
 
 
 def _build_component_groups(
@@ -578,70 +692,15 @@ def _build_component_groups(
         fb_refs = set(fb.components)
         subgroups: list[ComponentGroup] = []
 
-        # Find ICs in this feature and their decoupling caps
-        for ref in sorted(fb.components):
-            comp = comp_map.get(ref)
-            if comp is None or not ref.startswith("U"):
-                continue
-            caps = ic_to_caps.get(ref, [])
-            caps_in_feature = [c for c in caps if c in fb_refs]
-            if caps_in_feature:
-                subgroups.append(ComponentGroup(
-                    name=f"{ref} ({comp.value})",
-                    description=f"{comp.value} + decoupling",
-                    refs=(ref, *sorted(caps_in_feature)),
-                ))
-
-        # Find relay groups (relay + flyback diode + driver)
-        relay_refs = [r for r in fb.components if r.startswith("K")]
-        if relay_refs:
-            # Find diodes and transistors sharing nets with relays
-            relay_associated: set[str] = set(relay_refs)
-            for relay_ref in relay_refs:
-                relay_nets = ref_nets.get(relay_ref, set())
-                for ref in fb.components:
-                    if ref in relay_associated:
-                        continue
-                    if ref.startswith(("D", "Q")) and ref_nets.get(ref, set()) & relay_nets:
-                        relay_associated.add(ref)
-            if len(relay_associated) > len(relay_refs):
-                subgroups.append(ComponentGroup(
-                    name="Relay Driver Circuit",
-                    description="Relays with flyback diodes and drivers",
-                    refs=tuple(sorted(relay_associated)),
-                ))
-
-        # Find regulator subgroups (regulator + input/output caps)
-        for ref in sorted(fb.components):
-            comp = comp_map.get(ref)
-            if comp is None or not ref.startswith("U"):
-                continue
-            upper_value = comp.value.upper()
-            upper_desc = (comp.description or "").upper()
-            is_regulator = any(
-                kw in upper_value or kw in upper_desc
-                for kw in _REGULATOR_KEYWORDS
-            )
-            if not is_regulator:
-                continue
-            # Find caps sharing power nets with this regulator
-            reg_nets = ref_nets.get(ref, set())
-            reg_power = {n for n in reg_nets if _is_power_net(n)}
-            associated: list[str] = [ref]
-            for cref in sorted(fb.components):
-                if cref == ref or cref in cap_assigned:
-                    continue
-                if not cref.startswith(("C", "L")):
-                    continue
-                c_nets = ref_nets.get(cref, set())
-                if c_nets & reg_power:
-                    associated.append(cref)
-            if len(associated) > 1:
-                subgroups.append(ComponentGroup(
-                    name=f"{ref} Regulator ({comp.value})",
-                    description=f"{comp.value} with input/output passives",
-                    refs=tuple(associated),
-                ))
+        subgroups.extend(
+            _find_ic_decoupling_subgroups(fb_refs, comp_map, ic_to_caps)
+        )
+        subgroups.extend(
+            _find_relay_subgroups(fb.components, ref_nets)
+        )
+        subgroups.extend(
+            _find_regulator_subgroups(fb.components, comp_map, ref_nets, cap_assigned)
+        )
 
         groups.append(ComponentGroup(
             name=fb.name,
@@ -783,9 +842,12 @@ def generate_design_review(
     items.extend(_subcircuit_design_notes(requirements))
 
     # --- Board context notes ---
-    if requirements.board_context is not None:
+    has_board_context = requirements.board_context is not None
+    if has_board_context:
         ctx = requirements.board_context
-        if ctx.target_system:
+        has_system_integration = bool(ctx.target_system)
+        has_shared_grounds = bool(ctx.shared_grounds)
+        if has_system_integration:
             items.append(ReviewItem(
                 category="context",
                 severity="required",
@@ -796,7 +858,7 @@ def generate_design_review(
                 ),
                 affected_refs=(),
             ))
-        if ctx.shared_grounds:
+        if has_shared_grounds:
             items.append(ReviewItem(
                 category="context",
                 severity="recommended",

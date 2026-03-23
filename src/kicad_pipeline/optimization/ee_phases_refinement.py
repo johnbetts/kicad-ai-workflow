@@ -44,6 +44,276 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Shared clamping / collision helpers
+# ---------------------------------------------------------------------------
+
+
+def _clamp_ref_pad_extent(
+    ref: str,
+    rx: float,
+    ry: float,
+    rot: float,
+    fp_obj: object,
+    bounds: tuple[float, float, float, float],
+    edge_margin: float,
+) -> tuple[float, float] | None:
+    """Clamp a component by pad extent to stay within board bounds.
+
+    Returns:
+        ``(new_cx, new_cy)`` if clamped, or ``None`` if no shift needed.
+    """
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
+    min_x, min_y, max_x, max_y = bounds
+    ori_x, ori_y = centroid_to_origin(fp_obj, rx, ry, rot)  # type: ignore[arg-type]
+    px0, py0, px1, py1 = pad_extent_in_board_space(
+        fp_obj, ori_x, ori_y, rot,  # type: ignore[arg-type]
+    )
+    shift_x = shift_y = 0.0
+    if px0 < min_x + edge_margin:
+        shift_x = (min_x + edge_margin) - px0
+    elif px1 > max_x - edge_margin:
+        shift_x = (max_x - edge_margin) - px1
+    if py0 < min_y + edge_margin:
+        shift_y = (min_y + edge_margin) - py0
+    elif py1 > max_y - edge_margin:
+        shift_y = (max_y - edge_margin) - py1
+    if shift_x == 0.0 and shift_y == 0.0:
+        return None
+    new_cx, new_cy = origin_to_centroid(
+        fp_obj, ori_x + shift_x, ori_y + shift_y, rot,  # type: ignore[arg-type]
+    )
+    return new_cx, new_cy
+
+
+def _clamp_ref_simple(
+    rx: float,
+    ry: float,
+    w: float,
+    h: float,
+    bounds: tuple[float, float, float, float],
+    edge_margin: float = 1.5,
+) -> tuple[float, float]:
+    """Clamp a component center to stay within board bounds using simple w/h."""
+    min_x, min_y, max_x, max_y = bounds
+    clamped_x = max(min_x + w / 2 + edge_margin, min(max_x - w / 2 - edge_margin, rx))
+    clamped_y = max(min_y + h / 2 + edge_margin, min(max_y - h / 2 - edge_margin, ry))
+    return clamped_x, clamped_y
+
+
+def _clamp_all_positions(
+    positions: dict[str, tuple[float, float, float]],
+    fp_lookup: dict[str, object],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    edge_margin: float,
+    skip_refs: set[str] | None = None,
+    label: str = "Clamp",
+) -> int:
+    """Clamp all positions to board bounds, using pad extent when available.
+
+    Returns:
+        Number of components clamped.
+    """
+    count = 0
+    for ref, (rx, ry, rot) in list(positions.items()):
+        if skip_refs and ref in skip_refs:
+            continue
+        fp_obj = fp_lookup.get(ref)
+        if fp_obj is not None and fp_obj.pads:  # type: ignore[union-attr]
+            result = _clamp_ref_pad_extent(
+                ref, rx, ry, rot, fp_obj, bounds, edge_margin,
+            )
+            if result is not None:
+                positions[ref] = (result[0], result[1], rot)
+                count += 1
+        else:
+            w, h = _rotation_aware_size(ref, positions, fp_sizes)
+            cx, cy = _clamp_ref_simple(rx, ry, w, h, bounds)
+            if cx != rx or cy != ry:
+                positions[ref] = (cx, cy, rot)
+                count += 1
+    if count:
+        _log.info("  %s: %d components repositioned", label, count)
+    return count
+
+
+def _build_subcircuit_fixed(ctx: PlacementContext) -> set[str]:
+    """Build the set of subcircuit-fixed refs from context."""
+    return (ctx.relay_support_refs | ctx.adc_channel_refs
+            | ctx.mcu_peripheral_refs | ctx.power_group_fixed
+            | ctx.ethernet_fixed | ctx.template_fixed
+            | ctx.top_edge_connector_refs)
+
+
+def _build_always_base_refs(ctx: PlacementContext,
+                            positions: dict[str, tuple[float, float, float]],
+                            ) -> set[str]:
+    """Build the base set of always-protected refs for collision resolution."""
+    return (ctx.mcu_peripheral_refs | ctx.top_edge_connector_refs
+            | ctx.ethernet_fixed | ctx.adc_channel_refs | ctx.adc_ic_refs
+            | ctx.relay_support_refs | ctx.power_group_fixed
+            | {r for r in positions if r.startswith("K")})
+
+
+def _unprotect_small_colliders(
+    collisions: list[tuple[str, str]],
+    always_base: set[str],
+    fp_sizes: dict[str, tuple[float, float]],
+    power_group_fixed: set[str],
+) -> set[str]:
+    """Find refs that should be unprotected because they are the smaller
+    component in a collision where both sides are in always_base."""
+    unprotect: set[str] = set()
+    for a, b in collisions:
+        if a in always_base and b in always_base:
+            area_a = fp_sizes.get(a, (2, 2))[0] * fp_sizes.get(a, (2, 2))[1]
+            area_b = fp_sizes.get(b, (2, 2))[0] * fp_sizes.get(b, (2, 2))[1]
+            smaller = a if area_a <= area_b else b
+            if (not smaller.startswith(("U", "Y", "K", "Q"))
+                    and smaller not in power_group_fixed):
+                unprotect.add(smaller)
+    return unprotect
+
+
+def _resolve_post_phase_collisions(
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+    subcircuit_fixed: set[str],
+    label: str,
+) -> dict[str, tuple[float, float, float]]:
+    """Run collision detection and resolution with standard protection logic."""
+    collisions = _count_collisions(positions, fp_sizes)
+    if not collisions:
+        return positions
+
+    _log.info("  %d %s collisions -- resolving", len(collisions), label)
+    colliding = set()
+    for a, b in collisions:
+        colliding.add(a)
+        colliding.add(b)
+
+    always_base = _build_always_base_refs(ctx, positions)
+    unprotect = _unprotect_small_colliders(
+        collisions, always_base, fp_sizes, ctx.power_group_fixed,
+    )
+    always_fixed = always_base - unprotect
+    targeted = (ctx.fixed_refs
+                | (subcircuit_fixed - colliding)
+                | always_fixed)
+    return _resolve_collisions(positions, fp_sizes, bounds, targeted)
+
+
+def _post_clamp_decoupling_repull(
+    ctx: PlacementContext,
+) -> None:
+    """Re-pull decoupling caps that drifted too far from their IC after clamping."""
+    _ref_to_group: dict[str, str] = getattr(ctx, "_ref_to_group", {})
+    if not _ref_to_group:
+        for feat in ctx.requirements.features:
+            for comp in feat.components:
+                r = comp.ref if hasattr(comp, "ref") else comp
+                _ref_to_group[r] = feat.name
+
+    sc_list = list(ctx.subcircuits)
+    _post_clamp_decoup = 0
+    for sc in sc_list:
+        if sc.circuit_type != SubCircuitType.DECOUPLING:
+            continue
+        ic_ref = sc.anchor_ref
+        if ic_ref not in ctx.positions:
+            continue
+        ic_group = _ref_to_group.get(ic_ref, "")
+        ix, iy, _irot = ctx.positions[ic_ref]
+        iw, ih = ctx.fp_sizes.get(ic_ref, (5.0, 5.0))
+        if _irot % 180 in (90.0, 270.0):
+            iw, ih = ih, iw
+        placed_count = 0
+        for cap_ref in sc.refs:
+            if cap_ref == ic_ref or not cap_ref.startswith("C"):
+                continue
+            if cap_ref not in ctx.positions:
+                continue
+            cap_group = _ref_to_group.get(cap_ref, "")
+            if cap_group != ic_group:
+                continue
+            cx, cy, crot = ctx.positions[cap_ref]
+            cw, ch = ctx.fp_sizes.get(cap_ref, (1.5, 1.0))
+            dx_edge = abs(cx - ix) - (iw + cw) / 2.0
+            dy_edge = abs(cy - iy) - (ih + ch) / 2.0
+            if dx_edge <= 0 and dy_edge <= 0:
+                edge_dist = 0.0
+            elif dx_edge <= 0:
+                edge_dist = dy_edge
+            elif dy_edge <= 0:
+                edge_dist = dx_edge
+            else:
+                edge_dist = math.sqrt(dx_edge ** 2 + dy_edge ** 2)
+            if edge_dist <= 5.0:
+                continue
+            side = placed_count % 4
+            if side == 0:
+                tx = ix + placed_count // 4 * (cw + 0.5)
+                ty = iy - ih / 2.0 - ch / 2.0 - 0.5
+            elif side == 1:
+                tx = ix + placed_count // 4 * (cw + 0.5)
+                ty = iy + ih / 2.0 + ch / 2.0 + 0.5
+            elif side == 2:
+                tx = ix + iw / 2.0 + cw / 2.0 + 0.5
+                ty = iy + placed_count // 4 * (ch + 0.5)
+            else:
+                tx = ix - iw / 2.0 - cw / 2.0 - 0.5
+                ty = iy + placed_count // 4 * (ch + 0.5)
+            tx = max(ctx.bounds[0] + 1.0, min(ctx.bounds[2] - 1.0, tx))
+            ty = max(ctx.bounds[1] + 1.0, min(ctx.bounds[3] - 1.0, ty))
+            ctx.positions[cap_ref] = (tx, ty, crot)
+            placed_count += 1
+            _post_clamp_decoup += 1
+    if _post_clamp_decoup:
+        _log.info("  Post-clamp decoupling re-pull: %d caps repositioned",
+                  _post_clamp_decoup)
+
+
+def _resolve_crystal_overlaps(
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+) -> None:
+    """Resolve overlaps between crystal refs (Y*) and capacitors (C*)."""
+    min_x, min_y, max_x, max_y = bounds
+    crystal_refs = [r for r in positions if r.startswith("Y")]
+    for yref in crystal_refs:
+        yx, yy, yrot = positions[yref]
+        yw, yh = fp_sizes.get(yref, (3.2, 1.5))
+        if yrot % 180 in (90.0, 270.0):
+            yw, yh = yh, yw
+        for cref in list(positions):
+            if cref == yref or not cref.startswith("C"):
+                continue
+            cx, cy, crot = positions[cref]
+            cw, ch = fp_sizes.get(cref, (1.5, 1.0))
+            if crot % 180 in (90.0, 270.0):
+                cw, ch = ch, cw
+            overlap_x = (cw + yw) / 2.0 + 0.5 - abs(cx - yx)
+            overlap_y = (ch + yh) / 2.0 + 0.5 - abs(cy - yy)
+            if overlap_x > 0 and overlap_y > 0:
+                if overlap_x < overlap_y:
+                    shift = overlap_x + 0.5
+                    new_cx = cx + shift if cx > yx else cx - shift
+                    new_cx = max(min_x + 2, min(max_x - 2, new_cx))
+                    positions[cref] = (new_cx, cy, crot)
+                else:
+                    shift = overlap_y + 0.5
+                    new_cy = cy + shift if cy > yy else cy - shift
+                    new_cy = max(min_y + 2, min(max_y - 2, new_cy))
+                    positions[cref] = (cx, new_cy, crot)
+                _log.info("Final crystal overlap fix: shifted %s away from %s",
+                          cref, yref)
+
+
 def _phase_late_decoupling(ctx: PlacementContext) -> None:
     """3c-late: Re-pull decoupling caps close to ICs after all group phases."""
     _log.info("  3c-late: Late decoupling re-tightening")
@@ -180,139 +450,23 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
 def _phase_first_clamp(ctx: PlacementContext) -> None:
     """First board-edge clamp using pad extent."""
     _log.info("=== Final: Clamping and review ===")
-    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
-    min_x, min_y, max_x, max_y = ctx.bounds
     fp_lookup = {fp.ref: fp for fp in ctx.initial_pcb.footprints}
     _edge_m = 1.5
 
-    for ref, (rx, ry, rot) in list(ctx.positions.items()):
-        if ref in ctx.fixed_refs:
-            continue
-        fp_obj = fp_lookup.get(ref)
-        if fp_obj is not None and fp_obj.pads:
-            ori_x, ori_y = centroid_to_origin(fp_obj, rx, ry, rot)
-            px0, py0, px1, py1 = pad_extent_in_board_space(
-                fp_obj, ori_x, ori_y, rot,
-            )
-            shift_x = shift_y = 0.0
-            if px0 < min_x + _edge_m:
-                shift_x = (min_x + _edge_m) - px0
-            elif px1 > max_x - _edge_m:
-                shift_x = (max_x - _edge_m) - px1
-            if py0 < min_y + _edge_m:
-                shift_y = (min_y + _edge_m) - py0
-            elif py1 > max_y - _edge_m:
-                shift_y = (max_y - _edge_m) - py1
-            if shift_x != 0.0 or shift_y != 0.0:
-                new_cx, new_cy = origin_to_centroid(
-                    fp_obj, ori_x + shift_x, ori_y + shift_y, rot,
-                )
-                ctx.positions[ref] = (new_cx, new_cy, rot)
-                _log.info("  Clamped %s: pad extent was (%.1f,%.1f)-(%.1f,%.1f), "
-                          "shifted by (%.1f,%.1f)", ref, px0, py0, px1, py1,
-                          shift_x, shift_y)
-        else:
-            w, h = _rotation_aware_size(ref, ctx.positions, ctx.fp_sizes)
-            clamped_x = max(min_x + w / 2 + 1.5, min(max_x - w / 2 - 1.5, rx))
-            clamped_y = max(min_y + h / 2 + 1.5, min(max_y - h / 2 - 1.5, ry))
-            if clamped_x != rx or clamped_y != ry:
-                ctx.positions[ref] = (clamped_x, clamped_y, rot)
+    _clamp_all_positions(
+        ctx.positions, fp_lookup, ctx.fp_sizes, ctx.bounds, _edge_m,
+        skip_refs=ctx.fixed_refs, label="First clamp",
+    )
 
     # Post-clamp collision resolution
-    subcircuit_fixed = (ctx.relay_support_refs | ctx.adc_channel_refs
-                        | ctx.mcu_peripheral_refs | ctx.power_group_fixed
-                        | ctx.ethernet_fixed | ctx.template_fixed
-                        | ctx.top_edge_connector_refs)
-    post_clamp_collisions_list = _count_collisions(ctx.positions, ctx.fp_sizes)
-    if post_clamp_collisions_list:
-        _log.info("  %d post-clamp collisions — resolving",
-                  len(post_clamp_collisions_list))
-        clamp_colliding = set()
-        for a, b in post_clamp_collisions_list:
-            clamp_colliding.add(a)
-            clamp_colliding.add(b)
-        clamp_always_base = (ctx.mcu_peripheral_refs | ctx.top_edge_connector_refs
-                             | ctx.ethernet_fixed | ctx.adc_channel_refs | ctx.adc_ic_refs
-                             | ctx.relay_support_refs | ctx.power_group_fixed
-                             | {r for r in ctx.positions if r.startswith("K")})
-        clamp_unprotect: set[str] = set()
-        for a, b in post_clamp_collisions_list:
-            if a in clamp_always_base and b in clamp_always_base:
-                area_a = ctx.fp_sizes.get(a, (2, 2))[0] * ctx.fp_sizes.get(a, (2, 2))[1]
-                area_b = ctx.fp_sizes.get(b, (2, 2))[0] * ctx.fp_sizes.get(b, (2, 2))[1]
-                smaller = a if area_a <= area_b else b
-                if (not smaller.startswith(("U", "Y", "K", "Q"))
-                        and smaller not in ctx.power_group_fixed):
-                    clamp_unprotect.add(smaller)
-        clamp_always_fixed = clamp_always_base - clamp_unprotect
-        clamp_targeted = (ctx.fixed_refs
-                          | (subcircuit_fixed - clamp_colliding)
-                          | clamp_always_fixed)
-        ctx.positions = _resolve_collisions(
-            ctx.positions, ctx.fp_sizes, ctx.bounds, clamp_targeted,
-        )
+    subcircuit_fixed = _build_subcircuit_fixed(ctx)
+    ctx.positions = _resolve_post_phase_collisions(
+        ctx.positions, ctx.fp_sizes, ctx.bounds, ctx, subcircuit_fixed,
+        label="post-clamp",
+    )
 
     # Post-clamp decoupling re-pull
-    _ref_to_group: dict[str, str] = getattr(ctx, "_ref_to_group", {})
-    if not _ref_to_group:
-        for feat in ctx.requirements.features:
-            for comp in feat.components:
-                r = comp.ref if hasattr(comp, "ref") else comp
-                _ref_to_group[r] = feat.name
-
-    sc_list = list(ctx.subcircuits)
-    _post_clamp_decoup = 0
-    for sc in sc_list:
-        if sc.circuit_type != SubCircuitType.DECOUPLING:
-            continue
-        ic_ref = sc.anchor_ref
-        if ic_ref not in ctx.positions:
-            continue
-        ic_group = _ref_to_group.get(ic_ref, "")
-        ix, iy, _irot = ctx.positions[ic_ref]
-        iw, ih = ctx.fp_sizes.get(ic_ref, (5.0, 5.0))
-        if _irot % 180 in (90.0, 270.0):
-            iw, ih = ih, iw
-        placed_count = 0
-        for cap_ref in sc.refs:
-            if cap_ref == ic_ref or not cap_ref.startswith("C"):
-                continue
-            if cap_ref not in ctx.positions:
-                continue
-            cap_group = _ref_to_group.get(cap_ref, "")
-            if cap_group != ic_group:
-                continue
-            cx, cy, crot = ctx.positions[cap_ref]
-            cw, ch = ctx.fp_sizes.get(cap_ref, (1.5, 1.0))
-            dx_edge = abs(cx - ix) - (iw + cw) / 2.0
-            dy_edge = abs(cy - iy) - (ih + ch) / 2.0
-            if dx_edge <= 0 and dy_edge <= 0:
-                edge_dist = 0.0
-            elif dx_edge <= 0:
-                edge_dist = dy_edge
-            elif dy_edge <= 0:
-                edge_dist = dx_edge
-            else:
-                edge_dist = math.sqrt(dx_edge ** 2 + dy_edge ** 2)
-            if edge_dist <= 5.0:
-                continue
-            side = placed_count % 4
-            if side == 0:
-                tx, ty = ix + placed_count // 4 * (cw + 0.5), iy - ih / 2.0 - ch / 2.0 - 0.5
-            elif side == 1:
-                tx, ty = ix + placed_count // 4 * (cw + 0.5), iy + ih / 2.0 + ch / 2.0 + 0.5
-            elif side == 2:
-                tx, ty = ix + iw / 2.0 + cw / 2.0 + 0.5, iy + placed_count // 4 * (ch + 0.5)
-            else:
-                tx, ty = ix - iw / 2.0 - cw / 2.0 - 0.5, iy + placed_count // 4 * (ch + 0.5)
-            tx = max(ctx.bounds[0] + 1.0, min(ctx.bounds[2] - 1.0, tx))
-            ty = max(ctx.bounds[1] + 1.0, min(ctx.bounds[3] - 1.0, ty))
-            ctx.positions[cap_ref] = (tx, ty, crot)
-            placed_count += 1
-            _post_clamp_decoup += 1
-    if _post_clamp_decoup:
-        _log.info("  Post-clamp decoupling re-pull: %d caps repositioned",
-                  _post_clamp_decoup)
+    _post_clamp_decoupling_repull(ctx)
 
     # Store fp_lookup and _edge_m on ctx for use by later phases
     ctx._fp_lookup = fp_lookup  # type: ignore[attr-defined]
@@ -334,10 +488,7 @@ def _phase_review_loop(ctx: PlacementContext) -> None:
     best_review: PlacementReview | None = None
     best_violation_count = float("inf")
 
-    subcircuit_fixed = (ctx.relay_support_refs | ctx.adc_channel_refs
-                        | ctx.mcu_peripheral_refs | ctx.power_group_fixed
-                        | ctx.ethernet_fixed | ctx.template_fixed
-                        | ctx.top_edge_connector_refs)
+    subcircuit_fixed = _build_subcircuit_fixed(ctx)
 
     for pass_num in range(ctx.max_review_passes):
         positions_tuple = _dict_to_positions(ctx.positions)
@@ -352,7 +503,7 @@ def _phase_review_loop(ctx: PlacementContext) -> None:
             if v.severity in ("critical", "major")
         )
         _log.info(
-            "  Review pass %d: %s — %d critical/major",
+            "  Review pass %d: %s -- %d critical/major",
             pass_num + 1, review.summary, critical_major,
         )
 
@@ -372,36 +523,10 @@ def _phase_review_loop(ctx: PlacementContext) -> None:
         )
 
     # Post-review collision resolution
-    post_review_collisions = _count_collisions(best_positions, ctx.fp_sizes)
-    if post_review_collisions:
-        _log.info(
-            "  %d post-review collisions — resolving", len(post_review_collisions),
-        )
-        pr_colliding = set()
-        for a, b in post_review_collisions:
-            pr_colliding.add(a)
-            pr_colliding.add(b)
-        pr_always_base = (ctx.mcu_peripheral_refs | ctx.top_edge_connector_refs
-                          | ctx.ethernet_fixed
-                          | ctx.adc_channel_refs | ctx.adc_ic_refs
-                          | ctx.relay_support_refs | ctx.power_group_fixed
-                          | {r for r in best_positions if r.startswith("K")})
-        pr_unprotect: set[str] = set()
-        for a, b in post_review_collisions:
-            if a in pr_always_base and b in pr_always_base:
-                area_a = ctx.fp_sizes.get(a, (2, 2))[0] * ctx.fp_sizes.get(a, (2, 2))[1]
-                area_b = ctx.fp_sizes.get(b, (2, 2))[0] * ctx.fp_sizes.get(b, (2, 2))[1]
-                smaller = a if area_a <= area_b else b
-                if (not smaller.startswith(("U", "Y", "K", "Q"))
-                        and smaller not in ctx.power_group_fixed):
-                    pr_unprotect.add(smaller)
-        pr_always = pr_always_base - pr_unprotect
-        pr_targeted = (ctx.fixed_refs
-                       | (subcircuit_fixed - pr_colliding)
-                       | pr_always)
-        best_positions = _resolve_collisions(
-            best_positions, ctx.fp_sizes, ctx.bounds, pr_targeted,
-        )
+    best_positions = _resolve_post_phase_collisions(
+        best_positions, ctx.fp_sizes, ctx.bounds, ctx, subcircuit_fixed,
+        label="post-review",
+    )
 
     ctx.best_positions = best_positions
     ctx._best_review = best_review  # type: ignore[attr-defined]
@@ -524,20 +649,11 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
 
     _log.info("    3c2-late: re-aligned %d ADC channel components", _realigned)
 
-    _post_adc_collisions = _count_collisions(ctx.best_positions, ctx.fp_sizes)
-    if _post_adc_collisions:
-        _log.info(
-            "    3c2-late: %d post-alignment collisions — resolving",
-            len(_post_adc_collisions),
-        )
-        _adc_fixed = (ctx.fixed_refs | ctx.adc_channel_refs | ctx.adc_ic_refs
-                      | ctx.top_edge_connector_refs | ctx.relay_support_refs
-                      | ctx.ethernet_fixed | ctx.mcu_peripheral_refs
-                      | ctx.power_group_fixed
-                      | {r for r in ctx.best_positions if r.startswith("K")})
-        ctx.best_positions = _resolve_collisions(
-            ctx.best_positions, ctx.fp_sizes, ctx.bounds, _adc_fixed,
-        )
+    subcircuit_fixed = _build_subcircuit_fixed(ctx)
+    ctx.best_positions = _resolve_post_phase_collisions(
+        ctx.best_positions, ctx.fp_sizes, ctx.bounds, ctx, subcircuit_fixed,
+        label="3c2-late post-alignment",
+    )
 
 
 def _phase_late_relay_realignment(
@@ -687,109 +803,25 @@ def _phase_mcu_decoupling_repull(ctx: PlacementContext) -> None:
 
 def _phase_final_clamp(ctx: PlacementContext) -> None:
     """Final board-edge clamp — ensure ALL components are inside board."""
-    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
-    min_x, min_y, max_x, max_y = ctx.bounds
     fp_lookup: dict[str, object] = getattr(ctx, "_fp_lookup", {})
     if not fp_lookup:
         fp_lookup = {fp.ref: fp for fp in ctx.initial_pcb.footprints}
     _edge_m: float = getattr(ctx, "_edge_m", 1.5)
 
     # Late-phase edge clamp
-    for ref, (rx, ry, rot) in list(ctx.best_positions.items()):
-        fp_obj = fp_lookup.get(ref)
-        if fp_obj is not None and fp_obj.pads:  # type: ignore[union-attr]
-            ori_x, ori_y = centroid_to_origin(fp_obj, rx, ry, rot)  # type: ignore[arg-type]
-            px0, py0, px1, py1 = pad_extent_in_board_space(
-                fp_obj, ori_x, ori_y, rot,  # type: ignore[arg-type]
-            )
-            shift_x = shift_y = 0.0
-            _fm = 1.5
-            if px0 < min_x + _fm:
-                shift_x = (min_x + _fm) - px0
-            elif px1 > max_x - _fm:
-                shift_x = (max_x - _fm) - px1
-            if py0 < min_y + _fm:
-                shift_y = (min_y + _fm) - py0
-            elif py1 > max_y - _fm:
-                shift_y = (max_y - _fm) - py1
-            if shift_x != 0.0 or shift_y != 0.0:
-                new_cx, new_cy = origin_to_centroid(
-                    fp_obj, ori_x + shift_x, ori_y + shift_y, rot,  # type: ignore[arg-type]
-                )
-                ctx.best_positions[ref] = (new_cx, new_cy, rot)
-                _log.info("  Late-phase clamp %s: shifted by (%.1f,%.1f)",
-                          ref, shift_x, shift_y)
-        else:
-            w, h = _rotation_aware_size(ref, ctx.best_positions, ctx.fp_sizes)
-            clamped_x = max(min_x + w / 2 + 1.5, min(max_x - w / 2 - 1.5, rx))
-            clamped_y = max(min_y + h / 2 + 1.5, min(max_y - h / 2 - 1.5, ry))
-            if clamped_x != rx or clamped_y != ry:
-                ctx.best_positions[ref] = (clamped_x, clamped_y, rot)
+    _clamp_all_positions(
+        ctx.best_positions, fp_lookup, ctx.fp_sizes, ctx.bounds, _edge_m,
+        label="Late-phase clamp",
+    )
 
     # Final crystal-cap overlap resolution
-    _crystal_refs_final = [r for r in ctx.best_positions if r.startswith("Y")]
-    for yref in _crystal_refs_final:
-        yx, yy, yrot = ctx.best_positions[yref]
-        yw, yh = ctx.fp_sizes.get(yref, (3.2, 1.5))
-        if yrot % 180 in (90.0, 270.0):
-            yw, yh = yh, yw
-        for cref in list(ctx.best_positions):
-            if cref == yref or not cref.startswith("C"):
-                continue
-            cx, cy, crot = ctx.best_positions[cref]
-            cw, ch = ctx.fp_sizes.get(cref, (1.5, 1.0))
-            if crot % 180 in (90.0, 270.0):
-                cw, ch = ch, cw
-            overlap_x = (cw + yw) / 2.0 + 0.5 - abs(cx - yx)
-            overlap_y = (ch + yh) / 2.0 + 0.5 - abs(cy - yy)
-            if overlap_x > 0 and overlap_y > 0:
-                if overlap_x < overlap_y:
-                    shift = overlap_x + 0.5
-                    new_cx = cx + shift if cx > yx else cx - shift
-                    new_cx = max(min_x + 2, min(max_x - 2, new_cx))
-                    ctx.best_positions[cref] = (new_cx, cy, crot)
-                else:
-                    shift = overlap_y + 0.5
-                    new_cy = cy + shift if cy > yy else cy - shift
-                    new_cy = max(min_y + 2, min(max_y - 2, new_cy))
-                    ctx.best_positions[cref] = (cx, new_cy, crot)
-                _log.info("Final crystal overlap fix: shifted %s away from %s",
-                          cref, yref)
+    _resolve_crystal_overlaps(ctx.best_positions, ctx.fp_sizes, ctx.bounds)
 
     # Final board-edge clamp
-    _final_clamp_count = 0
-    for ref, (rx, ry, rot) in list(ctx.best_positions.items()):
-        fp_obj = fp_lookup.get(ref)
-        if fp_obj is not None and fp_obj.pads:  # type: ignore[union-attr]
-            ori_x, ori_y = centroid_to_origin(fp_obj, rx, ry, rot)  # type: ignore[arg-type]
-            px0, py0, px1, py1 = pad_extent_in_board_space(
-                fp_obj, ori_x, ori_y, rot,  # type: ignore[arg-type]
-            )
-            shift_x = shift_y = 0.0
-            if px0 < min_x + _edge_m:
-                shift_x = (min_x + _edge_m) - px0
-            elif px1 > max_x - _edge_m:
-                shift_x = (max_x - _edge_m) - px1
-            if py0 < min_y + _edge_m:
-                shift_y = (min_y + _edge_m) - py0
-            elif py1 > max_y - _edge_m:
-                shift_y = (max_y - _edge_m) - py1
-            if shift_x != 0.0 or shift_y != 0.0:
-                new_cx, new_cy = origin_to_centroid(
-                    fp_obj, ori_x + shift_x, ori_y + shift_y, rot,  # type: ignore[arg-type]
-                )
-                ctx.best_positions[ref] = (new_cx, new_cy, rot)
-                _final_clamp_count += 1
-        else:
-            w, h = _rotation_aware_size(ref, ctx.best_positions, ctx.fp_sizes)
-            clamped_x = max(min_x + w / 2 + 1.5, min(max_x - w / 2 - 1.5, rx))
-            clamped_y = max(min_y + h / 2 + 1.5, min(max_y - h / 2 - 1.5, ry))
-            if clamped_x != rx or clamped_y != ry:
-                ctx.best_positions[ref] = (clamped_x, clamped_y, rot)
-                _final_clamp_count += 1
-    if _final_clamp_count:
-        _log.info("Final board-edge clamp: %d components repositioned",
-                  _final_clamp_count)
+    _clamp_all_positions(
+        ctx.best_positions, fp_lookup, ctx.fp_sizes, ctx.bounds, _edge_m,
+        label="Final board-edge clamp",
+    )
 
 
 def _phase_build_final(

@@ -1002,6 +1002,257 @@ def _solve_remaining_placement(
 
 
 # ---------------------------------------------------------------------------
+# NEAR placement helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_pin_offsets(
+    near_refs: list[tuple[str, PlacementConstraint]],
+    requirements: ProjectRequirements | None,
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> dict[str, dict[str, tuple[float, float]]]:
+    """Build pin position lookup for pin-level NEAR targeting.
+
+    Estimates pin offsets for ICs and NEAR targets using a DIP-convention
+    heuristic that distributes pins around the component perimeter.
+    """
+    near_targets = {c.target_ref for _, c in near_refs if c.target_ref is not None}
+    pin_offsets: dict[str, dict[str, tuple[float, float]]] = {}
+    for comp in (requirements.components if requirements is not None else []):
+        if not (comp.ref.startswith("U") or comp.ref in near_targets):
+            continue
+        w, h = footprint_sizes.get(comp.ref, (3.0, 3.0))
+        comp_pins: dict[str, tuple[float, float]] = {}
+        pin_list = [c.pin for net in (requirements.nets if requirements is not None else [])
+                    for c in net.connections if c.ref == comp.ref]
+        for pidx, pin in enumerate(sorted(set(pin_list))):
+            n_pins = max(1, len(set(pin_list)))
+            if n_pins == 1:
+                comp_pins[pin] = (0.0, 0.0)
+                continue
+            if pidx < n_pins // 2:
+                denom_l = max(1, n_pins // 2 - 1)
+                y_off = -h / 2.0 + h * pidx / denom_l if n_pins > 2 else 0.0
+                comp_pins[pin] = (-w / 2.0, y_off)
+            else:
+                ridx = pidx - n_pins // 2
+                denom = max(1, n_pins - n_pins // 2 - 1)
+                comp_pins[pin] = (w / 2.0, h / 2.0 - h * ridx / denom if denom > 0 else 0.0)
+        pin_offsets[comp.ref] = comp_pins
+    return pin_offsets
+
+
+def _compute_preferred_angle(
+    c: PlacementConstraint,
+    target_center: Point,
+    pin_offsets: dict[str, dict[str, tuple[float, float]]],
+    rotations: dict[str, float],
+    ref_constraint: dict[str, PlacementConstraint],
+    origin_x: float,
+    origin_y: float,
+    board_w: float,
+    board_h: float,
+) -> tuple[Point, float | None]:
+    """Compute pin position and preferred placement angle for a NEAR constraint.
+
+    Returns:
+        (pin_pos, preferred_angle) where preferred_angle may be None.
+    """
+    target = c.target_ref
+    assert target is not None
+    pin_pos = target_center
+    preferred_angle: float | None = None
+
+    if c.target_pin is not None and target in pin_offsets:
+        pin_off = pin_offsets[target].get(c.target_pin)
+        if pin_off is not None:
+            rot_rad = math.radians(-rotations.get(target, 0.0))
+            cos_r = math.cos(rot_rad)
+            sin_r = math.sin(rot_rad)
+            rpx = pin_off[0] * cos_r - pin_off[1] * sin_r
+            rpy = pin_off[0] * sin_r + pin_off[1] * cos_r
+            pin_pos = Point(
+                x=target_center.x + rpx,
+                y=target_center.y + rpy,
+            )
+            if abs(rpx) > 0.01 or abs(rpy) > 0.01:
+                preferred_angle = math.atan2(rpy, rpx)
+
+    target_constraint = ref_constraint.get(target)
+    if (target_constraint is not None
+            and target_constraint.constraint_type == PlacementConstraintType.EDGE):
+        if preferred_angle is not None:
+            preferred_angle += math.pi
+        else:
+            board_cx = origin_x + board_w / 2.0
+            board_cy = origin_y + board_h / 2.0
+            preferred_angle = math.atan2(
+                board_cy - target_center.y,
+                board_cx - target_center.x,
+            )
+
+    return pin_pos, preferred_angle
+
+
+def _try_near_grid_search(
+    ref: str,
+    pin_pos: Point,
+    preferred_angle: float | None,
+    max_dist: float,
+    enforce_min: float,
+    w: float,
+    h: float,
+    grid: _OccupancyGrid,
+    origin_x: float,
+    origin_y: float,
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    target: str,
+    target_pin: str | None,
+) -> bool:
+    """Try to place a component near a pin using grid search over angles/distances.
+
+    Mutates positions, rotations, and grid on success.
+
+    Returns:
+        True if placed successfully.
+    """
+    if preferred_angle is not None:
+        angles = [preferred_angle + math.radians(d)
+                  for d in (0, 45, -45, 90, -90, 135, -135, 180)]
+    else:
+        angles = [math.radians(a) for a in range(0, 360, 45)]
+
+    min_dist = max(max(w, h) * 0.75, enforce_min)
+    distances = [min_dist + (max_dist - min_dist) * i / 3 for i in range(4)]
+    distances.extend([max_dist * 1.5, max_dist * 2.0])
+    for dist in distances:
+        for angle in angles:
+            trial_x = pin_pos.x + dist * math.cos(angle)
+            trial_y = pin_pos.y + dist * math.sin(angle)
+            rx = trial_x - origin_x - w / 2
+            ry = trial_y - origin_y - h / 2
+            if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
+                positions[ref] = Point(x=trial_x, y=trial_y)
+                if preferred_angle is not None and _is_two_pin_passive(ref):
+                    angle_deg = math.degrees(preferred_angle) % 360
+                    rotations[ref] = round(angle_deg / 90.0) * 90.0 % 360.0
+                else:
+                    rotations[ref] = 0.0
+                gap = _placement_gap(w, h)
+                grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
+                log.debug("NEAR(%s.%s): %s at (%.1f, %.1f) angle=%.0f",
+                          target, target_pin or "?", ref, trial_x, trial_y,
+                          math.degrees(angle))
+                return True
+    return False
+
+
+def _try_near_fallback(
+    ref: str,
+    pin_pos: Point,
+    target_center: Point,
+    enforce_min: float,
+    w: float,
+    h: float,
+    grid: _OccupancyGrid,
+    origin_x: float,
+    origin_y: float,
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    target: str,
+    violations: list[str],
+) -> bool:
+    """Fallback placement: nearest free spot to pin position.
+
+    Mutates positions, rotations, grid, and violations.
+
+    Returns:
+        True if placed successfully.
+    """
+    free = grid.find_nearest_free(
+        pin_pos.x - origin_x, pin_pos.y - origin_y, w, h,
+    )
+    if free is None:
+        violations.append(f"Could not place {ref} near {target}")
+        return False
+
+    fx = free[0] + origin_x
+    fy = free[1] + origin_y
+    if enforce_min > 0:
+        dist_to_target = math.hypot(
+            fx - target_center.x, fy - target_center.y,
+        )
+        if dist_to_target < enforce_min:
+            angle = math.atan2(
+                fy - target_center.y, fx - target_center.x,
+            )
+            fx = target_center.x + enforce_min * math.cos(angle)
+            fy = target_center.y + enforce_min * math.sin(angle)
+    positions[ref] = Point(x=fx, y=fy)
+    rotations[ref] = 0.0
+    gap = _placement_gap(w, h)
+    gx = fx - origin_x - w / 2
+    gy = fy - origin_y - h / 2
+    grid.mark_rect(gx - gap, gy - gap, w + 2 * gap, h + 2 * gap)
+    return True
+
+
+def _solve_near_placement(
+    near_refs: list[tuple[str, PlacementConstraint]],
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    violations: list[str],
+    grid: _OccupancyGrid,
+    ref_constraint: dict[str, PlacementConstraint],
+    pin_offsets: dict[str, dict[str, tuple[float, float]]],
+    footprint_sizes: dict[str, tuple[float, float]],
+    origin_x: float,
+    origin_y: float,
+    board_w: float,
+    board_h: float,
+) -> None:
+    """Solve NEAR constraint placements with multi-pass retry."""
+    for _pass in range(3):
+        deferred: list[tuple[str, PlacementConstraint]] = []
+        for ref, c in near_refs:
+            if ref in positions:
+                continue
+            target = c.target_ref
+            if target is None or target not in positions:
+                deferred.append((ref, c))
+                continue
+
+            target_center = positions[target]
+            pin_pos, preferred_angle = _compute_preferred_angle(
+                c, target_center, pin_offsets, rotations,
+                ref_constraint, origin_x, origin_y, board_w, board_h,
+            )
+
+            max_dist = c.max_distance_mm or 5.0
+            enforce_min = c.min_distance_mm or 0.0
+            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+
+            placed = _try_near_grid_search(
+                ref, pin_pos, preferred_angle, max_dist, enforce_min,
+                w, h, grid, origin_x, origin_y, positions, rotations,
+                target, c.target_pin,
+            )
+            if not placed:
+                placed = _try_near_fallback(
+                    ref, pin_pos, target_center, enforce_min,
+                    w, h, grid, origin_x, origin_y, positions, rotations,
+                    target, violations,
+                )
+            if not placed:
+                deferred.append((ref, c))
+
+        near_refs = deferred
+        if not deferred:
+            break
+
+
+# ---------------------------------------------------------------------------
 # Constraint solver
 # ---------------------------------------------------------------------------
 
@@ -1120,160 +1371,21 @@ def solve_placement(
         footprint_sizes, board_w, board_h, origin_x, origin_y,
     )
 
-    # 3. Place NEAR (with retry for deferred placements whose targets
-    # appear later in the priority order)
+    # 3. Place NEAR
     near_refs = [
         (ref, c) for ref, c in ref_constraint.items()
         if c.constraint_type == PlacementConstraintType.NEAR and ref not in positions
     ]
 
-    # Build pin position lookup for pin-level NEAR targeting
-    # Compute offsets for any component that is a NEAR target (ICs, switches, etc.)
-    near_targets = {c.target_ref for _, c in near_refs if c.target_ref is not None}
-    pin_offsets: dict[str, dict[str, tuple[float, float]]] = {}
-    for comp in (requirements.components if requirements is not None else []):
-        if comp.ref.startswith("U") or comp.ref in near_targets:
-            # Estimate pin offsets from footprint dimensions
-            w, h = footprint_sizes.get(comp.ref, (3.0, 3.0))
-            comp_pins: dict[str, tuple[float, float]] = {}
-            # Simple heuristic: distribute pins around perimeter
-            pin_list = [c.pin for net in (requirements.nets if requirements is not None else [])
-                        for c in net.connections if c.ref == comp.ref]
-            for pidx, pin in enumerate(sorted(set(pin_list))):
-                n_pins = max(1, len(set(pin_list)))
-                # Single pin → center
-                if n_pins == 1:
-                    comp_pins[pin] = (0.0, 0.0)
-                    continue
-                # Left-right distribution (DIP convention)
-                if pidx < n_pins // 2:
-                    denom_l = max(1, n_pins // 2 - 1)
-                    y_off = -h / 2.0 + h * pidx / denom_l if n_pins > 2 else 0.0
-                    comp_pins[pin] = (-w / 2.0, y_off)
-                else:
-                    ridx = pidx - n_pins // 2
-                    denom = max(1, n_pins - n_pins // 2 - 1)
-                    comp_pins[pin] = (w / 2.0, h / 2.0 - h * ridx / denom if denom > 0 else 0.0)
-            pin_offsets[comp.ref] = comp_pins
+    pin_offsets = _build_pin_offsets(
+        near_refs, requirements, footprint_sizes,
+    )
 
-    def _place_near(ref: str, c: PlacementConstraint) -> bool:
-        target = c.target_ref
-        if target is None or target not in positions:
-            return False
-        target_center = positions[target]
-        pin_pos = target_center
-        preferred_angle: float | None = None
-
-        # Pin-level targeting: compute pin position AND outward direction
-        if c.target_pin is not None and target in pin_offsets:
-            pin_off = pin_offsets[target].get(c.target_pin)
-            if pin_off is not None:
-                rot_rad = math.radians(-rotations.get(target, 0.0))
-                cos_r = math.cos(rot_rad)
-                sin_r = math.sin(rot_rad)
-                rpx = pin_off[0] * cos_r - pin_off[1] * sin_r
-                rpy = pin_off[0] * sin_r + pin_off[1] * cos_r
-                pin_pos = Point(
-                    x=target_center.x + rpx,
-                    y=target_center.y + rpy,
-                )
-                # Outward direction: from component center through pin
-                if abs(rpx) > 0.01 or abs(rpy) > 0.01:
-                    preferred_angle = math.atan2(rpy, rpx)
-
-        # For edge-mounted targets (connectors), flip inward —
-        # passives should be on the board-interior side
-        target_constraint = ref_constraint.get(target)
-        if (target_constraint is not None
-                and target_constraint.constraint_type
-                == PlacementConstraintType.EDGE):
-            if preferred_angle is not None:
-                preferred_angle += math.pi  # flip outward → inward
-            else:
-                # No pin info — point toward board center
-                board_cx = origin_x + board_w / 2.0
-                board_cy = origin_y + board_h / 2.0
-                preferred_angle = math.atan2(
-                    board_cy - target_center.y,
-                    board_cx - target_center.x,
-                )
-
-        max_dist = c.max_distance_mm or 5.0
-        enforce_min = c.min_distance_mm or 0.0
-        w, h = footprint_sizes.get(ref, (3.0, 3.0))
-
-        # Build angle search order: prefer outward from pin, then nearby
-        if preferred_angle is not None:
-            angles = [preferred_angle + math.radians(d)
-                      for d in (0, 45, -45, 90, -90, 135, -135, 180)]
-        else:
-            angles = [math.radians(a) for a in range(0, 360, 45)]
-
-        # Search from close to far, starting at the pin position
-        min_dist = max(max(w, h) * 0.75, enforce_min)
-        distances = [min_dist + (max_dist - min_dist) * i / 3 for i in range(4)]
-        distances.extend([max_dist * 1.5, max_dist * 2.0])
-        for dist in distances:
-            for angle in angles:
-                trial_x = pin_pos.x + dist * math.cos(angle)
-                trial_y = pin_pos.y + dist * math.sin(angle)
-                rx = trial_x - origin_x - w / 2
-                ry = trial_y - origin_y - h / 2
-                if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
-                    positions[ref] = Point(x=trial_x, y=trial_y)
-                    # Set initial rotation: align passive toward target pin
-                    if preferred_angle is not None and _is_two_pin_passive(ref):
-                        angle_deg = math.degrees(preferred_angle) % 360
-                        # Snap to nearest 90° — pad axis should point toward pin
-                        rotations[ref] = round(angle_deg / 90.0) * 90.0 % 360.0
-                    else:
-                        rotations[ref] = 0.0
-                    gap = _placement_gap(w, h)
-                    grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
-                    log.debug("NEAR(%s.%s): %s at (%.1f, %.1f) angle=%.0f°",
-                              target, c.target_pin or "?", ref, trial_x, trial_y,
-                              math.degrees(angle))
-                    return True
-        # Fallback: nearest free spot to pin position (respecting min_distance)
-        free = grid.find_nearest_free(
-            pin_pos.x - origin_x, pin_pos.y - origin_y, w, h,
-        )
-        if free is not None:
-            fx = free[0] + origin_x
-            fy = free[1] + origin_y
-            # Enforce min_distance from target center (avoid courtyard overlap)
-            if enforce_min > 0:
-                dist_to_target = math.hypot(
-                    fx - target_center.x, fy - target_center.y,
-                )
-                if dist_to_target < enforce_min:
-                    # Push outward from target center
-                    angle = math.atan2(
-                        fy - target_center.y, fx - target_center.x,
-                    )
-                    fx = target_center.x + enforce_min * math.cos(angle)
-                    fy = target_center.y + enforce_min * math.sin(angle)
-            positions[ref] = Point(x=fx, y=fy)
-            rotations[ref] = 0.0
-            gap = _placement_gap(w, h)
-            gx = fx - origin_x - w / 2
-            gy = fy - origin_y - h / 2
-            grid.mark_rect(gx - gap, gy - gap, w + 2 * gap, h + 2 * gap)
-            return True
-        violations.append(f"Could not place {ref} near {target}")
-        return False
-
-    # Multiple passes to resolve dependency chains (A -> B -> C)
-    for _pass in range(3):
-        deferred = []
-        for ref, c in near_refs:
-            if ref in positions:
-                continue
-            if not _place_near(ref, c):
-                deferred.append((ref, c))
-        near_refs = deferred
-        if not deferred:
-            break
+    _solve_near_placement(
+        near_refs, positions, rotations, violations, grid,
+        ref_constraint, pin_offsets, footprint_sizes,
+        origin_x, origin_y, board_w, board_h,
+    )
 
     # 4. Place GROUP
     conn_degree_index = _build_connectivity_degree_index(requirements)

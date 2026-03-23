@@ -416,6 +416,66 @@ def _extent_v_spacing(
     return row_bottoms + next_tops + gap
 
 
+def _row_height_for_pin_count(max_pc: int) -> float:
+    """Compute row height from the max pin count in the row.
+
+    Returns body height + size-scaled label clearance.
+    """
+    body_h = max(max_pc * 2.54, 5.08)
+    if body_h <= 5.08:
+        clearance = 10.0  # 2-pin passives: tight
+    elif body_h <= 10.0:
+        clearance = 12.0  # 4-6 pin: moderate
+    else:
+        clearance = 15.0  # 8+ pin: generous
+    return body_h + clearance
+
+
+def _place_small_components(
+    refs: list[str],
+    pin_counts: list[int],
+    small_indices: list[int],
+    zone: PlacementZone,
+    grid: float,
+    cumulative_y: float,
+    result: dict[str, Point],
+) -> float:
+    """Place small components (<8 pins) in a compact grid within zone.
+
+    Returns the updated cumulative_y after placing all small components.
+    """
+    n_small = len(small_indices)
+
+    first_row_pcs = [pin_counts[small_indices[j]] for j in range(min(n_small, 6))]
+    max_pc_first = max(first_row_pcs) if first_row_pcs else 2
+    h_spacing = snap_to_grid(_h_spacing_for_pins(max_pc_first, grid), grid)
+    cols = max(1, min(n_small, int(zone.width / h_spacing)))
+
+    for local_idx, global_idx in enumerate(small_indices):
+        ref = refs[global_idx]
+        col = local_idx % cols
+        row = local_idx // cols
+
+        row_start_idx = row * cols
+        row_end_idx = min(row_start_idx + cols, n_small)
+        row_pcs = [pin_counts[small_indices[j]] for j in range(row_start_idx, row_end_idx)]
+        max_pc = max(row_pcs) if row_pcs else 2
+        row_height = _row_height_for_pin_count(max_pc)
+
+        row_h_spacing = snap_to_grid(_h_spacing_for_pins(max_pc, grid), grid)
+        raw_x = zone.origin_x + col * row_h_spacing
+        if col == 0 and local_idx > 0:
+            cumulative_y += row_height
+        raw_y = zone.origin_y + cumulative_y
+
+        x = snap_to_grid(raw_x, grid)
+        y = snap_to_grid(raw_y, grid)
+        result[ref] = Point(x=x, y=y)
+        log.debug("place_in_zone: %s -> (%.3f, %.3f) in zone %s", ref, x, y, zone.name)
+
+    return cumulative_y
+
+
 def place_in_zone(
     refs: list[str],
     zone: PlacementZone,
@@ -500,46 +560,9 @@ def place_in_zone(
 
     # Place small components: pin-count-aware spacing per row
     if small_indices:
-        n_small = len(small_indices)
-
-        # Compute per-row horizontal spacing from max pin count in first row
-        first_row_pcs = [pin_counts[small_indices[j]] for j in range(min(n_small, 6))]
-        max_pc_first = max(first_row_pcs) if first_row_pcs else 2
-        h_spacing = snap_to_grid(_h_spacing_for_pins(max_pc_first, grid), grid)
-        cols = max(1, min(n_small, int(zone.width / h_spacing)))
-
-        for local_idx, global_idx in enumerate(small_indices):
-            ref = refs[global_idx]
-            pc = pin_counts[global_idx]
-            col = local_idx % cols
-            row = local_idx // cols
-
-            # Compute row height: body height + size-scaled label clearance
-            row_start_idx = row * cols
-            row_end_idx = min(row_start_idx + cols, n_small)
-            row_pcs = [pin_counts[small_indices[j]] for j in range(row_start_idx, row_end_idx)]
-            max_pc = max(row_pcs) if row_pcs else 2
-            body_h = max(max_pc * 2.54, 5.08)
-            # Scale label clearance by body size
-            if body_h <= 5.08:
-                clearance = 10.0  # 2-pin passives: tight
-            elif body_h <= 10.0:
-                clearance = 12.0  # 4-6 pin: moderate
-            else:
-                clearance = 15.0  # 8+ pin: generous
-            row_height = body_h + clearance
-
-            # Recompute h_spacing per row from max pin count
-            row_h_spacing = snap_to_grid(_h_spacing_for_pins(max_pc, grid), grid)
-            raw_x = zone.origin_x + col * row_h_spacing
-            if col == 0 and local_idx > 0:
-                cumulative_y += row_height
-            raw_y = zone.origin_y + cumulative_y
-
-            x = snap_to_grid(raw_x, grid)
-            y = snap_to_grid(raw_y, grid)
-            result[ref] = Point(x=x, y=y)
-            log.debug("place_in_zone: %s → (%.3f, %.3f) in zone %s", ref, x, y, zone.name)
+        cumulative_y = _place_small_components(
+            refs, pin_counts, small_indices, zone, grid, cumulative_y, result,
+        )
 
     return result
 

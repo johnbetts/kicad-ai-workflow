@@ -99,6 +99,15 @@ def _net_pin_map(
     return result
 
 
+_MCU_KEYWORDS: tuple[str, ...] = ("ESP32", "STM32", "ATMEGA", "RP2040", "NRF52")
+
+
+def _is_mcu_component(comp: Component) -> bool:
+    """Return True if *comp* is a microcontroller based on its value string."""
+    upper = (comp.value or "").upper()
+    return any(kw in upper for kw in _MCU_KEYWORDS)
+
+
 def _ref_prefix(ref: str) -> str:
     """Get the alpha prefix of a reference designator."""
     return "".join(c for c in ref if c.isalpha())
@@ -253,11 +262,7 @@ def _trace_gpio_to_mcu_pin(
         comp = comps.get(r)
         if comp is None:
             continue
-        is_mcu = (
-            "ESP32" in (comp.value or "").upper()
-            or "MCU" in (comp.description or "").upper()
-        )
-        if not is_mcu:
+        if not (_is_mcu_component(comp) or "MCU" in (comp.description or "").upper()):
             continue
         for p in comp.pins:
             if p.net == gpio_net:
@@ -330,6 +335,59 @@ def _parse_resistance(value: str) -> float | None:
     return num
 
 
+def _trace_voltage_divider(
+    r_refs: list[str],
+    adc_net: str,
+    comps: dict[str, Component],
+) -> tuple[float | None, float | None, str]:
+    """Trace voltage divider resistors on an ADC net.
+
+    Returns:
+        (divider_ratio, max_input_voltage, input_net)
+    """
+    top_r_val: float | None = None
+    bot_r_val: float | None = None
+    input_net = adc_net
+
+    for r_ref in r_refs:
+        r_comp = comps.get(r_ref)
+        if not r_comp:
+            continue
+        other_nets = [p.net for p in r_comp.pins if p.net and p.net != adc_net]
+        if any(_is_gnd_net(n) for n in other_nets):
+            bot_r_val = _parse_resistance(r_comp.value)
+        else:
+            top_r_val = _parse_resistance(r_comp.value)
+            for n in other_nets:
+                input_net = n
+                if not _is_power_net(n):
+                    break
+
+    divider_ratio: float | None = None
+    max_vin: float | None = None
+    if top_r_val and bot_r_val:
+        divider_ratio = round(bot_r_val / (top_r_val + bot_r_val), 4)
+        max_vin = round(3.3 / divider_ratio, 1)
+
+    return divider_ratio, max_vin, input_net
+
+
+def _derive_adc_description(
+    r_refs: list[str],
+    comps: dict[str, Component],
+    comp_ref: str,
+    channel: int,
+) -> str:
+    """Derive a human-readable description for an ADC channel."""
+    for r_ref in r_refs:
+        r_comp = comps.get(r_ref)
+        if r_comp and r_comp.description:
+            m = re.search(r"ADC\s+(.+?)\s+(?:top|bottom)", r_comp.description)
+            if m:
+                return m.group(1)
+    return f"{comp_ref} channel {channel}"
+
+
 def _infer_adc_channels(
     requirements: ProjectRequirements,
 ) -> tuple[tuple[ADCChannelConfig, ...], list[str]]:
@@ -339,14 +397,12 @@ def _infer_adc_channels(
     warnings: list[str] = []
     channels: list[ADCChannelConfig] = []
 
-    # ADS1115 AIN pin names → channel index
     ain_pins: dict[str, int] = {"AIN0": 0, "AIN1": 1, "AIN2": 2, "AIN3": 3}
 
     for comp in requirements.components:
         if "ADS1115" not in comp.value.upper():
             continue
 
-        # Determine I2C address from ADDR pin
         addr_pin = next((p for p in comp.pins if p.name.upper() == "ADDR"), None)
         addr_net = addr_pin.net if addr_pin else None
         i2c_address = _ADS1115_ADDR_MAP.get(addr_net or "", 0x48)
@@ -357,60 +413,21 @@ def _infer_adc_channels(
             channel = ain_pins[pin.name.upper()]
             adc_net = pin.net
 
-            # Trace voltage divider: find Rs on the ADC net
             adc_refs = net_to_refs.get(adc_net, set())
             r_refs = sorted(r for r in adc_refs if _ref_prefix(r) == "R")
 
-            divider_ratio: float | None = None
-            max_vin: float | None = None
-            input_net = adc_net
-            connector_ref = ""
-
-            # Look for voltage divider (top R + bottom R)
-            top_r_val: float | None = None
-            bot_r_val: float | None = None
-            for r_ref in r_refs:
-                r_comp = comps.get(r_ref)
-                if not r_comp:
-                    continue
-                # Bottom R: other pin goes to GND/AGND
-                other_nets = [
-                    p.net for p in r_comp.pins if p.net and p.net != adc_net
-                ]
-                if any(_is_gnd_net(n) for n in other_nets):
-                    bot_r_val = _parse_resistance(r_comp.value)
-                else:
-                    # Top R: other pin goes to input
-                    top_r_val = _parse_resistance(r_comp.value)
-                    # Prefer non-power net as the actual input signal
-                    for n in other_nets:
-                        input_net = n
-                        if not _is_power_net(n):
-                            break
-
-            if top_r_val and bot_r_val:
-                divider_ratio = round(bot_r_val / (top_r_val + bot_r_val), 4)
-                # Max input = Vref / ratio (assuming 3.3V ref)
-                max_vin = round(3.3 / divider_ratio, 1)
+            divider_ratio, max_vin, input_net = _trace_voltage_divider(
+                r_refs, adc_net, comps,
+            )
 
             # Find connector on the input net
             input_refs = net_to_refs.get(input_net, set())
             j_refs = [r for r in input_refs if _ref_prefix(r) == "J"]
-            if j_refs:
-                connector_ref = sorted(j_refs)[0]
+            connector_ref = sorted(j_refs)[0] if j_refs else ""
 
-            description = ""
-            # Try to derive from component descriptions of divider resistors
-            for r_ref in r_refs:
-                r_comp = comps.get(r_ref)
-                if r_comp and r_comp.description:
-                    # Extract label from "ADC <label> top/bottom divider"
-                    m = re.search(r"ADC\s+(.+?)\s+(?:top|bottom)", r_comp.description)
-                    if m:
-                        description = m.group(1)
-                        break
-            if not description:
-                description = f"{comp.ref} channel {channel}"
+            description = _derive_adc_description(
+                r_refs, comps, comp.ref, channel,
+            )
 
             channels.append(ADCChannelConfig(
                 adc_ref=comp.ref,
@@ -432,6 +449,129 @@ def _infer_adc_channels(
 # ---------------------------------------------------------------------------
 
 
+def _collect_mcu_bus_nets(
+    requirements: ProjectRequirements,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Scan MCU pins for I2C and SPI signal nets.
+
+    Returns:
+        (i2c_nets, spi_nets) dicts mapping role name to net name.
+    """
+    from kicad_pipeline.models.requirements import PinFunction
+
+    _FUNCTION_TO_BUS: dict[PinFunction, tuple[str, str]] = {
+        PinFunction.I2C_SDA: ("i2c", "sda"),
+        PinFunction.I2C_SCL: ("i2c", "scl"),
+        PinFunction.SPI_CLK: ("spi", "clk"),
+        PinFunction.SPI_MOSI: ("spi", "mosi"),
+        PinFunction.SPI_MISO: ("spi", "miso"),
+    }
+
+    i2c_nets: dict[str, str] = {}
+    spi_nets: dict[str, str] = {}
+    bus_dicts = {"i2c": i2c_nets, "spi": spi_nets}
+
+    for comp in requirements.components:
+        if _ref_prefix(comp.ref) != "U" or not _is_mcu_component(comp):
+            continue
+        for pin in comp.pins:
+            if not pin.function or not pin.net:
+                continue
+            mapping = _FUNCTION_TO_BUS.get(pin.function)
+            if mapping:
+                bus_dicts[mapping[0]][mapping[1]] = pin.net
+
+    return i2c_nets, spi_nets
+
+
+def _detect_i2c_bus(
+    i2c_nets: dict[str, str],
+    net_to_refs: dict[str, set[str]],
+    comps: dict[str, Component],
+) -> BusConfig | None:
+    """Build an I2C BusConfig from detected SDA/SCL nets."""
+    if "sda" not in i2c_nets or "scl" not in i2c_nets:
+        return None
+
+    sda_net = i2c_nets["sda"]
+    scl_net = i2c_nets["scl"]
+
+    sda_refs = net_to_refs.get(sda_net, set())
+    devices: list[BusDevice] = []
+    pullups: list[str] = []
+    for ref in sorted(sda_refs):
+        prefix = _ref_prefix(ref)
+        bus_comp = comps.get(ref)
+        if not bus_comp:
+            continue
+        if prefix == "R":
+            pullups.append(ref)
+            continue
+        if prefix == "U":
+            if _is_mcu_component(bus_comp):
+                continue
+            addr_pin = next(
+                (p for p in bus_comp.pins if p.name.upper() == "ADDR"), None
+            )
+            addr_net = addr_pin.net if addr_pin else None
+            address = _ADS1115_ADDR_MAP.get(addr_net or "")
+            devices.append(BusDevice(ref=ref, value=bus_comp.value, address=address))
+
+    scl_refs = net_to_refs.get(scl_net, set())
+    for ref in sorted(scl_refs):
+        if _ref_prefix(ref) == "R" and ref not in pullups:
+            pullups.append(ref)
+
+    return BusConfig(
+        bus_type=BusType.I2C,
+        bus_name="I2C",
+        signal_nets=(sda_net, scl_net),
+        devices=tuple(devices),
+        pullup_refs=tuple(sorted(pullups)),
+    )
+
+
+def _detect_spi_bus(
+    spi_nets: dict[str, str],
+    net_to_refs: dict[str, set[str]],
+    comps: dict[str, Component],
+) -> BusConfig | None:
+    """Build a SPI BusConfig from detected CLK/MOSI/MISO nets."""
+    if "clk" not in spi_nets:
+        return None
+
+    signal_nets_list = [spi_nets["clk"]]
+    if "mosi" in spi_nets:
+        signal_nets_list.append(spi_nets["mosi"])
+    if "miso" in spi_nets:
+        signal_nets_list.append(spi_nets["miso"])
+
+    clk_refs = net_to_refs.get(spi_nets["clk"], set())
+    devices_spi: list[BusDevice] = []
+    for ref in sorted(clk_refs):
+        spi_comp = comps.get(ref)
+        if not spi_comp or _ref_prefix(ref) != "U":
+            continue
+        if _is_mcu_component(spi_comp):
+            continue
+        cs_net: str | None = None
+        for pin in spi_comp.pins:
+            if pin.name.upper() in ("CS", "~CS", "SS", "~SS", "SCS", "SCSN"):
+                cs_net = pin.net
+                break
+        devices_spi.append(BusDevice(ref=ref, value=spi_comp.value, cs_net=cs_net))
+
+    if not devices_spi:
+        return None
+
+    return BusConfig(
+        bus_type=BusType.SPI,
+        bus_name="SPI",
+        signal_nets=tuple(signal_nets_list),
+        devices=tuple(devices_spi),
+    )
+
+
 def _infer_buses(requirements: ProjectRequirements) -> tuple[tuple[BusConfig, ...], list[str]]:
     """Detect I2C and SPI buses from MCU pin functions and shared nets."""
     comps = _comp_map(requirements)
@@ -439,127 +579,15 @@ def _infer_buses(requirements: ProjectRequirements) -> tuple[tuple[BusConfig, ..
     warnings: list[str] = []
     buses: list[BusConfig] = []
 
-    from kicad_pipeline.models.requirements import PinFunction
+    i2c_nets, spi_nets = _collect_mcu_bus_nets(requirements)
 
-    # Collect MCU bus pins
-    i2c_nets: dict[str, str] = {}  # "sda"/"scl" → net name
-    spi_nets: dict[str, str] = {}  # "clk"/"mosi"/"miso" → net name
+    i2c_bus = _detect_i2c_bus(i2c_nets, net_to_refs, comps)
+    if i2c_bus:
+        buses.append(i2c_bus)
 
-    for comp in requirements.components:
-        if _ref_prefix(comp.ref) != "U":
-            continue
-        is_mcu = any(
-            kw in (comp.value or "").upper()
-            for kw in ("ESP32", "STM32", "ATMEGA", "RP2040", "NRF52")
-        )
-        if not is_mcu:
-            continue
-        for pin in comp.pins:
-            if not pin.function or not pin.net:
-                continue
-            if pin.function == PinFunction.I2C_SDA:
-                i2c_nets["sda"] = pin.net
-            elif pin.function == PinFunction.I2C_SCL:
-                i2c_nets["scl"] = pin.net
-            elif pin.function == PinFunction.SPI_CLK:
-                spi_nets["clk"] = pin.net
-            elif pin.function == PinFunction.SPI_MOSI:
-                spi_nets["mosi"] = pin.net
-            elif pin.function == PinFunction.SPI_MISO:
-                spi_nets["miso"] = pin.net
-
-    # I2C bus
-    if "sda" in i2c_nets and "scl" in i2c_nets:
-        sda_net = i2c_nets["sda"]
-        scl_net = i2c_nets["scl"]
-        signal_nets = (sda_net, scl_net)
-
-        # Find devices on the I2C bus (non-MCU components on SDA net)
-        sda_refs = net_to_refs.get(sda_net, set())
-        devices: list[BusDevice] = []
-        pullups: list[str] = []
-        for ref in sorted(sda_refs):
-            prefix = _ref_prefix(ref)
-            bus_comp = comps.get(ref)
-            if not bus_comp:
-                continue
-            if prefix == "R":
-                # Pullup resistor
-                pullups.append(ref)
-                continue
-            if prefix == "U":
-                is_mcu = any(
-                    kw in (bus_comp.value or "").upper()
-                    for kw in ("ESP32", "STM32", "ATMEGA", "RP2040", "NRF52")
-                )
-                if is_mcu:
-                    continue
-                # Determine I2C address from ADDR pin
-                addr_pin = next(
-                    (p for p in bus_comp.pins if p.name.upper() == "ADDR"), None
-                )
-                addr_net = addr_pin.net if addr_pin else None
-                address = _ADS1115_ADDR_MAP.get(addr_net or "")
-                devices.append(BusDevice(
-                    ref=ref,
-                    value=bus_comp.value,
-                    address=address,
-                ))
-
-        # Also check SCL net for pullups
-        scl_refs = net_to_refs.get(scl_net, set())
-        for ref in sorted(scl_refs):
-            if _ref_prefix(ref) == "R" and ref not in pullups:
-                pullups.append(ref)
-
-        buses.append(BusConfig(
-            bus_type=BusType.I2C,
-            bus_name="I2C",
-            signal_nets=signal_nets,
-            devices=tuple(devices),
-            pullup_refs=tuple(sorted(pullups)),
-        ))
-
-    # SPI bus
-    if "clk" in spi_nets:
-        signal_nets_list = [spi_nets["clk"]]
-        if "mosi" in spi_nets:
-            signal_nets_list.append(spi_nets["mosi"])
-        if "miso" in spi_nets:
-            signal_nets_list.append(spi_nets["miso"])
-
-        clk_net = spi_nets["clk"]
-        clk_refs = net_to_refs.get(clk_net, set())
-        devices_spi: list[BusDevice] = []
-        for ref in sorted(clk_refs):
-            spi_comp = comps.get(ref)
-            if not spi_comp or _ref_prefix(ref) != "U":
-                continue
-            is_mcu = any(
-                kw in (spi_comp.value or "").upper()
-                for kw in ("ESP32", "STM32", "ATMEGA", "RP2040", "NRF52")
-            )
-            if is_mcu:
-                continue
-            # Find CS net
-            cs_net: str | None = None
-            for pin in spi_comp.pins:
-                if pin.name.upper() in ("CS", "~CS", "SS", "~SS", "SCS", "SCSN"):
-                    cs_net = pin.net
-                    break
-            devices_spi.append(BusDevice(
-                ref=ref,
-                value=spi_comp.value,
-                cs_net=cs_net,
-            ))
-
-        if devices_spi:
-            buses.append(BusConfig(
-                bus_type=BusType.SPI,
-                bus_name="SPI",
-                signal_nets=tuple(signal_nets_list),
-                devices=tuple(devices_spi),
-            ))
+    spi_bus = _detect_spi_bus(spi_nets, net_to_refs, comps)
+    if spi_bus:
+        buses.append(spi_bus)
 
     return tuple(buses), warnings
 

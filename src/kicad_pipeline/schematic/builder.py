@@ -813,6 +813,94 @@ def _build_pin_position_map(
 # ---------------------------------------------------------------------------
 
 
+def _build_feature_map(requirements: ProjectRequirements) -> dict[str, str]:
+    """Derive and refine feature map from FeatureBlocks.
+
+    Maps each component ref to its feature group name, then refines
+    by connectivity to move small components to their neighbours' group.
+    """
+    feature_map: dict[str, str] = {}
+    for fb in requirements.features:
+        for ref in fb.components:
+            feature_map[ref] = fb.name
+    return _refine_feature_map_by_connectivity(feature_map, requirements)
+
+
+def _build_lib_symbols(
+    requirements: ProjectRequirements,
+) -> tuple[list[LibSymbol], dict[str, LibSymbol]]:
+    """Build lib_symbol definitions for all components.
+
+    Returns:
+        ``(lib_symbols_list, comp_lib_sym)`` where ``comp_lib_sym`` maps
+        component ref to its LibSymbol.
+    """
+    lib_symbols_list: list[LibSymbol] = []
+    seen_lib_ids: set[str] = set()
+    lib_cache: dict[str, LibSymbol] = {}
+    comp_lib_sym: dict[str, LibSymbol] = {}
+
+    for comp in requirements.components:
+        lib_sym = get_or_make_symbol(comp, lib_cache)
+        lib_id = lib_sym.lib_id
+        comp_lib_sym[comp.ref] = lib_sym
+        if lib_id not in seen_lib_ids:
+            lib_symbols_list.append(lib_sym)
+            seen_lib_ids.add(lib_id)
+
+    return lib_symbols_list, comp_lib_sym
+
+
+def _select_page_size(requirements: ProjectRequirements) -> str:
+    """Auto-select schematic page size based on design complexity."""
+    active_pins = sum(
+        1 for c in requirements.components for p in c.pins
+        if p.net is not None
+    )
+    max_pins = max((len(c.pins) for c in requirements.components), default=0)
+    many_components = len(requirements.components) > 15
+    many_pins = active_pins > 60
+    large_component = max_pins >= 20
+
+    if many_components or many_pins or large_component:
+        log.info(
+            "build_schematic: auto-selected A3 page (%d components, %d pins)",
+            len(requirements.components),
+            active_pins,
+        )
+        return "A3"
+    return "A4"
+
+
+def _build_signal_adjacency(requirements: ProjectRequirements) -> dict[str, set[str]]:
+    """Build adjacency map for connectivity-based sorting (excluding power nets)."""
+    adjacency: dict[str, set[str]] = {c.ref: set() for c in requirements.components}
+    power_net_set = set(_POWER_LIB_IDS.keys())
+    for net in requirements.nets:
+        if net.name in power_net_set:
+            continue
+        refs_on_net = {conn.ref for conn in net.connections}
+        for r in refs_on_net:
+            adjacency.setdefault(r, set()).update(refs_on_net - {r})
+    return adjacency
+
+
+def _resolve_footprint_lib_id(
+    comp: Component,
+    project_name: str | None,
+) -> str:
+    """Resolve the PCB footprint lib_id for a component's Footprint property."""
+    if project_name is not None:
+        from kicad_pipeline.pcb.footprint_library import footprint_name_from_lib_id
+        fp_name = footprint_name_from_lib_id(comp.footprint)
+        return f"{project_name}:{fp_name}"
+    try:
+        pcb_fp = footprint_for_component(comp.ref, comp.value, comp.footprint, comp.lcsc)
+        return pcb_fp.lib_id
+    except Exception:
+        return comp.footprint
+
+
 def build_schematic(
     requirements: ProjectRequirements,
     compact: bool = False,
@@ -861,31 +949,12 @@ def build_schematic(
     # ------------------------------------------------------------------
     # Step 1: Derive feature map from FeatureBlocks, then refine by connectivity
     # ------------------------------------------------------------------
-    feature_map: dict[str, str] = {}
-    for fb in requirements.features:
-        for ref in fb.components:
-            feature_map[ref] = fb.name
-
-    # Refine feature map by connectivity: move small components (≤4 pins)
-    # to the feature group where ALL their non-power neighbours live.
-    # This groups sensor connectors (J2-J5) with their voltage dividers.
-    feature_map = _refine_feature_map_by_connectivity(feature_map, requirements)
+    feature_map = _build_feature_map(requirements)
 
     # ------------------------------------------------------------------
     # Step 2: Build lib_symbols (needed for extent computation before placement)
     # ------------------------------------------------------------------
-    lib_symbols_list: list[LibSymbol] = []
-    seen_lib_ids: set[str] = set()
-    lib_cache: dict[str, LibSymbol] = {}
-    comp_lib_sym: dict[str, LibSymbol] = {}
-
-    for comp in requirements.components:
-        lib_sym = get_or_make_symbol(comp, lib_cache)
-        lib_id = lib_sym.lib_id
-        comp_lib_sym[comp.ref] = lib_sym
-        if lib_id not in seen_lib_ids:
-            lib_symbols_list.append(lib_sym)
-            seen_lib_ids.add(lib_id)
+    lib_symbols_list, comp_lib_sym = _build_lib_symbols(requirements)
 
     # ------------------------------------------------------------------
     # Step 3: Compute symbol extents for overlap-free placement
@@ -900,31 +969,8 @@ def build_schematic(
     # ------------------------------------------------------------------
     all_refs = [c.ref for c in requirements.components]
     pin_count_map = {c.ref: len(c.pins) for c in requirements.components}
-
-    # Auto-select page size: A3 only for very large designs
-    active_pins = sum(
-        1 for c in requirements.components for p in c.pins
-        if p.net is not None
-    )
-    max_pins = max((len(c.pins) for c in requirements.components), default=0)
-    paper = "A4"
-    if len(requirements.components) > 15 or active_pins > 60 or max_pins >= 20:
-        paper = "A3"
-        log.info(
-            "build_schematic: auto-selected A3 page (%d components, %d pins)",
-            len(requirements.components),
-            active_pins,
-        )
-
-    # Build adjacency map for connectivity-based sorting within zones
-    adjacency: dict[str, set[str]] = {c.ref: set() for c in requirements.components}
-    power_net_set_adj = set(_POWER_LIB_IDS.keys())
-    for net in requirements.nets:
-        if net.name in power_net_set_adj:
-            continue
-        refs_on_net = {conn.ref for conn in net.connections}
-        for r in refs_on_net:
-            adjacency.setdefault(r, set()).update(refs_on_net - {r})
+    paper = _select_page_size(requirements)
+    adjacency = _build_signal_adjacency(requirements)
 
     if compact:
         positions = layout_compact(
@@ -945,19 +991,7 @@ def build_schematic(
         lib_sym = comp_lib_sym[comp.ref]
         lib_id = lib_sym.lib_id
         pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
-        # Resolve PCB footprint lib_id for the Footprint property
-        if project_name is not None:
-            # Use project-local library prefix, deriving name from the
-            # component's requirements footprint field (same source as PCB)
-            from kicad_pipeline.pcb.footprint_library import footprint_name_from_lib_id
-            fp_name = footprint_name_from_lib_id(comp.footprint)
-            fp_lib_id = f"{project_name}:{fp_name}"
-        else:
-            try:
-                pcb_fp = footprint_for_component(comp.ref, comp.value, comp.footprint, comp.lcsc)
-                fp_lib_id = pcb_fp.lib_id
-            except Exception:
-                fp_lib_id = comp.footprint  # fallback to bare name
+        fp_lib_id = _resolve_footprint_lib_id(comp, project_name)
         inst = _make_symbol_instance(comp, lib_id, pos, lib_sym, footprint_lib_id=fp_lib_id)
         symbols_list.append(inst)
 
@@ -1436,6 +1470,53 @@ def _power_symbol_sexp(
     ]
 
 
+def _title_block_sexp(schematic: Schematic) -> list[SExpNode] | None:
+    """Build the ``(title_block ...)`` node, or ``None`` if empty."""
+    if not (schematic.title or schematic.date or schematic.revision or schematic.company):
+        return None
+    title_block: list[SExpNode] = ["title_block"]
+    if schematic.title:
+        title_block.append(["title", schematic.title])
+    if schematic.date:
+        title_block.append(["date", schematic.date])
+    if schematic.revision:
+        title_block.append(["rev", schematic.revision])
+    if schematic.company:
+        title_block.append(["company", schematic.company])
+    return title_block
+
+
+def _lib_symbols_section(schematic: Schematic) -> list[SExpNode]:
+    """Build the ``(lib_symbols ...)`` node including power symbol defs."""
+    lib_syms_node: list[SExpNode] = ["lib_symbols"]
+    for lib_sym in schematic.lib_symbols:
+        lib_syms_node.append(_lib_symbol_sexp(lib_sym))
+    seen_power_ids: set[str] = set()
+    for ps in schematic.power_symbols:
+        if ps.lib_id not in seen_power_ids:
+            seen_power_ids.add(ps.lib_id)
+            lib_syms_node.append(_power_lib_symbol_sexp(ps.lib_id, ps.value))
+    return lib_syms_node
+
+
+def _sheet_instances_section(
+    schematic: Schematic,
+    instance_path: str,
+    root_uuid: str,
+) -> list[SExpNode]:
+    """Build the ``(sheet_instances ...)`` node."""
+    self_path = instance_path if instance_path else "/"
+    node: list[SExpNode] = [
+        "sheet_instances",
+        ["path", self_path, ["page", "1"]],
+    ]
+    for page_num, sheet in enumerate(schematic.sheets, start=2):
+        node.append(
+            ["path", f"/{root_uuid}/{sheet.uuid}", ["page", str(page_num)]]
+        )
+    return node
+
+
 def schematic_to_sexp(
     schematic: Schematic,
     project_name: str = "kicad-ai",
@@ -1485,60 +1566,33 @@ def schematic_to_sexp(
     ]
 
     # Title block
-    if schematic.title or schematic.date or schematic.revision or schematic.company:
-        title_block: list[SExpNode] = ["title_block"]
-        if schematic.title:
-            title_block.append(["title", schematic.title])
-        if schematic.date:
-            title_block.append(["date", schematic.date])
-        if schematic.revision:
-            title_block.append(["rev", schematic.revision])
-        if schematic.company:
-            title_block.append(["company", schematic.company])
-        root.append(title_block)
+    tb = _title_block_sexp(schematic)
+    if tb is not None:
+        root.append(tb)
 
     # lib_symbols section
-    lib_syms_node: list[SExpNode] = ["lib_symbols"]
-    for lib_sym in schematic.lib_symbols:
-        lib_syms_node.append(_lib_symbol_sexp(lib_sym))
-    # Add lib_symbol definitions for power symbols
-    seen_power_ids: set[str] = set()
-    for ps in schematic.power_symbols:
-        if ps.lib_id not in seen_power_ids:
-            seen_power_ids.add(ps.lib_id)
-            lib_syms_node.append(_power_lib_symbol_sexp(ps.lib_id, ps.value))
-    root.append(lib_syms_node)
+    root.append(_lib_symbols_section(schematic))
 
     # Symbol instances (regular + power)
-    # For hierarchical sub-sheets, instance_path is the full path from root
-    # (e.g. "/{root_uuid}/{sheet_entry_uuid}").  For root sheets, it's "/{root_uuid}".
     sym_path = instance_path if instance_path else f"/{root_uuid}"
     for inst in schematic.symbols:
         root.append(_symbol_instance_sexp(inst, project_name=project_name, sheet_path=sym_path))
     for ps in schematic.power_symbols:
         root.append(_power_symbol_sexp(ps, project_name=project_name, sheet_path=sym_path))
 
-    # Wires
+    # Wires, junctions, no-connects
     for wire in schematic.wires:
         root.append(_wire_sexp(wire))
-
-    # Junctions
     for j in schematic.junctions:
         root.append(_junction_sexp(j))
-
-    # No-connects
     for nc in schematic.no_connects:
         root.append(["no_connect", ["at", nc.position.x, nc.position.y], ["uuid", nc.uuid]])
 
-    # Local labels
+    # Labels
     for label in schematic.labels:
         root.append(_label_sexp(label))
-
-    # Global labels
     for gl in schematic.global_labels:
         root.append(_global_label_sexp(gl))
-
-    # Hierarchical labels (sub-sheet connections)
     for hl in schematic.hierarchical_labels:
         root.append(_hierarchical_label_sexp(hl))
 
@@ -1546,20 +1600,8 @@ def schematic_to_sexp(
     for sheet in schematic.sheets:
         root.append(_sheet_sexp(sheet))
 
-    # KiCad 9 canonical sheet_instances section (root sheet + sub-sheets).
-    # Root sheet path is always "/" (verified against real KiCad 9 files).
-    # Sub-sheet files must use their hierarchical path (instance_path),
-    # NOT "/" — otherwise KiCad can't resolve ref designators and shows "?".
-    self_path = instance_path if instance_path else "/"
-    sheet_instances_node: list[SExpNode] = [
-        "sheet_instances",
-        ["path", self_path, ["page", "1"]],
-    ]
-    for page_num, sheet in enumerate(schematic.sheets, start=2):
-        sheet_instances_node.append(
-            ["path", f"/{root_uuid}/{sheet.uuid}", ["page", str(page_num)]]
-        )
-    root.append(sheet_instances_node)
+    # KiCad 9 canonical sheet_instances section
+    root.append(_sheet_instances_section(schematic, instance_path, root_uuid))
 
     # NOTE: KiCad 9 does NOT use a top-level (symbol_instances ...) section.
     # Ref designators are resolved entirely through per-symbol (instances ...)

@@ -142,6 +142,182 @@ def _draw_pad_ratsnest(
             )
 
 
+def _build_ref_color_map(
+    requirements: ProjectRequirements,
+    group_map: dict[str, str] | None,
+    domain_map: dict[str, VoltageDomain] | None,
+) -> tuple[dict[str, str], bool, dict[str, VoltageDomain] | None]:
+    """Build per-ref color mapping from group_map or domain_map.
+
+    Returns:
+        (ref_color, use_groups, domain_map) — domain_map may be computed.
+    """
+    use_groups = group_map is not None and len(group_map) > 0
+    if use_groups:
+        assert group_map is not None
+        unique_groups = sorted(set(group_map.values()))
+        group_color_map = {
+            name: _get_group_color(name, i)
+            for i, name in enumerate(unique_groups)
+        }
+        ref_color = {
+            ref: group_color_map.get(gname, "#cccccc")
+            for ref, gname in group_map.items()
+        }
+    else:
+        if domain_map is None:
+            from kicad_pipeline.optimization.functional_grouper import (
+                classify_voltage_domains,
+            )
+            domain_map = classify_voltage_domains(requirements)
+        ref_color = {}
+        for comp in requirements.components:
+            d = domain_map.get(comp.ref)
+            dval = d.value if d else "MIXED"
+            ref_color[comp.ref] = _DOMAIN_COLORS.get(dval, "#cccccc")
+    return ref_color, use_groups, domain_map
+
+
+def _draw_footprints(
+    ax: object,
+    pcb: PCBDesign,
+    ref_color: dict[str, str],
+) -> None:
+    """Draw footprint bounding boxes on the axes."""
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
+    try:
+        from matplotlib.patches import FancyBboxPatch
+    except ImportError:
+        return
+
+    for fp in pcb.footprints:
+        color = ref_color.get(fp.ref, "#cccccc")
+        ox, oy = fp.position.x, fp.position.y
+        rot = fp.rotation
+        px0, py0, px1, py1 = pad_extent_in_board_space(fp, ox, oy, rot)
+        pad_w = px1 - px0
+        pad_h = py1 - py0
+        court_w, court_h = _fp_size(fp)
+        rot_norm = rot % 360.0
+        if 45.0 < rot_norm < 135.0 or 225.0 < rot_norm < 315.0:
+            court_w, court_h = court_h, court_w
+        w = max(pad_w, court_w)
+        h = max(pad_h, court_h)
+        cx = (px0 + px1) / 2.0
+        cy = (py0 + py1) / 2.0
+
+        rect = FancyBboxPatch(
+            (cx - w / 2, cy - h / 2), w, h,
+            boxstyle="round,pad=0.1",
+            facecolor=color, edgecolor="black", alpha=0.6, linewidth=0.8,
+        )
+        ax.add_patch(rect)  # type: ignore[attr-defined]
+        fontsize = 5 if len(fp.ref) <= 3 else 4
+        ax.text(cx, cy, fp.ref, ha="center", va="center",  # type: ignore[attr-defined]
+                fontsize=fontsize, fontweight="bold", color="black")
+
+
+def _draw_group_boundaries(
+    ax: object,
+    pcb: PCBDesign,
+    group_map: dict[str, str],
+) -> None:
+    """Draw dotted bounding box boundaries around component groups."""
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
+    try:
+        from matplotlib.patches import Rectangle
+    except ImportError:
+        return
+
+    ref_pos: dict[str, tuple[float, float]] = {}
+    for fp in pcb.footprints:
+        px0, py0, px1, py1 = pad_extent_in_board_space(
+            fp, fp.position.x, fp.position.y, fp.rotation,
+        )
+        ref_pos[fp.ref] = ((px0 + px1) / 2.0, (py0 + py1) / 2.0)
+    unique_groups = sorted(set(group_map.values()))
+    group_color_map = {
+        name: _get_group_color(name, i)
+        for i, name in enumerate(unique_groups)
+    }
+
+    for gname in unique_groups:
+        grefs = [r for r, g in group_map.items() if g == gname and r in ref_pos]
+        if len(grefs) < 2:
+            continue
+
+        gxs = [ref_pos[r][0] for r in grefs]
+        gys = [ref_pos[r][1] for r in grefs]
+        margin = 2.0
+        gx_min = min(gxs) - margin
+        gy_min = min(gys) - margin
+        gx_max = max(gxs) + margin
+        gy_max = max(gys) + margin
+
+        color = group_color_map.get(gname, "#888888")
+        boundary = Rectangle(
+            (gx_min, gy_min),
+            gx_max - gx_min,
+            gy_max - gy_min,
+            fill=False,
+            edgecolor=color,
+            linestyle="--",
+            linewidth=1.5,
+            alpha=0.7,
+        )
+        ax.add_patch(boundary)  # type: ignore[attr-defined]
+        ax.text(  # type: ignore[attr-defined]
+            (gx_min + gx_max) / 2, gy_min - 0.5,
+            gname, ha="center", va="bottom",
+            fontsize=6, fontweight="bold", color=color, alpha=0.8,
+        )
+
+
+def _build_legend_patches(
+    requirements: ProjectRequirements,
+    use_groups: bool,
+    group_map: dict[str, str] | None,
+    domain_map: dict[str, VoltageDomain] | None,
+) -> list[object]:
+    """Build legend patch list for the placement render."""
+    try:
+        import matplotlib.patches as mpatches
+    except ImportError:
+        return []
+
+    if use_groups:
+        assert group_map is not None
+        unique_groups = sorted(set(group_map.values()))
+        group_color_map = {
+            name: _get_group_color(name, i)
+            for i, name in enumerate(unique_groups)
+        }
+        return [
+            mpatches.Patch(color=group_color_map[g], alpha=0.6, label=g)
+            for g in unique_groups
+        ]
+
+    if domain_map is not None:
+        used_domain_vals = {
+            domain_map.get(comp.ref)
+            for comp in requirements.components
+            if domain_map.get(comp.ref) is not None
+        }
+        used_names = {d.value for d in used_domain_vals if d is not None}
+        return [
+            mpatches.Patch(
+                color=_DOMAIN_COLORS.get(n, "#cccccc"),
+                alpha=0.6,
+                label=_DOMAIN_LABELS.get(n, n),
+            )
+            for n in _DOMAIN_COLORS
+            if n in used_names
+        ]
+    return []
+
+
 def render_placement(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -178,44 +354,14 @@ def render_placement(
     try:
         import matplotlib
         matplotlib.use("Agg")
-        import matplotlib.patches as mpatches
         import matplotlib.pyplot as plt
-        from matplotlib.patches import FancyBboxPatch, Rectangle
     except ImportError as exc:
         msg = "matplotlib is required for placement rendering: pip install matplotlib"
         raise ImportError(msg) from exc
 
-    # Determine coloring mode
-    use_groups = group_map is not None and len(group_map) > 0
-
-    # Build color mapping
-    if use_groups:
-        assert group_map is not None  # for type narrowing
-        # Assign color per group
-        unique_groups = sorted(set(group_map.values()))
-        group_color_map: dict[str, str] = {
-            name: _get_group_color(name, i)
-            for i, name in enumerate(unique_groups)
-        }
-        ref_color: dict[str, str] = {
-            ref: group_color_map.get(gname, "#cccccc")
-            for ref, gname in group_map.items()
-        }
-    else:
-        # Fallback to voltage domain coloring
-        if domain_map is None:
-            from kicad_pipeline.optimization.functional_grouper import (
-                classify_voltage_domains,
-            )
-            domain_map = classify_voltage_domains(requirements)
-        ref_domain: dict[str, str] = {}
-        for comp in requirements.components:
-            d = domain_map.get(comp.ref)
-            ref_domain[comp.ref] = d.value if d else "MIXED"
-        ref_color = {
-            ref: _DOMAIN_COLORS.get(dval, "#cccccc")
-            for ref, dval in ref_domain.items()
-        }
+    ref_color, use_groups, domain_map = _build_ref_color_map(
+        requirements, group_map, domain_map,
+    )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
 
@@ -227,132 +373,17 @@ def render_placement(
         ax.plot(xs, ys, "k-", linewidth=2)
         ax.fill(xs, ys, alpha=0.05, color="green")
 
-    # Draw footprints using actual pad bounding box for position, expanded
-    # to courtyard size for visibility.  This matches KiCad's display:
-    # - Asymmetric components (connectors) are positioned correctly
-    # - Small SMD parts use courtyard size so they're visible
-    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+    _draw_footprints(ax, pcb, ref_color)
 
-    for fp in pcb.footprints:
-        color = ref_color.get(fp.ref, "#cccccc")
-        ox, oy = fp.position.x, fp.position.y
-        rot = fp.rotation
-        px0, py0, px1, py1 = pad_extent_in_board_space(fp, ox, oy, rot)
-        pad_w = px1 - px0
-        pad_h = py1 - py0
-        # Use courtyard size as minimum for visibility — swap for 90/270° rotation
-        court_w, court_h = _fp_size(fp)
-        rot_norm = rot % 360.0
-        if 45.0 < rot_norm < 135.0 or 225.0 < rot_norm < 315.0:
-            court_w, court_h = court_h, court_w
-        w = max(pad_w, court_w)
-        h = max(pad_h, court_h)
-        # Center the (possibly enlarged) box on the pad centroid
-        cx = (px0 + px1) / 2.0
-        cy = (py0 + py1) / 2.0
+    if use_groups and group_map is not None:
+        _draw_group_boundaries(ax, pcb, group_map)
 
-        rect = FancyBboxPatch(
-            (cx - w / 2, cy - h / 2), w, h,
-            boxstyle="round,pad=0.1",
-            facecolor=color, edgecolor="black", alpha=0.6, linewidth=0.8,
-        )
-        ax.add_patch(rect)
-        fontsize = 5 if len(fp.ref) <= 3 else 4
-        ax.text(cx, cy, fp.ref, ha="center", va="center",
-                fontsize=fontsize, fontweight="bold", color="black")
-
-    # Draw group bounding boxes with dotted lines
-    if use_groups:
-        assert group_map is not None
-        # Use pad extent center for group bounding boxes (matches drawn boxes)
-        ref_pos: dict[str, tuple[float, float]] = {}
-        for fp in pcb.footprints:
-            px0, py0, px1, py1 = pad_extent_in_board_space(
-                fp, fp.position.x, fp.position.y, fp.rotation,
-            )
-            ref_pos[fp.ref] = ((px0 + px1) / 2.0, (py0 + py1) / 2.0)
-        unique_groups = sorted(set(group_map.values()))
-        group_color_map = {
-            name: _get_group_color(name, i)
-            for i, name in enumerate(unique_groups)
-        }
-
-        for gname in unique_groups:
-            grefs = [r for r, g in group_map.items() if g == gname and r in ref_pos]
-            if len(grefs) < 2:
-                continue
-
-            gxs = [ref_pos[r][0] for r in grefs]
-            gys = [ref_pos[r][1] for r in grefs]
-            margin = 2.0
-            gx_min = min(gxs) - margin
-            gy_min = min(gys) - margin
-            gx_max = max(gxs) + margin
-            gy_max = max(gys) + margin
-
-            color = group_color_map.get(gname, "#888888")
-            boundary = Rectangle(
-                (gx_min, gy_min),
-                gx_max - gx_min,
-                gy_max - gy_min,
-                fill=False,
-                edgecolor=color,
-                linestyle="--",
-                linewidth=1.5,
-                alpha=0.7,
-            )
-            ax.add_patch(boundary)
-
-            # Group name label above boundary
-            ax.text(
-                (gx_min + gx_max) / 2, gy_min - 0.5,
-                gname, ha="center", va="bottom",
-                fontsize=6, fontweight="bold", color=color, alpha=0.8,
-            )
-
-    # Pad-to-pad ratsnest — draw lines between pads that share a signal net
     if show_ratsnest:
         _draw_pad_ratsnest(ax, pcb)
 
-    # Legend
-    if use_groups:
-        assert group_map is not None
-        unique_groups = sorted(set(group_map.values()))
-        group_color_map = {
-            name: _get_group_color(name, i)
-            for i, name in enumerate(unique_groups)
-        }
-        legend_patches = [
-            mpatches.Patch(color=group_color_map[g], alpha=0.6, label=g)
-            for g in unique_groups
-        ]
-    else:
-        used_domains = set(ref_color.values())
-        legend_patches = [
-            mpatches.Patch(color=c, alpha=0.6, label=_DOMAIN_LABELS.get(n, n))
-            for n, c in _DOMAIN_COLORS.items()
-            if c in used_domains or n in {
-                ref_domain.get(comp.ref, "MIXED")
-                for comp in requirements.components
-            }
-        ]
-        # Re-build properly using domain labels
-        if domain_map is not None:
-            used_domain_vals = {
-                domain_map.get(comp.ref)
-                for comp in requirements.components
-                if domain_map.get(comp.ref) is not None
-            }
-            used_names = {d.value for d in used_domain_vals if d is not None}
-            legend_patches = [
-                mpatches.Patch(
-                    color=_DOMAIN_COLORS.get(n, "#cccccc"),
-                    alpha=0.6,
-                    label=_DOMAIN_LABELS.get(n, n),
-                )
-                for n in _DOMAIN_COLORS
-                if n in used_names
-            ]
+    legend_patches = _build_legend_patches(
+        requirements, use_groups, group_map, domain_map,
+    )
     if legend_patches:
         ax.legend(handles=legend_patches, loc="upper left", fontsize=7)
 

@@ -85,6 +85,107 @@ def make_gnd_zones(
     return (front, back)
 
 
+def _build_fp_bboxes(
+    footprints: tuple[Footprint, ...],
+    clearance: float,
+) -> list[tuple[float, float, float, float]]:
+    """Build padded bounding boxes for footprint clearance checks."""
+    bboxes: list[tuple[float, float, float, float]] = []
+    for fp in footprints:
+        pad_xs = [fp.position.x]
+        pad_ys = [fp.position.y]
+        for pad in fp.pads:
+            px, py = fp.position.x + pad.position.x, fp.position.y + pad.position.y
+            pad_xs.extend([px - pad.size_x / 2, px + pad.size_x / 2])
+            pad_ys.extend([py - pad.size_y / 2, py + pad.size_y / 2])
+        bboxes.append((
+            min(pad_xs) - clearance, min(pad_ys) - clearance,
+            max(pad_xs) + clearance, max(pad_ys) + clearance,
+        ))
+    return bboxes
+
+
+def _point_in_any_bbox(
+    x: float,
+    y: float,
+    bboxes: list[tuple[float, float, float, float]],
+) -> bool:
+    """Return True if (x, y) is inside any bounding box."""
+    for x1, y1, x2, y2 in bboxes:
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            return True
+    return False
+
+
+def _point_in_any_keepout(
+    x: float,
+    y: float,
+    keepout_zones: tuple[Keepout, ...],
+) -> bool:
+    """Return True if (x, y) is inside any keepout polygon AABB."""
+    for ko in keepout_zones:
+        ko_xs = [p.x for p in ko.polygon]
+        ko_ys = [p.y for p in ko.polygon]
+        if min(ko_xs) <= x <= max(ko_xs) and min(ko_ys) <= y <= max(ko_ys):
+            return True
+    return False
+
+
+def _too_close_to_via(
+    x: float,
+    y: float,
+    via_positions: list[tuple[float, float]],
+    min_dist: float = 1.0,
+) -> bool:
+    """Return True if (x, y) is within *min_dist* of an existing via."""
+    for vx, vy in via_positions:
+        if abs(x - vx) < min_dist and abs(y - vy) < min_dist:
+            return True
+    return False
+
+
+def _too_close_to_track(
+    x: float,
+    y: float,
+    tracks: tuple[Track, ...],
+    min_dist: float = 1.0,
+) -> bool:
+    """Return True if (x, y) is within *min_dist* of a track segment AABB."""
+    for trk in tracks:
+        tx1 = min(trk.start.x, trk.end.x) - min_dist
+        ty1 = min(trk.start.y, trk.end.y) - min_dist
+        tx2 = max(trk.start.x, trk.end.x) + min_dist
+        ty2 = max(trk.start.y, trk.end.y) + min_dist
+        if tx1 <= x <= tx2 and ty1 <= y <= ty2:
+            return True
+    return False
+
+
+def _has_gnd_nearby(
+    x: float,
+    y: float,
+    footprints: tuple[Footprint, ...],
+    tracks: tuple[Track, ...],
+    gnd_net_number: int,
+    proximity_r: float,
+) -> bool:
+    """Return True if GND copper exists within proximity radius."""
+    for fp in footprints:
+        for pad in fp.pads:
+            if pad.net_number == gnd_net_number:
+                px = fp.position.x + pad.position.x
+                py = fp.position.y + pad.position.y
+                if abs(x - px) < proximity_r and abs(y - py) < proximity_r:
+                    return True
+    for trk in tracks:
+        if trk.net_number == gnd_net_number:
+            mid_x = (trk.start.x + trk.end.x) / 2
+            mid_y = (trk.start.y + trk.end.y) / 2
+            if abs(x - mid_x) < proximity_r and abs(y - mid_y) < proximity_r:
+                return True
+    return False
+
+
 def make_gnd_stitching_vias(
     board: BoardOutline,
     gnd_net_number: int,
@@ -119,120 +220,38 @@ def make_gnd_stitching_vias(
         VIA_DRILL_SIGNAL_MM,
     )
 
-    # Compute board bounding box from outline
     xs = [p.x for p in board.polygon]
     ys = [p.y for p in board.polygon]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
 
-    # Build footprint bounding boxes (with clearance)
-    fp_bboxes: list[tuple[float, float, float, float]] = []  # (x1, y1, x2, y2)
-    for fp in footprints:
-        pad_xs = [fp.position.x]
-        pad_ys = [fp.position.y]
-        for pad in fp.pads:
-            px, py = fp.position.x + pad.position.x, fp.position.y + pad.position.y
-            pad_xs.extend([px - pad.size_x / 2, px + pad.size_x / 2])
-            pad_ys.extend([py - pad.size_y / 2, py + pad.size_y / 2])
-        fp_bboxes.append((
-            min(pad_xs) - GND_STITCH_FP_CLEARANCE_MM,
-            min(pad_ys) - GND_STITCH_FP_CLEARANCE_MM,
-            max(pad_xs) + GND_STITCH_FP_CLEARANCE_MM,
-            max(pad_ys) + GND_STITCH_FP_CLEARANCE_MM,
-        ))
-
-    # Collect existing via positions
+    fp_bboxes = _build_fp_bboxes(footprints, GND_STITCH_FP_CLEARANCE_MM)
     via_positions = [(v.position.x, v.position.y) for v in existing_vias]
 
-    # Check if any GND copper exists (for proximity filtering)
-    _has_gnd_copper = any(
+    has_gnd_copper = any(
         pad.net_number == gnd_net_number
         for fp in footprints for pad in fp.pads
     ) or any(trk.net_number == gnd_net_number for trk in existing_tracks)
 
-    # Build grid candidates
     edge_margin = 2.0
     vias: list[Via] = []
     y = min_y + edge_margin
     while y < max_y - edge_margin:
         x = min_x + edge_margin
         while x < max_x - edge_margin:
-            # Check footprint clearance
-            in_fp = False
-            for x1, y1, x2, y2 in fp_bboxes:
-                if x1 <= x <= x2 and y1 <= y <= y2:
-                    in_fp = True
-                    break
-            if in_fp:
+            if (_point_in_any_bbox(x, y, fp_bboxes)
+                    or _point_in_any_keepout(x, y, keepout_zones)
+                    or _too_close_to_via(x, y, via_positions)
+                    or _too_close_to_track(x, y, existing_tracks)):
                 x += spacing_mm
                 continue
 
-            # Check keepout zones
-            in_keepout = False
-            for ko in keepout_zones:
-                ko_xs = [p.x for p in ko.polygon]
-                ko_ys = [p.y for p in ko.polygon]
-                if min(ko_xs) <= x <= max(ko_xs) and min(ko_ys) <= y <= max(ko_ys):
-                    in_keepout = True
-                    break
-            if in_keepout:
+            if has_gnd_copper and not _has_gnd_nearby(
+                x, y, footprints, existing_tracks,
+                gnd_net_number, spacing_mm / 2.0,
+            ):
                 x += spacing_mm
                 continue
-
-            # Check existing via clearance (1mm)
-            too_close_via = False
-            for vx, vy in via_positions:
-                if abs(x - vx) < 1.0 and abs(y - vy) < 1.0:
-                    too_close_via = True
-                    break
-            if too_close_via:
-                x += spacing_mm
-                continue
-
-            # Check existing track clearance (1mm)
-            too_close_track = False
-            for trk in existing_tracks:
-                # Simple AABB check for track segment
-                tx1 = min(trk.start.x, trk.end.x) - 1.0
-                ty1 = min(trk.start.y, trk.end.y) - 1.0
-                tx2 = max(trk.start.x, trk.end.x) + 1.0
-                ty2 = max(trk.start.y, trk.end.y) + 1.0
-                if tx1 <= x <= tx2 and ty1 <= y <= ty2:
-                    too_close_track = True
-                    break
-            if too_close_track:
-                x += spacing_mm
-                continue
-
-            # Only place via if there's GND copper nearby (pad or track)
-            # to avoid dangling vias far from any GND connection.
-            # Skip this check if there are no GND pads at all (empty board).
-            if _has_gnd_copper:
-                proximity_r = spacing_mm / 2.0
-                has_gnd_nearby = False
-                for fp in footprints:
-                    for pad in fp.pads:
-                        if pad.net_number == gnd_net_number:
-                            px = fp.position.x + pad.position.x
-                            py = fp.position.y + pad.position.y
-                            if (abs(x - px) < proximity_r
-                                    and abs(y - py) < proximity_r):
-                                has_gnd_nearby = True
-                                break
-                    if has_gnd_nearby:
-                        break
-                if not has_gnd_nearby:
-                    for trk in existing_tracks:
-                        if trk.net_number == gnd_net_number:
-                            mid_x = (trk.start.x + trk.end.x) / 2
-                            mid_y = (trk.start.y + trk.end.y) / 2
-                            if (abs(x - mid_x) < proximity_r
-                                    and abs(y - mid_y) < proximity_r):
-                                has_gnd_nearby = True
-                                break
-                if not has_gnd_nearby:
-                    x += spacing_mm
-                    continue
 
             vias.append(Via(
                 position=Point(round(x, 3), round(y, 3)),
@@ -245,6 +264,96 @@ def make_gnd_stitching_vias(
         y += spacing_mm
 
     return tuple(vias)
+
+
+def _is_rf_keepout(ko: Keepout) -> bool:
+    """Return True if keepout is an RF/antenna keepout on F.Cu."""
+    if not ko.no_copper or not ko.polygon:
+        return False
+    if ko.tag == "mounting_hole":
+        return False
+    if ko.layers and "F.Cu" not in ko.layers:
+        return False
+    return len(ko.polygon) >= 3
+
+
+def _build_rf_fp_boxes(
+    footprints: tuple[Footprint, ...],
+) -> list[tuple[float, float, float, float]]:
+    """Build footprint bounding boxes with 0.5mm margin for RF via avoidance."""
+    fp_boxes: list[tuple[float, float, float, float]] = []
+    for fp in footprints:
+        pad_xs = (
+            [fp.position.x + p.position.x for p in fp.pads]
+            if fp.pads else [fp.position.x]
+        )
+        pad_ys = (
+            [fp.position.y + p.position.y for p in fp.pads]
+            if fp.pads else [fp.position.y]
+        )
+        half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
+        half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
+        min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=False)) - 0.5
+        max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=False)) + 0.5
+        min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=False)) - 0.5
+        max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=False)) + 0.5
+        fp_boxes.append((min_x, min_y, max_x, max_y))
+    return fp_boxes
+
+
+def _compute_edge_fence_vias(
+    p1: Point,
+    p2: Point,
+    cx: float,
+    cy: float,
+    fence_margin: float,
+    spacing_mm: float,
+    fp_boxes: list[tuple[float, float, float, float]],
+    board_width: float,
+    board_height: float,
+    gnd_net_num: int,
+) -> list[Via]:
+    """Place vias along one polygon edge, offset outward from centroid."""
+    import math as _m
+
+    edge_len = _m.hypot(p2.x - p1.x, p2.y - p1.y)
+    if edge_len < 0.01:
+        return []
+
+    dx = p2.x - p1.x
+    dy = p2.y - p1.y
+    nx = -dy / edge_len
+    ny = dx / edge_len
+    mid_x = (p1.x + p2.x) / 2.0
+    mid_y = (p1.y + p2.y) / 2.0
+    if nx * (mid_x - cx) + ny * (mid_y - cy) < 0:
+        nx, ny = -nx, -ny
+
+    edge_margin_mm = 0.4
+    vias: list[Via] = []
+    n_vias = max(1, int(edge_len / spacing_mm))
+    for j in range(n_vias):
+        t = (j + 0.5) / n_vias
+        vx = round(p1.x + t * dx + nx * fence_margin, 3)
+        vy = round(p1.y + t * dy + ny * fence_margin, 3)
+
+        if (board_width > 0 and board_height > 0
+                and (vx < edge_margin_mm or vx > board_width - edge_margin_mm
+                     or vy < edge_margin_mm or vy > board_height - edge_margin_mm)):
+            continue
+
+        if _point_in_any_bbox(vx, vy, fp_boxes):
+            continue
+
+        vias.append(Via(
+            position=Point(vx, vy),
+            drill=0.6,
+            size=1.0,
+            layers=(LAYER_F_CU, LAYER_B_CU),
+            net_number=gnd_net_num,
+            uuid=_new_uuid(),
+        ))
+    return vias
 
 
 def make_rf_via_fence(
@@ -273,97 +382,25 @@ def make_rf_via_fence(
     Returns:
         Tuple of GND vias forming the fence.
     """
-    import math as _m
-
     vias: list[Via] = []
-    fence_margin = 0.5  # mm outside keepout perimeter
+    fence_margin = 0.5
 
     for ko in keepouts:
-        if not ko.no_copper or not ko.polygon:
-            continue
-        # Skip non-RF keepouts (mounting holes, etc.)
-        if ko.tag == "mounting_hole":
-            continue
-        # Check if this is an RF-related keepout (on F.Cu)
-        if ko.layers and "F.Cu" not in ko.layers:
+        if not _is_rf_keepout(ko):
             continue
 
-        # Walk the polygon perimeter and place vias at spacing intervals
         pts = list(ko.polygon)
-        if len(pts) < 3:
-            continue
+        fp_boxes = _build_rf_fp_boxes(footprints)
 
-        # Pre-compute footprint bounding boxes for avoidance
-        fp_boxes: list[tuple[float, float, float, float]] = []
-        for fp in footprints:
-            pad_xs = (
-                [fp.position.x + p.position.x for p in fp.pads]
-                if fp.pads else [fp.position.x]
-            )
-            pad_ys = (
-                [fp.position.y + p.position.y for p in fp.pads]
-                if fp.pads else [fp.position.y]
-            )
-            half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
-            half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
-            min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=False)) - 0.5
-            max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=False)) + 0.5
-            min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=False)) - 0.5
-            max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=False)) + 0.5
-            fp_boxes.append((min_x, min_y, max_x, max_y))
-
-        # Compute centroid for outward offset direction
         cx = sum(p.x for p in pts) / len(pts)
         cy = sum(p.y for p in pts) / len(pts)
 
         for i in range(len(pts)):
             p1 = pts[i]
             p2 = pts[(i + 1) % len(pts)]
-            edge_len = _m.hypot(p2.x - p1.x, p2.y - p1.y)
-            if edge_len < 0.01:
-                continue
-
-            # Normal direction (outward from centroid)
-            dx = p2.x - p1.x
-            dy = p2.y - p1.y
-            nx = -dy / edge_len
-            ny = dx / edge_len
-            # Ensure normal points away from centroid
-            mid_x = (p1.x + p2.x) / 2.0
-            mid_y = (p1.y + p2.y) / 2.0
-            if nx * (mid_x - cx) + ny * (mid_y - cy) < 0:
-                nx, ny = -nx, -ny
-
-            n_vias = max(1, int(edge_len / spacing_mm))
-            for j in range(n_vias):
-                t = (j + 0.5) / n_vias
-                vx = round(p1.x + t * dx + nx * fence_margin, 3)
-                vy = round(p1.y + t * dy + ny * fence_margin, 3)
-
-                # Skip if outside board edge (0.4mm margin for edge clearance)
-                edge_margin_mm = 0.4
-                if (board_width > 0 and board_height > 0
-                        and (vx < edge_margin_mm or vx > board_width - edge_margin_mm
-                             or vy < edge_margin_mm
-                             or vy > board_height - edge_margin_mm)):
-                    continue
-
-                # Skip if inside any footprint
-                blocked = False
-                for bx0, by0, bx1, by1 in fp_boxes:
-                    if bx0 <= vx <= bx1 and by0 <= vy <= by1:
-                        blocked = True
-                        break
-                if blocked:
-                    continue
-
-                vias.append(Via(
-                    position=Point(vx, vy),
-                    drill=0.6,
-                    size=1.0,
-                    layers=(LAYER_F_CU, LAYER_B_CU),
-                    net_number=gnd_net_num,
-                    uuid=_new_uuid(),
-                ))
+            vias.extend(_compute_edge_fence_vias(
+                p1, p2, cx, cy, fence_margin, spacing_mm,
+                fp_boxes, board_width, board_height, gnd_net_num,
+            ))
 
     return tuple(vias)

@@ -141,14 +141,21 @@ def assign_pcb_zones(
     Returns:
         Mapping from component ref to the assigned :class:`PCBZone`.
     """
+    # Pre-build prefix -> zone_name lookup for O(1) matching
+    _prefix_zone_cache: dict[str, str] = {}
+    for keywords, candidate_zone in _FEATURE_ZONE_MAP:
+        for kw in keywords:
+            _prefix_zone_cache[kw] = candidate_zone
+
+    def _match_zone(feature_lower: str) -> str:
+        for prefix, zone in _prefix_zone_cache.items():
+            if feature_lower.startswith(prefix):
+                return zone
+        return "PERIPHERALS"
+
     result: dict[str, PCBZone] = {}
     for ref, feature in components:
-        feature_lower = feature.lower()
-        zone_name = "PERIPHERALS"
-        for keywords, candidate_zone in _FEATURE_ZONE_MAP:
-            if any(feature_lower.startswith(kw) for kw in keywords):
-                zone_name = candidate_zone
-                break
+        zone_name = _match_zone(feature.lower())
         result[ref] = PCB_ZONES[zone_name]
         log.debug("assign_pcb_zones: %s (feature=%s) → %s", ref, feature, zone_name)
     return result
@@ -366,16 +373,17 @@ def _dynamic_zones(
         margin = (board_width - usable_w) / 2.0
 
     # Estimate area needed per group
+    _default_area = 7.0 * 7.0  # default 7x7mm per component
     group_areas: dict[str, float] = {}
     for gname, refs in groups.items():
-        area = 0.0
-        for ref in refs:
-            if footprint_sizes and ref in footprint_sizes:
-                w, h = footprint_sizes[ref]
-                # Add clearance around each component
-                area += (w + 3.0) * (h + 3.0)
-            else:
-                area += 7.0 * 7.0  # default 7x7mm per component
+        if footprint_sizes:
+            area = sum(
+                (footprint_sizes[ref][0] + 3.0) * (footprint_sizes[ref][1] + 3.0)
+                if ref in footprint_sizes else _default_area
+                for ref in refs
+            )
+        else:
+            area = len(refs) * _default_area
         group_areas[gname] = area
 
     total_area = sum(group_areas.values())
@@ -491,6 +499,7 @@ def _subcircuit_sort(
     adj = build_signal_adjacency(requirements)
 
     # Build net-based adjacency count between components in this zone
+    # Pre-filter connections to zone refs for O(zone_size) per net
     net_sharing: dict[tuple[str, str], int] = {}
     for net in requirements.nets:
         zone_refs_in_net = [c.ref for c in net.connections if c.ref in ref_set]
@@ -500,32 +509,52 @@ def _subcircuit_sort(
                 net_sharing[key] = net_sharing.get(key, 0) + 1
 
     # Identify ICs and connectors as "anchor" components
+    _anchor_prefixes = frozenset({"U", "J", "K", "Q", "Y"})
     anchors: list[str] = []
     passives: list[str] = []
     for ref in refs:
         prefix = "".join(ch for ch in ref if ch.isalpha()).upper()
-        if prefix in ("U", "J", "K", "Q", "Y"):
+        if prefix in _anchor_prefixes:
             anchors.append(ref)
         else:
             passives.append(ref)
 
-    # Group each passive with its best anchor (most shared nets)
+    # Pre-build passive -> anchor scores using net_sharing + adjacency
+    # to avoid nested loop over all anchors for every passive
+    anchor_set = set(anchors)
+    passive_best: dict[str, tuple[str, int]] = {}  # passive -> (best_anchor, score)
+    for (r1, r2), count in net_sharing.items():
+        # Only consider pairs where one is passive, other is anchor
+        if r1 in anchor_set and r2 not in anchor_set:
+            anchor, passive = r1, r2
+        elif r2 in anchor_set and r1 not in anchor_set:
+            anchor, passive = r2, r1
+        else:
+            continue
+        if passive not in ref_set:
+            continue
+        prev = passive_best.get(passive, ("", 0))
+        if count > prev[1]:
+            passive_best[passive] = (anchor, count)
+
+    # Also factor in signal adjacency for passives without net-sharing hits
+    for p in passives:
+        p_adj = adj.get(p, set())
+        for a in p_adj & anchor_set:
+            prev = passive_best.get(p, ("", 0))
+            # net_sharing bonus + 1 for adjacency
+            key = (min(p, a), max(p, a))
+            total = net_sharing.get(key, 0) + 1
+            if total > prev[1]:
+                passive_best[p] = (a, total)
+
+    # Group each passive with its best anchor
     anchor_groups: dict[str, list[str]] = {a: [] for a in anchors}
     ungrouped: list[str] = []
     for p in passives:
-        best_anchor = ""
-        best_count = 0
-        for a in anchors:
-            key = (min(p, a), max(p, a))
-            count = net_sharing.get(key, 0)
-            # Also count signal adjacency
-            if a in adj.get(p, set()):
-                count += 1
-            if count > best_count:
-                best_count = count
-                best_anchor = a
-        if best_anchor:
-            anchor_groups[best_anchor].append(p)
+        best = passive_best.get(p)
+        if best and best[0]:
+            anchor_groups[best[0]].append(p)
         else:
             ungrouped.append(p)
 
@@ -596,17 +625,23 @@ def _edge_priority_sort(
     if "CONNECTORS" not in groups:
         groups["CONNECTORS"] = []
 
+    # Pre-build ref -> zone_name index for O(1) lookups
+    _edge_exempt_zones = frozenset({"CONNECTORS", "RJ45", "USB_POWER"})
+    ref_to_zone: dict[str, str] = {}
+    for zone_name, zone_refs in groups.items():
+        for ref in zone_refs:
+            ref_to_zone[ref] = zone_name
+
     # Move edge-sensitive refs from interior zones to CONNECTORS
     for ref in edge_refs:
-        for zone_name, zone_refs in groups.items():
-            if ref in zone_refs and zone_name not in ("CONNECTORS", "RJ45", "USB_POWER"):
-                zone_refs.remove(ref)
-                groups["CONNECTORS"].append(ref)
-                log.info(
-                    "_edge_priority_sort: moved %s from %s to CONNECTORS (edge-sensitive)",
-                    ref, zone_name,
-                )
-                break
+        zone_name = ref_to_zone.get(ref, "")
+        if zone_name and zone_name not in _edge_exempt_zones:
+            groups[zone_name].remove(ref)
+            groups["CONNECTORS"].append(ref)
+            log.info(
+                "_edge_priority_sort: moved %s from %s to CONNECTORS (edge-sensitive)",
+                ref, zone_name,
+            )
 
     return groups
 
@@ -926,6 +961,334 @@ def _passive_rotation_for_side(
     return rotation_table.get(side, {}).get(connected_pin, 0.0)
 
 
+@dataclass
+class _PassiveAssignment:
+    """Assignment of a passive component to an anchor pin."""
+
+    passive_ref: str
+    passive_pin: str
+    anchor_ref: str
+    anchor_pin: str
+
+
+def _find_direct_anchor(
+    pref: str,
+    comp: object,
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    group_ref_set: frozenset[str],
+) -> tuple[str, str, str, int]:
+    """Find the best anchor directly connected to a passive via signal nets.
+
+    Returns:
+        (anchor_ref, anchor_pin, passive_pin, priority) — empty anchor_ref if
+        no direct connection found.
+    """
+    best_anchor = ""
+    best_anchor_pin = ""
+    best_passive_pin = ""
+    best_priority = 999
+
+    for pin in comp.pins:  # type: ignore[union-attr]
+        neighbours = pad_conn.get((pref, pin.number), [])
+        for nb_ref, nb_pin in neighbours:
+            if nb_ref not in group_ref_set or not _is_anchor_ref(nb_ref):
+                continue
+            pri = _anchor_priority(nb_ref)
+            if pri < best_priority:
+                best_priority = pri
+                best_anchor = nb_ref
+                best_anchor_pin = nb_pin
+                best_passive_pin = pin.number
+
+    return best_anchor, best_anchor_pin, best_passive_pin, best_priority
+
+
+def _find_indirect_anchor(
+    pref: str,
+    comp: object,
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    group_ref_set: frozenset[str],
+    requirements: ProjectRequirements,
+) -> tuple[str, str, str]:
+    """Find anchor connected indirectly through another passive.
+
+    Returns:
+        (anchor_ref, anchor_pin, passive_pin) — empty anchor_ref if not found.
+    """
+    best_anchor = ""
+    best_anchor_pin = ""
+    best_passive_pin = ""
+    best_priority = 999
+
+    for pin in comp.pins:  # type: ignore[union-attr]
+        neighbours = pad_conn.get((pref, pin.number), [])
+        found = False
+        for nb_ref, _nb_pin in neighbours:
+            if nb_ref in group_ref_set and not _is_anchor_ref(nb_ref):
+                nb_comp = next(
+                    (c for c in requirements.components if c.ref == nb_ref),
+                    None,
+                )
+                if nb_comp is None:
+                    continue
+                for nb_p in nb_comp.pins:
+                    for nn_ref, nn_pin in pad_conn.get((nb_ref, nb_p.number), []):
+                        if nn_ref in group_ref_set and _is_anchor_ref(nn_ref):
+                            pri = _anchor_priority(nn_ref)
+                            if pri < best_priority:
+                                best_priority = pri
+                                best_anchor = nn_ref
+                                best_anchor_pin = nn_pin
+                                best_passive_pin = pin.number
+                                found = True
+            if found:
+                break
+        if found:
+            break
+
+    return best_anchor, best_anchor_pin, best_passive_pin
+
+
+def _assign_passives_to_anchors(
+    passives: list[str],
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    group_ref_set: frozenset[str],
+    requirements: ProjectRequirements,
+) -> tuple[list[_PassiveAssignment], list[str]]:
+    """Assign each passive to an anchor + specific pin.
+
+    Returns:
+        (assignments, overflow) where overflow are unassigned refs.
+    """
+    assignments: list[_PassiveAssignment] = []
+    overflow: list[str] = []
+
+    for pref in passives:
+        comp = next((c for c in requirements.components if c.ref == pref), None)
+        if comp is None:
+            overflow.append(pref)
+            continue
+
+        anchor, anchor_pin, passive_pin, _pri = _find_direct_anchor(
+            pref, comp, pad_conn, group_ref_set,
+        )
+
+        if not anchor:
+            anchor, anchor_pin, passive_pin = _find_indirect_anchor(
+                pref, comp, pad_conn, group_ref_set, requirements,
+            )
+
+        if anchor:
+            assignments.append(_PassiveAssignment(
+                passive_ref=pref,
+                passive_pin=passive_pin,
+                anchor_ref=anchor,
+                anchor_pin=anchor_pin,
+            ))
+        else:
+            overflow.append(pref)
+
+    return assignments, overflow
+
+
+def _place_primary_anchors(
+    primary_anchors: list[str],
+    footprint_sizes: dict[str, tuple[float, float]],
+    is_relay_group: bool,
+) -> tuple[dict[str, tuple[float, float, float]], float, float]:
+    """Place primary anchors in rows, wrapping when row exceeds threshold.
+
+    Returns:
+        (layout, cursor_x, max_anchor_h) — layout dict and cursor state.
+    """
+    layout: dict[str, tuple[float, float, float]] = {}
+    max_row_width = 999.0 if is_relay_group else 120.0
+    cursor_x = _GROUP_MARGIN_MM
+    anchor_y = _GROUP_MARGIN_MM
+    row_h = 0.0
+    max_anchor_h = 0.0
+
+    for aref in primary_anchors:
+        w, h = footprint_sizes.get(aref, (5.0, 5.0))
+        if cursor_x + w > max_row_width and cursor_x > _GROUP_MARGIN_MM + 1:
+            anchor_y += row_h + _ANCHOR_GAP_MM
+            cursor_x = _GROUP_MARGIN_MM
+            row_h = 0.0
+        layout[aref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
+        cursor_x += w + _ANCHOR_GAP_MM
+        row_h = max(row_h, h)
+        max_anchor_h = max(max_anchor_h, anchor_y + h - _GROUP_MARGIN_MM)
+
+    return layout, cursor_x, max_anchor_h
+
+
+def _place_secondary_near_pin(
+    sref: str,
+    connected_primary: str,
+    connected_primary_pin: str,
+    layout: dict[str, tuple[float, float, float]],
+    footprint_sizes: dict[str, tuple[float, float]],
+    _cached_offsets: object,
+) -> None:
+    """Place a secondary anchor (Q) near the pin of its primary."""
+    prim_x, prim_y, _ = layout[connected_primary]
+    offsets = _cached_offsets(connected_primary)  # type: ignore[operator]
+    sw, sh = footprint_sizes.get(sref, (3.0, 3.0))
+    pw, ph = footprint_sizes.get(connected_primary, (5.0, 5.0))
+
+    if offsets and connected_primary_pin in offsets:
+        pdx, pdy = offsets[connected_primary_pin]
+        side = _classify_pin_side(pdx, pdy, pw / 2.0, ph / 2.0)
+        if side == "right":
+            sx = prim_x + pw / 2.0 + sw / 2.0 + _PASSIVE_STANDOFF_MM
+            sy = prim_y + pdy
+        elif side == "left":
+            sx = prim_x - pw / 2.0 - sw / 2.0 - _PASSIVE_STANDOFF_MM
+            sy = prim_y + pdy
+        elif side == "bottom":
+            sx = prim_x + pdx
+            sy = prim_y + ph / 2.0 + sh / 2.0 + _PASSIVE_STANDOFF_MM
+        else:  # top
+            sx = prim_x + pdx
+            sy = prim_y - ph / 2.0 - sh / 2.0 - _PASSIVE_STANDOFF_MM
+        layout[sref] = (sx, sy, 0.0)
+    else:
+        layout[sref] = (
+            prim_x,
+            prim_y + ph / 2.0 + sh / 2.0 + _PASSIVE_STANDOFF_MM,
+            0.0,
+        )
+
+
+def _place_passive_at_pin(
+    asn: _PassiveAssignment,
+    stack_idx: int,
+    pad_abs_x: float,
+    pad_abs_y: float,
+    side: str,
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> tuple[float, float, float]:
+    """Compute position and rotation for a passive placed at an anchor pin.
+
+    Returns:
+        (x, y, rotation) for the passive component.
+    """
+    pw, ph = footprint_sizes.get(asn.passive_ref, (1.6, 0.8))
+    rot = _passive_rotation_for_side(side, asn.passive_pin)
+
+    eff_w, eff_h = pw, ph
+    if rot in (90.0, 270.0):
+        eff_w, eff_h = ph, pw
+
+    stack_offset = stack_idx * (eff_w + _PASSIVE_STACK_GAP_MM)
+
+    if side == "right":
+        px = pad_abs_x + _PASSIVE_STANDOFF_MM + eff_w / 2.0 + stack_offset
+        py = pad_abs_y
+    elif side == "left":
+        px = pad_abs_x - _PASSIVE_STANDOFF_MM - eff_w / 2.0 - stack_offset
+        py = pad_abs_y
+    elif side == "bottom":
+        px = pad_abs_x
+        py = pad_abs_y + _PASSIVE_STANDOFF_MM + eff_h / 2.0 + stack_offset
+    else:  # top
+        px = pad_abs_x
+        py = pad_abs_y - _PASSIVE_STANDOFF_MM - eff_h / 2.0 - stack_offset
+
+    return px, py, rot
+
+
+def _build_relay_ownership(
+    layout: dict[str, tuple[float, float, float]],
+    relay_refs: list[str],
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    requirements: ProjectRequirements,
+) -> dict[str, str]:
+    """Map each non-relay ref to its owning relay via net connectivity.
+
+    Returns:
+        Mapping from ref to owning relay ref (defaults to first relay).
+    """
+    ownership: dict[str, str] = {}
+    for ref in list(layout.keys()):
+        if _ref_prefix(ref) == "K":
+            continue
+        owning_relay = ""
+        comp = next(
+            (c for c in requirements.components if c.ref == ref), None,
+        )
+        if comp:
+            for pin in comp.pins:
+                for nb_ref, _nb_pin in pad_conn.get(
+                    (ref, pin.number), [],
+                ):
+                    if nb_ref in relay_refs:
+                        owning_relay = nb_ref
+                        break
+                    if _ref_prefix(nb_ref) != "K":
+                        nb_comp = next(
+                            (c for c in requirements.components
+                             if c.ref == nb_ref),
+                            None,
+                        )
+                        if nb_comp:
+                            for nb_p in nb_comp.pins:
+                                for nn_ref, _ in pad_conn.get(
+                                    (nb_ref, nb_p.number), [],
+                                ):
+                                    if nn_ref in relay_refs:
+                                        owning_relay = nn_ref
+                                        break
+                                if owning_relay:
+                                    break
+                if owning_relay:
+                    break
+        ownership[ref] = owning_relay or relay_refs[0]
+    return ownership
+
+
+def _place_relay_support_grid(
+    layout: dict[str, tuple[float, float, float]],
+    relay_refs: list[str],
+    ownership: dict[str, str],
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> None:
+    """Place support components in a tight 2-column grid below each relay."""
+    relay_bottom = max(
+        layout[r][1] + footprint_sizes.get(r, (18.0, 15.0))[1] / 2.0
+        for r in relay_refs
+    )
+    support_y_start = relay_bottom + 0.5
+    relay_kw = footprint_sizes.get(relay_refs[0], (18.0, 16.0))[0]
+
+    for kr in relay_refs:
+        kx = layout[kr][0]
+        members = sorted(
+            [r for r, owner in ownership.items() if owner == kr],
+            key=lambda r: (
+                0 if r.startswith("Q") else
+                1 if r.startswith("D") else 2, r,
+            ),
+        )
+        col = 0
+        row_y = support_y_start
+        row_max_h = 0.0
+        cols_per_row = 2
+        col_width = relay_kw / cols_per_row
+
+        for ref in members:
+            w, h = footprint_sizes.get(ref, (2.0, 2.0))
+            px = kx - relay_kw / 2.0 + (col + 0.5) * col_width
+            py = row_y + h / 2.0
+            layout[ref] = (px, py, 0.0)
+            row_max_h = max(row_max_h, h)
+            col += 1
+            if col >= cols_per_row:
+                col = 0
+                row_y += row_max_h + 0.5
+                row_max_h = 0.0
+
+
 def _resolve_overlaps(
     layout: dict[str, tuple[float, float, float]],
     footprint_sizes: dict[str, tuple[float, float]],
@@ -1034,92 +1397,16 @@ def _layout_group(
         return pad_offsets_cache[ref]
 
     # ------------------------------------------------------------------
-    # Step 3: Assign each passive to an anchor + specific pin
+    # Step 3: Assign passives to anchors
     # ------------------------------------------------------------------
-    @dataclass
-    class _PassiveAssignment:
-        passive_ref: str
-        passive_pin: str
-        anchor_ref: str
-        anchor_pin: str
-
-    assignments: list[_PassiveAssignment] = []
-    overflow: list[str] = []
-
-    for pref in passives:
-        best_anchor: str = ""
-        best_anchor_pin: str = ""
-        best_passive_pin: str = ""
-        best_priority: int = 999
-
-        # Check all pins of this passive for signal-net connections to anchors
-        comp = next((c for c in requirements.components if c.ref == pref), None)
-        if comp is None:
-            overflow.append(pref)
-            continue
-
-        for pin in comp.pins:
-            neighbours = pad_conn.get((pref, pin.number), [])
-            for nb_ref, nb_pin in neighbours:
-                if nb_ref not in group_ref_set or not _is_anchor_ref(nb_ref):
-                    continue
-                pri = _anchor_priority(nb_ref)
-                if pri < best_priority:
-                    best_priority = pri
-                    best_anchor = nb_ref
-                    best_anchor_pin = nb_pin
-                    best_passive_pin = pin.number
-
-        if best_anchor:
-            assignments.append(_PassiveAssignment(
-                passive_ref=pref,
-                passive_pin=best_passive_pin,
-                anchor_ref=best_anchor,
-                anchor_pin=best_anchor_pin,
-            ))
-        else:
-            # Check for indirect connection through other passives to anchors
-            found = False
-            for pin in comp.pins:
-                neighbours = pad_conn.get((pref, pin.number), [])
-                for nb_ref, _nb_pin in neighbours:
-                    if nb_ref in group_ref_set and not _is_anchor_ref(nb_ref):
-                        # This passive connects to another passive —
-                        # find which anchor the intermediary connects to
-                        nb_comp = next(
-                            (c for c in requirements.components if c.ref == nb_ref),
-                            None,
-                        )
-                        if nb_comp is None:
-                            continue
-                        for nb_p in nb_comp.pins:
-                            for nn_ref, nn_pin in pad_conn.get((nb_ref, nb_p.number), []):
-                                if nn_ref in group_ref_set and _is_anchor_ref(nn_ref):
-                                    pri = _anchor_priority(nn_ref)
-                                    if pri < best_priority:
-                                        best_priority = pri
-                                        best_anchor = nn_ref
-                                        best_anchor_pin = nn_pin
-                                        best_passive_pin = pin.number
-                                        found = True
-                    if found:
-                        break
-                if found:
-                    break
-            if best_anchor:
-                assignments.append(_PassiveAssignment(
-                    passive_ref=pref,
-                    passive_pin=best_passive_pin,
-                    anchor_ref=best_anchor,
-                    anchor_pin=best_anchor_pin,
-                ))
-            else:
-                overflow.append(pref)
+    assignments, overflow = _assign_passives_to_anchors(
+        passives, pad_conn, group_ref_set, requirements,
+    )
 
     # ------------------------------------------------------------------
     # Step 4: Classify anchor pins into sides using pad geometry
     # ------------------------------------------------------------------
-    anchor_pin_sides: dict[str, dict[str, str]] = {}  # anchor_ref → {pin: side}
+    anchor_pin_sides: dict[str, dict[str, str]] = {}
     for aref in anchors:
         offsets = _cached_offsets(aref)
         if offsets is None:
@@ -1135,38 +1422,18 @@ def _layout_group(
     # ------------------------------------------------------------------
     # Step 5: Place anchors
     # ------------------------------------------------------------------
-    layout: dict[str, tuple[float, float, float]] = {}
-
-    # Separate primary anchors (K, U, J) from secondary (Q)
     primary_anchors = [a for a in anchors if _ref_prefix(a) in ("K", "U", "J", "Y")]
     secondary_anchors = [a for a in anchors if _ref_prefix(a) not in ("K", "U", "J", "Y")]
 
-    # Detect relay groups: if ALL primary anchors are relays (K refs), use
-    # single-row layout (1xN) — relays should never wrap to multiple rows.
     is_relay_group = (
         len(primary_anchors) >= 2
         and all(_ref_prefix(a) == "K" for a in primary_anchors)
     )
 
-    # Place primaries in rows, wrapping to 2D grid when row exceeds threshold
-    # Relay groups: no wrapping (single row), support components go below
-    max_row_width = 999.0 if is_relay_group else 120.0
-    cursor_x = _GROUP_MARGIN_MM
+    layout, cursor_x, _max_anchor_h = _place_primary_anchors(
+        primary_anchors, footprint_sizes, is_relay_group,
+    )
     anchor_y = _GROUP_MARGIN_MM
-    max_anchor_h = 0.0
-    row_h = 0.0  # height of current row for wrapping
-
-    for aref in primary_anchors:
-        w, h = footprint_sizes.get(aref, (5.0, 5.0))
-        # Wrap to next row if this anchor would exceed max width
-        if cursor_x + w > max_row_width and cursor_x > _GROUP_MARGIN_MM + 1:
-            anchor_y += row_h + _ANCHOR_GAP_MM
-            cursor_x = _GROUP_MARGIN_MM
-            row_h = 0.0
-        layout[aref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
-        cursor_x += w + _ANCHOR_GAP_MM
-        row_h = max(row_h, h)
-        max_anchor_h = max(max_anchor_h, anchor_y + h - _GROUP_MARGIN_MM)
 
     # Place secondary anchors (Q) near the primary they connect to
     for sref in secondary_anchors:
@@ -1184,37 +1451,11 @@ def _layout_group(
                     break
 
         if connected_primary and connected_primary in layout:
-            # Place Q near the connected pin of the primary
-            prim_x, prim_y, _ = layout[connected_primary]
-            offsets = _cached_offsets(connected_primary)
-            sw, sh = footprint_sizes.get(sref, (3.0, 3.0))
-            pw, ph = footprint_sizes.get(connected_primary, (5.0, 5.0))
-
-            if offsets and connected_primary_pin in offsets:
-                pdx, pdy = offsets[connected_primary_pin]
-                side = _classify_pin_side(pdx, pdy, pw / 2.0, ph / 2.0)
-                if side == "right":
-                    sx = prim_x + pw / 2.0 + sw / 2.0 + _PASSIVE_STANDOFF_MM
-                    sy = prim_y + pdy
-                elif side == "left":
-                    sx = prim_x - pw / 2.0 - sw / 2.0 - _PASSIVE_STANDOFF_MM
-                    sy = prim_y + pdy
-                elif side == "bottom":
-                    sx = prim_x + pdx
-                    sy = prim_y + ph / 2.0 + sh / 2.0 + _PASSIVE_STANDOFF_MM
-                else:  # top
-                    sx = prim_x + pdx
-                    sy = prim_y - ph / 2.0 - sh / 2.0 - _PASSIVE_STANDOFF_MM
-                layout[sref] = (sx, sy, 0.0)
-            else:
-                # Fallback: place below primary
-                layout[sref] = (
-                    prim_x,
-                    prim_y + ph / 2.0 + sh / 2.0 + _PASSIVE_STANDOFF_MM,
-                    0.0,
-                )
+            _place_secondary_near_pin(
+                sref, connected_primary, connected_primary_pin,
+                layout, footprint_sizes, _cached_offsets,
+            )
         else:
-            # Unconnected secondary — place at end of primary row
             w, h = footprint_sizes.get(sref, (3.0, 3.0))
             layout[sref] = (cursor_x + w / 2.0, anchor_y + h / 2.0, 0.0)
             cursor_x += w + _ANCHOR_GAP_MM
@@ -1222,7 +1463,6 @@ def _layout_group(
     # ------------------------------------------------------------------
     # Step 6: Place passives at anchor pins
     # ------------------------------------------------------------------
-    # Group assignments by (anchor_ref, anchor_pin)
     pin_assignments: dict[tuple[str, str], list[_PassiveAssignment]] = {}
     for asn in assignments:
         key = (asn.anchor_ref, asn.anchor_pin)
@@ -1230,7 +1470,6 @@ def _layout_group(
 
     for (anchor_ref, anchor_pin), asn_list in pin_assignments.items():
         if anchor_ref not in layout:
-            # Anchor not placed (shouldn't happen, but guard)
             continue
 
         anchor_x, anchor_y_pos, anchor_rot = layout[anchor_ref]
@@ -1244,125 +1483,31 @@ def _layout_group(
             pad_abs_y = anchor_y_pos + rot_dy
             side = anchor_pin_sides.get(anchor_ref, {}).get(anchor_pin, "right")
         else:
-            # Fallback: place to the right
             pad_abs_x = anchor_x + aw / 2.0
             pad_abs_y = anchor_y_pos
             side = "right"
 
-        # Place each passive outward from the pin, stacking if multiple
         for stack_idx, asn in enumerate(asn_list):
-            pw, ph = footprint_sizes.get(asn.passive_ref, (1.6, 0.8))
-            rot = _passive_rotation_for_side(side, asn.passive_pin)
-
-            # Effective passive size after rotation
-            eff_w, eff_h = pw, ph
-            if rot in (90.0, 270.0):
-                eff_w, eff_h = ph, pw
-
-            stack_offset = stack_idx * (eff_w + _PASSIVE_STACK_GAP_MM)
-
-            if side == "right":
-                px = pad_abs_x + _PASSIVE_STANDOFF_MM + eff_w / 2.0 + stack_offset
-                py = pad_abs_y
-            elif side == "left":
-                px = pad_abs_x - _PASSIVE_STANDOFF_MM - eff_w / 2.0 - stack_offset
-                py = pad_abs_y
-            elif side == "bottom":
-                px = pad_abs_x
-                py = pad_abs_y + _PASSIVE_STANDOFF_MM + eff_h / 2.0 + stack_offset
-            else:  # top
-                px = pad_abs_x
-                py = pad_abs_y - _PASSIVE_STANDOFF_MM - eff_h / 2.0 - stack_offset
-
+            px, py, rot = _place_passive_at_pin(
+                asn, stack_idx, pad_abs_x, pad_abs_y, side, footprint_sizes,
+            )
             layout[asn.passive_ref] = (px, py, rot)
 
     # ------------------------------------------------------------------
     # Step 7: Relay group post-processing — support below relay row
     # ------------------------------------------------------------------
-    # Done BEFORE overlap resolution so support components start tight,
-    # and overlaps are resolved without breaking sub-circuit clustering.
     if is_relay_group:
-        # Reorganize: K refs in a single top row, all support components
-        # (Q, D, R, C) placed in a tight grid directly below their relay.
         relay_refs = sorted(
             [r for r in layout if _ref_prefix(r) == "K"],
-            key=lambda r: layout[r][0],  # left to right
+            key=lambda r: layout[r][0],
         )
         if relay_refs:
-            # Find the bottom of the relay row
-            relay_bottom = max(
-                layout[r][1] + footprint_sizes.get(r, (18.0, 15.0))[1] / 2.0
-                for r in relay_refs
+            ownership = _build_relay_ownership(
+                layout, relay_refs, pad_conn, requirements,
             )
-            # Tight gap between relay bottom and support top
-            support_y_start = relay_bottom + 0.5
-
-            # Build ownership map: each non-K ref → its owning relay
-            ownership: dict[str, str] = {}
-            for ref in list(layout.keys()):
-                if _ref_prefix(ref) == "K":
-                    continue
-                owning_relay = ""
-                comp = next(
-                    (c for c in requirements.components if c.ref == ref), None,
-                )
-                if comp:
-                    for pin in comp.pins:
-                        for nb_ref, _nb_pin in pad_conn.get(
-                            (ref, pin.number), [],
-                        ):
-                            if nb_ref in relay_refs:
-                                owning_relay = nb_ref
-                                break
-                            # Indirect: check through any non-K ref
-                            if _ref_prefix(nb_ref) != "K":
-                                nb_comp = next(
-                                    (c for c in requirements.components
-                                     if c.ref == nb_ref),
-                                    None,
-                                )
-                                if nb_comp:
-                                    for nb_p in nb_comp.pins:
-                                        for nn_ref, _ in pad_conn.get(
-                                            (nb_ref, nb_p.number), [],
-                                        ):
-                                            if nn_ref in relay_refs:
-                                                owning_relay = nn_ref
-                                                break
-                                        if owning_relay:
-                                            break
-                        if owning_relay:
-                            break
-                ownership[ref] = owning_relay or relay_refs[0]
-
-            # Place support components in a tight 2-column grid below each relay
-            relay_kw = footprint_sizes.get(relay_refs[0], (18.0, 16.0))[0]
-            for kr in relay_refs:
-                kx = layout[kr][0]
-                members = sorted(
-                    [r for r, owner in ownership.items() if owner == kr],
-                    key=lambda r: (
-                        0 if r.startswith("Q") else
-                        1 if r.startswith("D") else 2, r,
-                    ),
-                )
-                col = 0
-                row_y = support_y_start
-                row_max_h = 0.0
-                cols_per_row = 2  # tight 2-column grid under each relay
-                col_width = relay_kw / cols_per_row
-
-                for ref in members:
-                    w, h = footprint_sizes.get(ref, (2.0, 2.0))
-                    px = kx - relay_kw / 2.0 + (col + 0.5) * col_width
-                    py = row_y + h / 2.0
-                    layout[ref] = (px, py, 0.0)
-                    row_max_h = max(row_max_h, h)
-                    col += 1
-                    if col >= cols_per_row:
-                        col = 0
-                        row_y += row_max_h + 0.5
-                        row_max_h = 0.0
+            _place_relay_support_grid(
+                layout, relay_refs, ownership, footprint_sizes,
+            )
 
     # ------------------------------------------------------------------
     # Step 7.5: Resolve overlaps

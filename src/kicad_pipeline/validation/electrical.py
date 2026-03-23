@@ -348,7 +348,7 @@ def _check_relay_polarity(
     for net in requirements.nets:
         net_to_refs[net.name] = {conn.ref for conn in net.connections}
 
-    comp_map = {c.ref: c for c in requirements.components}
+    {c.ref: c for c in requirements.components}
 
     for comp in requirements.components:
         prefix = "".join(c for c in comp.ref if c.isalpha())

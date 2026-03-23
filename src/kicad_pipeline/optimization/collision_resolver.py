@@ -172,6 +172,128 @@ def _group_of_ref(
     return None
 
 
+def _get_movable_colliding_refs(
+    collisions: list[tuple[str, str]],
+    fixed_refs: set[str],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> list[str]:
+    """Get non-fixed colliding refs sorted by area (smallest first)."""
+    colliding_refs: set[str] = set()
+    for ref_a, ref_b in collisions:
+        if ref_a not in fixed_refs:
+            colliding_refs.add(ref_a)
+        if ref_b not in fixed_refs:
+            colliding_refs.add(ref_b)
+    return sorted(
+        colliding_refs,
+        key=lambda r: (
+            fp_sizes.get(r, DEFAULT_FP_SIZE_MM)[0]
+            * fp_sizes.get(r, DEFAULT_FP_SIZE_MM)[1]
+        ),
+    )
+
+
+def _ref_has_collision(
+    ref: str,
+    rx: float,
+    ry: float,
+    w: float,
+    h: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> bool:
+    """Check if a specific ref still collides with any other component."""
+    for other_ref, (ox, oy, _orot) in positions.items():
+        if other_ref == ref:
+            continue
+        ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
+        if (abs(rx - ox) < (w + ow) / 2.0
+                and abs(ry - oy) < (h + oh) / 2.0):
+            return True
+    return False
+
+
+def _build_exclusion_grid(
+    ref: str,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+) -> _PlacementGrid:
+    """Build an occupancy grid with all components except *ref*."""
+    grid = _PlacementGrid(bounds)
+    for other_ref, (ox, oy, _orot) in positions.items():
+        if other_ref == ref:
+            continue
+        ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
+        grid.place(ox, oy, ow, oh)
+    return grid
+
+
+def _compute_large_ic_push(
+    ref: str,
+    rx: float,
+    ry: float,
+    w: float,
+    h: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> tuple[float, float]:
+    """If ref collides with a large IC (>100mm^2), push away from its center.
+
+    Returns:
+        Target (x, y) for relocation.
+    """
+    target_x, target_y = rx, ry
+    for other_ref, (ox, oy, _orot) in positions.items():
+        if other_ref == ref:
+            continue
+        ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
+        if ow * oh < 100.0:
+            continue
+        if (abs(rx - ox) < (w + ow) / 2.0
+                and abs(ry - oy) < (h + oh) / 2.0):
+            dx = rx - ox
+            dy = ry - oy
+            if abs(dx) * oh > abs(dy) * ow:
+                push_x = ow / 2.0 + w / 2.0 + 2.0
+                target_x = ox + push_x if dx >= 0 else ox - push_x
+            else:
+                push_y = oh / 2.0 + h / 2.0 + 2.0
+                target_y = oy + push_y if dy >= 0 else oy - push_y
+            break
+    return target_x, target_y
+
+
+def _clamp_to_group(
+    ref: str,
+    fx: float,
+    fy: float,
+    w: float,
+    h: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    group_bboxes: list[GroupBoundingBox] | None,
+    grid: _PlacementGrid,
+    group_rect_fn: object,
+) -> tuple[float, float]:
+    """Clamp position to group bounding box if applicable.
+
+    Returns:
+        (fx, fy) — clamped or original position.
+    """
+    if group_bboxes is None:
+        return fx, fy
+    grp = _group_of_ref(ref, group_bboxes)
+    if grp is None:
+        return fx, fy
+    grx1, gry1, grx2, gry2 = group_rect_fn(grp, positions)  # type: ignore[operator]
+    cx = max(grx1 + w / 2, min(grx2 - w / 2, fx))
+    cy = max(gry1 + h / 2, min(gry2 - h / 2, fy))
+    if grid.is_free(cx, cy, w, h):
+        return cx, cy
+    return fx, fy
+
+
 def _resolve_collisions(
     positions: dict[str, tuple[float, float, float]],
     fp_sizes: dict[str, tuple[float, float]],
@@ -223,23 +345,12 @@ def _resolve_collisions(
 
     # Iteratively relocate colliding components
     for _pass in range(COLLISION_MAX_PASSES):
-        # Recompute colliding refs each pass (relocations may create new collisions)
         current_collisions = _count_collisions(result, fp_sizes)
         if not current_collisions:
             break
-        colliding_refs: set[str] = set()
-        for ref_a, ref_b in current_collisions:
-            if ref_a not in fixed_refs:
-                colliding_refs.add(ref_a)
-            if ref_b not in fixed_refs:
-                colliding_refs.add(ref_b)
 
-        # Sort: move smaller components first (less disruptive)
-        sorted_refs = sorted(
-            colliding_refs,
-            key=lambda r: (
-                fp_sizes.get(r, DEFAULT_FP_SIZE_MM)[0] * fp_sizes.get(r, DEFAULT_FP_SIZE_MM)[1]
-            ),
+        sorted_refs = _get_movable_colliding_refs(
+            current_collisions, fixed_refs, fp_sizes,
         )
 
         moved = 0
@@ -249,67 +360,21 @@ def _resolve_collisions(
             rx, ry, rot = result[ref]
             w, h = _rotation_aware_size(ref, result, fp_sizes)
 
-            # Check if this ref still collides
-            has_collision = False
-            for other_ref, (ox, oy, _orot) in result.items():
-                if other_ref == ref:
-                    continue
-                ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
-                if (abs(rx - ox) < (w + ow) / 2.0
-                        and abs(ry - oy) < (h + oh) / 2.0):
-                    has_collision = True
-                    break
-
-            if not has_collision:
+            if not _ref_has_collision(ref, rx, ry, w, h, result, fp_sizes):
                 continue
 
-            # Build grid WITHOUT this component
-            grid = _PlacementGrid(bounds)
-            for other_ref, (ox, oy, _orot) in result.items():
-                if other_ref == ref:
-                    continue
-                ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
-                grid.place(ox, oy, ow, oh)
+            grid = _build_exclusion_grid(ref, result, fp_sizes, bounds)
 
-            # If colliding with a large IC (>100mm^2), push away from its center
-            # to avoid landing right at the edge of its courtyard
-            target_x, target_y = rx, ry
-            for other_ref, (ox, oy, _orot) in result.items():
-                if other_ref == ref:
-                    continue
-                ow, oh = _rotation_aware_size(other_ref, result, fp_sizes)
-                if ow * oh < 100.0:
-                    continue  # not a large IC
-                if (abs(rx - ox) < (w + ow) / 2.0
-                        and abs(ry - oy) < (h + oh) / 2.0):
-                    # Inside large IC — push to nearest edge + margin
-                    dx = rx - ox
-                    dy = ry - oy
-                    if abs(dx) * oh > abs(dy) * ow:
-                        # Closer to left/right edge
-                        push_x = (ow / 2.0 + w / 2.0 + 2.0)
-                        target_x = ox + push_x if dx >= 0 else ox - push_x
-                    else:
-                        # Closer to top/bottom edge
-                        push_y = (oh / 2.0 + h / 2.0 + 2.0)
-                        target_y = oy + push_y if dy >= 0 else oy - push_y
-                    break
+            target_x, target_y = _compute_large_ic_push(
+                ref, rx, ry, w, h, result, fp_sizes,
+            )
 
-            # Find nearest free position to target
             fx, fy = grid.find_free_pos(target_x, target_y, w, h)
 
-            # Clamp to group bounding box if group constraints active,
-            # but ONLY if clamping doesn't re-create the collision.
-            if group_bboxes is not None:
-                grp = _group_of_ref(ref, group_bboxes)
-                if grp is not None:
-                    grx1, gry1, grx2, gry2 = _group_rect(grp, result)
-                    cx = max(grx1 + w / 2, min(grx2 - w / 2, fx))
-                    cy = max(gry1 + h / 2, min(gry2 - h / 2, fy))
-                    # Only apply group clamp if it doesn't cause overlap
-                    # with the same component we're trying to escape
-                    if grid.is_free(cx, cy, w, h):
-                        fx, fy = cx, cy
+            fx, fy = _clamp_to_group(
+                ref, fx, fy, w, h, result, fp_sizes,
+                group_bboxes, grid, _group_rect,
+            )
 
             result[ref] = (fx, fy, rot)
             moved += 1
