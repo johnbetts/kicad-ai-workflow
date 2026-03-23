@@ -983,68 +983,26 @@ def build_schematic(
             adjacency=adjacency, symbol_extents=symbol_extents,
         )
 
-    # ------------------------------------------------------------------
-    # Step 5: Create symbol instances at computed positions
-    # ------------------------------------------------------------------
-    symbols_list: list[SymbolInstance] = []
-    for comp in requirements.components:
-        lib_sym = comp_lib_sym[comp.ref]
-        lib_id = lib_sym.lib_id
-        pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
-        fp_lib_id = _resolve_footprint_lib_id(comp, project_name)
-        inst = _make_symbol_instance(comp, lib_id, pos, lib_sym, footprint_lib_id=fp_lib_id)
-        symbols_list.append(inst)
-
-    # ------------------------------------------------------------------
-    # Step 6: Build pin-position map for wire routing
-    # ------------------------------------------------------------------
+    symbols_list = _create_symbol_instances(
+        requirements, comp_lib_sym, positions, project_name,
+    )
     pin_positions, pin_sides = _build_pin_position_map(
         requirements.components, positions, comp_lib_sym,
     )
-
-    # ------------------------------------------------------------------
-    # Step 7: Route nets (skip power nets — handled by power symbols)
-    # ------------------------------------------------------------------
-    all_wires: list[Wire] = []
-    all_junctions: list[Junction] = []
-    all_global_labels: list[GlobalLabel] = []
-    all_local_labels: list[Label] = []
-
-    power_net_set = set(_POWER_LIB_IDS.keys())
-    for net in requirements.nets:
-        if net.name in power_net_set:
-            continue  # power nets use power symbols, not labels
-        ws, js, gls, ls = route_net(
-            net, pin_positions, use_global_labels=True, pin_sides=pin_sides,
-        )
-        all_wires.extend(ws)
-        all_junctions.extend(js)
-        all_global_labels.extend(gls)
-        all_local_labels.extend(ls)
-
-    # ------------------------------------------------------------------
-    # Step 8: Power symbols at pin locations
-    # ------------------------------------------------------------------
-    power_net_names = _collect_power_nets(requirements)
-    power_syms, power_wires, power_labels, power_junctions = _make_power_symbols_at_pins(
-        power_net_names, pin_positions, pin_sides, requirements,
+    all_wires, all_junctions, all_global_labels, all_local_labels = _route_all_nets(
+        requirements, pin_positions, pin_sides,
     )
-    all_wires.extend(power_wires)
-    all_global_labels.extend(power_labels)
-    all_junctions.extend(power_junctions)
-
-    # ------------------------------------------------------------------
-    # Step 9: No-connect markers for pins with no net assignment
-    # ------------------------------------------------------------------
+    power_syms = _add_power_symbols(
+        requirements, pin_positions, pin_sides,
+        all_wires, all_global_labels, all_junctions,
+    )
     no_connects = _make_no_connect_markers(requirements, pin_positions)
 
     log.info(
         "build_schematic complete: %d symbols, %d wires, %d labels, %d power syms, %d no-connects",
-        len(symbols_list),
-        len(all_wires),
+        len(symbols_list), len(all_wires),
         len(all_global_labels) + len(all_local_labels),
-        len(power_syms),
-        len(no_connects),
+        len(power_syms), len(no_connects),
     )
 
     return Schematic(
@@ -1064,6 +1022,69 @@ def build_schematic(
         revision=requirements.project.revision,
         company=requirements.project.author or "",
     )
+
+
+def _create_symbol_instances(
+    requirements: ProjectRequirements,
+    comp_lib_sym: dict[str, LibSymbol],
+    positions: dict[str, Point],
+    project_name: str | None,
+) -> list[SymbolInstance]:
+    """Step 5: Create symbol instances at computed positions."""
+    symbols_list: list[SymbolInstance] = []
+    for comp in requirements.components:
+        lib_sym = comp_lib_sym[comp.ref]
+        lib_id = lib_sym.lib_id
+        pos = positions.get(comp.ref, Point(x=0.0, y=0.0))
+        fp_lib_id = _resolve_footprint_lib_id(comp, project_name)
+        inst = _make_symbol_instance(comp, lib_id, pos, lib_sym, footprint_lib_id=fp_lib_id)
+        symbols_list.append(inst)
+    return symbols_list
+
+
+def _route_all_nets(
+    requirements: ProjectRequirements,
+    pin_positions: dict[tuple[str, str], Point],
+    pin_sides: dict[tuple[str, str], str],
+) -> tuple[list[Wire], list[Junction], list[GlobalLabel], list[Label]]:
+    """Steps 6-7: Route all non-power nets."""
+    all_wires: list[Wire] = []
+    all_junctions: list[Junction] = []
+    all_global_labels: list[GlobalLabel] = []
+    all_local_labels: list[Label] = []
+
+    power_net_set = set(_POWER_LIB_IDS.keys())
+    for net in requirements.nets:
+        if net.name in power_net_set:
+            continue
+        ws, js, gls, ls = route_net(
+            net, pin_positions, use_global_labels=True, pin_sides=pin_sides,
+        )
+        all_wires.extend(ws)
+        all_junctions.extend(js)
+        all_global_labels.extend(gls)
+        all_local_labels.extend(ls)
+
+    return all_wires, all_junctions, all_global_labels, all_local_labels
+
+
+def _add_power_symbols(
+    requirements: ProjectRequirements,
+    pin_positions: dict[tuple[str, str], Point],
+    pin_sides: dict[tuple[str, str], str],
+    all_wires: list[Wire],
+    all_global_labels: list[GlobalLabel],
+    all_junctions: list[Junction],
+) -> list[PowerSymbol]:
+    """Step 8: Add power symbols at pin locations."""
+    power_net_names = _collect_power_nets(requirements)
+    power_syms, power_wires, power_labels, power_junctions = _make_power_symbols_at_pins(
+        power_net_names, pin_positions, pin_sides, requirements,
+    )
+    all_wires.extend(power_wires)
+    all_global_labels.extend(power_labels)
+    all_junctions.extend(power_junctions)
+    return power_syms
 
 
 # ---------------------------------------------------------------------------

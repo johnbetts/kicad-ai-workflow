@@ -1011,28 +1011,14 @@ def _score_pad_facing(
     return (_clamp01(sum(scores) / len(scores)), tuple(issues[:10]))
 
 
-def compute_fast_placement_score(
+def _gather_placement_subdimensions(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
-) -> QualityScore:
-    """Compute a placement-focused quality score without full validation.
+) -> dict[str, tuple[float, tuple[str, ...]]]:
+    """Compute all 13 placement sub-dimension scores.
 
-    Evaluates 5 EE-aligned placement sub-dimensions:
-
-    - **Collisions** (25%): courtyard overlap detection
-    - **Sub-circuit cohesion** (25%): sub-circuit components clustered
-    - **Voltage isolation** (20%): domain separation maintained
-    - **Connector edge** (15%): connectors near board edges
-    - **Decoupling proximity** (15%): caps near their ICs
-
-    Args:
-        pcb: The PCB design to evaluate.
-        requirements: Project requirements with nets and feature blocks.
-
-    Returns:
-        A :class:`QualityScore` with placement-derived scores.
+    Returns a dict mapping dimension name to ``(score, issues)`` pairs.
     """
-    # Sub-dimension scores
     collision_score, collision_issues = _score_collisions(pcb)
     cohesion_score, cohesion_issues = _score_subcircuit_cohesion(pcb, requirements)
     isolation_score, isolation_issues = _score_voltage_isolation(pcb, requirements)
@@ -1042,137 +1028,200 @@ def compute_fast_placement_score(
     mcu_periph_score, mcu_periph_issues = _score_mcu_peripheral_proximity(pcb, requirements)
     rf_edge_score, rf_edge_issues = _score_rf_edge_placement(pcb, requirements)
     group_cohesion_score, group_cohesion_issues = _score_group_cohesion(pcb, requirements)
-
-    # Subgroup cohesion
     subgroup_score, subgroup_issues = _score_subgroup_cohesion(pcb, requirements)
-
-    # Group isolation
     grp_isolation_score, grp_isolation_issues = _score_group_isolation(pcb, requirements)
-
-    # Pad facing
     pad_facing_score, pad_facing_issues = _score_pad_facing(pcb, requirements)
+
+    return {
+        "collision": (collision_score, tuple(collision_issues[:5])),
+        "cohesion": (cohesion_score, tuple(cohesion_issues[:5])),
+        "isolation": (isolation_score, tuple(isolation_issues[:5])),
+        "connector": (connector_score, tuple(connector_issues[:5])),
+        "decoupling": (decoupling_score, tuple(decoupling_issues[:5])),
+        "boundary": (boundary_score, tuple(_boundary_issues[:5])),
+        "mcu_periph": (mcu_periph_score, tuple(mcu_periph_issues[:5])),
+        "rf_edge": (rf_edge_score, tuple(rf_edge_issues[:5])),
+        "group_cohesion": (group_cohesion_score, tuple(group_cohesion_issues[:5])),
+        "subgroup": (subgroup_score, tuple(subgroup_issues[:5])),
+        "grp_isolation": (grp_isolation_score, tuple(grp_isolation_issues[:5])),
+        "pad_facing": (pad_facing_score, tuple(pad_facing_issues[:5])),
+    }
+
+
+def _build_fast_breakdown(
+    dims: dict[str, tuple[float, tuple[str, ...]]],
+) -> tuple[ScoreDetail, ...]:
+    """Build the ScoreDetail breakdown tuple from sub-dimension scores."""
+    _detail_spec: tuple[tuple[str, str, float], ...] = (
+        ("collision", "Collisions", _FAST_WEIGHT_COLLISION),
+        ("cohesion", "Sub-circuit Cohesion", _FAST_WEIGHT_SUBCIRCUIT_COHESION),
+        ("isolation", "Voltage Isolation", _FAST_WEIGHT_VOLTAGE_ISOLATION),
+        ("connector", "Connector Edge", _FAST_WEIGHT_CONNECTOR_EDGE),
+        ("decoupling", "Decoupling Proximity", _FAST_WEIGHT_DECOUPLING_PROXIMITY),
+        ("mcu_periph", "MCU Peripheral", _FAST_WEIGHT_MCU_PERIPHERAL),
+        ("rf_edge", "RF Edge", _FAST_WEIGHT_RF_EDGE),
+        ("group_cohesion", "Group Cohesion", _FAST_WEIGHT_GROUP_COHESION),
+        ("subgroup", "Subgroup Cohesion", _FAST_WEIGHT_SUBGROUP_COHESION),
+        ("grp_isolation", "Group Isolation", _FAST_WEIGHT_GROUP_ISOLATION),
+        ("pad_facing", "Pad Facing", _FAST_WEIGHT_PAD_FACING),
+    )
+    return tuple(
+        ScoreDetail(
+            category=label,
+            score=dims[key][0],
+            weight=weight,
+            issues=dims[key][1],
+        )
+        for key, label, weight in _detail_spec
+    )
+
+
+def compute_fast_placement_score(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> QualityScore:
+    """Compute a placement-focused quality score without full validation.
+
+    Evaluates 13 EE-aligned placement sub-dimensions and returns a composite
+    :class:`QualityScore`.
+
+    Args:
+        pcb: The PCB design to evaluate.
+        requirements: Project requirements with nets and feature blocks.
+
+    Returns:
+        A :class:`QualityScore` with placement-derived scores.
+    """
+    dims = _gather_placement_subdimensions(pcb, requirements)
 
     # Weighted placement composite (13 dimensions)
     placement_score = (
-        _FAST_WEIGHT_COLLISION * collision_score
-        + _FAST_WEIGHT_SUBCIRCUIT_COHESION * cohesion_score
-        + _FAST_WEIGHT_VOLTAGE_ISOLATION * isolation_score
-        + _FAST_WEIGHT_CONNECTOR_EDGE * connector_score
-        + _FAST_WEIGHT_DECOUPLING_PROXIMITY * decoupling_score
-        + _FAST_WEIGHT_MCU_PERIPHERAL * mcu_periph_score
-        + _FAST_WEIGHT_RF_EDGE * rf_edge_score
+        _FAST_WEIGHT_COLLISION * dims["collision"][0]
+        + _FAST_WEIGHT_SUBCIRCUIT_COHESION * dims["cohesion"][0]
+        + _FAST_WEIGHT_VOLTAGE_ISOLATION * dims["isolation"][0]
+        + _FAST_WEIGHT_CONNECTOR_EDGE * dims["connector"][0]
+        + _FAST_WEIGHT_DECOUPLING_PROXIMITY * dims["decoupling"][0]
+        + _FAST_WEIGHT_MCU_PERIPHERAL * dims["mcu_periph"][0]
+        + _FAST_WEIGHT_RF_EDGE * dims["rf_edge"][0]
         + _FAST_WEIGHT_CONNECTOR_ORIENTATION * 1.0  # orientation scored via review
-        + _FAST_WEIGHT_REGULATOR_BOUNDARY * boundary_score
-        + _FAST_WEIGHT_GROUP_COHESION * group_cohesion_score
-        + _FAST_WEIGHT_SUBGROUP_COHESION * subgroup_score
-        + _FAST_WEIGHT_GROUP_ISOLATION * grp_isolation_score
-        + _FAST_WEIGHT_PAD_FACING * pad_facing_score
+        + _FAST_WEIGHT_REGULATOR_BOUNDARY * dims["boundary"][0]
+        + _FAST_WEIGHT_GROUP_COHESION * dims["group_cohesion"][0]
+        + _FAST_WEIGHT_SUBGROUP_COHESION * dims["subgroup"][0]
+        + _FAST_WEIGHT_GROUP_ISOLATION * dims["grp_isolation"][0]
+        + _FAST_WEIGHT_PAD_FACING * dims["pad_facing"][0]
     )
 
-    # For fast path, other dimensions are derived from placement sub-scores
-    manufacturing_score = _clamp01(
-        0.5 + 0.5 * collision_score
-    )
+    manufacturing_score = _clamp01(0.5 + 0.5 * dims["collision"][0])
     electrical_score = _clamp01(
-        0.5 + 0.25 * isolation_score + 0.25 * boundary_score
+        0.5 + 0.25 * dims["isolation"][0] + 0.25 * dims["boundary"][0],
     )
 
-    # Overall: use full weight system but with placement-derived estimates
     scores = (
         (electrical_score, _WEIGHT_ELECTRICAL),
         (manufacturing_score, _WEIGHT_MANUFACTURING),
         (placement_score, _WEIGHT_PLACEMENT),
-        (cohesion_score, _WEIGHT_SIGNAL_INTEGRITY),
+        (dims["cohesion"][0], _WEIGHT_SIGNAL_INTEGRITY),
         (1.0, _WEIGHT_THERMAL),
     )
     overall = _weighted_geometric_mean(scores)
     grade = score_to_grade(overall)
-
-    breakdown = (
-        ScoreDetail(
-            category="Collisions",
-            score=collision_score,
-            weight=_FAST_WEIGHT_COLLISION,
-            issues=tuple(collision_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Sub-circuit Cohesion",
-            score=cohesion_score,
-            weight=_FAST_WEIGHT_SUBCIRCUIT_COHESION,
-            issues=tuple(cohesion_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Voltage Isolation",
-            score=isolation_score,
-            weight=_FAST_WEIGHT_VOLTAGE_ISOLATION,
-            issues=tuple(isolation_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Connector Edge",
-            score=connector_score,
-            weight=_FAST_WEIGHT_CONNECTOR_EDGE,
-            issues=tuple(connector_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Decoupling Proximity",
-            score=decoupling_score,
-            weight=_FAST_WEIGHT_DECOUPLING_PROXIMITY,
-            issues=tuple(decoupling_issues[:5]),
-        ),
-        ScoreDetail(
-            category="MCU Peripheral",
-            score=mcu_periph_score,
-            weight=_FAST_WEIGHT_MCU_PERIPHERAL,
-            issues=tuple(mcu_periph_issues[:5]),
-        ),
-        ScoreDetail(
-            category="RF Edge",
-            score=rf_edge_score,
-            weight=_FAST_WEIGHT_RF_EDGE,
-            issues=tuple(rf_edge_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Group Cohesion",
-            score=group_cohesion_score,
-            weight=_FAST_WEIGHT_GROUP_COHESION,
-            issues=tuple(group_cohesion_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Subgroup Cohesion",
-            score=subgroup_score,
-            weight=_FAST_WEIGHT_SUBGROUP_COHESION,
-            issues=tuple(subgroup_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Group Isolation",
-            score=grp_isolation_score,
-            weight=_FAST_WEIGHT_GROUP_ISOLATION,
-            issues=tuple(grp_isolation_issues[:5]),
-        ),
-        ScoreDetail(
-            category="Pad Facing",
-            score=pad_facing_score,
-            weight=_FAST_WEIGHT_PAD_FACING,
-            issues=tuple(pad_facing_issues[:5]),
-        ),
-    )
 
     return QualityScore(
         board_cost=0.0,
         electrical_score=round(electrical_score, 4),
         manufacturing_score=round(manufacturing_score, 4),
         thermal_score=1.0,
-        signal_integrity_score=round(cohesion_score, 4),
+        signal_integrity_score=round(dims["cohesion"][0], 4),
         placement_score=round(placement_score, 4),
         overall_score=round(overall, 4),
         grade=grade,
-        breakdown=breakdown,
+        breakdown=_build_fast_breakdown(dims),
     )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _score_validation_dimensions(
+    validation_report: ValidationReport,
+) -> tuple[
+    tuple[float, list[str]],
+    tuple[float, list[str]],
+    tuple[float, list[str]],
+    tuple[float, list[str]],
+]:
+    """Extract per-dimension scores from a validation report.
+
+    Returns (electrical, manufacturing, thermal, signal_integrity) tuples
+    of ``(score, issues)``.
+    """
+    from kicad_pipeline.validation.drc import Severity
+
+    # Electrical / DRC
+    drc_errors = len(validation_report.drc.errors)
+    drc_warnings = sum(
+        1 for v in validation_report.drc.violations if v.severity == Severity.WARNING
+    )
+    elec_errors = len(validation_report.electrical.errors)
+    elec_warnings = sum(
+        1 for v in validation_report.electrical.violations if v.severity == Severity.WARNING
+    )
+    total_elec_err = drc_errors + elec_errors
+    total_elec_warn = drc_warnings + elec_warnings
+    electrical_score = _score_from_violations(total_elec_err, total_elec_warn, 0.15, 0.03)
+    electrical_issues: list[str] = []
+    if total_elec_err > 0:
+        electrical_issues.append(f"{total_elec_err} electrical/DRC errors")
+    if total_elec_warn > 0:
+        electrical_issues.append(f"{total_elec_warn} electrical/DRC warnings")
+
+    # Manufacturing
+    mfg_errors = len(validation_report.manufacturing.errors)
+    mfg_warnings = sum(
+        1 for v in validation_report.manufacturing.violations if v.severity == Severity.WARNING
+    )
+    manufacturing_score = _score_from_violations(mfg_errors, mfg_warnings, 0.2, 0.05)
+    manufacturing_issues: list[str] = []
+    if mfg_errors > 0:
+        manufacturing_issues.append(f"{mfg_errors} manufacturing errors")
+    if mfg_warnings > 0:
+        manufacturing_issues.append(f"{mfg_warnings} manufacturing warnings")
+
+    # Thermal
+    thermal_errors = sum(
+        1 for v in validation_report.thermal.violations if v.severity == Severity.ERROR
+    )
+    thermal_warnings = sum(
+        1 for v in validation_report.thermal.violations if v.severity == Severity.WARNING
+    )
+    thermal_score = _score_from_violations(thermal_errors, thermal_warnings, 0.15, 0.03)
+    thermal_issues: list[str] = []
+    if thermal_errors > 0:
+        thermal_issues.append(f"{thermal_errors} thermal errors")
+    if thermal_warnings > 0:
+        thermal_issues.append(f"{thermal_warnings} thermal warnings")
+
+    # Signal integrity
+    si_errors = len(validation_report.signal_integrity.errors)
+    si_warnings = sum(
+        1 for v in validation_report.signal_integrity.violations
+        if v.severity == Severity.WARNING
+    )
+    si_score = _score_from_violations(si_errors, si_warnings, 0.1, 0.02)
+    si_issues: list[str] = []
+    if si_errors > 0:
+        si_issues.append(f"{si_errors} signal integrity errors")
+    if si_warnings > 0:
+        si_issues.append(f"{si_warnings} signal integrity warnings")
+
+    return (
+        (electrical_score, electrical_issues),
+        (manufacturing_score, manufacturing_issues),
+        (thermal_score, thermal_issues),
+        (si_score, si_issues),
+    )
 
 
 def compute_quality_score(
@@ -1186,93 +1235,28 @@ def compute_quality_score(
     Args:
         pcb: The PCB design to evaluate.
         requirements: Project requirements (used for cross-reference).
-        validation_report: Optional unified validation report.  When provided,
-            error/warning counts are extracted from each sub-report.
-        routing_metrics: Optional routing metrics.  When provided, the board
-            cost is computed via :func:`compute_board_cost`.
+        validation_report: Optional unified validation report.
+        routing_metrics: Optional routing metrics for board cost.
 
     Returns:
         A :class:`QualityScore` summarising all dimensions.
     """
-    from kicad_pipeline.validation.drc import Severity
-
-    # --- Board cost --------------------------------------------------------
     board_cost = 0.0
     if routing_metrics is not None:
         from kicad_pipeline.routing.metrics import compute_board_cost
-
         board_cost = compute_board_cost(routing_metrics)
 
-    # --- Per-dimension scoring ---------------------------------------------
-    electrical_issues: list[str] = []
-    manufacturing_issues: list[str] = []
-    thermal_issues: list[str] = []
-    si_issues: list[str] = []
-
     if validation_report is not None:
-        # Electrical / DRC
-        drc_errors = len(validation_report.drc.errors)
-        drc_warnings = sum(
-            1 for v in validation_report.drc.violations if v.severity == Severity.WARNING
-        )
-        elec_errors = len(validation_report.electrical.errors)
-        elec_warnings = sum(
-            1 for v in validation_report.electrical.violations if v.severity == Severity.WARNING
-        )
-        total_elec_err = drc_errors + elec_errors
-        total_elec_warn = drc_warnings + elec_warnings
-        electrical_score = _score_from_violations(total_elec_err, total_elec_warn, 0.15, 0.03)
-        if total_elec_err > 0:
-            electrical_issues.append(f"{total_elec_err} electrical/DRC errors")
-        if total_elec_warn > 0:
-            electrical_issues.append(f"{total_elec_warn} electrical/DRC warnings")
-
-        # Manufacturing
-        mfg_errors = len(validation_report.manufacturing.errors)
-        mfg_warnings = sum(
-            1 for v in validation_report.manufacturing.violations if v.severity == Severity.WARNING
-        )
-        manufacturing_score = _score_from_violations(mfg_errors, mfg_warnings, 0.2, 0.05)
-        if mfg_errors > 0:
-            manufacturing_issues.append(f"{mfg_errors} manufacturing errors")
-        if mfg_warnings > 0:
-            manufacturing_issues.append(f"{mfg_warnings} manufacturing warnings")
-
-        # Thermal
-        thermal_errors = sum(
-            1 for v in validation_report.thermal.violations if v.severity == Severity.ERROR
-        )
-        thermal_warnings = sum(
-            1 for v in validation_report.thermal.violations if v.severity == Severity.WARNING
-        )
-        thermal_score = _score_from_violations(thermal_errors, thermal_warnings, 0.15, 0.03)
-        if thermal_errors > 0:
-            thermal_issues.append(f"{thermal_errors} thermal errors")
-        if thermal_warnings > 0:
-            thermal_issues.append(f"{thermal_warnings} thermal warnings")
-
-        # Signal integrity
-        si_errors = len(validation_report.signal_integrity.errors)
-        si_warnings = sum(
-            1 for v in validation_report.signal_integrity.violations
-            if v.severity == Severity.WARNING
-        )
-        si_score = _score_from_violations(si_errors, si_warnings, 0.1, 0.02)
-        if si_errors > 0:
-            si_issues.append(f"{si_errors} signal integrity errors")
-        if si_warnings > 0:
-            si_issues.append(f"{si_warnings} signal integrity warnings")
+        elec, mfg, therm, si = _score_validation_dimensions(validation_report)
+        electrical_score, electrical_issues = elec
+        manufacturing_score, manufacturing_issues = mfg
+        thermal_score, thermal_issues = therm
+        si_score, si_issues = si
     else:
-        # No validation report — assume perfect
-        electrical_score = 1.0
-        manufacturing_score = 1.0
-        thermal_score = 1.0
-        si_score = 1.0
+        electrical_score = manufacturing_score = thermal_score = si_score = 1.0
+        electrical_issues = manufacturing_issues = thermal_issues = si_issues = []
 
-    # --- Placement ---------------------------------------------------------
     placement_score, placement_issues = _compute_placement_score_from_pcb(pcb)
-
-    # If routing_metrics provides avg_passive_distance_mm, prefer it
     if routing_metrics is not None and routing_metrics.avg_passive_distance_mm > 0.0:
         avg_dist = routing_metrics.avg_passive_distance_mm
         placement_score = _clamp01(
@@ -1286,7 +1270,6 @@ def compute_quality_score(
             )
         placement_issues = tuple(p_issues)
 
-    # --- Composite ---------------------------------------------------------
     scores = (
         (electrical_score, _WEIGHT_ELECTRICAL),
         (manufacturing_score, _WEIGHT_MANUFACTURING),
@@ -1298,36 +1281,16 @@ def compute_quality_score(
     grade = score_to_grade(overall)
 
     breakdown = (
-        ScoreDetail(
-            category="Electrical/DRC",
-            score=electrical_score,
-            weight=_WEIGHT_ELECTRICAL,
-            issues=tuple(electrical_issues),
-        ),
-        ScoreDetail(
-            category="Manufacturing",
-            score=manufacturing_score,
-            weight=_WEIGHT_MANUFACTURING,
-            issues=tuple(manufacturing_issues),
-        ),
-        ScoreDetail(
-            category="Placement",
-            score=placement_score,
-            weight=_WEIGHT_PLACEMENT,
-            issues=tuple(placement_issues),
-        ),
-        ScoreDetail(
-            category="Signal Integrity",
-            score=si_score,
-            weight=_WEIGHT_SIGNAL_INTEGRITY,
-            issues=tuple(si_issues),
-        ),
-        ScoreDetail(
-            category="Thermal",
-            score=thermal_score,
-            weight=_WEIGHT_THERMAL,
-            issues=tuple(thermal_issues),
-        ),
+        ScoreDetail("Electrical/DRC", electrical_score, _WEIGHT_ELECTRICAL,
+                     tuple(electrical_issues)),
+        ScoreDetail("Manufacturing", manufacturing_score, _WEIGHT_MANUFACTURING,
+                     tuple(manufacturing_issues)),
+        ScoreDetail("Placement", placement_score, _WEIGHT_PLACEMENT,
+                     tuple(placement_issues)),
+        ScoreDetail("Signal Integrity", si_score, _WEIGHT_SIGNAL_INTEGRITY,
+                     tuple(si_issues)),
+        ScoreDetail("Thermal", thermal_score, _WEIGHT_THERMAL,
+                     tuple(thermal_issues)),
     )
 
     return QualityScore(

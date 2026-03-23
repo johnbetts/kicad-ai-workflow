@@ -193,6 +193,54 @@ def _classify_connector_pins(
 # ---------------------------------------------------------------------------
 
 
+def _place_side_pins(
+    placed_pins: list[LibPin],
+    pins: list[Pin],
+    pin_x: float,
+    body_top: float,
+    *,
+    rotation: float,
+) -> None:
+    """Place pins along a vertical side (left or right) of the symbol body."""
+    for idx, pin in enumerate(pins):
+        y = body_top - SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
+        placed_pins.append(
+            LibPin(
+                number=pin.number,
+                name=pin.name,
+                pin_type=pin.pin_type.value,
+                at=Point(pin_x, y),
+                rotation=rotation,
+                length=SCHEMATIC_PIN_LENGTH_MM,
+                name_effects=_make_font(),
+                number_effects=_make_font(hidden=True),
+            )
+        )
+
+
+def _place_horiz_pins(
+    placed_pins: list[LibPin],
+    pins: list[Pin],
+    pin_y: float,
+    rotation: float,
+) -> None:
+    """Place pins along a horizontal edge (top or bottom) of the symbol body."""
+    for idx, pin in enumerate(pins):
+        x = (idx - (len(pins) - 1) / 2.0) * SCHEMATIC_SYMBOL_PIN_SPACING_MM
+        placed_pins.append(
+            LibPin(
+                number=pin.number,
+                name=pin.name,
+                pin_type=pin.pin_type.value,
+                at=Point(x, pin_y),
+                rotation=rotation,
+                length=SCHEMATIC_PIN_LENGTH_MM,
+                name_effects=_make_font(),
+                number_effects=_make_font(hidden=True),
+            )
+        )
+
+
 def make_lib_symbol(component: Component) -> LibSymbol:
     """Generate a :class:`LibSymbol` from a :class:`Component` definition.
 
@@ -255,74 +303,10 @@ def make_lib_symbol(component: Component) -> LibSymbol:
     )
 
     placed_pins: list[LibPin] = []
-
-    # Left-side pins (inputs etc.) — top to bottom (positive to negative Y)
-    # KiCad convention: left pins at negative X, rotation=0° (extends RIGHT toward body)
-    for idx, pin in enumerate(left_pins):
-        y = body_top - SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
-        placed_pins.append(
-            LibPin(
-                number=pin.number,
-                name=pin.name,
-                pin_type=pin.pin_type.value,
-                at=Point(pin_x_left, y),
-                rotation=0.0,
-                length=SCHEMATIC_PIN_LENGTH_MM,
-                name_effects=_make_font(),
-                number_effects=_make_font(hidden=True),
-            )
-        )
-
-    # Right-side pins (outputs) — top to bottom (positive to negative Y)
-    # KiCad convention: right pins at positive X, rotation=180° (extends LEFT toward body)
-    for idx, pin in enumerate(right_pins):
-        y = body_top - SCHEMATIC_SYMBOL_PIN_SPACING_MM * (idx + 1)
-        placed_pins.append(
-            LibPin(
-                number=pin.number,
-                name=pin.name,
-                pin_type=pin.pin_type.value,
-                at=Point(pin_x_right, y),
-                rotation=180.0,
-                length=SCHEMATIC_PIN_LENGTH_MM,
-                name_effects=_make_font(),
-                number_effects=_make_font(hidden=True),
-            )
-        )
-
-    # Top pins (power supply) — above body (positive Y direction)
-    # KiCad convention: rotation=270° (extends DOWN toward body)
-    for idx, pin in enumerate(top_pins):
-        x = (idx - (len(top_pins) - 1) / 2.0) * SCHEMATIC_SYMBOL_PIN_SPACING_MM
-        placed_pins.append(
-            LibPin(
-                number=pin.number,
-                name=pin.name,
-                pin_type=pin.pin_type.value,
-                at=Point(x, body_top + SCHEMATIC_PIN_LENGTH_MM),
-                rotation=270.0,
-                length=SCHEMATIC_PIN_LENGTH_MM,
-                name_effects=_make_font(),
-                number_effects=_make_font(hidden=True),
-            )
-        )
-
-    # Bottom pins (GND / VSS) — below body (negative Y direction)
-    # KiCad convention: rotation=90° (extends UP toward body)
-    for idx, pin in enumerate(bottom_pins):
-        x = (idx - (len(bottom_pins) - 1) / 2.0) * SCHEMATIC_SYMBOL_PIN_SPACING_MM
-        placed_pins.append(
-            LibPin(
-                number=pin.number,
-                name=pin.name,
-                pin_type=pin.pin_type.value,
-                at=Point(x, body_bottom - SCHEMATIC_PIN_LENGTH_MM),
-                rotation=90.0,
-                length=SCHEMATIC_PIN_LENGTH_MM,
-                name_effects=_make_font(),
-                number_effects=_make_font(hidden=True),
-            )
-        )
+    _place_side_pins(placed_pins, left_pins, pin_x_left, body_top, rotation=0.0)
+    _place_side_pins(placed_pins, right_pins, pin_x_right, body_top, rotation=180.0)
+    _place_horiz_pins(placed_pins, top_pins, body_top + SCHEMATIC_PIN_LENGTH_MM, 270.0)
+    _place_horiz_pins(placed_pins, bottom_pins, body_bottom - SCHEMATIC_PIN_LENGTH_MM, 90.0)
 
     log.debug(
         "Generated lib_symbol %s with %d pins",

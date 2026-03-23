@@ -130,6 +130,130 @@ def _make_search_url(comment: str, footprint: str) -> str:
     return f"{JLCPCB_PARTS_SEARCH_URL}{encoded}"
 
 
+class _ValidationAccumulator:
+    """Mutable accumulator for parts validation results."""
+
+    __slots__ = ("all_available", "low_stock", "parts", "total_cost", "unresolved")
+
+    def __init__(self) -> None:
+        self.parts: list[PartStatus] = []
+        self.total_cost: float = 0.0
+        self.all_available: bool = True
+        self.unresolved: int = 0
+        self.low_stock: int = 0
+
+
+def _try_tier1_local(
+    lcsc: str | None,
+    row: BOMRow,
+    refs: tuple[str, ...],
+    db: ComponentDB | None,
+    acc: _ValidationAccumulator,
+) -> bool:
+    """Tier 1: Local ComponentDB lookup. Returns True if resolved."""
+    if db is None or not lcsc:
+        return False
+    local_part = db.find_by_lcsc(lcsc)
+    if local_part is None or not local_part.in_stock:
+        return False
+    price = local_part.price_usd
+    acc.total_cost += price * row.quantity
+    acc.parts.append(PartStatus(
+        lcsc=lcsc, ref_designators=refs, comment=row.comment,
+        footprint=row.footprint, tier=1, status="ok", in_stock=True,
+        stock_qty=None, unit_price_usd=price,
+        replacement_lcsc=None, replacement_reason=None, manual_url=None,
+    ))
+    return True
+
+
+def _try_tier2_web(
+    lcsc: str | None,
+    row: BOMRow,
+    refs: tuple[str, ...],
+    web_stock: dict[str, LCSCStockInfo],
+    acc: _ValidationAccumulator,
+) -> bool:
+    """Tier 2: Web stock check. Returns True if resolved."""
+    if not lcsc or lcsc not in web_stock:
+        return False
+    info = web_stock[lcsc]
+    if not info.in_stock:
+        return False
+    qty = info.stock_qty or 0
+    if qty < JLCPCB_MIN_STOCK_QTY:
+        acc.all_available = False
+        acc.unresolved += 1
+        acc.low_stock += 1
+        acc.parts.append(PartStatus(
+            lcsc=lcsc, ref_designators=refs, comment=row.comment,
+            footprint=row.footprint, tier=2, status="low_stock", in_stock=True,
+            stock_qty=info.stock_qty, unit_price_usd=info.unit_price_usd,
+            replacement_lcsc=None, replacement_reason=None,
+            manual_url=_make_search_url(row.comment, row.footprint),
+        ))
+        return True
+    web_price = info.unit_price_usd
+    if web_price is not None:
+        acc.total_cost += web_price * row.quantity
+    acc.parts.append(PartStatus(
+        lcsc=lcsc, ref_designators=refs, comment=row.comment,
+        footprint=row.footprint, tier=2, status="ok", in_stock=True,
+        stock_qty=info.stock_qty, unit_price_usd=info.unit_price_usd,
+        replacement_lcsc=None, replacement_reason=None, manual_url=None,
+    ))
+    return True
+
+
+def _try_tier3_replacement(
+    lcsc: str | None,
+    row: BOMRow,
+    refs: tuple[str, ...],
+    db: ComponentDB | None,
+    acc: _ValidationAccumulator,
+) -> bool:
+    """Tier 3: Auto-replacement from ComponentDB. Returns True if resolved."""
+    if db is None:
+        return False
+    repl_lcsc, repl_reason = _find_replacement(
+        row.comment, row.footprint, refs, db,
+    )
+    if repl_lcsc is None:
+        return False
+    repl_part = db.find_by_lcsc(repl_lcsc)
+    repl_price = repl_part.price_usd if repl_part else 0.0
+    acc.total_cost += repl_price * row.quantity
+    acc.parts.append(PartStatus(
+        lcsc=lcsc or "", ref_designators=refs, comment=row.comment,
+        footprint=row.footprint, tier=3, status="replaced", in_stock=True,
+        stock_qty=None, unit_price_usd=repl_price,
+        replacement_lcsc=repl_lcsc, replacement_reason=repl_reason,
+        manual_url=None,
+    ))
+    return True
+
+
+def _add_tier4_manual(
+    lcsc: str | None,
+    row: BOMRow,
+    refs: tuple[str, ...],
+    web_stock: dict[str, LCSCStockInfo],
+    acc: _ValidationAccumulator,
+) -> None:
+    """Tier 4: Manual resolution (fallback)."""
+    acc.all_available = False
+    acc.unresolved += 1
+    status = "missing_lcsc" if not lcsc else "unavailable"
+    acc.parts.append(PartStatus(
+        lcsc=lcsc or "", ref_designators=refs, comment=row.comment,
+        footprint=row.footprint, tier=4, status=status, in_stock=False,
+        stock_qty=web_stock[lcsc].stock_qty if lcsc and lcsc in web_stock else None,
+        unit_price_usd=None,
+        replacement_lcsc=None, replacement_reason=None,
+        manual_url=_make_search_url(row.comment, row.footprint),
+    ))
+
+
 def validate_bom_parts(
     bom_rows: tuple[BOMRow, ...],
     db: ComponentDB | None = None,
@@ -144,13 +268,8 @@ def validate_bom_parts(
     Tier 3: Auto-suggest replacement from ComponentDB
     Tier 4: Manual review with JLCPCB search URL
     """
-    parts: list[PartStatus] = []
-    total_cost: float = 0.0
-    all_available = True
-    unresolved = 0
-    low_stock = 0
+    acc = _ValidationAccumulator()
 
-    # Collect web stock info for all LCSC parts in one pass
     web_stock: dict[str, LCSCStockInfo] = {}
     if check_web_stock:
         lcsc_numbers = tuple(
@@ -165,131 +284,29 @@ def validate_bom_parts(
     for row in bom_rows:
         refs = tuple(row.designator.split())
         lcsc = row.lcsc
-
-        # --- Tier 1: Local DB ---
-        if db is not None and lcsc:
-            local_part = db.find_by_lcsc(lcsc)
-            if local_part is not None and local_part.in_stock:
-                price = local_part.price_usd
-                total_cost += price * row.quantity
-                parts.append(PartStatus(
-                    lcsc=lcsc,
-                    ref_designators=refs,
-                    comment=row.comment,
-                    footprint=row.footprint,
-                    tier=1,
-                    status="ok",
-                    in_stock=True,
-                    stock_qty=None,
-                    unit_price_usd=price,
-                    replacement_lcsc=None,
-                    replacement_reason=None,
-                    manual_url=None,
-                ))
-                continue
-
-        # --- Tier 2: Web stock check ---
-        if lcsc and lcsc in web_stock:
-            info = web_stock[lcsc]
-            if info.in_stock:
-                qty = info.stock_qty or 0
-                if qty < JLCPCB_MIN_STOCK_QTY:
-                    # Low stock — flag as unavailable, needs approval
-                    all_available = False
-                    unresolved += 1
-                    low_stock += 1
-                    parts.append(PartStatus(
-                        lcsc=lcsc,
-                        ref_designators=refs,
-                        comment=row.comment,
-                        footprint=row.footprint,
-                        tier=2,
-                        status="low_stock",
-                        in_stock=True,
-                        stock_qty=info.stock_qty,
-                        unit_price_usd=info.unit_price_usd,
-                        replacement_lcsc=None,
-                        replacement_reason=None,
-                        manual_url=_make_search_url(row.comment, row.footprint),
-                    ))
-                    continue
-                web_price = info.unit_price_usd
-                if web_price is not None:
-                    total_cost += web_price * row.quantity
-                parts.append(PartStatus(
-                    lcsc=lcsc,
-                    ref_designators=refs,
-                    comment=row.comment,
-                    footprint=row.footprint,
-                    tier=2,
-                    status="ok",
-                    in_stock=True,
-                    stock_qty=info.stock_qty,
-                    unit_price_usd=info.unit_price_usd,
-                    replacement_lcsc=None,
-                    replacement_reason=None,
-                    manual_url=None,
-                ))
-                continue
-
-        # --- Tier 3: Auto-replacement from ComponentDB ---
-        if db is not None:
-            repl_lcsc, repl_reason = _find_replacement(
-                row.comment, row.footprint, refs, db,
-            )
-            if repl_lcsc is not None:
-                repl_part = db.find_by_lcsc(repl_lcsc)
-                repl_price = repl_part.price_usd if repl_part else 0.0
-                total_cost += repl_price * row.quantity
-                parts.append(PartStatus(
-                    lcsc=lcsc or "",
-                    ref_designators=refs,
-                    comment=row.comment,
-                    footprint=row.footprint,
-                    tier=3,
-                    status="replaced",
-                    in_stock=True,
-                    stock_qty=None,
-                    unit_price_usd=repl_price,
-                    replacement_lcsc=repl_lcsc,
-                    replacement_reason=repl_reason,
-                    manual_url=None,
-                ))
-                continue
-
-        # --- Tier 4: Manual resolution ---
-        all_available = False
-        unresolved += 1
-        status = "missing_lcsc" if not lcsc else "unavailable"
-        parts.append(PartStatus(
-            lcsc=lcsc or "",
-            ref_designators=refs,
-            comment=row.comment,
-            footprint=row.footprint,
-            tier=4,
-            status=status,
-            in_stock=False,
-            stock_qty=web_stock[lcsc].stock_qty if lcsc and lcsc in web_stock else None,
-            unit_price_usd=None,
-            replacement_lcsc=None,
-            replacement_reason=None,
-            manual_url=_make_search_url(row.comment, row.footprint),
-        ))
+        if _try_tier1_local(lcsc, row, refs, db, acc):
+            continue
+        if _try_tier2_web(lcsc, row, refs, web_stock, acc):
+            continue
+        if _try_tier3_replacement(lcsc, row, refs, db, acc):
+            continue
+        _add_tier4_manual(lcsc, row, refs, web_stock, acc)
 
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     summary = _build_summary(
-        parts, total_cost, all_available, unresolved, low_stock,
+        acc.parts, acc.total_cost, acc.all_available,
+        acc.unresolved, acc.low_stock,
     )
 
     return PartsValidationReport(
         project_name=project_name,
         timestamp=timestamp,
-        parts=tuple(parts),
-        total_bom_cost_usd=total_cost if total_cost > 0.0 else None,
-        all_parts_available=all_available,
-        unresolved_count=unresolved,
+        parts=tuple(acc.parts),
+        total_bom_cost_usd=acc.total_cost if acc.total_cost > 0.0 else None,
+        all_parts_available=acc.all_available,
+        unresolved_count=acc.unresolved,
         summary_text=summary,
-        low_stock_count=low_stock,
+        low_stock_count=acc.low_stock,
     )
 
 

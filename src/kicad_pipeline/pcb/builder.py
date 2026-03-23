@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1190,54 +1190,6 @@ def _compute_footprint_bboxes(
     return fp_bboxes
 
 
-def _build_context(
-    board_width_mm: float,
-    board_height_mm: float,
-    origin_x: float,
-    origin_y: float,
-    corner_radius_mm: float,
-    layer_count: int,
-    project_name: str | None,
-    outline: BoardOutline,
-    nets: tuple[NetEntry, ...],
-    net_lookup: dict[str, int],
-    fixed_positions: dict[str, tuple[float, float, float]],
-    layer_overrides: dict[str, str],
-    template_mounting_positions: list[tuple[float, float]],
-    template_mounting_diameter: float,
-    tmpl_obj: object | None,
-    preserved_ref_text_positions: dict[str, tuple[float, float]],
-    requirements: ProjectRequirements,
-    fp_sizes: dict[str, tuple[float, float]],
-    fp_bboxes: dict[str, object],
-) -> _BuildContext:
-    """Create the shared build context for PCB assembly steps."""
-    return _BuildContext(
-        board_width_mm=board_width_mm,
-        board_height_mm=board_height_mm,
-        origin_x=origin_x,
-        origin_y=origin_y,
-        corner_radius_mm=corner_radius_mm,
-        layer_count=layer_count,
-        project_name=project_name,
-        outline=outline,
-        nets=nets,
-        net_lookup=net_lookup,
-        keepouts=[],
-        zones=[],
-        fixed_positions=fixed_positions,
-        layer_overrides=layer_overrides,
-        template_mounting_positions=template_mounting_positions,
-        template_mounting_diameter=template_mounting_diameter,
-        tmpl_obj=tmpl_obj,
-        preserved_ref_text_positions=preserved_ref_text_positions,
-        has_rf=_has_rf_module(requirements),
-        rf_pos=None,
-        fp_sizes=fp_sizes,
-        fp_bboxes=fp_bboxes,
-    )
-
-
 def _assemble_pcb_design(
     ctx: _BuildContext,
     requirements: ProjectRequirements,
@@ -1342,13 +1294,29 @@ def _setup_board(
 
     fp_bboxes = _compute_footprint_bboxes(pre_footprints)
 
-    ctx = _build_context(
-        board_width_mm, board_height_mm, origin_x, origin_y,
-        corner_radius_mm, layer_count, project_name, outline,
-        nets, net_lookup, fixed_positions, layer_overrides,
-        template_mounting_positions, template_mounting_diameter,
-        tmpl_obj, preserved_ref_text_positions,
-        requirements, fp_sizes, fp_bboxes,
+    ctx = _BuildContext(
+        board_width_mm=board_width_mm,
+        board_height_mm=board_height_mm,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        corner_radius_mm=corner_radius_mm,
+        layer_count=layer_count,
+        project_name=project_name,
+        outline=outline,
+        nets=nets,
+        net_lookup=net_lookup,
+        keepouts=[],
+        zones=[],
+        fixed_positions=fixed_positions,
+        layer_overrides=layer_overrides,
+        template_mounting_positions=template_mounting_positions,
+        template_mounting_diameter=template_mounting_diameter,
+        tmpl_obj=tmpl_obj,
+        preserved_ref_text_positions=preserved_ref_text_positions,
+        has_rf=_has_rf_module(requirements),
+        rf_pos=None,
+        fp_sizes=fp_sizes,
+        fp_bboxes=fp_bboxes,
     )
 
     return ctx, nets, pre_footprints

@@ -423,8 +423,6 @@ def requirements_from_dict(data: dict[str, object]) -> ProjectRequirements:
 
 def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
     """Internal parser; propagates raw exceptions for wrapping by the caller."""
-
-    # --- project ---
     proj_raw = _as_dict(data["project"])
     project = ProjectInfo(
         name=str(proj_raw["name"]),
@@ -433,7 +431,35 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
         description=_optional_str(proj_raw.get("description")),
     )
 
-    # --- features ---
+    features = _parse_features(data)
+    components = _parse_components(data)
+    nets = _parse_nets(data)
+    pin_map = _parse_pin_map(data)
+    power_budget = _parse_power_budget(data)
+    mechanical = _parse_mechanical(data)
+    recommendations = _parse_recommendations(data)
+
+    builder = RequirementsBuilder(project)
+    for comp in components:
+        builder.add_component(comp)
+    for net in nets:
+        builder.add_net(net)
+    for feat in features:
+        builder.add_feature(feat)
+    for rec in recommendations:
+        builder.add_recommendation(rec)
+    if pin_map is not None:
+        builder.set_pin_map(pin_map)
+    if power_budget is not None:
+        builder.set_power_budget(power_budget)
+    if mechanical is not None:
+        builder.set_mechanical(mechanical)
+
+    return builder.build()
+
+
+def _parse_features(data: dict[str, object]) -> list[FeatureBlock]:
+    """Parse feature blocks from requirements data."""
     features: list[FeatureBlock] = []
     for f_raw in _as_list(data.get("features", [])):
         fd = _as_dict(f_raw)
@@ -448,8 +474,11 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
                 ),
             )
         )
+    return features
 
-    # --- components ---
+
+def _parse_components(data: dict[str, object]) -> list[Component]:
+    """Parse component definitions from requirements data."""
     components: list[Component] = []
     for c_raw in _as_list(data.get("components", [])):
         cd = _as_dict(c_raw)
@@ -477,8 +506,11 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
                 pins=tuple(pins),
             )
         )
+    return components
 
-    # --- nets ---
+
+def _parse_nets(data: dict[str, object]) -> list[Net]:
+    """Parse net definitions from requirements data."""
     nets: list[Net] = []
     for n_raw in _as_list(data.get("nets", [])):
         nd = _as_dict(n_raw)
@@ -489,76 +521,85 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
                 NetConnection(ref=str(cd2["ref"]), pin=str(cd2["pin"]))
             )
         nets.append(Net(name=str(nd["name"]), connections=tuple(connections)))
+    return nets
 
-    # --- pin_map ---
-    pin_map: MCUPinMap | None = None
+
+def _parse_pin_map(data: dict[str, object]) -> MCUPinMap | None:
+    """Parse MCU pin map from requirements data."""
     pm_raw = data.get("pin_map")
-    if pm_raw is not None:
-        pm_dict = _as_dict(pm_raw)
-        assignments: list[PinAssignment] = []
-        for a_raw in _as_list(pm_dict.get("assignments", [])):
-            ad = _as_dict(a_raw)
-            assignments.append(
-                PinAssignment(
-                    mcu_ref=str(ad["mcu_ref"]),
-                    pin_number=str(ad["pin_number"]),
-                    pin_name=str(ad["pin_name"]),
-                    function=PinFunction(str(ad["function"])),
-                    net=str(ad["net"]),
-                    notes=_optional_str(ad.get("notes")),
-                )
+    if pm_raw is None:
+        return None
+    pm_dict = _as_dict(pm_raw)
+    assignments: list[PinAssignment] = []
+    for a_raw in _as_list(pm_dict.get("assignments", [])):
+        ad = _as_dict(a_raw)
+        assignments.append(
+            PinAssignment(
+                mcu_ref=str(ad["mcu_ref"]),
+                pin_number=str(ad["pin_number"]),
+                pin_name=str(ad["pin_name"]),
+                function=PinFunction(str(ad["function"])),
+                net=str(ad["net"]),
+                notes=_optional_str(ad.get("notes")),
             )
-        pin_map = MCUPinMap(
-            mcu_ref=str(pm_dict["mcu_ref"]),
-            assignments=tuple(assignments),
-            unassigned_gpio=tuple(
-                str(x) for x in _as_list(pm_dict.get("unassigned_gpio", []))
-            ),
         )
+    return MCUPinMap(
+        mcu_ref=str(pm_dict["mcu_ref"]),
+        assignments=tuple(assignments),
+        unassigned_gpio=tuple(
+            str(x) for x in _as_list(pm_dict.get("unassigned_gpio", []))
+        ),
+    )
 
-    # --- power_budget ---
-    power_budget: PowerBudget | None = None
+
+def _parse_power_budget(data: dict[str, object]) -> PowerBudget | None:
+    """Parse power budget from requirements data."""
     pb_raw = data.get("power_budget")
-    if pb_raw is not None:
-        pb_dict = _as_dict(pb_raw)
-        rails: list[PowerRail] = []
-        for r_raw in _as_list(pb_dict.get("rails", [])):
-            rd = _as_dict(r_raw)
-            rails.append(
-                PowerRail(
-                    name=str(rd["name"]),
-                    voltage=float(rd["voltage"]),  # type: ignore[arg-type]
-                    current_ma=float(rd["current_ma"]),  # type: ignore[arg-type]
-                    source_ref=str(rd["source_ref"]),
-                )
+    if pb_raw is None:
+        return None
+    pb_dict = _as_dict(pb_raw)
+    rails: list[PowerRail] = []
+    for r_raw in _as_list(pb_dict.get("rails", [])):
+        rd = _as_dict(r_raw)
+        rails.append(
+            PowerRail(
+                name=str(rd["name"]),
+                voltage=float(rd["voltage"]),  # type: ignore[arg-type]
+                current_ma=float(rd["current_ma"]),  # type: ignore[arg-type]
+                source_ref=str(rd["source_ref"]),
             )
-        power_budget = PowerBudget(
-            rails=tuple(rails),
-            total_current_ma=float(pb_dict["total_current_ma"]),  # type: ignore[arg-type]
-            notes=tuple(str(x) for x in _as_list(pb_dict.get("notes", []))),
         )
+    return PowerBudget(
+        rails=tuple(rails),
+        total_current_ma=float(pb_dict["total_current_ma"]),  # type: ignore[arg-type]
+        notes=tuple(str(x) for x in _as_list(pb_dict.get("notes", []))),
+    )
 
-    # --- mechanical ---
-    mechanical: MechanicalConstraints | None = None
+
+def _parse_mechanical(data: dict[str, object]) -> MechanicalConstraints | None:
+    """Parse mechanical constraints from requirements data."""
     mech_raw = data.get("mechanical")
-    if mech_raw is not None:
-        md = _as_dict(mech_raw)
-        hole_positions: list[tuple[float, float]] = []
-        for pos_raw in _as_list(md.get("mounting_hole_positions", [])):
-            pos = _as_list(pos_raw)
-            hole_positions.append((float(pos[0]), float(pos[1])))  # type: ignore[arg-type]
-        mechanical = MechanicalConstraints(
-            board_width_mm=float(md["board_width_mm"]),  # type: ignore[arg-type]
-            board_height_mm=float(md["board_height_mm"]),  # type: ignore[arg-type]
-            enclosure=_optional_str(md.get("enclosure")),
-            mounting_hole_diameter_mm=float(
-                md.get("mounting_hole_diameter_mm", 3.2)  # type: ignore[arg-type]
-            ),
-            mounting_hole_positions=tuple(hole_positions),
-            notes=_optional_str(md.get("notes")),
-        )
+    if mech_raw is None:
+        return None
+    md = _as_dict(mech_raw)
+    hole_positions: list[tuple[float, float]] = []
+    for pos_raw in _as_list(md.get("mounting_hole_positions", [])):
+        pos = _as_list(pos_raw)
+        hole_positions.append((float(pos[0]), float(pos[1])))  # type: ignore[arg-type]
+    return MechanicalConstraints(
+        board_width_mm=float(md["board_width_mm"]),  # type: ignore[arg-type]
+        board_height_mm=float(md["board_height_mm"]),  # type: ignore[arg-type]
+        enclosure=_optional_str(md.get("enclosure")),
+        mounting_hole_diameter_mm=float(
+            md.get("mounting_hole_diameter_mm", 3.2)  # type: ignore[arg-type]
+        ),
+        mounting_hole_positions=tuple(hole_positions),
+        notes=_optional_str(md.get("notes")),
+    )
 
-    # --- recommendations ---
+
+def _parse_recommendations(data: dict[str, object]) -> list[Recommendation]:
+    """Parse recommendations from requirements data."""
     recommendations: list[Recommendation] = []
     for r_raw in _as_list(data.get("recommendations", [])):
         rd2 = _as_dict(r_raw)
@@ -572,25 +613,7 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
                 ),
             )
         )
-
-    # Use the builder to get validation for free
-    builder = RequirementsBuilder(project)
-    for comp in components:
-        builder.add_component(comp)
-    for net in nets:
-        builder.add_net(net)
-    for feat in features:
-        builder.add_feature(feat)
-    for rec in recommendations:
-        builder.add_recommendation(rec)
-    if pin_map is not None:
-        builder.set_pin_map(pin_map)
-    if power_budget is not None:
-        builder.set_power_budget(power_budget)
-    if mechanical is not None:
-        builder.set_mechanical(mechanical)
-
-    return builder.build()
+    return recommendations
 
 
 # ---------------------------------------------------------------------------

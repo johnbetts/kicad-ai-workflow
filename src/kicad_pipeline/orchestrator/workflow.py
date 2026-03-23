@@ -442,8 +442,8 @@ class WorkflowEngine:
 
         # Render placement PNGs to project directory
         try:
-            from kicad_pipeline.optimization.placement_optimizer import _build_group_map
             from kicad_pipeline.optimization.functional_grouper import classify_voltage_domains
+            from kicad_pipeline.optimization.placement_optimizer import _build_group_map
             from kicad_pipeline.visualization.placement_render import render_placement
 
             output_dir = vdir / "output"
@@ -494,6 +494,58 @@ class WorkflowEngine:
         self, variant_name: str, vdir: Path, warnings: list[str]
     ) -> None:
         """Run pre-production validation: consistency check + parts validation."""
+        val_dir = vdir / "validation"
+        val_dir.mkdir(parents=True, exist_ok=True)
+
+        self._check_consistency(variant_name, vdir, val_dir, warnings)
+        pcb, req, report, db = self._validate_parts(
+            variant_name, vdir, val_dir, warnings,
+        )
+        self._run_extended_validation(pcb, req, val_dir, warnings)
+        self._enforce_parts_gate(report, val_dir)
+
+    def _check_consistency(
+        self,
+        variant_name: str,
+        vdir: Path,
+        val_dir: Path,
+        warnings: list[str],
+    ) -> None:
+        """Hard gate: schematic-PCB consistency check."""
+        from kicad_pipeline.validation.consistency import (
+            check_consistency,
+            consistency_report_to_text,
+        )
+
+        sch_path = vdir / f"{variant_name}.kicad_sch"
+        pcb_path = vdir / f"{variant_name}.kicad_pcb"
+        if not (sch_path.exists() and pcb_path.exists()):
+            return
+
+        consistency = check_consistency(sch_path, pcb_path)
+        (val_dir / "consistency_report.txt").write_text(
+            consistency_report_to_text(consistency), encoding="utf-8"
+        )
+        log.info("Consistency report written to %s", val_dir)
+
+        if not consistency.passed:
+            raise OrchestrationError(
+                f"Schematic-PCB consistency check failed: "
+                f"{len(consistency.errors)} error(s). "
+                f"See {val_dir / 'consistency_report.txt'}"
+            )
+
+        for w in consistency.warnings:
+            warnings.append(f"Consistency: {w.message}")
+
+    def _validate_parts(
+        self,
+        variant_name: str,
+        vdir: Path,
+        val_dir: Path,
+        warnings: list[str],
+    ) -> tuple[object, object, object, object]:
+        """Run parts validation and return (pcb, req, report, db)."""
         from kicad_pipeline.pcb.board_templates import detect_template
         from kicad_pipeline.pcb.builder import build_pcb
         from kicad_pipeline.production.bom import generate_bom
@@ -504,35 +556,7 @@ class WorkflowEngine:
         )
         from kicad_pipeline.requirements.component_db import ComponentDB
         from kicad_pipeline.requirements.decomposer import load_requirements
-        from kicad_pipeline.validation.consistency import (
-            check_consistency,
-            consistency_report_to_text,
-        )
 
-        val_dir = vdir / "validation"
-        val_dir.mkdir(parents=True, exist_ok=True)
-
-        # --- Hard gate: schematic-PCB consistency ---
-        sch_path = vdir / f"{variant_name}.kicad_sch"
-        pcb_path = vdir / f"{variant_name}.kicad_pcb"
-        if sch_path.exists() and pcb_path.exists():
-            consistency = check_consistency(sch_path, pcb_path)
-            (val_dir / "consistency_report.txt").write_text(
-                consistency_report_to_text(consistency), encoding="utf-8"
-            )
-            log.info("Consistency report written to %s", val_dir)
-
-            if not consistency.passed:
-                raise OrchestrationError(
-                    f"Schematic-PCB consistency check failed: "
-                    f"{len(consistency.errors)} error(s). "
-                    f"See {val_dir / 'consistency_report.txt'}"
-                )
-
-            for w in consistency.warnings:
-                warnings.append(f"Consistency: {w.message}")
-
-        # --- Parts validation ---
         req = load_requirements(vdir / "requirements.json")
         req = self._enrich_requirements(req)  # type: ignore[assignment]
         tmpl = detect_template(req.mechanical)
@@ -545,7 +569,6 @@ class WorkflowEngine:
             bom_rows, db=db, check_web_stock=False, project_name=variant_name,
         )
 
-        # Write reports
         (val_dir / "parts_validation_report.txt").write_text(
             report_to_text(report), encoding="utf-8"
         )
@@ -554,29 +577,36 @@ class WorkflowEngine:
         )
         log.info("Validation reports written to %s", val_dir)
 
-        # Warn about extended parts ($3 setup fee each)
         for ps in report.parts:
             if ps.status == "ok" and ps.tier == 1:
-                # Check if it's an extended part by looking up in DB
                 part = db.find_by_lcsc(ps.lcsc)
                 if part is not None and not getattr(part, "basic", True):
                     warnings.append(
                         f"{ps.lcsc} ({', '.join(ps.ref_designators)}) is extended "
-                        f"— adds $3 JLCPCB setup fee"
+                        f"-- adds $3 JLCPCB setup fee"
                     )
 
-        # Warn about low stock parts
         if report.low_stock_count > 0:
             for ps in report.parts:
                 if ps.status == "low_stock":
                     warnings.append(
                         f"{ps.lcsc} ({', '.join(ps.ref_designators)}) "
-                        f"low stock: {ps.stock_qty} units — "
+                        f"low stock: {ps.stock_qty} units -- "
                         f"approval required"
                     )
 
-        # --- Full validation suite (non-blocking) ---
+        return pcb, req, report, db
+
+    def _run_extended_validation(
+        self,
+        pcb: object,
+        req: object,
+        val_dir: Path,
+        warnings: list[str],
+    ) -> None:
+        """Run full validation suite (non-blocking)."""
         try:
+            from kicad_pipeline.optimization.scoring import compute_quality_score
             from kicad_pipeline.validation.drc import run_drc
             from kicad_pipeline.validation.electrical import run_electrical_checks
             from kicad_pipeline.validation.manufacturing import run_manufacturing_checks
@@ -587,56 +617,26 @@ class WorkflowEngine:
             from kicad_pipeline.validation.signal_integrity import run_si_checks
             from kicad_pipeline.validation.thermal import run_thermal_checks
 
-            from kicad_pipeline.optimization.scoring import compute_quality_score
-
-            drc_report = run_drc(pcb)
-            electrical_report = run_electrical_checks(pcb, req)
-            manufacturing_report = run_manufacturing_checks(pcb)
-            thermal_report = run_thermal_checks(pcb, req)
-            si_report = run_si_checks(pcb, req)
+            drc_report = run_drc(pcb)  # type: ignore[arg-type]
+            electrical_report = run_electrical_checks(pcb, req)  # type: ignore[arg-type]
+            manufacturing_report = run_manufacturing_checks(pcb)  # type: ignore[arg-type]
+            thermal_report = run_thermal_checks(pcb, req)  # type: ignore[arg-type]
+            si_report = run_si_checks(pcb, req)  # type: ignore[arg-type]
 
             full_report = build_validation_report(
-                drc=drc_report,
-                electrical=electrical_report,
+                drc=drc_report, electrical=electrical_report,
                 manufacturing=manufacturing_report,
-                thermal=thermal_report,
-                si=si_report,
+                thermal=thermal_report, si=si_report,
             )
 
-            # Write full validation report
             (val_dir / "full_validation_report.md").write_text(
                 format_report_markdown(full_report), encoding="utf-8"
             )
 
-            # Compute and write quality score
-            quality = compute_quality_score(pcb, req, validation_report=full_report)
-            import json as _json
-
-            (val_dir / "quality_score.json").write_text(
-                _json.dumps(
-                    {
-                        "overall_score": quality.overall_score,
-                        "grade": quality.grade,
-                        "board_cost": quality.board_cost,
-                        "electrical_score": quality.electrical_score,
-                        "manufacturing_score": quality.manufacturing_score,
-                        "thermal_score": quality.thermal_score,
-                        "signal_integrity_score": quality.signal_integrity_score,
-                        "placement_score": quality.placement_score,
-                        "breakdown": [
-                            {
-                                "category": d.category,
-                                "score": d.score,
-                                "weight": d.weight,
-                                "issues": list(d.issues),
-                            }
-                            for d in quality.breakdown
-                        ],
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+            quality = compute_quality_score(
+                pcb, req, validation_report=full_report,  # type: ignore[arg-type]
             )
+            self._write_quality_score(quality, val_dir)
             log.info("Quality score: %.2f (%s)", quality.overall_score, quality.grade)
 
             for d in quality.breakdown:
@@ -647,15 +647,48 @@ class WorkflowEngine:
             log.warning("Extended validation failed (non-blocking): %s", exc)
             warnings.append(f"Extended validation skipped: {exc}")
 
-        # Hard gate: block if parts are unavailable or low stock
-        if not report.all_parts_available:
+    @staticmethod
+    def _write_quality_score(quality: object, val_dir: Path) -> None:
+        """Serialise quality score to JSON."""
+        import json as _json
+
+        (val_dir / "quality_score.json").write_text(
+            _json.dumps(
+                {
+                    "overall_score": quality.overall_score,  # type: ignore[union-attr]
+                    "grade": quality.grade,  # type: ignore[union-attr]
+                    "board_cost": quality.board_cost,  # type: ignore[union-attr]
+                    "electrical_score": quality.electrical_score,  # type: ignore[union-attr]
+                    "manufacturing_score": quality.manufacturing_score,  # type: ignore[union-attr]
+                    "thermal_score": quality.thermal_score,  # type: ignore[union-attr]
+                    "signal_integrity_score": quality.signal_integrity_score,  # type: ignore[union-attr]
+                    "placement_score": quality.placement_score,  # type: ignore[union-attr]
+                    "breakdown": [
+                        {
+                            "category": d.category,  # type: ignore[union-attr]
+                            "score": d.score,  # type: ignore[union-attr]
+                            "weight": d.weight,  # type: ignore[union-attr]
+                            "issues": list(d.issues),  # type: ignore[union-attr]
+                        }
+                        for d in quality.breakdown  # type: ignore[union-attr]
+                    ],
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _enforce_parts_gate(report: object, val_dir: Path) -> None:
+        """Hard gate: block if parts are unavailable or low stock."""
+        if not report.all_parts_available:  # type: ignore[union-attr]
             details: list[str] = []
-            unavailable = report.unresolved_count - report.low_stock_count
+            unavailable = report.unresolved_count - report.low_stock_count  # type: ignore[union-attr]
             if unavailable > 0:
                 details.append(f"{unavailable} unavailable")
-            if report.low_stock_count > 0:
+            if report.low_stock_count > 0:  # type: ignore[union-attr]
                 details.append(
-                    f"{report.low_stock_count} low stock (<1000 qty)"
+                    f"{report.low_stock_count} low stock (<1000 qty)"  # type: ignore[union-attr]
                 )
             raise OrchestrationError(
                 f"Parts validation failed: {', '.join(details)}. "

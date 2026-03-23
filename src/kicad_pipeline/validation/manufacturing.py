@@ -88,24 +88,10 @@ def _board_dimensions(pcb: PCBDesign) -> tuple[float, float]:
 # ---------------------------------------------------------------------------
 
 
-def run_manufacturing_checks(
-    pcb: PCBDesign,
-    bom_entries: tuple[BOMEntry, ...] | None = None,
-) -> ManufacturingReport:
-    """Run JLCPCB manufacturing constraint checks on *pcb*.
-
-    Args:
-        pcb: The PCB design to check.
-        bom_entries: Optional BOM entries used for LCSC part-number checks.
-
-    Returns:
-        A :class:`ManufacturingReport` with all detected violations.
-    """
-    violations: list[ManufacturingViolation] = []
-
-    # ------------------------------------------------------------------
-    # 1. trace_width_jlcpcb
-    # ------------------------------------------------------------------
+def _check_trace_widths(
+    pcb: PCBDesign, violations: list[ManufacturingViolation],
+) -> None:
+    """Check trace widths against JLCPCB minimum."""
     for track in pcb.tracks:
         if track.width < JLCPCB_MIN_TRACE_MM:
             violations.append(
@@ -119,9 +105,11 @@ def run_manufacturing_checks(
                 )
             )
 
-    # ------------------------------------------------------------------
-    # 2. via_drill_jlcpcb
-    # ------------------------------------------------------------------
+
+def _check_via_drills(
+    pcb: PCBDesign, violations: list[ManufacturingViolation],
+) -> None:
+    """Check via drill sizes against JLCPCB minimum."""
     for via in pcb.vias:
         if via.drill < _JLCPCB_MIN_VIA_DRILL_MM:
             violations.append(
@@ -135,9 +123,11 @@ def run_manufacturing_checks(
                 )
             )
 
-    # ------------------------------------------------------------------
-    # 3. board_dimensions
-    # ------------------------------------------------------------------
+
+def _check_board_dimensions(
+    pcb: PCBDesign, violations: list[ManufacturingViolation],
+) -> None:
+    """Check board dimensions against JLCPCB maximum."""
     max_w, max_h = JLCPCB_MAX_BOARD_SIZE_MM
     board_w, board_h = _board_dimensions(pcb)
     if board_w <= 0.0 or board_h <= 0.0:
@@ -148,22 +138,23 @@ def run_manufacturing_checks(
                 severity=Severity.ERROR,
             )
         )
-    else:
-        if board_w > max_w or board_h > max_h:
-            violations.append(
-                ManufacturingViolation(
-                    rule="board_dimensions",
-                    message=(
-                        f"Board size {board_w:.1f}x{board_h:.1f}mm exceeds JLCPCB"
-                        f" maximum {max_w:.0f}x{max_h:.0f}mm"
-                    ),
-                    severity=Severity.ERROR,
-                )
+    elif board_w > max_w or board_h > max_h:
+        violations.append(
+            ManufacturingViolation(
+                rule="board_dimensions",
+                message=(
+                    f"Board size {board_w:.1f}x{board_h:.1f}mm exceeds JLCPCB"
+                    f" maximum {max_w:.0f}x{max_h:.0f}mm"
+                ),
+                severity=Severity.ERROR,
             )
+        )
 
-    # ------------------------------------------------------------------
-    # 4. acid_trap_check
-    # ------------------------------------------------------------------
+
+def _check_acid_traps(
+    pcb: PCBDesign, violations: list[ManufacturingViolation],
+) -> None:
+    """Check for zero-length tracks (acid trap indicators)."""
     for track in pcb.tracks:
         if math.isclose(track.start.x, track.end.x) and math.isclose(
             track.start.y, track.end.y
@@ -179,9 +170,11 @@ def run_manufacturing_checks(
                 )
             )
 
-    # ------------------------------------------------------------------
-    # 5. paste_aperture_check
-    # ------------------------------------------------------------------
+
+def _check_paste_apertures(
+    pcb: PCBDesign, violations: list[ManufacturingViolation],
+) -> None:
+    """Check paste aperture sizes against JLCPCB minimum."""
     for fp in pcb.footprints:
         for pad in fp.pads:
             if pad.pad_type != "smd":
@@ -204,24 +197,30 @@ def run_manufacturing_checks(
                     )
                 )
 
-    # ------------------------------------------------------------------
-    # 6. lcsc_check
-    # ------------------------------------------------------------------
-    if bom_entries is not None:
-        for entry in bom_entries:
-            if not entry.lcsc:
-                for ref in entry.designators:
-                    violations.append(
-                        ManufacturingViolation(
-                            rule="lcsc_check",
-                            message=f"Component {ref} has no LCSC part number",
-                            severity=Severity.WARNING,
-                        )
-                    )
 
-    # ------------------------------------------------------------------
-    # 7. smt_side_check
-    # ------------------------------------------------------------------
+def _check_lcsc_parts(
+    bom_entries: tuple[BOMEntry, ...] | None,
+    violations: list[ManufacturingViolation],
+) -> None:
+    """Check that all BOM entries have LCSC part numbers."""
+    if bom_entries is None:
+        return
+    for entry in bom_entries:
+        if not entry.lcsc:
+            for ref in entry.designators:
+                violations.append(
+                    ManufacturingViolation(
+                        rule="lcsc_check",
+                        message=f"Component {ref} has no LCSC part number",
+                        severity=Severity.WARNING,
+                    )
+                )
+
+
+def _check_smt_sides(
+    pcb: PCBDesign, violations: list[ManufacturingViolation],
+) -> None:
+    """Check for double-sided SMD assembly surcharge."""
     has_front_smd = any(
         fp.layer == _LAYER_F_CU and fp.attr == "smd" for fp in pcb.footprints
     )
@@ -240,4 +239,26 @@ def run_manufacturing_checks(
             )
         )
 
+
+def run_manufacturing_checks(
+    pcb: PCBDesign,
+    bom_entries: tuple[BOMEntry, ...] | None = None,
+) -> ManufacturingReport:
+    """Run JLCPCB manufacturing constraint checks on *pcb*.
+
+    Args:
+        pcb: The PCB design to check.
+        bom_entries: Optional BOM entries used for LCSC part-number checks.
+
+    Returns:
+        A :class:`ManufacturingReport` with all detected violations.
+    """
+    violations: list[ManufacturingViolation] = []
+    _check_trace_widths(pcb, violations)
+    _check_via_drills(pcb, violations)
+    _check_board_dimensions(pcb, violations)
+    _check_acid_traps(pcb, violations)
+    _check_paste_apertures(pcb, violations)
+    _check_lcsc_parts(bom_entries, violations)
+    _check_smt_sides(pcb, violations)
     return ManufacturingReport(violations=tuple(violations))

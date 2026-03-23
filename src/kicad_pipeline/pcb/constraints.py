@@ -56,6 +56,41 @@ def _placement_gap(w: float, h: float) -> float:
     return _THT_GAP_MM if max(w, h) > _THT_SIZE_THRESHOLD_MM else PLACEMENT_GAP_MM
 
 
+class _PlacementState:
+    """Mutable state container threaded through constraint-solver helpers.
+
+    Groups the repeatedly-passed positions, rotations, violations, grid, and
+    board-geometry parameters into a single object to reduce parameter counts.
+    """
+
+    __slots__ = (
+        "board_h", "board_w", "footprint_sizes", "grid",
+        "origin_x", "origin_y", "positions", "rotations", "violations",
+    )
+
+    def __init__(
+        self,
+        positions: dict[str, Point],
+        rotations: dict[str, float],
+        violations: list[str],
+        grid: _OccupancyGrid,
+        footprint_sizes: dict[str, tuple[float, float]],
+        board_w: float,
+        board_h: float,
+        origin_x: float,
+        origin_y: float,
+    ) -> None:
+        self.positions = positions
+        self.rotations = rotations
+        self.violations = violations
+        self.grid = grid
+        self.footprint_sizes = footprint_sizes
+        self.board_w = board_w
+        self.board_h = board_h
+        self.origin_x = origin_x
+        self.origin_y = origin_y
+
+
 class _OccupancyGrid:
     """2D boolean grid tracking placed courtyards and keepouts.
 
@@ -838,61 +873,58 @@ def _grid_rect_for_ref(
 
 def _solve_edge_placement(
     ref_constraint: dict[str, PlacementConstraint],
-    positions: dict[str, Point],
-    rotations: dict[str, float],
-    grid: _OccupancyGrid,
-    footprint_sizes: dict[str, tuple[float, float]],
-    board_w: float,
-    board_h: float,
-    origin_x: float,
-    origin_y: float,
+    state: _PlacementState,
 ) -> None:
     """Place EDGE-constrained components along board edges."""
     edge_groups: dict[BoardEdge, list[str]] = {}
     for ref, c in ref_constraint.items():
-        if c.constraint_type != PlacementConstraintType.EDGE and ref not in positions:
+        if c.constraint_type != PlacementConstraintType.EDGE and ref not in state.positions:
             continue
-        if c.constraint_type == PlacementConstraintType.EDGE and ref not in positions:
+        if c.constraint_type == PlacementConstraintType.EDGE and ref not in state.positions:
             edge = c.edge or BoardEdge.LEFT
             edge_groups.setdefault(edge, []).append(ref)
 
     for edge, refs in edge_groups.items():
         is_horizontal = edge in (BoardEdge.TOP, BoardEdge.BOTTOM)
-        edge_len = board_w if is_horizontal else board_h
+        edge_len = state.board_w if is_horizontal else state.board_h
         refs_sorted = sorted(
             refs,
-            key=lambda r: footprint_sizes.get(r, _DEFAULT_FP_SIZE)[0 if is_horizontal else 1],
+            key=lambda r: state.footprint_sizes.get(
+                r, _DEFAULT_FP_SIZE,
+            )[0 if is_horizontal else 1],
             reverse=True,
         )
         spacing = edge_len / (len(refs_sorted) + 1)
         for i, ref in enumerate(refs_sorted):
-            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
-            base = origin_x if is_horizontal else origin_y
+            w, h = state.footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
+            base = state.origin_x if is_horizontal else state.origin_y
             half_extent = w / 2.0 if is_horizontal else h / 2.0
             offset = spacing * (i + 1) + base
             offset = max(offset, half_extent + 1.0 + base)
             offset = min(offset, edge_len + base - half_extent - 1.0)
-            x, y, rot = _edge_position(edge, board_w, board_h, w, h, offset)
-            x += origin_x
-            y += origin_y
+            x, y, rot = _edge_position(
+                edge, state.board_w, state.board_h, w, h, offset,
+            )
+            x += state.origin_x
+            y += state.origin_y
             gap = _placement_gap(w, h)
-            rx = x - origin_x - w / 2 - gap
-            ry = y - origin_y - h / 2 - gap
+            rx = x - state.origin_x - w / 2 - gap
+            ry = y - state.origin_y - h / 2 - gap
             rw = w + 2 * gap
             rh = h + 2 * gap
-            if not grid.is_rect_free(rx, ry, rw, rh):
-                alt = grid.find_nearest_free(rx, ry, rw, rh)
+            if not state.grid.is_rect_free(rx, ry, rw, rh):
+                alt = state.grid.find_nearest_free(rx, ry, rw, rh)
                 if alt is not None:
-                    x = alt[0] + w / 2 + gap + origin_x
-                    y = alt[1] + h / 2 + gap + origin_y
+                    x = alt[0] + w / 2 + gap + state.origin_x
+                    y = alt[1] + h / 2 + gap + state.origin_y
                     rx, ry = alt
                     log.debug(
                         "EDGE(%s): %s shifted to avoid overlap -> (%.1f, %.1f)",
                         edge.value, ref, x, y,
                     )
-            positions[ref] = Point(x=x, y=y)
-            rotations[ref] = rot
-            grid.mark_rect(rx, ry, rw, rh)
+            state.positions[ref] = Point(x=x, y=y)
+            state.rotations[ref] = rot
+            state.grid.mark_rect(rx, ry, rw, rh)
             log.debug("EDGE(%s): %s at (%.1f, %.1f) rot=%.0f", edge.value, ref, x, y, rot)
 
 
@@ -916,93 +948,91 @@ def _build_connectivity_degree_index(
 
 def _solve_group_placement(
     ref_constraint: dict[str, PlacementConstraint],
-    positions: dict[str, Point],
-    rotations: dict[str, float],
-    grid: _OccupancyGrid,
-    footprint_sizes: dict[str, tuple[float, float]],
-    board_w: float,
-    board_h: float,
-    origin_x: float,
-    origin_y: float,
+    state: _PlacementState,
     conn_degree_index: dict[str, int],
 ) -> None:
     """Place GROUP-constrained components in grid clusters."""
     group_members: dict[str, list[str]] = {}
     for ref, c in ref_constraint.items():
-        if c.constraint_type == PlacementConstraintType.GROUP and ref not in positions:
+        if c.constraint_type == PlacementConstraintType.GROUP and ref not in state.positions:
             gname = c.group_name or "default"
             group_members.setdefault(gname, []).append(ref)
 
     for gname, refs in group_members.items():
         refs.sort(key=lambda r: conn_degree_index.get(r, 0), reverse=True)
-        item_w = max(footprint_sizes.get(r, _DEFAULT_FP_SIZE)[0] + 2.0 for r in refs)
-        max_h = max(footprint_sizes.get(r, _DEFAULT_FP_SIZE)[1] for r in refs) + 2.0
+        item_w = max(
+            state.footprint_sizes.get(r, _DEFAULT_FP_SIZE)[0] + 2.0 for r in refs
+        )
+        max_h = max(
+            state.footprint_sizes.get(r, _DEFAULT_FP_SIZE)[1] for r in refs
+        ) + 2.0
 
-        max_row_w = board_w - 10.0
+        max_row_w = state.board_w - 10.0
         cols_per_row = max(1, int(max_row_w / item_w))
         num_rows = math.ceil(len(refs) / cols_per_row)
 
         block_w = min(len(refs), cols_per_row) * item_w
         block_h = num_rows * max_h
 
-        centre_x = board_w / 2.0
-        centre_y = board_h / 2.0
-        start = grid.find_nearest_free(centre_x, centre_y, block_w, block_h)
+        centre_x = state.board_w / 2.0
+        centre_y = state.board_h / 2.0
+        start = state.grid.find_nearest_free(centre_x, centre_y, block_w, block_h)
         if start is None:
             start = (5.0, 5.0)
 
-        base_x = start[0] + origin_x
-        base_y = start[1] + origin_y
+        base_x = start[0] + state.origin_x
+        base_y = start[1] + state.origin_y
         for idx, ref in enumerate(refs):
             col = idx % cols_per_row
             row = idx // cols_per_row
-            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
+            w, h = state.footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
             x_pos = base_x + col * item_w + w / 2
             y_pos = base_y + row * max_h + max_h / 2
-            positions[ref] = Point(x=x_pos, y=y_pos)
-            rotations[ref] = 0.0
+            state.positions[ref] = Point(x=x_pos, y=y_pos)
+            state.rotations[ref] = 0.0
             gap = _placement_gap(w, h)
-            grid.mark_rect(
-                x_pos - origin_x - w / 2 - gap,
-                y_pos - origin_y - max_h / 2 - gap,
+            state.grid.mark_rect(
+                x_pos - state.origin_x - w / 2 - gap,
+                y_pos - state.origin_y - max_h / 2 - gap,
                 w + 2.0 + 2 * gap, max_h + 2 * gap,
             )
             log.debug(
                 "GROUP(%s): %s at (%.1f, %.1f) [row=%d col=%d]",
-                gname, ref, positions[ref].x, positions[ref].y, row, col,
+                gname, ref, state.positions[ref].x, state.positions[ref].y, row, col,
             )
 
 
 def _solve_remaining_placement(
     all_refs: set[str],
-    positions: dict[str, Point],
-    rotations: dict[str, float],
-    violations: list[str],
-    grid: _OccupancyGrid,
-    footprint_sizes: dict[str, tuple[float, float]],
-    board_w: float,
-    board_h: float,
-    origin_x: float,
-    origin_y: float,
+    state: _PlacementState,
     conn_degree_index: dict[str, int],
 ) -> None:
     """Place remaining unplaced components at nearest free positions."""
     unplaced = sorted(
-        [ref for ref in all_refs if ref not in positions],
+        [ref for ref in all_refs if ref not in state.positions],
         key=lambda r: conn_degree_index.get(r, 0), reverse=True,
     )
     for ref in unplaced:
-        w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
-        free = grid.find_nearest_free(board_w / 2.0, board_h / 2.0, w, h)
+        w, h = state.footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
+        free = state.grid.find_nearest_free(
+            state.board_w / 2.0, state.board_h / 2.0, w, h,
+        )
         if free is not None:
-            positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
-            rotations[ref] = 0.0
+            state.positions[ref] = Point(
+                x=free[0] + state.origin_x, y=free[1] + state.origin_y,
+            )
+            state.rotations[ref] = 0.0
             gap = _placement_gap(w, h)
-            grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
+            state.grid.mark_rect(
+                free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap,
+            )
         else:
-            violations.append(f"No space for {ref} on the board")
-            positions[ref] = Point(x=board_w / 2.0 + origin_x, y=board_h / 2.0 + origin_y)
-            rotations[ref] = 0.0
+            state.violations.append(f"No space for {ref} on the board")
+            state.positions[ref] = Point(
+                x=state.board_w / 2.0 + state.origin_x,
+                y=state.board_h / 2.0 + state.origin_y,
+            )
+            state.rotations[ref] = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1050,12 +1080,8 @@ def _compute_preferred_angle(
     c: PlacementConstraint,
     target_center: Point,
     pin_offsets: dict[str, dict[str, tuple[float, float]]],
-    rotations: dict[str, float],
+    state: _PlacementState,
     ref_constraint: dict[str, PlacementConstraint],
-    origin_x: float,
-    origin_y: float,
-    board_w: float,
-    board_h: float,
 ) -> tuple[Point, float | None]:
     """Compute pin position and preferred placement angle for a NEAR constraint.
 
@@ -1070,7 +1096,7 @@ def _compute_preferred_angle(
     if c.target_pin is not None and target in pin_offsets:
         pin_off = pin_offsets[target].get(c.target_pin)
         if pin_off is not None:
-            rot_rad = math.radians(-rotations.get(target, 0.0))
+            rot_rad = math.radians(-state.rotations.get(target, 0.0))
             cos_r = math.cos(rot_rad)
             sin_r = math.sin(rot_rad)
             rpx = pin_off[0] * cos_r - pin_off[1] * sin_r
@@ -1088,8 +1114,8 @@ def _compute_preferred_angle(
         if preferred_angle is not None:
             preferred_angle += math.pi
         else:
-            board_cx = origin_x + board_w / 2.0
-            board_cy = origin_y + board_h / 2.0
+            board_cx = state.origin_x + state.board_w / 2.0
+            board_cy = state.origin_y + state.board_h / 2.0
             preferred_angle = math.atan2(
                 board_cy - target_center.y,
                 board_cx - target_center.x,
@@ -1106,17 +1132,13 @@ def _try_near_grid_search(
     enforce_min: float,
     w: float,
     h: float,
-    grid: _OccupancyGrid,
-    origin_x: float,
-    origin_y: float,
-    positions: dict[str, Point],
-    rotations: dict[str, float],
+    state: _PlacementState,
     target: str,
     target_pin: str | None,
 ) -> bool:
     """Try to place a component near a pin using grid search over angles/distances.
 
-    Mutates positions, rotations, and grid on success.
+    Mutates state.positions, state.rotations, and state.grid on success.
 
     Returns:
         True if placed successfully.
@@ -1134,17 +1156,17 @@ def _try_near_grid_search(
         for angle in angles:
             trial_x = pin_pos.x + dist * math.cos(angle)
             trial_y = pin_pos.y + dist * math.sin(angle)
-            rx = trial_x - origin_x - w / 2
-            ry = trial_y - origin_y - h / 2
-            if rx >= 0 and ry >= 0 and grid.is_rect_free(rx, ry, w, h):
-                positions[ref] = Point(x=trial_x, y=trial_y)
+            rx = trial_x - state.origin_x - w / 2
+            ry = trial_y - state.origin_y - h / 2
+            if rx >= 0 and ry >= 0 and state.grid.is_rect_free(rx, ry, w, h):
+                state.positions[ref] = Point(x=trial_x, y=trial_y)
                 if preferred_angle is not None and _is_two_pin_passive(ref):
                     angle_deg = math.degrees(preferred_angle) % 360
-                    rotations[ref] = round(angle_deg / 90.0) * 90.0 % 360.0
+                    state.rotations[ref] = round(angle_deg / 90.0) * 90.0 % 360.0
                 else:
-                    rotations[ref] = 0.0
+                    state.rotations[ref] = 0.0
                 gap = _placement_gap(w, h)
-                grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
+                state.grid.mark_rect(rx - gap, ry - gap, w + 2 * gap, h + 2 * gap)
                 log.debug("NEAR(%s.%s): %s at (%.1f, %.1f) angle=%.0f",
                           target, target_pin or "?", ref, trial_x, trial_y,
                           math.degrees(angle))
@@ -1159,30 +1181,25 @@ def _try_near_fallback(
     enforce_min: float,
     w: float,
     h: float,
-    grid: _OccupancyGrid,
-    origin_x: float,
-    origin_y: float,
-    positions: dict[str, Point],
-    rotations: dict[str, float],
+    state: _PlacementState,
     target: str,
-    violations: list[str],
 ) -> bool:
     """Fallback placement: nearest free spot to pin position.
 
-    Mutates positions, rotations, grid, and violations.
+    Mutates state.positions, state.rotations, state.grid, and state.violations.
 
     Returns:
         True if placed successfully.
     """
-    free = grid.find_nearest_free(
-        pin_pos.x - origin_x, pin_pos.y - origin_y, w, h,
+    free = state.grid.find_nearest_free(
+        pin_pos.x - state.origin_x, pin_pos.y - state.origin_y, w, h,
     )
     if free is None:
-        violations.append(f"Could not place {ref} near {target}")
+        state.violations.append(f"Could not place {ref} near {target}")
         return False
 
-    fx = free[0] + origin_x
-    fy = free[1] + origin_y
+    fx = free[0] + state.origin_x
+    fy = free[1] + state.origin_y
     if enforce_min > 0:
         dist_to_target = math.hypot(
             fx - target_center.x, fy - target_center.y,
@@ -1193,60 +1210,49 @@ def _try_near_fallback(
             )
             fx = target_center.x + enforce_min * math.cos(angle)
             fy = target_center.y + enforce_min * math.sin(angle)
-    positions[ref] = Point(x=fx, y=fy)
-    rotations[ref] = 0.0
+    state.positions[ref] = Point(x=fx, y=fy)
+    state.rotations[ref] = 0.0
     gap = _placement_gap(w, h)
-    gx = fx - origin_x - w / 2
-    gy = fy - origin_y - h / 2
-    grid.mark_rect(gx - gap, gy - gap, w + 2 * gap, h + 2 * gap)
+    gx = fx - state.origin_x - w / 2
+    gy = fy - state.origin_y - h / 2
+    state.grid.mark_rect(gx - gap, gy - gap, w + 2 * gap, h + 2 * gap)
     return True
 
 
 def _solve_near_placement(
     near_refs: list[tuple[str, PlacementConstraint]],
-    positions: dict[str, Point],
-    rotations: dict[str, float],
-    violations: list[str],
-    grid: _OccupancyGrid,
+    state: _PlacementState,
     ref_constraint: dict[str, PlacementConstraint],
     pin_offsets: dict[str, dict[str, tuple[float, float]]],
-    footprint_sizes: dict[str, tuple[float, float]],
-    origin_x: float,
-    origin_y: float,
-    board_w: float,
-    board_h: float,
 ) -> None:
     """Solve NEAR constraint placements with multi-pass retry."""
     for _pass in range(3):
         deferred: list[tuple[str, PlacementConstraint]] = []
         for ref, c in near_refs:
-            if ref in positions:
+            if ref in state.positions:
                 continue
             target = c.target_ref
-            if target is None or target not in positions:
+            if target is None or target not in state.positions:
                 deferred.append((ref, c))
                 continue
 
-            target_center = positions[target]
+            target_center = state.positions[target]
             pin_pos, preferred_angle = _compute_preferred_angle(
-                c, target_center, pin_offsets, rotations,
-                ref_constraint, origin_x, origin_y, board_w, board_h,
+                c, target_center, pin_offsets, state, ref_constraint,
             )
 
             max_dist = c.max_distance_mm or 5.0
             enforce_min = c.min_distance_mm or 0.0
-            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
+            w, h = state.footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
 
             placed = _try_near_grid_search(
                 ref, pin_pos, preferred_angle, max_dist, enforce_min,
-                w, h, grid, origin_x, origin_y, positions, rotations,
-                target, c.target_pin,
+                w, h, state, target, c.target_pin,
             )
             if not placed:
                 placed = _try_near_fallback(
                     ref, pin_pos, target_center, enforce_min,
-                    w, h, grid, origin_x, origin_y, positions, rotations,
-                    target, violations,
+                    w, h, state, target,
                 )
             if not placed:
                 deferred.append((ref, c))
@@ -1295,7 +1301,48 @@ def solve_placement(
     Returns:
         :class:`PlacementResult` with positions, rotations, and violations.
     """
-    # Compute board dimensions
+    state, ref_constraint = _init_placement_state(
+        board_outline, footprint_sizes, keepouts, grid_mm, constraints,
+        footprint_bboxes,
+    )
+    all_refs: set[str] = {c.ref for c in constraints}
+
+    # 1-5: Constraint-driven placement phases
+    _solve_all_constraint_phases(
+        state, ref_constraint, all_refs, requirements, footprint_bboxes,
+    )
+
+    # 6. Optimize rotations when requirements are available
+    if requirements is not None:
+        for _ in range(2):
+            state.rotations = optimize_rotations(
+                state.positions, state.rotations, requirements,
+                footprint_sizes=state.footprint_sizes,
+            )
+
+    # 7. Align 2-pin passives to their connected pads on multi-pin components
+    if requirements is not None:
+        state.positions, state.rotations = align_passives_to_pads(
+            state.positions, state.rotations, requirements, state.footprint_sizes,
+            state.board_w, state.board_h, state.origin_x, state.origin_y,
+        )
+
+    return PlacementResult(
+        positions=state.positions,
+        rotations=state.rotations,
+        violations=tuple(state.violations),
+    )
+
+
+def _init_placement_state(
+    board_outline: BoardOutline,
+    footprint_sizes: dict[str, tuple[float, float]],
+    keepouts: tuple[Keepout, ...],
+    grid_mm: float,
+    constraints: tuple[PlacementConstraint, ...],
+    footprint_bboxes: dict[str, FootprintBBox] | None,
+) -> tuple[_PlacementState, dict[str, PlacementConstraint]]:
+    """Initialise grid, mark margins/keepouts, and sort constraints."""
     xs = [p.x for p in board_outline.polygon]
     ys = [p.y for p in board_outline.polygon]
     board_w = max(xs) - min(xs)
@@ -1304,9 +1351,6 @@ def solve_placement(
     origin_y = min(ys)
 
     grid = _OccupancyGrid(board_w, board_h, grid_mm)
-    positions: dict[str, Point] = {}
-    rotations: dict[str, float] = {}
-    violations: list[str] = []
 
     # Mark board-edge margin as occupied (prevent copper_edge_clearance DRC)
     margin_cells = max(1, int(1.0 / grid_mm))
@@ -1329,6 +1373,13 @@ def solve_placement(
                 max(ko_xs) - min(ko_xs), max(ko_ys) - min(ko_ys),
             )
 
+    state = _PlacementState(
+        positions={}, rotations={}, violations=[], grid=grid,
+        footprint_sizes=footprint_sizes,
+        board_w=board_w, board_h=board_h,
+        origin_x=origin_x, origin_y=origin_y,
+    )
+
     # Sort constraints by priority (highest first), then by type order
     type_order = {
         PlacementConstraintType.FIXED: 0,
@@ -1341,93 +1392,59 @@ def solve_placement(
         constraints,
         key=lambda c: (-c.priority, type_order.get(c.constraint_type, 5)),
     )
-
-    # Collect all refs from constraints
-    all_refs: set[str] = {c.ref for c in constraints}
-
-    # Group constraints by ref (pick highest priority per ref)
     ref_constraint: dict[str, PlacementConstraint] = {}
     for pc in sorted_constraints:
         if pc.ref not in ref_constraint:
             ref_constraint[pc.ref] = pc
 
+    return state, ref_constraint
+
+
+def _solve_all_constraint_phases(
+    state: _PlacementState,
+    ref_constraint: dict[str, PlacementConstraint],
+    all_refs: set[str],
+    requirements: ProjectRequirements | None,
+    footprint_bboxes: dict[str, FootprintBBox] | None,
+) -> None:
+    """Run placement phases 1-5: FIXED, EDGE, NEAR, GROUP, remaining."""
     # 1. Place FIXED
     for ref, c in ref_constraint.items():
         if c.constraint_type != PlacementConstraintType.FIXED:
             continue
         if c.x is not None and c.y is not None:
-            x_rel = c.x - origin_x
-            y_rel = c.y - origin_y
-            w, h = footprint_sizes.get(ref, _DEFAULT_FP_SIZE)
-            positions[ref] = Point(x=c.x, y=c.y)
+            x_rel = c.x - state.origin_x
+            y_rel = c.y - state.origin_y
+            state.positions[ref] = Point(x=c.x, y=c.y)
             rot = c.rotation if c.rotation is not None else 0.0
-            rotations[ref] = rot
+            state.rotations[ref] = rot
             rx, ry, rw, rh = _grid_rect_for_ref(
-                ref, x_rel, y_rel, footprint_sizes, footprint_bboxes,
+                ref, x_rel, y_rel, state.footprint_sizes, footprint_bboxes,
                 rotation=rot,
             )
-            grid.mark_rect(rx, ry, rw, rh)
+            state.grid.mark_rect(rx, ry, rw, rh)
             log.debug("FIXED: %s at (%.1f, %.1f)", ref, c.x, c.y)
 
     # 2. Place EDGE
-    _solve_edge_placement(
-        ref_constraint, positions, rotations, grid,
-        footprint_sizes, board_w, board_h, origin_x, origin_y,
-    )
+    _solve_edge_placement(ref_constraint, state)
 
     # 3. Place NEAR
     near_refs = [
         (ref, c) for ref, c in ref_constraint.items()
-        if c.constraint_type == PlacementConstraintType.NEAR and ref not in positions
+        if c.constraint_type == PlacementConstraintType.NEAR
+        and ref not in state.positions
     ]
-
     pin_offsets = _build_pin_offsets(
-        near_refs, requirements, footprint_sizes,
+        near_refs, requirements, state.footprint_sizes,
     )
-
-    _solve_near_placement(
-        near_refs, positions, rotations, violations, grid,
-        ref_constraint, pin_offsets, footprint_sizes,
-        origin_x, origin_y, board_w, board_h,
-    )
+    _solve_near_placement(near_refs, state, ref_constraint, pin_offsets)
 
     # 4. Place GROUP
     conn_degree_index = _build_connectivity_degree_index(requirements)
-    _solve_group_placement(
-        ref_constraint, positions, rotations, grid,
-        footprint_sizes, board_w, board_h, origin_x, origin_y,
-        conn_degree_index,
-    )
+    _solve_group_placement(ref_constraint, state, conn_degree_index)
 
     # 5. Place any remaining unplaced refs (highest connectivity first)
-    _solve_remaining_placement(
-        all_refs, positions, rotations, violations, grid,
-        footprint_sizes, board_w, board_h, origin_x, origin_y,
-        conn_degree_index,
-    )
-
-    # 6. Optimize rotations when requirements are available
-    # Two iterations: neighbours' rotations affect each other, so a second
-    # pass picks up improvements missed when neighbours hadn't settled yet.
-    if requirements is not None:
-        for _ in range(2):
-            rotations = optimize_rotations(
-                positions, rotations, requirements,
-                footprint_sizes=footprint_sizes,
-            )
-
-    # 7. Align 2-pin passives to their connected pads on multi-pin components
-    if requirements is not None:
-        positions, rotations = align_passives_to_pads(
-            positions, rotations, requirements, footprint_sizes,
-            board_w, board_h, origin_x, origin_y,
-        )
-
-    return PlacementResult(
-        positions=positions,
-        rotations=rotations,
-        violations=tuple(violations),
-    )
+    _solve_remaining_placement(all_refs, state, conn_degree_index)
 
 
 # ---------------------------------------------------------------------------

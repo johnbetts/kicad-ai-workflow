@@ -1058,21 +1058,25 @@ def _finalize_bcu_route(
     return (tuple(all_tracks), tuple(emitted_vias))
 
 
+@dataclass(frozen=True)
+class _BcuEndpoint:
+    """Coordinates and flags for one end of a B.Cu route segment."""
+
+    x: float
+    y: float
+    is_tht: bool = False
+    via_in_pad: bool = False
+
+
 def _route_on_bcu(
-    start_x: float,
-    start_y: float,
-    goal_x: float,
-    goal_y: float,
+    start: _BcuEndpoint,
+    goal: _BcuEndpoint,
     bcu_grid: _Grid,
     net_number: int,
     net_name: str,
     width_mm: float,
     clearance_mm: float,
     fcu_grid: _Grid | None = None,
-    start_is_tht: bool = False,
-    goal_is_tht: bool = False,
-    start_via_in_pad: bool = False,
-    goal_via_in_pad: bool = False,
 ) -> tuple[tuple[Track, ...], tuple[Via, ...]] | None:
     """Route a segment on B.Cu with vias at each end.
 
@@ -1085,7 +1089,7 @@ def _route_on_bcu(
 
     # Find via positions for start and goal
     start_result = _find_via_endpoint(
-        start_x, start_y, start_is_tht, start_via_in_pad,
+        start.x, start.y, start.is_tht, start.via_in_pad,
         via_radius, clearance_mm, width_mm, fcu_grid, bcu_grid, net_name, "start",
     )
     if start_result is None:
@@ -1093,7 +1097,7 @@ def _route_on_bcu(
     via_start_pos, _start_needs_astar_stub = start_result
 
     goal_result = _find_via_endpoint(
-        goal_x, goal_y, goal_is_tht, goal_via_in_pad,
+        goal.x, goal.y, goal.is_tht, goal.via_in_pad,
         via_radius, clearance_mm, width_mm, fcu_grid, bcu_grid, net_name, "goal",
     )
     if goal_result is None:
@@ -1125,15 +1129,15 @@ def _route_on_bcu(
     # Build tracks, vias, and stubs
     tracks = _build_bcu_tracks(path, bcu_grid, width_mm, net_number)
 
-    via_start = _build_endpoint_via(via_start_pos, start_is_tht, via_drill, via_size, net_number)
-    via_goal = _build_endpoint_via(via_goal_pos, goal_is_tht, via_drill, via_size, net_number)
+    via_start = _build_endpoint_via(via_start_pos, start.is_tht, via_drill, via_size, net_number)
+    via_goal = _build_endpoint_via(via_goal_pos, goal.is_tht, via_drill, via_size, net_number)
 
     stub_tracks = _build_stub_track(
-        start_x, start_y, via_start_pos[0], via_start_pos[1],
+        start.x, start.y, via_start_pos[0], via_start_pos[1],
         _start_needs_astar_stub, fcu_grid, net_number, width_mm, clearance_mm,
     )
     stub_tracks.extend(_build_stub_track(
-        goal_x, goal_y, via_goal_pos[0], via_goal_pos[1],
+        goal.x, goal.y, via_goal_pos[0], via_goal_pos[1],
         _goal_needs_astar_stub, fcu_grid, net_number, width_mm, clearance_mm,
     ))
 
@@ -1604,12 +1608,11 @@ def _try_bcu_fallback(
             )
 
     bcu_result = _route_on_bcu(
-        p1.x, p1.y, p2.x, p2.y,
+        _BcuEndpoint(p1.x, p1.y, is_tht=p1.pad_type == "thru_hole"),
+        _BcuEndpoint(p2.x, p2.y, is_tht=p2.pad_type == "thru_hole"),
         bcu_grid, ctx.request.net_number, ctx.request.net_name,
         ctx.request.width_mm, ctx.request.clearance_mm,
         fcu_grid=ctx.grid,
-        start_is_tht=p1.pad_type == "thru_hole",
-        goal_is_tht=p2.pad_type == "thru_hole",
     )
     bcu_grid.restore_state(_bcu_saved)
 
@@ -1785,11 +1788,11 @@ def _try_ic_bcu_route(
             ic_pad_cl,
         )
     bcu_result = _route_on_bcu(
-        best_pi.x, best_pi.y, ic_pi.x, ic_pi.y,
+        _BcuEndpoint(best_pi.x, best_pi.y, is_tht=best_pi.pad_type == "thru_hole"),
+        _BcuEndpoint(ic_pi.x, ic_pi.y),
         bcu_grid, ctx.request.net_number, ctx.request.net_name,
         ic_stub_width, ctx.request.clearance_mm,
         fcu_grid=ctx.grid,
-        start_is_tht=best_pi.pad_type == "thru_hole",
     )
     # Re-mark unmarked THT pads on B.Cu
     for _ux, _uy, _uhw, _uhh in _ic_bcu_unmarked:
@@ -2167,16 +2170,11 @@ def _try_fanout_bcu(
             )
             _fan_bcu_um.append((pi.x, pi.y, pi.half_w, pi.half_h))
     bcu_fan = _route_on_bcu(
-        fan_via_pos[0], fan_via_pos[1],
-        best_pi.x, best_pi.y,
-        bcu_grid,
-        ctx.request.net_number,
-        ctx.request.net_name,
-        ic_stub_width,
-        ctx.request.clearance_mm,
+        _BcuEndpoint(fan_via_pos[0], fan_via_pos[1], via_in_pad=True),
+        _BcuEndpoint(best_pi.x, best_pi.y, is_tht=best_pi.pad_type == "thru_hole"),
+        bcu_grid, ctx.request.net_number, ctx.request.net_name,
+        ic_stub_width, ctx.request.clearance_mm,
         fcu_grid=ctx.grid,
-        start_via_in_pad=True,
-        goal_is_tht=best_pi.pad_type == "thru_hole",
     )
     for _ux, _uy, _uhw, _uhh in _fan_bcu_um:
         _mark_pad_area(bcu_grid, _ux, _uy, _uhw, _uhh, ctx.pad_cl)
@@ -2243,11 +2241,11 @@ def _try_via_in_pad(
         ic_pad_cl,
     )
     vip_result = _route_on_bcu(
-        px, py, best_pi.x, best_pi.y,
+        _BcuEndpoint(px, py),
+        _BcuEndpoint(best_pi.x, best_pi.y, is_tht=best_pi.pad_type == "thru_hole"),
         bcu_grid, ctx.request.net_number, ctx.request.net_name,
         ic_stub_width, ctx.request.clearance_mm,
         fcu_grid=None,
-        goal_is_tht=best_pi.pad_type == "thru_hole",
     )
     for _ux, _uy, _uhw, _uhh in _vip_bcu_um:
         _mark_pad_area(bcu_grid, _ux, _uy, _uhw, _uhh, ctx.bcu_pad_cl)
@@ -2563,47 +2561,6 @@ def _route_mst_pairs(
     return None
 
 
-def _build_route_context(
-    request: RouteRequest,
-    grid: _Grid,
-    bcu_grid: _Grid | None,
-    fp_by_ref: dict[str, Footprint],
-    pad_infos: list[_PadInfo],
-    net_pad_set: frozenset[tuple[str, str]],
-    pad_cl: float,
-    tht_refs_in_net: frozenset[str],
-    ic_refs_in_net: frozenset[str],
-    ic_pad_infos: list[_PadInfo],
-    ic_pad_refs: list[tuple[str, str]],
-    pad_cache: list[object],
-    net_clearances: dict[str, float] | None,
-    net_widths: dict[str, float] | None,
-    placed_via_positions: list[tuple[float, float]] | None,
-    footprints: list[Footprint],
-) -> _RouteContext:
-    """Build the shared routing context for a single net."""
-    excl_cells = max(1, math.ceil(
-        (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
-    ) - 1)
-    return _RouteContext(
-        request=request, grid=grid, bcu_grid=bcu_grid,
-        fp_by_ref=fp_by_ref, pad_infos=pad_infos,
-        net_pad_set=net_pad_set, original_net_pad_set=net_pad_set,
-        pad_cl=pad_cl, bcu_pad_cl=pad_cl,
-        excl_cells=excl_cells,
-        all_tracks=[], all_vias=[],
-        tht_refs_in_net=tht_refs_in_net,
-        ic_refs_in_net=ic_refs_in_net,
-        ic_pad_infos=ic_pad_infos,
-        ic_pad_refs=ic_pad_refs,
-        pad_cache=pad_cache,
-        net_clearances=net_clearances,
-        net_widths=net_widths,
-        placed_via_positions=placed_via_positions,
-        footprints=footprints,
-    )
-
-
 def _handle_ic_pads(
     ic_refs_in_net: frozenset[str],
     pad_infos: list[_PadInfo],
@@ -2716,10 +2673,25 @@ def route_net(
     _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
                        _pad_cache=_pad_cache)
 
-    ctx = _build_route_context(
-        request, grid, bcu_grid, fp_by_ref, pad_infos, net_pad_set, pad_cl,
-        tht_refs_in_net, ic_refs_in_net, _ic_pad_infos, _ic_pad_refs,
-        _pad_cache, net_clearances, net_widths, placed_via_positions, footprints,
+    excl_cells = max(1, math.ceil(
+        (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
+    ) - 1)
+    ctx = _RouteContext(
+        request=request, grid=grid, bcu_grid=bcu_grid,
+        fp_by_ref=fp_by_ref, pad_infos=pad_infos,
+        net_pad_set=net_pad_set, original_net_pad_set=net_pad_set,
+        pad_cl=pad_cl, bcu_pad_cl=pad_cl,
+        excl_cells=excl_cells,
+        all_tracks=[], all_vias=[],
+        tht_refs_in_net=tht_refs_in_net,
+        ic_refs_in_net=ic_refs_in_net,
+        ic_pad_infos=_ic_pad_infos,
+        ic_pad_refs=_ic_pad_refs,
+        pad_cache=_pad_cache,
+        net_clearances=net_clearances,
+        net_widths=net_widths,
+        placed_via_positions=placed_via_positions,
+        footprints=footprints,
     )
 
     # MST-style routing
