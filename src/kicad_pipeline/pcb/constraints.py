@@ -172,14 +172,13 @@ def _edge_position(
     Returns:
         ``(x, y, rotation)`` tuple.
     """
-    if edge == BoardEdge.TOP:
-        return (offset, margin + comp_h / 2.0, 0.0)
-    elif edge == BoardEdge.BOTTOM:
-        return (offset, board_h - margin - comp_h / 2.0, 180.0)
-    elif edge == BoardEdge.LEFT:
-        return (margin + comp_h / 2.0, offset, 90.0)
-    else:  # RIGHT
-        return (board_w - margin - comp_h / 2.0, offset, 270.0)
+    _edge_dispatch: dict[BoardEdge, tuple[float, float, float]] = {
+        BoardEdge.TOP: (offset, margin + comp_h / 2.0, 0.0),
+        BoardEdge.BOTTOM: (offset, board_h - margin - comp_h / 2.0, 180.0),
+        BoardEdge.LEFT: (margin + comp_h / 2.0, offset, 90.0),
+        BoardEdge.RIGHT: (board_w - margin - comp_h / 2.0, offset, 270.0),
+    }
+    return _edge_dispatch[edge]
 
 
 # ---------------------------------------------------------------------------
@@ -374,14 +373,24 @@ def trace_linear_chains(
     return chains
 
 
-def _ref_to_nets(requirements: ProjectRequirements, ref: str) -> set[str]:
-    """Return the set of net names a ref connects to."""
-    nets: set[str] = set()
+def _build_ref_to_nets_index(
+    requirements: ProjectRequirements,
+) -> dict[str, set[str]]:
+    """Build a ref -> set[net_name] index from all nets.
+
+    Pre-computes the mapping once so callers avoid repeated O(N*M) scans.
+    """
+    index: dict[str, set[str]] = {}
     for net in requirements.nets:
         for conn in net.connections:
-            if conn.ref == ref:
-                nets.add(net.name)
-    return nets
+            index.setdefault(conn.ref, set()).add(net.name)
+    return index
+
+
+def _ref_to_nets(requirements: ProjectRequirements, ref: str) -> set[str]:
+    """Return the set of net names a ref connects to."""
+    index = _build_ref_to_nets_index(requirements)
+    return index.get(ref, set())
 
 
 def _detect_relay_clusters(
@@ -391,17 +400,18 @@ def _detect_relay_clusters(
     layout: str,
 ) -> None:
     """Detect relay driver subcircuit clusters from FeatureBlock metadata."""
+    ref_nets_index = _build_ref_to_nets_index(requirements)
     for fb in requirements.features:
         if not fb.subcircuits or "relay_driver" not in fb.subcircuits:
             continue
         relay_refs_in_fb = [r for r in fb.components if r.startswith("K")]
         for relay_ref in relay_refs_in_fb:
-            relay_nets = _ref_to_nets(requirements, relay_ref)
+            relay_nets = ref_nets_index.get(relay_ref, set())
             cluster: list[str] = [relay_ref]
             for ref in fb.components:
                 if ref == relay_ref or ref in cluster:
                     continue
-                ref_nets = _ref_to_nets(requirements, ref)
+                ref_nets = ref_nets_index.get(ref, set())
                 shared = ref_nets & relay_nets
                 signal_shared = {n for n in shared if not _is_power_net(n)}
                 if signal_shared:
@@ -428,6 +438,16 @@ def _detect_npn_driver_clusters(
     layout: str,
 ) -> None:
     """Infer NPN driver subcircuit clusters from netlist patterns."""
+    # Pre-build net_name -> set[ref] index for O(1) lookups
+    net_to_refs: dict[str, set[str]] = {}
+    # Pre-build ref -> set[net_name] index via pin connections
+    ref_pin_nets: dict[str, set[str]] = {}
+    for comp in requirements.components:
+        for pin in comp.pins:
+            if pin.net:
+                net_to_refs.setdefault(pin.net, set()).add(comp.ref)
+                ref_pin_nets.setdefault(comp.ref, set()).add(pin.net)
+
     for comp in requirements.components:
         if not comp.ref.startswith("Q") or comp.ref in subcircuit_grouped:
             continue
@@ -440,16 +460,20 @@ def _detect_npn_driver_clusters(
         if not base_net_name or not collector_net_name:
             continue
         cluster = [comp.ref]
-        for other in requirements.components:
-            if other.ref == comp.ref or other.ref in subcircuit_grouped:
+        # Find base resistor: R* on base net
+        for other_ref in net_to_refs.get(base_net_name, set()):
+            if other_ref == comp.ref or other_ref in subcircuit_grouped:
                 continue
-            for pin in other.pins:
-                if pin.net == base_net_name and other.ref.startswith("R"):
-                    cluster.append(other.ref)
-                    break
-                if pin.net == collector_net_name and other.ref.startswith(("D", "K")):
-                    cluster.append(other.ref)
-                    break
+            if other_ref.startswith("R"):
+                cluster.append(other_ref)
+                break
+        # Find collector diode/relay: D*/K* on collector net
+        for other_ref in net_to_refs.get(collector_net_name, set()):
+            if other_ref == comp.ref or other_ref in subcircuit_grouped:
+                continue
+            if other_ref.startswith(("D", "K")):
+                cluster.append(other_ref)
+                break
         if len(cluster) >= 3:
             group_name = f"_subcircuit_{comp.ref}"
             for ref in cluster:
@@ -472,6 +496,194 @@ def _detect_subcircuit_clusters(
     """Detect subcircuit clusters from both feature metadata and netlist patterns."""
     _detect_relay_clusters(requirements, constraints, subcircuit_grouped, layout)
     _detect_npn_driver_clusters(requirements, constraints, subcircuit_grouped, layout)
+
+
+def _add_decoupling_near_constraints(
+    requirements: ProjectRequirements,
+    ic_refs: set[str],
+    constraints: list[PlacementConstraint],
+) -> None:
+    """Add NEAR constraints for decoupling caps targeting their associated IC pins."""
+    _gnd_names = {"GND", "AGND", "DGND", "VSS", "GNDA", "GNDD"}
+    ref_net_pin_index: dict[str, list[tuple[str, str]]] = {}
+    non_gnd_nets = [n for n in requirements.nets if n.name.upper() not in _gnd_names]
+    for net in non_gnd_nets:
+        for conn in net.connections:
+            ref_net_pin_index.setdefault(conn.ref, []).append((net.name, conn.pin))
+
+    for comp in requirements.components:
+        if not _is_decoupling_cap(comp.ref, comp.value):
+            continue
+        cap_nets = {np[0] for np in ref_net_pin_index.get(comp.ref, [])}
+        found = False
+        for net in non_gnd_nets:
+            if net.name not in cap_nets:
+                continue
+            for conn in net.connections:
+                if conn.ref in ic_refs and conn.ref != comp.ref:
+                    constraints.append(PlacementConstraint(
+                        ref=comp.ref,
+                        constraint_type=PlacementConstraintType.NEAR,
+                        target_ref=conn.ref,
+                        target_pin=conn.pin,
+                        max_distance_mm=DECOUPLING_CAP_MAX_DISTANCE_MM,
+                        min_distance_mm=DECOUPLING_CAP_MIN_DISTANCE_MM,
+                        priority=30,
+                    ))
+                    found = True
+                    break
+            if found:
+                break
+
+
+def _add_passive_near_constraints(
+    requirements: ProjectRequirements,
+    constraints: list[PlacementConstraint],
+) -> None:
+    """Add NEAR constraints for passives sharing signal nets with dominant components."""
+    passive_prefixes = ("R", "C", "L", "D")
+    dominant_prefixes = ("U", "J", "P", "Q", "SW")
+    already_near = {c.ref for c in constraints
+                    if c.constraint_type == PlacementConstraintType.NEAR}
+
+    signal_nets = [n for n in requirements.nets if not _is_power_net(n.name)]
+    ref_signal_nets: dict[str, list[object]] = {}
+    for net in signal_nets:
+        for conn in net.connections:
+            ref_signal_nets.setdefault(conn.ref, []).append(net)
+
+    for comp in requirements.components:
+        ref_alpha = "".join(ch for ch in comp.ref if ch.isalpha())
+        if ref_alpha not in passive_prefixes:
+            continue
+        if comp.ref in already_near:
+            continue
+
+        best_target: tuple[str, str] | None = None
+        for net in ref_signal_nets.get(comp.ref, []):
+            for conn in net.connections:
+                conn_alpha = "".join(ch for ch in conn.ref if ch.isalpha())
+                if conn_alpha in dominant_prefixes and conn.ref != comp.ref:
+                    best_target = (conn.ref, conn.pin)
+                    break
+            if best_target:
+                break
+
+        if best_target:
+            constraints.append(PlacementConstraint(
+                ref=comp.ref,
+                constraint_type=PlacementConstraintType.NEAR,
+                target_ref=best_target[0],
+                target_pin=best_target[1],
+                max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
+                priority=25,
+            ))
+
+
+def _upgrade_signal_chain_groups(
+    requirements: ProjectRequirements,
+    constraints: list[PlacementConstraint],
+) -> list[PlacementConstraint]:
+    """Upgrade signal-path chain components to GROUP at priority 15."""
+    adj = build_signal_adjacency(requirements)
+    chains = trace_linear_chains(adj)
+    ref_max_priority: dict[str, int] = {}
+    for c in constraints:
+        ref_max_priority[c.ref] = max(ref_max_priority.get(c.ref, 0), c.priority)
+
+    for chain_idx, chain in enumerate(chains):
+        if len(chain) < 2:
+            continue
+        chain_group = f"_signal_chain_{chain_idx}"
+        for ref in chain:
+            if ref_max_priority.get(ref, 0) >= 15:
+                continue
+            constraints = [
+                c for c in constraints
+                if not (c.ref == ref and c.constraint_type == PlacementConstraintType.GROUP
+                        and c.priority < 15)
+            ]
+            constraints.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name=chain_group,
+                priority=15,
+            ))
+            ref_max_priority[ref] = 15
+    return constraints
+
+
+def _upgrade_net_based_groups(
+    requirements: ProjectRequirements,
+    constraints: list[PlacementConstraint],
+) -> list[PlacementConstraint]:
+    """Add net-based GROUP constraints for star topologies at priority 16."""
+    ref_max_priority: dict[str, int] = {}
+    for c in constraints:
+        ref_max_priority[c.ref] = max(ref_max_priority.get(c.ref, 0), c.priority)
+
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue
+        net_group_refs = [c.ref for c in net.connections]
+        if len(net_group_refs) < 3:
+            continue
+        group_name = f"_net_group_{net.name}"
+        for ref in net_group_refs:
+            if ref_max_priority.get(ref, 0) > 16:
+                continue
+            constraints = [
+                c for c in constraints
+                if not (c.ref == ref
+                        and c.constraint_type == PlacementConstraintType.GROUP
+                        and c.priority <= 16)
+            ]
+            constraints.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name=group_name,
+                priority=16,
+            ))
+            ref_max_priority[ref] = 16
+    return constraints
+
+
+def _apply_template_fixed(
+    requirements: ProjectRequirements,
+    board_template: BoardTemplate,
+    constraints: list[PlacementConstraint],
+) -> None:
+    """Add FIXED constraints for components matching board template positions."""
+    for fc in board_template.fixed_components:
+        matched_ref: str | None = None
+        is_gpio_template = "GPIO" in fc.description.upper()
+        # Exact ref match — but for GPIO headers, skip small connectors
+        for comp in requirements.components:
+            if comp.ref == fc.ref_pattern:
+                if is_gpio_template and len(comp.pins) < 10:
+                    continue  # skip small connector with matching ref
+                matched_ref = comp.ref
+                break
+        # Fallback: for GPIO header templates, match any 2x20 connector
+        if matched_ref is None and is_gpio_template:
+            for comp in requirements.components:
+                fp_upper = comp.footprint.upper()
+                if "02X20" in fp_upper or "2X20" in fp_upper:
+                    matched_ref = comp.ref
+                    break
+        if matched_ref is not None:
+            layer_override: str | None = None
+            if fc.layer != "F.Cu":
+                layer_override = fc.layer
+            constraints.append(PlacementConstraint(
+                ref=matched_ref,
+                constraint_type=PlacementConstraintType.FIXED,
+                x=fc.x_mm,
+                y=fc.y_mm,
+                rotation=fc.rotation,
+                priority=100,
+                layer=layer_override,
+            ))
 
 
 def constraints_from_requirements(
@@ -501,36 +713,7 @@ def constraints_from_requirements(
 
     # 1. Template fixed components
     if board_template is not None:
-        for fc in board_template.fixed_components:
-            matched_ref: str | None = None
-            is_gpio_template = "GPIO" in fc.description.upper()
-            # Exact ref match — but for GPIO headers, skip small connectors
-            for comp in requirements.components:
-                if comp.ref == fc.ref_pattern:
-                    if is_gpio_template and len(comp.pins) < 10:
-                        continue  # skip small connector with matching ref
-                    matched_ref = comp.ref
-                    break
-            # Fallback: for GPIO header templates, match any 2x20 connector
-            if matched_ref is None and is_gpio_template:
-                for comp in requirements.components:
-                    fp_upper = comp.footprint.upper()
-                    if "02X20" in fp_upper or "2X20" in fp_upper:
-                        matched_ref = comp.ref
-                        break
-            if matched_ref is not None:
-                layer_override: str | None = None
-                if fc.layer != "F.Cu":
-                    layer_override = fc.layer
-                constraints.append(PlacementConstraint(
-                    ref=matched_ref,
-                    constraint_type=PlacementConstraintType.FIXED,
-                    x=fc.x_mm,
-                    y=fc.y_mm,
-                    rotation=fc.rotation,
-                    priority=100,
-                    layer=layer_override,
-                ))
+        _apply_template_fixed(requirements, board_template, constraints)
 
     # 2. Build net-to-refs map for proximity analysis
     net_refs: dict[str, set[str]] = {}
@@ -565,70 +748,10 @@ def constraints_from_requirements(
             ))
 
     # 4. Decoupling caps -> NEAR their associated IC (pin-level targeting)
-    _gnd_names = {"GND", "AGND", "DGND", "VSS", "GNDA", "GNDD"}
-    for comp in requirements.components:
-        if _is_decoupling_cap(comp.ref, comp.value):
-            # Find IC sharing a POWER net (skip GND — target the supply pin)
-            for net in requirements.nets:
-                if net.name.upper() in _gnd_names:
-                    continue  # skip ground nets
-                cap_in_net = any(c.ref == comp.ref for c in net.connections)
-                if not cap_in_net:
-                    continue
-                for conn in net.connections:
-                    if conn.ref in ic_refs and conn.ref != comp.ref:
-                        constraints.append(PlacementConstraint(
-                            ref=comp.ref,
-                            constraint_type=PlacementConstraintType.NEAR,
-                            target_ref=conn.ref,
-                            target_pin=conn.pin,
-                            max_distance_mm=DECOUPLING_CAP_MAX_DISTANCE_MM,
-                            min_distance_mm=DECOUPLING_CAP_MIN_DISTANCE_MM,
-                            priority=30,
-                        ))
-                        break
-                else:
-                    continue
-                break
+    _add_decoupling_near_constraints(requirements, ic_refs, constraints)
 
     # 4b. Passives sharing signal nets with ICs/switches/connectors -> NEAR
-    passive_prefixes = ("R", "C", "L", "D")
-    dominant_prefixes = ("U", "J", "P", "Q", "SW")
-    already_near = {c.ref for c in constraints
-                    if c.constraint_type == PlacementConstraintType.NEAR}
-
-    for comp in requirements.components:
-        ref_alpha = "".join(ch for ch in comp.ref if ch.isalpha())
-        if ref_alpha not in passive_prefixes:
-            continue
-        if comp.ref in already_near:
-            continue  # already has NEAR from decoupling cap logic (section 4)
-
-        # Find dominant component sharing a signal net
-        best_target: tuple[str, str] | None = None
-        for net in requirements.nets:
-            if _is_power_net(net.name):
-                continue
-            comp_in_net = any(c.ref == comp.ref for c in net.connections)
-            if not comp_in_net:
-                continue
-            for conn in net.connections:
-                conn_alpha = "".join(ch for ch in conn.ref if ch.isalpha())
-                if conn_alpha in dominant_prefixes and conn.ref != comp.ref:
-                    best_target = (conn.ref, conn.pin)
-                    break
-            if best_target:
-                break
-
-        if best_target:
-            constraints.append(PlacementConstraint(
-                ref=comp.ref,
-                constraint_type=PlacementConstraintType.NEAR,
-                target_ref=best_target[0],
-                target_pin=best_target[1],
-                max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
-                priority=25,
-            ))
+    _add_passive_near_constraints(requirements, constraints)
 
     # 4c & 4d. Subcircuit cluster detection
     _subcircuit_grouped: set[str] = set()
@@ -638,11 +761,13 @@ def constraints_from_requirements(
     )
 
     # 5. FeatureBlock -> GROUP
+    # Pre-build set of refs with high-priority constraints for O(1) lookup
+    high_priority_refs = {c.ref for c in constraints if c.priority >= 20}
     for fb in requirements.features:
         if len(fb.components) > 1:
             for ref in fb.components:
                 # Don't override higher-priority constraints
-                if any(c.ref == ref and c.priority >= 20 for c in constraints):
+                if ref in high_priority_refs:
                     continue
                 constraints.append(PlacementConstraint(
                     ref=ref,
@@ -652,57 +777,10 @@ def constraints_from_requirements(
                 ))
 
     # 6. Signal-path chains -> GROUP (higher priority than FeatureBlock)
-    adj = build_signal_adjacency(requirements)
-    chains = trace_linear_chains(adj)
-    for chain_idx, chain in enumerate(chains):
-        if len(chain) < 2:
-            continue
-        chain_group = f"_signal_chain_{chain_idx}"
-        for ref in chain:
-            # Only upgrade if current constraint is lower priority
-            if any(c.ref == ref and c.priority >= 15 for c in constraints):
-                continue
-            # Remove any existing GROUP at priority 10
-            constraints = [
-                c for c in constraints
-                if not (c.ref == ref and c.constraint_type == PlacementConstraintType.GROUP
-                        and c.priority < 15)
-            ]
-            constraints.append(PlacementConstraint(
-                ref=ref,
-                constraint_type=PlacementConstraintType.GROUP,
-                group_name=chain_group,
-                priority=15,
-            ))
+    constraints = _upgrade_signal_chain_groups(requirements, constraints)
 
-    # 7. Net-based grouping: components sharing the same signal net
-    # This captures star topologies (voltage dividers, filter networks)
-    # that trace_linear_chains cannot detect.  Priority 16 overrides
-    # signal chain groups (15) but not edge/near/fixed constraints (>=20).
-    for net in requirements.nets:
-        if _is_power_net(net.name):
-            continue
-        net_group_refs = [c.ref for c in net.connections]
-        if len(net_group_refs) < 3:
-            continue
-        group_name = f"_net_group_{net.name}"
-        for ref in net_group_refs:
-            # Don't override higher-priority constraints (NEAR, EDGE, FIXED)
-            if any(c.ref == ref and c.priority > 16 for c in constraints):
-                continue
-            # Remove existing lower-priority GROUP constraints for this ref
-            constraints = [
-                c for c in constraints
-                if not (c.ref == ref
-                        and c.constraint_type == PlacementConstraintType.GROUP
-                        and c.priority <= 16)
-            ]
-            constraints.append(PlacementConstraint(
-                ref=ref,
-                constraint_type=PlacementConstraintType.GROUP,
-                group_name=group_name,
-                priority=16,
-            ))
+    # 7. Net-based grouping for star topologies (voltage dividers, filters)
+    constraints = _upgrade_net_based_groups(requirements, constraints)
 
     return tuple(constraints)
 
@@ -747,6 +825,180 @@ def _grid_rect_for_ref(
         w + 2 * gap,
         h + 2 * gap,
     )
+
+
+# ---------------------------------------------------------------------------
+# Constraint solver helpers
+# ---------------------------------------------------------------------------
+
+
+def _solve_edge_placement(
+    ref_constraint: dict[str, PlacementConstraint],
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    grid: _OccupancyGrid,
+    footprint_sizes: dict[str, tuple[float, float]],
+    board_w: float,
+    board_h: float,
+    origin_x: float,
+    origin_y: float,
+) -> None:
+    """Place EDGE-constrained components along board edges."""
+    edge_groups: dict[BoardEdge, list[str]] = {}
+    for ref, c in ref_constraint.items():
+        if c.constraint_type != PlacementConstraintType.EDGE and ref not in positions:
+            continue
+        if c.constraint_type == PlacementConstraintType.EDGE and ref not in positions:
+            edge = c.edge or BoardEdge.LEFT
+            edge_groups.setdefault(edge, []).append(ref)
+
+    for edge, refs in edge_groups.items():
+        is_horizontal = edge in (BoardEdge.TOP, BoardEdge.BOTTOM)
+        edge_len = board_w if is_horizontal else board_h
+        refs_sorted = sorted(
+            refs,
+            key=lambda r: footprint_sizes.get(r, (3.0, 3.0))[0 if is_horizontal else 1],
+            reverse=True,
+        )
+        spacing = edge_len / (len(refs_sorted) + 1)
+        for i, ref in enumerate(refs_sorted):
+            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+            base = origin_x if is_horizontal else origin_y
+            half_extent = w / 2.0 if is_horizontal else h / 2.0
+            offset = spacing * (i + 1) + base
+            offset = max(offset, half_extent + 1.0 + base)
+            offset = min(offset, edge_len + base - half_extent - 1.0)
+            x, y, rot = _edge_position(edge, board_w, board_h, w, h, offset)
+            x += origin_x
+            y += origin_y
+            gap = _placement_gap(w, h)
+            rx = x - origin_x - w / 2 - gap
+            ry = y - origin_y - h / 2 - gap
+            rw = w + 2 * gap
+            rh = h + 2 * gap
+            if not grid.is_rect_free(rx, ry, rw, rh):
+                alt = grid.find_nearest_free(rx, ry, rw, rh)
+                if alt is not None:
+                    x = alt[0] + w / 2 + gap + origin_x
+                    y = alt[1] + h / 2 + gap + origin_y
+                    rx, ry = alt
+                    log.debug(
+                        "EDGE(%s): %s shifted to avoid overlap -> (%.1f, %.1f)",
+                        edge.value, ref, x, y,
+                    )
+            positions[ref] = Point(x=x, y=y)
+            rotations[ref] = rot
+            grid.mark_rect(rx, ry, rw, rh)
+            log.debug("EDGE(%s): %s at (%.1f, %.1f) rot=%.0f", edge.value, ref, x, y, rot)
+
+
+def _build_connectivity_degree_index(
+    requirements: ProjectRequirements | None,
+) -> dict[str, int]:
+    """Build ref -> count of non-power signal nets index."""
+    index: dict[str, int] = {}
+    if requirements is None:
+        return index
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue
+        seen_refs: set[str] = set()
+        for c in net.connections:
+            if c.ref not in seen_refs:
+                seen_refs.add(c.ref)
+                index[c.ref] = index.get(c.ref, 0) + 1
+    return index
+
+
+def _solve_group_placement(
+    ref_constraint: dict[str, PlacementConstraint],
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    grid: _OccupancyGrid,
+    footprint_sizes: dict[str, tuple[float, float]],
+    board_w: float,
+    board_h: float,
+    origin_x: float,
+    origin_y: float,
+    conn_degree_index: dict[str, int],
+) -> None:
+    """Place GROUP-constrained components in grid clusters."""
+    group_members: dict[str, list[str]] = {}
+    for ref, c in ref_constraint.items():
+        if c.constraint_type == PlacementConstraintType.GROUP and ref not in positions:
+            gname = c.group_name or "default"
+            group_members.setdefault(gname, []).append(ref)
+
+    for gname, refs in group_members.items():
+        refs.sort(key=lambda r: conn_degree_index.get(r, 0), reverse=True)
+        item_w = max(footprint_sizes.get(r, (3.0, 3.0))[0] + 2.0 for r in refs)
+        max_h = max(footprint_sizes.get(r, (3.0, 3.0))[1] for r in refs) + 2.0
+
+        max_row_w = board_w - 10.0
+        cols_per_row = max(1, int(max_row_w / item_w))
+        num_rows = math.ceil(len(refs) / cols_per_row)
+
+        block_w = min(len(refs), cols_per_row) * item_w
+        block_h = num_rows * max_h
+
+        centre_x = board_w / 2.0
+        centre_y = board_h / 2.0
+        start = grid.find_nearest_free(centre_x, centre_y, block_w, block_h)
+        if start is None:
+            start = (5.0, 5.0)
+
+        base_x = start[0] + origin_x
+        base_y = start[1] + origin_y
+        for idx, ref in enumerate(refs):
+            col = idx % cols_per_row
+            row = idx // cols_per_row
+            w, h = footprint_sizes.get(ref, (3.0, 3.0))
+            x_pos = base_x + col * item_w + w / 2
+            y_pos = base_y + row * max_h + max_h / 2
+            positions[ref] = Point(x=x_pos, y=y_pos)
+            rotations[ref] = 0.0
+            gap = _placement_gap(w, h)
+            grid.mark_rect(
+                x_pos - origin_x - w / 2 - gap,
+                y_pos - origin_y - max_h / 2 - gap,
+                w + 2.0 + 2 * gap, max_h + 2 * gap,
+            )
+            log.debug(
+                "GROUP(%s): %s at (%.1f, %.1f) [row=%d col=%d]",
+                gname, ref, positions[ref].x, positions[ref].y, row, col,
+            )
+
+
+def _solve_remaining_placement(
+    all_refs: set[str],
+    positions: dict[str, Point],
+    rotations: dict[str, float],
+    violations: list[str],
+    grid: _OccupancyGrid,
+    footprint_sizes: dict[str, tuple[float, float]],
+    board_w: float,
+    board_h: float,
+    origin_x: float,
+    origin_y: float,
+    conn_degree_index: dict[str, int],
+) -> None:
+    """Place remaining unplaced components at nearest free positions."""
+    unplaced = sorted(
+        [ref for ref in all_refs if ref not in positions],
+        key=lambda r: conn_degree_index.get(r, 0), reverse=True,
+    )
+    for ref in unplaced:
+        w, h = footprint_sizes.get(ref, (3.0, 3.0))
+        free = grid.find_nearest_free(board_w / 2.0, board_h / 2.0, w, h)
+        if free is not None:
+            positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
+            rotations[ref] = 0.0
+            gap = _placement_gap(w, h)
+            grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
+        else:
+            violations.append(f"No space for {ref} on the board")
+            positions[ref] = Point(x=board_w / 2.0 + origin_x, y=board_h / 2.0 + origin_y)
+            rotations[ref] = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -863,56 +1115,10 @@ def solve_placement(
             log.debug("FIXED: %s at (%.1f, %.1f)", ref, c.x, c.y)
 
     # 2. Place EDGE
-    edge_groups: dict[BoardEdge, list[str]] = {}
-    for ref, c in ref_constraint.items():
-        if c.constraint_type != PlacementConstraintType.EDGE and ref not in positions:
-            continue
-        if c.constraint_type == PlacementConstraintType.EDGE and ref not in positions:
-            edge = c.edge or BoardEdge.LEFT
-            edge_groups.setdefault(edge, []).append(ref)
-
-    for edge, refs in edge_groups.items():
-        is_horizontal = edge in (BoardEdge.TOP, BoardEdge.BOTTOM)
-        edge_len = board_w if is_horizontal else board_h
-        # Sort by footprint size (largest first) for better distribution
-        refs_sorted = sorted(
-            refs,
-            key=lambda r: footprint_sizes.get(r, (3.0, 3.0))[0 if is_horizontal else 1],
-            reverse=True,
-        )
-        spacing = edge_len / (len(refs_sorted) + 1)
-        for i, ref in enumerate(refs_sorted):
-            w, h = footprint_sizes.get(ref, (3.0, 3.0))
-            base = origin_x if is_horizontal else origin_y
-            # Component half-width along the edge axis
-            half_extent = w / 2.0 if is_horizontal else h / 2.0
-            offset = spacing * (i + 1) + base
-            # Clamp offset so entire component body stays within the board
-            offset = max(offset, half_extent + 1.0 + base)
-            offset = min(offset, edge_len + base - half_extent - 1.0)
-            x, y, rot = _edge_position(edge, board_w, board_h, w, h, offset)
-            x += origin_x
-            y += origin_y
-            gap = _placement_gap(w, h)
-            rx = x - origin_x - w / 2 - gap
-            ry = y - origin_y - h / 2 - gap
-            rw = w + 2 * gap
-            rh = h + 2 * gap
-            # Check if computed position conflicts with already-placed components
-            if not grid.is_rect_free(rx, ry, rw, rh):
-                alt = grid.find_nearest_free(rx, ry, rw, rh)
-                if alt is not None:
-                    x = alt[0] + w / 2 + gap + origin_x
-                    y = alt[1] + h / 2 + gap + origin_y
-                    rx, ry = alt
-                    log.debug(
-                        "EDGE(%s): %s shifted to avoid overlap → (%.1f, %.1f)",
-                        edge.value, ref, x, y,
-                    )
-            positions[ref] = Point(x=x, y=y)
-            rotations[ref] = rot
-            grid.mark_rect(rx, ry, rw, rh)
-            log.debug("EDGE(%s): %s at (%.1f, %.1f) rot=%.0f", edge.value, ref, x, y, rot)
+    _solve_edge_placement(
+        ref_constraint, positions, rotations, grid,
+        footprint_sizes, board_w, board_h, origin_x, origin_y,
+    )
 
     # 3. Place NEAR (with retry for deferred placements whose targets
     # appear later in the priority order)
@@ -1069,86 +1275,20 @@ def solve_placement(
         if not deferred:
             break
 
-    # 4. Place GROUP (sorted by connectivity degree — highest first for
-    # central positions and shorter average routes)
-    def _connectivity_degree(ref: str) -> int:
-        """Count non-power signal nets this component participates in."""
-        if requirements is None:
-            return 0
-        count = 0
-        for net in requirements.nets:
-            if _is_power_net(net.name):
-                continue
-            if any(c.ref == ref for c in net.connections):
-                count += 1
-        return count
-
-    group_members: dict[str, list[str]] = {}
-    for ref, c in ref_constraint.items():
-        if c.constraint_type == PlacementConstraintType.GROUP and ref not in positions:
-            gname = c.group_name or "default"
-            group_members.setdefault(gname, []).append(ref)
-
-    for gname, refs in group_members.items():
-        # Sort by connectivity (highest first) for better central placement
-        refs.sort(key=_connectivity_degree, reverse=True)
-        # Compute uniform cell size for the group
-        item_w = max(footprint_sizes.get(r, (3.0, 3.0))[0] + 2.0 for r in refs)
-        max_h = max(footprint_sizes.get(r, (3.0, 3.0))[1] for r in refs) + 2.0
-
-        # Wrap to multiple rows if group exceeds board width
-        max_row_w = board_w - 10.0  # 5mm margin each side
-        cols_per_row = max(1, int(max_row_w / item_w))
-        num_rows = math.ceil(len(refs) / cols_per_row)
-
-        block_w = min(len(refs), cols_per_row) * item_w
-        block_h = num_rows * max_h
-
-        # Start from board centre
-        centre_x = board_w / 2.0
-        centre_y = board_h / 2.0
-        start = grid.find_nearest_free(centre_x, centre_y, block_w, block_h)
-        if start is None:
-            start = (5.0, 5.0)
-
-        base_x = start[0] + origin_x
-        base_y = start[1] + origin_y
-        for idx, ref in enumerate(refs):
-            col = idx % cols_per_row
-            row = idx // cols_per_row
-            w, h = footprint_sizes.get(ref, (3.0, 3.0))
-            x_pos = base_x + col * item_w + w / 2
-            y_pos = base_y + row * max_h + max_h / 2
-            positions[ref] = Point(x=x_pos, y=y_pos)
-            rotations[ref] = 0.0
-            gap = _placement_gap(w, h)
-            grid.mark_rect(
-                x_pos - origin_x - w / 2 - gap,
-                y_pos - origin_y - max_h / 2 - gap,
-                w + 2.0 + 2 * gap, max_h + 2 * gap,
-            )
-            log.debug(
-                "GROUP(%s): %s at (%.1f, %.1f) [row=%d col=%d]",
-                gname, ref, positions[ref].x, positions[ref].y, row, col,
-            )
+    # 4. Place GROUP
+    conn_degree_index = _build_connectivity_degree_index(requirements)
+    _solve_group_placement(
+        ref_constraint, positions, rotations, grid,
+        footprint_sizes, board_w, board_h, origin_x, origin_y,
+        conn_degree_index,
+    )
 
     # 5. Place any remaining unplaced refs (highest connectivity first)
-    unplaced = sorted(
-        [ref for ref in all_refs if ref not in positions],
-        key=_connectivity_degree, reverse=True,
+    _solve_remaining_placement(
+        all_refs, positions, rotations, violations, grid,
+        footprint_sizes, board_w, board_h, origin_x, origin_y,
+        conn_degree_index,
     )
-    for ref in unplaced:
-        w, h = footprint_sizes.get(ref, (3.0, 3.0))
-        free = grid.find_nearest_free(board_w / 2.0, board_h / 2.0, w, h)
-        if free is not None:
-            positions[ref] = Point(x=free[0] + origin_x, y=free[1] + origin_y)
-            rotations[ref] = 0.0
-            gap = _placement_gap(w, h)
-            grid.mark_rect(free[0] - gap, free[1] - gap, w + 2 * gap, h + 2 * gap)
-        else:
-            violations.append(f"No space for {ref} on the board")
-            positions[ref] = Point(x=board_w / 2.0 + origin_x, y=board_h / 2.0 + origin_y)
-            rotations[ref] = 0.0
 
     # 6. Optimize rotations when requirements are available
     # Two iterations: neighbours' rotations affect each other, so a second
@@ -1172,6 +1312,119 @@ def solve_placement(
         rotations=rotations,
         violations=tuple(violations),
     )
+
+
+# ---------------------------------------------------------------------------
+# RPi HAT placement helpers
+# ---------------------------------------------------------------------------
+
+
+def _add_pullup_resistor_constraints(
+    requirements: ProjectRequirements,
+    extra: list[PlacementConstraint],
+    sw_ref: str,
+    ic_ref: str | None,
+) -> None:
+    """Add NEAR constraints for pull-up/address resistors near SW or IC."""
+    sw_net_pin: dict[str, str] = {}
+    for net in requirements.nets:
+        for c in net.connections:
+            if c.ref == sw_ref:
+                sw_net_pin[net.name] = c.pin
+
+    _bus_patterns = {"I2C", "SPI", "SCL", "SDA", "MOSI", "MISO", "SCLK"}
+    ic_net_pin: dict[str, str] = {}
+    if ic_ref is not None:
+        for net in requirements.nets:
+            name_upper = net.name.upper()
+            is_bus = any(p in name_upper for p in _bus_patterns)
+            if is_bus:
+                for c in net.connections:
+                    if c.ref == ic_ref:
+                        ic_net_pin[net.name] = c.pin
+
+    _net_member_refs: dict[str, set[str]] = {}
+    for net in requirements.nets:
+        if net.name in sw_net_pin:
+            _net_member_refs[net.name] = {c.ref for c in net.connections}
+
+    for comp in requirements.components:
+        if not comp.ref.startswith("R"):
+            continue
+        for net_name, member_refs in _net_member_refs.items():
+            if comp.ref not in member_refs:
+                continue
+            if net_name in ic_net_pin and ic_ref is not None:
+                extra.append(PlacementConstraint(
+                    ref=comp.ref,
+                    constraint_type=PlacementConstraintType.NEAR,
+                    target_ref=ic_ref,
+                    target_pin=ic_net_pin[net_name],
+                    max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
+                    priority=28,
+                ))
+            else:
+                extra.append(PlacementConstraint(
+                    ref=comp.ref,
+                    constraint_type=PlacementConstraintType.NEAR,
+                    target_ref=sw_ref,
+                    target_pin=sw_net_pin[net_name],
+                    max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
+                    priority=28,
+                ))
+            break
+
+
+def _add_channel_grouping_constraints(
+    requirements: ProjectRequirements,
+    extra: list[PlacementConstraint],
+) -> None:
+    """Add NEAR constraints grouping ADC channel passives near their connector.
+
+    Topology per channel:
+      Jx --[SENSx]--> Rx_top --[AINx]--> Rx_bot, Cx_filter, U1
+    """
+    channel_assigned: set[str] = set()
+    for net in requirements.nets:
+        if _is_power_net(net.name):
+            continue
+        conn_refs = [c.ref for c in net.connections]
+        j_refs = [r for r in conn_refs if r.startswith("J") and r != "J1"]
+        r_refs = [r for r in conn_refs if r.startswith("R")]
+        if len(j_refs) != 1 or len(r_refs) != 1:
+            continue
+        anchor_j = j_refs[0]
+        top_r = r_refs[0]
+        j_pin: str | None = None
+        for conn in net.connections:
+            if conn.ref == anchor_j:
+                j_pin = conn.pin
+                break
+        channel_parts = [top_r]
+        for other_net in requirements.nets:
+            if other_net.name == net.name or _is_power_net(other_net.name):
+                continue
+            other_refs = [c.ref for c in other_net.connections]
+            if top_r not in other_refs:
+                continue
+            for r in other_refs:
+                prefix = "".join(ch for ch in r if ch.isalpha()).upper()
+                if prefix not in ("R", "C", "L"):
+                    continue
+                if r != top_r and r not in channel_parts:
+                    channel_parts.append(r)
+        for ref in channel_parts:
+            if ref in channel_assigned:
+                continue
+            extra.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.NEAR,
+                target_ref=anchor_j,
+                target_pin=j_pin,
+                max_distance_mm=8.0,
+                priority=35,
+            ))
+            channel_assigned.add(ref)
 
 
 # ---------------------------------------------------------------------------
@@ -1241,55 +1494,10 @@ def rpi_hat_constraints(
             ))
 
     # Pull-up/address resistors sharing nets with SW -> NEAR(SW or U1)
-    # I2C pull-ups (nets also connecting U1) placed near U1 for shorter routes.
     if sw_ref is not None:
-        # Map net_name -> SW pin number for pin-level targeting
-        sw_net_pin: dict[str, str] = {}
-        for net in requirements.nets:
-            for c in net.connections:
-                if c.ref == sw_ref:
-                    sw_net_pin[net.name] = c.pin
-
-        # Identify I2C/SPI bus nets that also connect to U1 (IC).
-        # These pull-up resistors should be near U1, not SW1.
-        _bus_patterns = {"I2C", "SPI", "SCL", "SDA", "MOSI", "MISO", "SCLK"}
-        ic_net_pin: dict[str, str] = {}
-        if ic_ref is not None:
-            for net in requirements.nets:
-                name_upper = net.name.upper()
-                is_bus = any(p in name_upper for p in _bus_patterns)
-                if is_bus:
-                    for c in net.connections:
-                        if c.ref == ic_ref:
-                            ic_net_pin[net.name] = c.pin
-
-        for comp in requirements.components:
-            if not comp.ref.startswith("R"):
-                continue
-            for net in requirements.nets:
-                if net.name not in sw_net_pin:
-                    continue
-                if any(c.ref == comp.ref for c in net.connections):
-                    # I2C/SPI pull-ups: place near U1 for shorter bus routes
-                    if net.name in ic_net_pin and ic_ref is not None:
-                        extra.append(PlacementConstraint(
-                            ref=comp.ref,
-                            constraint_type=PlacementConstraintType.NEAR,
-                            target_ref=ic_ref,
-                            target_pin=ic_net_pin[net.name],
-                            max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
-                            priority=28,
-                        ))
-                    else:
-                        extra.append(PlacementConstraint(
-                            ref=comp.ref,
-                            constraint_type=PlacementConstraintType.NEAR,
-                            target_ref=sw_ref,
-                            target_pin=sw_net_pin[net.name],
-                            max_distance_mm=PASSIVE_NEAR_IC_MAX_DISTANCE_MM,
-                            priority=28,
-                        ))
-                    break
+        _add_pullup_resistor_constraints(
+            requirements, extra, sw_ref, ic_ref,
+        )
 
     # Screw terminals -> EDGE(BOTTOM) for RPi HATs (opposite GPIO header)
     for comp in requirements.components:
@@ -1312,57 +1520,7 @@ def rpi_hat_constraints(
     # Channel grouping: trace signal nets from screw terminals through
     # voltage dividers to the ADC, placing each channel's passives near
     # their input connector.
-    #
-    # Topology per channel:
-    #   Jx --[SENSx]--> Rx_top --[AINx]--> Rx_bot, Cx_filter, U1
-    #
-    # We place Rx_top, Rx_bot, Cx_filter all NEAR their Jx connector.
-    channel_assigned: set[str] = set()
-    for net in requirements.nets:
-        if _is_power_net(net.name):
-            continue
-        # Find SENS-type nets: connect a screw terminal (Jx) to a resistor
-        conn_refs = [c.ref for c in net.connections]
-        j_refs = [r for r in conn_refs if r.startswith("J") and r != "J1"]
-        r_refs = [r for r in conn_refs if r.startswith("R")]
-        if len(j_refs) != 1 or len(r_refs) != 1:
-            continue
-        anchor_j = j_refs[0]
-        top_r = r_refs[0]
-        # Capture the J terminal pin from this SENS net
-        j_pin: str | None = None
-        for conn in net.connections:
-            if conn.ref == anchor_j:
-                j_pin = conn.pin
-                break
-        # Find the ADC-side net that top_r also connects to
-        channel_parts = [top_r]
-        for other_net in requirements.nets:
-            if other_net.name == net.name or _is_power_net(other_net.name):
-                continue
-            other_refs = [c.ref for c in other_net.connections]
-            if top_r not in other_refs:
-                continue
-            # This is the AINx net — collect only passives (R, C, L)
-            for r in other_refs:
-                prefix = "".join(ch for ch in r if ch.isalpha()).upper()
-                if prefix not in ("R", "C", "L"):
-                    continue
-                if r != top_r and r not in channel_parts:
-                    channel_parts.append(r)
-        # Place all channel parts NEAR the screw terminal
-        for ref in channel_parts:
-            if ref in channel_assigned:
-                continue
-            extra.append(PlacementConstraint(
-                ref=ref,
-                constraint_type=PlacementConstraintType.NEAR,
-                target_ref=anchor_j,
-                target_pin=j_pin,
-                max_distance_mm=8.0,
-                priority=35,
-            ))
-            channel_assigned.add(ref)
+    _add_channel_grouping_constraints(requirements, extra)
 
     # Merge: higher-priority extras override base
     merged: dict[str, PlacementConstraint] = {}
@@ -1392,11 +1550,9 @@ def _get_component_pad_offsets(
     """
     from kicad_pipeline.pcb.footprints import footprint_for_component
 
-    comp = None
-    for c in requirements.components:
-        if c.ref == ref:
-            comp = c
-            break
+    # Use dict lookup instead of linear scan
+    comp_map = {c.ref: c for c in requirements.components}
+    comp = comp_map.get(ref)
     if comp is None:
         return None
 
@@ -1603,6 +1759,148 @@ def _build_pad_connectivity(
     return result
 
 
+def _passive_pad_offsets(
+    ref: str,
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> dict[str, tuple[float, float]] | None:
+    """Return pad-1/pad-2 offsets for a 2-pin passive at rotation 0."""
+    if not _is_two_pin_passive(ref):
+        return None
+    size = footprint_sizes.get(ref)
+    if size is None:
+        return None
+    w = size[0]
+    return {"1": (-w / 2.0, 0.0), "2": (w / 2.0, 0.0)}
+
+
+def _pad_world_pos(
+    ref: str,
+    pin: str,
+    rot: float,
+    pad_offsets: dict[str, tuple[float, float]] | None,
+    positions: dict[str, Point],
+) -> tuple[float, float]:
+    """Return world position of a pad given component rotation."""
+    pos = positions[ref]
+    if pad_offsets is not None and pin in pad_offsets:
+        px, py = pad_offsets[pin]
+        ox, oy = _rotated_pad_offset(px, py, rot)
+        return (pos.x + ox, pos.y + oy)
+    return (pos.x, pos.y)
+
+
+def _optimize_passive_rotations_pad_aware(
+    positions: dict[str, Point],
+    result: dict[str, float],
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> None:
+    """Optimize 2-pin passive rotations using pad-level Manhattan distance."""
+    for ref in positions:
+        if not _is_two_pin_passive(ref):
+            continue
+        offsets = _passive_pad_offsets(ref, footprint_sizes)
+        if offsets is None:
+            continue
+        pin_conns: list[tuple[str, str, str]] = []
+        for pin in ("1", "2"):
+            for nb_ref, nb_pin in pad_conn.get((ref, pin), []):
+                if nb_ref in positions:
+                    pin_conns.append((pin, nb_ref, nb_pin))
+        if not pin_conns:
+            continue
+
+        best_rot = result.get(ref, 0.0)
+        best_cost = float("inf")
+        for trial_rot in (0.0, 90.0, 180.0, 270.0):
+            cost = 0.0
+            for my_pin, nb_ref, nb_pin in pin_conns:
+                mx, my = _pad_world_pos(ref, my_pin, trial_rot, offsets, positions)
+                nb_offsets = _passive_pad_offsets(nb_ref, footprint_sizes)
+                nb_rot = result.get(nb_ref, 0.0)
+                nx, ny = _pad_world_pos(nb_ref, nb_pin, nb_rot, nb_offsets, positions)
+                cost += abs(mx - nx) + abs(my - ny)
+            if cost < best_cost:
+                best_cost = cost
+                best_rot = trial_rot
+        result[ref] = best_rot
+
+
+def _optimize_ic_rotations_pad_aware(
+    positions: dict[str, Point],
+    result: dict[str, float],
+    requirements: ProjectRequirements,
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    footprint_sizes: dict[str, tuple[float, float]],
+) -> None:
+    """Optimize IC rotations using neighbour pad positions."""
+    for ref in positions:
+        if not ref.startswith("U"):
+            continue
+        size = footprint_sizes.get(ref)
+        if size is None:
+            continue
+        ic_pin_conns: list[tuple[str, str, str]] = []
+        for comp in requirements.components:
+            if comp.ref != ref:
+                continue
+            for comp_pin in comp.pins:
+                for nb_ref, nb_pin in pad_conn.get((ref, comp_pin.number), []):
+                    if nb_ref in positions:
+                        ic_pin_conns.append((comp_pin.number, nb_ref, nb_pin))
+            break
+        if not ic_pin_conns:
+            continue
+
+        pos = positions[ref]
+        best_rot = result.get(ref, 0.0)
+        best_cost = float("inf")
+        for trial_rot in (0.0, 90.0, 180.0, 270.0):
+            cost = 0.0
+            for _my_pin, nb_ref, nb_pin in ic_pin_conns:
+                nb_offsets = _passive_pad_offsets(nb_ref, footprint_sizes)
+                nb_rot = result.get(nb_ref, 0.0)
+                nx, ny = _pad_world_pos(nb_ref, nb_pin, nb_rot, nb_offsets, positions)
+                cost += abs(pos.x - nx) + abs(pos.y - ny)
+            if cost < best_cost:
+                best_cost = cost
+                best_rot = trial_rot
+        result[ref] = best_rot
+
+
+def _optimize_passive_rotations_center_based(
+    positions: dict[str, Point],
+    result: dict[str, float],
+    adj: dict[str, set[str]],
+) -> None:
+    """Optimize 2-pin passive rotations toward nearest connected neighbour."""
+    for ref in positions:
+        if not _is_two_pin_passive(ref):
+            continue
+        neighbours = adj.get(ref, set())
+        if not neighbours:
+            continue
+        pos = positions[ref]
+        best_neighbour: str | None = None
+        best_dist = float("inf")
+        for nb in neighbours:
+            if nb not in positions:
+                continue
+            nb_pos = positions[nb]
+            d = math.hypot(nb_pos.x - pos.x, nb_pos.y - pos.y)
+            if d < best_dist:
+                best_dist = d
+                best_neighbour = nb
+
+        if best_neighbour is not None:
+            nb_pos = positions[best_neighbour]
+            dx = nb_pos.x - pos.x
+            dy = nb_pos.y - pos.y
+            angle = math.degrees(math.atan2(dy, dx))
+            snapped = round(angle / 90.0) * 90.0
+            result[ref] = snapped % 360.0
+
+
 def optimize_rotations(
     positions: dict[str, Point],
     rotations: dict[str, float],
@@ -1631,141 +1929,20 @@ def optimize_rotations(
     """
     result = dict(rotations)
 
-    # Build ref -> set of connected refs (via signal nets)
-    adj = build_signal_adjacency(requirements)
-
     # --- Pad-aware path ---
     if footprint_sizes is not None:
         pad_conn = _build_pad_connectivity(requirements)
-
-        # Build per-ref pin→pad-offset map for 2-pin passives
-        # Convention: pad-1 at (-w/2, 0), pad-2 at (+w/2, 0) at rotation 0
-        def _passive_pad_offsets(
-            ref: str,
-        ) -> dict[str, tuple[float, float]] | None:
-            if not _is_two_pin_passive(ref):
-                return None
-            size = footprint_sizes.get(ref)
-            if size is None:
-                return None
-            w = size[0]
-            return {"1": (-w / 2.0, 0.0), "2": (w / 2.0, 0.0)}
-
-        def _pad_world_pos(
-            ref: str,
-            pin: str,
-            rot: float,
-            pad_offsets: dict[str, tuple[float, float]] | None,
-        ) -> tuple[float, float]:
-            """Return world position of a pad given component rotation."""
-            pos = positions[ref]
-            if pad_offsets is not None and pin in pad_offsets:
-                px, py = pad_offsets[pin]
-                ox, oy = _rotated_pad_offset(px, py, rot)
-                return (pos.x + ox, pos.y + oy)
-            return (pos.x, pos.y)
-
-        # Two-pass: passives first, then ICs
-        # Pass 1: 2-pin passives
-        for ref in positions:
-            if not _is_two_pin_passive(ref):
-                continue
-            offsets = _passive_pad_offsets(ref)
-            if offsets is None:
-                continue
-            # Collect this component's pin-level connections
-            pin_conns: list[tuple[str, str, str]] = []  # (my_pin, nb_ref, nb_pin)
-            for pin in ("1", "2"):
-                for nb_ref, nb_pin in pad_conn.get((ref, pin), []):
-                    if nb_ref in positions:
-                        pin_conns.append((pin, nb_ref, nb_pin))
-            if not pin_conns:
-                continue
-
-            best_rot = result.get(ref, 0.0)
-            best_cost = float("inf")
-            for trial_rot in (0.0, 90.0, 180.0, 270.0):
-                cost = 0.0
-                for my_pin, nb_ref, nb_pin in pin_conns:
-                    mx, my = _pad_world_pos(ref, my_pin, trial_rot, offsets)
-                    nb_offsets = _passive_pad_offsets(nb_ref)
-                    nb_rot = result.get(nb_ref, 0.0)
-                    nx, ny = _pad_world_pos(nb_ref, nb_pin, nb_rot, nb_offsets)
-                    cost += abs(mx - nx) + abs(my - ny)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_rot = trial_rot
-            result[ref] = best_rot
-
-        # Pass 2: ICs (U*)
-        for ref in positions:
-            if not ref.startswith("U"):
-                continue
-            size = footprint_sizes.get(ref)
-            if size is None:
-                continue
-            # Collect IC pin connections
-            ic_pin_conns: list[tuple[str, str, str]] = []
-            for comp in requirements.components:
-                if comp.ref != ref:
-                    continue
-                for comp_pin in comp.pins:
-                    for nb_ref, nb_pin in pad_conn.get((ref, comp_pin.number), []):
-                        if nb_ref in positions:
-                            ic_pin_conns.append((comp_pin.number, nb_ref, nb_pin))
-                break
-            if not ic_pin_conns:
-                continue
-
-            # For ICs we don't have detailed pad layout — use centre-based
-            # with pad offsets on the *neighbour* side for differentiation
-            pos = positions[ref]
-            best_rot = result.get(ref, 0.0)
-            best_cost = float("inf")
-            for trial_rot in (0.0, 90.0, 180.0, 270.0):
-                cost = 0.0
-                for _my_pin, nb_ref, nb_pin in ic_pin_conns:
-                    nb_offsets = _passive_pad_offsets(nb_ref)
-                    nb_rot = result.get(nb_ref, 0.0)
-                    nx, ny = _pad_world_pos(nb_ref, nb_pin, nb_rot, nb_offsets)
-                    cost += abs(pos.x - nx) + abs(pos.y - ny)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_rot = trial_rot
-            result[ref] = best_rot
-
+        _optimize_passive_rotations_pad_aware(
+            positions, result, pad_conn, footprint_sizes,
+        )
+        _optimize_ic_rotations_pad_aware(
+            positions, result, requirements, pad_conn, footprint_sizes,
+        )
         return result
 
     # --- Fallback: center-based (no footprint_sizes) ---
-
-    # 2-pin passives: align toward nearest connected neighbour
-    for ref in positions:
-        if not _is_two_pin_passive(ref):
-            continue
-        neighbours = adj.get(ref, set())
-        if not neighbours:
-            continue
-        pos = positions[ref]
-        best_neighbour: str | None = None
-        best_dist = float("inf")
-        for nb in neighbours:
-            if nb not in positions:
-                continue
-            nb_pos = positions[nb]
-            d = math.hypot(nb_pos.x - pos.x, nb_pos.y - pos.y)
-            if d < best_dist:
-                best_dist = d
-                best_neighbour = nb
-
-        if best_neighbour is not None:
-            nb_pos = positions[best_neighbour]
-            dx = nb_pos.x - pos.x
-            dy = nb_pos.y - pos.y
-            angle = math.degrees(math.atan2(dy, dx))
-            snapped = round(angle / 90.0) * 90.0
-            result[ref] = snapped % 360.0
-
-    # ICs: center-based is rotation-invariant, keep current rotation
+    adj = build_signal_adjacency(requirements)
+    _optimize_passive_rotations_center_based(positions, result, adj)
     return result
 
 
@@ -1823,11 +2000,14 @@ def check_courtyard_collisions(
             pos.y + h / 2.0,
         )
 
+    # Pre-compute all bounds for O(1) access in the nested loop
+    all_bounds = {ref: _bounds(ref) for ref in refs}
+
     # Component vs component collision
     for i, ref_a in enumerate(refs):
-        ax0, ay0, ax1, ay1 = _bounds(ref_a)
+        ax0, ay0, ax1, ay1 = all_bounds[ref_a]
         for ref_b in refs[i + 1:]:
-            bx0, by0, bx1, by1 = _bounds(ref_b)
+            bx0, by0, bx1, by1 = all_bounds[ref_b]
             if ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0:
                 violations.append(
                     f"Courtyard collision: {ref_a} and {ref_b}"

@@ -155,37 +155,28 @@ def _ic_model_name(name: str, prefix: str) -> str:
     return f"{name}{suffix}"
 
 
-def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel | None:
-    """Determine the 3D model path for a given KiCad lib_id.
+def _model_pin_header_socket(
+    name: str, upper: str, layer: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for pin header/socket footprints."""
+    if "PINHEADER" not in upper and "PINSOCKET" not in upper:
+        return None
+    if layer == LAYER_B_CU or "PINSOCKET" in upper:
+        dir_name = "Connector_PinSocket_2.54mm.3dshapes"
+        model_name = name.replace("PinHeader", "PinSocket")
+    else:
+        dir_name = "Connector_PinHeader_2.54mm.3dshapes"
+        model_name = name
+    if not any(s in model_name for s in ("_Vertical", "_Horizontal", "_SMD")):
+        model_name += "_Vertical"
+    path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
+    return Footprint3DModel(path=path)
 
-    Args:
-        lib_id: KiCad library identifier (e.g. ``"Resistor_SMD:R_0805_2012Metric"``).
-        layer: Component layer — B.Cu connectors use PinSocket models.
 
-    Returns:
-        A :class:`Footprint3DModel` or ``None`` if no mapping found.
-    """
-    # Extract the footprint name (after ':') for pattern matching
-    name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
-    upper = name.upper()
-
-    # Pin headers / sockets — append _Vertical if no orientation suffix
-    # Pads are along Y-axis matching KiCad convention — no model rotation needed.
-    if "PINHEADER" in upper or "PINSOCKET" in upper:
-        if layer == LAYER_B_CU or "PINSOCKET" in upper:
-            dir_name = "Connector_PinSocket_2.54mm.3dshapes"
-            model_name = name.replace("PinHeader", "PinSocket")
-        else:
-            dir_name = "Connector_PinHeader_2.54mm.3dshapes"
-            model_name = name
-        # KiCad model files require orientation suffix (e.g. _Vertical)
-        if not any(s in model_name for s in ("_Vertical", "_Horizontal", "_SMD")):
-            model_name += "_Vertical"
-        path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
-        return Footprint3DModel(path=path)
-
-    # IC packages — route to correct 3D library directory
-    # LQFP/QFP → Package_QFP; MSOP/SOIC/etc. → Package_SO
+def _model_ic_package(
+    name: str, upper: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for IC packages (QFP, SO families)."""
     for prefix in ("LQFP", "QFP"):
         if upper.startswith(prefix):
             model_name = _ic_model_name(name, prefix)
@@ -196,54 +187,54 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
             model_name = _ic_model_name(name, prefix)
             path = f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/{model_name}.step"
             return Footprint3DModel(path=path)
+    return None
 
-    # Terminal blocks — KiCad uses vendor-specific dirs (Phoenix MKDS series)
-    # Both our pads and the .step model use X-axis layout, pin 1 at origin.
-    if "TERMINALBLOCK" in upper or "MKDS" in upper:
-        import re as _re
-        # Extract pin count from "1x06" or "1x02" pattern in lib_id
-        pin_count = 2  # default
-        nx_match = _re.search(r"1x(\d+)", lib_id)
-        if nx_match:
-            pin_count = int(nx_match.group(1))
-        # Extract pitch from "P5.08mm" pattern
-        pitch_match = _re.search(r"P([\d.]+)mm", lib_id)
-        pitch = float(pitch_match.group(1)) if pitch_match else 5.08
-        model_name = (
-            f"TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-{pitch:.2f}"
-            f"_1x{pin_count:02d}_P{pitch:.2f}mm_Horizontal"
-        )
-        path = (
-            f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
-            f"{model_name}.step"
-        )
-        # Rotate 180° so terminal openings face the board edge.
-        # The model origin is at pin 1, so 180° rotation around (0,0) moves
-        # the model off the pads. Offset by (N-1)*pitch in X to re-center.
-        offset_x = (pin_count - 1) * pitch
-        return Footprint3DModel(
-            path=path,
-            offset=(offset_x, 0.0, 0.0),
-            rotate=(0.0, 0.0, 180.0),
-        )
 
-    # ESP32 / RF modules
-    if "ESP32" in upper or "WROOM" in upper:
-        # Extract the module name for the 3D model
-        model_name = name.split(":")[-1] if ":" in name else name
-        path = f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/{model_name}.step"
-        return Footprint3DModel(path=path)
+def _model_terminal_block(
+    lib_id: str, upper: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for terminal block footprints."""
+    if "TERMINALBLOCK" not in upper and "MKDS" not in upper:
+        return None
+    import re as _re
+    pin_count = 2
+    nx_match = _re.search(r"1x(\d+)", lib_id)
+    if nx_match:
+        pin_count = int(nx_match.group(1))
+    pitch_match = _re.search(r"P([\d.]+)mm", lib_id)
+    pitch = float(pitch_match.group(1)) if pitch_match else 5.08
+    model_name = (
+        f"TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-{pitch:.2f}"
+        f"_1x{pin_count:02d}_P{pitch:.2f}mm_Horizontal"
+    )
+    path = (
+        f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
+        f"{model_name}.step"
+    )
+    offset_x = (pin_count - 1) * pitch
+    return Footprint3DModel(
+        path=path,
+        offset=(offset_x, 0.0, 0.0),
+        rotate=(0.0, 0.0, 180.0),
+    )
 
-    # Relays
-    if "RELAY" in upper and "SANYOU" in upper:
-        path = (
-            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
-            "Relay_SPDT_SANYOU_SRD_Series_Form_C.step"
-        )
-        return Footprint3DModel(path=path)
 
-    # DIP switches — must check BEFORE generic SW_ match (SW_DIP contains "SPST")
-    # KiCad convention uses 90° Z rotation for DIP switch models
+def _model_esp32(
+    name: str, upper: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for ESP32/RF modules."""
+    if "ESP32" not in upper and "WROOM" not in upper:
+        return None
+    model_name = name.split(":")[-1] if ":" in name else name
+    path = f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/{model_name}.step"
+    return Footprint3DModel(path=path)
+
+
+def _model_switch(
+    name: str, upper: str, lib_id: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for DIP switches and tactile switches."""
+    # DIP switches — must check BEFORE generic SW_ match
     if upper.startswith("SW_DIP"):
         import re as _re_dip
         sw_count_m = _re_dip.search(r"SPSTx(\d+)", name, _re_dip.IGNORECASE)
@@ -255,7 +246,6 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         return Footprint3DModel(path=path, rotate=(0.0, 0.0, 90.0))
 
     # Tactile switches — SMD vs THT
-    # Check full lib_id (not just name) for SMD indicator
     lib_upper = lib_id.upper()
     if upper.startswith("SW_PUSH") or (upper.startswith("SW_") and "SPST" in upper):
         if "SMD" in lib_upper or "SMD" in upper:
@@ -266,8 +256,13 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         else:
             path = f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
         return Footprint3DModel(path=path)
+    return None
 
-    # RJ45 — use best-match Amphenol model (KiCad ships RJHSE538X)
+
+def _model_connector(
+    name: str, upper: str, layer: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for RJ45, USB-C, Conn_01x, MicroSD connectors."""
     if "RJ45" in upper:
         path = (
             f"{KICAD_3DMODEL_VAR}/Connector_RJ.3dshapes/"
@@ -275,7 +270,6 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         )
         return Footprint3DModel(path=path)
 
-    # USB-C
     if upper.startswith(("USB-C", "USB_C")):
         path = (
             f"{KICAD_3DMODEL_VAR}/Connector_USB.3dshapes/"
@@ -283,40 +277,6 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         )
         return Footprint3DModel(path=path)
 
-    # Optocouplers (PC817, EL817, etc.) — SMD SOP-4 or THT DIP-4
-    if "PC817" in upper or "EL817" in upper or "OPTO" in upper:
-        if "SOP" in upper or "SMD" in upper or "MINI" in upper:
-            path = (
-                f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/"
-                "SOP-4_3.8x4.1mm_P2.54mm.step"
-            )
-        else:
-            path = (
-                f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/"
-                "DIP-4_W7.62mm.step"
-            )
-        return Footprint3DModel(path=path)
-
-    # DIP packages (optocouplers, etc.)
-    if upper.startswith("DIP-"):
-        path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
-        return Footprint3DModel(path=path)
-
-    # WS2812B addressable LEDs (size-aware)
-    if "WS2812" in upper:
-        if "2.0X2.0" in upper or "2020" in upper:
-            # No 2.0x2.0 .step in KiCad library; use Mini 3.5x3.5 as closest
-            step = "LED_WS2812B-Mini_PLCC4_3.5x3.5mm.step"
-        elif "3.5X3.5" in upper or "3535" in upper or "P2.45" in upper:
-            step = "LED_WS2812B-Mini_PLCC4_3.5x3.5mm.step"
-        elif "PLCC6" in upper:
-            step = "LED_WS2812_PLCC6_5.0x5.0mm_P1.6mm.step"
-        else:
-            step = "LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm.step"
-        path = f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/{step}"
-        return Footprint3DModel(path=path)
-
-    # Micro SD card slot
     if upper.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")):
         path = (
             f"{KICAD_3DMODEL_VAR}/Connector_Card.3dshapes/"
@@ -324,9 +284,7 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         )
         return Footprint3DModel(path=path)
 
-    # Generic single-row connectors (Conn_01xNN) → PinHeader_1xNN
     if upper.startswith("CONN_01X"):
-        # Extract pin count: Conn_01x14_P2.54mm → 14
         import re
         m = re.match(r"CONN_01X(\d+)", upper)
         if m:
@@ -340,6 +298,104 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
             path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
             return Footprint3DModel(path=path)
 
+    return None
+
+
+def _model_optocoupler(
+    name: str, upper: str,
+) -> Footprint3DModel | None:
+    """Return 3D model for optocoupler packages."""
+    if "PC817" not in upper and "EL817" not in upper and "OPTO" not in upper:
+        return None
+    if "SOP" in upper or "SMD" in upper or "MINI" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Package_SO.3dshapes/"
+            "SOP-4_3.8x4.1mm_P2.54mm.step"
+        )
+    else:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/"
+            "DIP-4_W7.62mm.step"
+        )
+    return Footprint3DModel(path=path)
+
+
+def _model_ws2812(upper: str) -> Footprint3DModel | None:
+    """Return 3D model for WS2812B addressable LEDs."""
+    if "WS2812" not in upper:
+        return None
+    if (
+        "2.0X2.0" in upper or "2020" in upper
+        or "3.5X3.5" in upper or "3535" in upper or "P2.45" in upper
+    ):
+        step = "LED_WS2812B-Mini_PLCC4_3.5x3.5mm.step"
+    elif "PLCC6" in upper:
+        step = "LED_WS2812_PLCC6_5.0x5.0mm_P1.6mm.step"
+    else:
+        step = "LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm.step"
+    path = f"{KICAD_3DMODEL_VAR}/LED_SMD.3dshapes/{step}"
+    return Footprint3DModel(path=path)
+
+
+def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel | None:
+    """Determine the 3D model path for a given KiCad lib_id.
+
+    Args:
+        lib_id: KiCad library identifier (e.g. ``"Resistor_SMD:R_0805_2012Metric"``).
+        layer: Component layer — B.Cu connectors use PinSocket models.
+
+    Returns:
+        A :class:`Footprint3DModel` or ``None`` if no mapping found.
+    """
+    name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+    upper = name.upper()
+
+    # Dispatch through category helpers (first match wins)
+    result = _model_pin_header_socket(name, upper, layer)
+    if result is not None:
+        return result
+
+    result = _model_ic_package(name, upper)
+    if result is not None:
+        return result
+
+    result = _model_terminal_block(lib_id, upper)
+    if result is not None:
+        return result
+
+    result = _model_esp32(name, upper)
+    if result is not None:
+        return result
+
+    # Relays — Sanyou-specific before generic SPDT
+    if "RELAY" in upper and "SANYOU" in upper:
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
+            "Relay_SPDT_SANYOU_SRD_Series_Form_C.step"
+        )
+        return Footprint3DModel(path=path)
+
+    result = _model_switch(name, upper, lib_id)
+    if result is not None:
+        return result
+
+    result = _model_connector(name, upper, layer)
+    if result is not None:
+        return result
+
+    result = _model_optocoupler(name, upper)
+    if result is not None:
+        return result
+
+    # DIP packages
+    if upper.startswith("DIP-"):
+        path = f"{KICAD_3DMODEL_VAR}/Package_DIP.3dshapes/{name}.step"
+        return Footprint3DModel(path=path)
+
+    result = _model_ws2812(upper)
+    if result is not None:
+        return result
+
     # Generic relay SPDT (non-Sanyou)
     if "RELAY" in upper and "SPDT" in upper:
         path = (
@@ -349,8 +405,6 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
         return Footprint3DModel(path=path)
 
     # Static pattern map for passives/transistors/diodes/inductors/crystals
-    # Use `in` instead of `startswith` so patterns like "SOD-323" match
-    # footprint names like "D_SOD-323" which have a prefix.
     for pattern, directory, model_file in _3D_MODEL_MAP:
         if pattern.upper() in upper:
             path = f"{KICAD_3DMODEL_VAR}/{directory}/{model_file}"
@@ -493,6 +547,131 @@ _RJ45_NPTH_POSITIONS: tuple[tuple[float, float], ...] = (
     (-2.79, -2.54),
     (9.91, -2.54),
 )
+
+# ---------------------------------------------------------------------------
+# Footprint dimension constants (extracted from inline magic numbers)
+# ---------------------------------------------------------------------------
+
+# SOD-123 diode dimensions (mm)
+_SOD123_BODY_W: float = 2.68
+_SOD123_BODY_H: float = 1.65
+_SOD123_PAD_W: float = 0.91
+_SOD123_PAD_H: float = 1.22
+_SOD123_PITCH: float = 2.2
+
+# SOD-323 diode dimensions (mm)
+_SOD323_BODY_W: float = 1.7
+_SOD323_BODY_H: float = 1.25
+_SOD323_PAD_W: float = 0.6
+_SOD323_PAD_H: float = 0.55
+_SOD323_PITCH: float = 2.1
+
+# ESP32-S3-WROOM-1 module dimensions (mm)
+_ESP32_BODY_W: float = 18.0
+_ESP32_BODY_H: float = 25.5
+_ESP32_PAD_W: float = 0.9
+_ESP32_PAD_H: float = 1.2
+_ESP32_PITCH: float = 1.27
+_ESP32_SIDE_PINS: int = 14
+_ESP32_BOTTOM_PINS: int = 12
+_ESP32_TOP_MARGIN: float = 2.5
+_ESP32_GND_PAD_SIZE: float = 6.7
+
+# Crystal oscillator dimensions (mm)
+_CRYSTAL_PAD_W: float = 1.2
+_CRYSTAL_PAD_H: float = 1.0
+_CRYSTAL_SHIELD_MIN_HEIGHT: float = 2.0
+
+# Through-hole connector dimensions (mm)
+_THT_CONNECTOR_DRILL: float = 1.0
+_THT_CONNECTOR_PAD_DIAM: float = 1.7
+
+# Terminal block dimensions (mm)
+_TB_DRILL: float = 1.3
+_TB_PAD_DIAM: float = 2.5
+_TB_BODY_W_MARGIN: float = 4.0
+_TB_BODY_H_MARGIN: float = 6.0
+
+# DIP package dimensions (mm)
+_DIP_DRILL: float = 0.8
+_DIP_PAD_DIAM: float = 1.6
+_DIP_ROW_SPACING: float = 7.62
+_DIP_SWITCH_DRILL: float = 1.0
+_DIP_SWITCH_PAD_DIAM: float = 1.7
+
+# Relay SPDT pad dimensions (mm)
+_RELAY_CONTACT_PAD_DIAM: float = 3.0
+_RELAY_CONTACT_DRILL: float = 1.3
+_RELAY_COIL_PAD_DIAM: float = 2.5
+_RELAY_COIL_DRILL: float = 1.0
+_RELAY_CUTOUT_WIDTH: float = 1.0
+_RELAY_CUTOUT_CLEARANCE: float = 2.0
+
+# Tact switch dimension tiers (mm)
+_TACT_SMALL_HALF_X: float = 2.0
+_TACT_SMALL_HALF_Y: float = 1.5
+_TACT_SMALL_DRILL: float = 0.8
+_TACT_SMALL_PAD_DIAM: float = 1.4
+_TACT_MEDIUM_HALF_X: float = 2.75
+_TACT_MEDIUM_HALF_Y: float = 2.0
+_TACT_MEDIUM_DRILL: float = 0.9
+_TACT_MEDIUM_PAD_DIAM: float = 1.6
+_TACT_LARGE_HALF_X: float = 3.25
+_TACT_LARGE_HALF_Y: float = 2.25
+_TACT_LARGE_DRILL: float = 1.0
+_TACT_LARGE_PAD_DIAM: float = 1.8
+
+# SMD tact switch (XKB TS-1187A) dimensions (mm)
+_SMD_TACT_PAD_W: float = 1.5
+_SMD_TACT_PAD_H: float = 3.0
+_SMD_TACT_PAD_X: float = 3.5
+_SMD_TACT_PAD_Y: float = 2.5
+
+# USB-C connector body dimensions (mm)
+_USBC_BODY_W: float = 9.0
+_USBC_BODY_H: float = 7.35
+
+# RJ45 courtyard dimensions (mm)
+_RJ45_COURTYARD_CX: float = 3.56
+_RJ45_COURTYARD_CY: float = -0.125
+_RJ45_COURTYARD_W: float = 19.56
+_RJ45_COURTYARD_H: float = 16.75
+
+# WS2812B LED size variants: (pad_w, pad_h, x_pitch, y_pitch, body_w, body_h)
+_WS2812B_DIMS: dict[str, tuple[float, float, float, float, float, float]] = {
+    "2020": (0.7, 0.5, 0.75, 0.55, 2.6, 2.6),
+    "3535": (1.0, 0.8, 1.65, 1.05, 4.0, 4.0),
+    "5050": (1.5, 1.0, 2.45, 1.6, 5.4, 5.4),
+}
+
+# Micro SD card slot dimensions (mm)
+_MICROSD_SIGNAL_PITCH: float = 1.1
+_MICROSD_PAD_W: float = 0.7
+_MICROSD_PAD_H: float = 1.8
+_MICROSD_SIGNAL_Y: float = -5.5
+_MICROSD_SHIELD_PAD_W: float = 1.2
+_MICROSD_SHIELD_PAD_H: float = 2.0
+_MICROSD_BODY_W: float = 15.0
+_MICROSD_BODY_H: float = 14.5
+
+# Relay body outline coordinates (mm)
+_RELAY_BODY_X_MIN: float = -1.4
+_RELAY_BODY_X_MAX: float = 18.4
+_RELAY_BODY_Y_MIN: float = -7.8
+_RELAY_BODY_Y_MAX: float = 7.8
+
+# Text offset from body edge (mm)
+_TEXT_OFFSET_SMALL: float = 1.0
+_TEXT_OFFSET_LARGE: float = 1.5
+
+# Silkscreen clearance threshold: compact packages skip silk marks (mm)
+_COMPACT_PKG_THRESHOLD: float = 1.0
+
+# Generic SMD IC constraints
+_IC_PAD_W_MAX: float = 0.5
+_IC_PAD_H_MAX: float = 1.5
+_IC_COL_OFFSET: float = 1.5
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -666,7 +845,7 @@ def make_smd_resistor_capacitor(
     pad_edge_x = pitch / 2.0 + pad_w / 2.0
     # For compact packages (0603/0402) skip silk marks — they inevitably
     # overlap mask apertures after rotation in dense layouts.
-    if body_h <= 1.0:
+    if body_h <= _COMPACT_PKG_THRESHOLD:
         graphics = _courtyard_rect(body_w, body_h)
     else:
         graphics = (
@@ -674,7 +853,7 @@ def make_smd_resistor_capacitor(
             *_silk_side_marks(body_w, body_h, pad_edge_x=pad_edge_x),
         )
     # Compact packages: ref on F.Fab to avoid silk-over-copper DRC
-    ref_layer = LAYER_F_FAB if body_h <= 1.0 else LAYER_F_SILKSCREEN
+    ref_layer = LAYER_F_FAB if body_h <= _COMPACT_PKG_THRESHOLD else LAYER_F_SILKSCREEN
     texts = (
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), ref_layer),
         _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5, LAYER_F_FAB),
@@ -791,11 +970,11 @@ def make_sod123(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    body_w = 2.68
-    body_h = 1.65
-    pad_w = 0.91
-    pad_h = 1.22
-    pitch = 2.2
+    body_w = _SOD123_BODY_W
+    body_h = _SOD123_BODY_H
+    pad_w = _SOD123_PAD_W
+    pad_h = _SOD123_PAD_H
+    pitch = _SOD123_PITCH
     pads = (
         _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
         _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
@@ -883,22 +1062,22 @@ def make_tact_switch(
     # Scale pad layout to match body size
     if size_mm <= 3.5:
         # Small tact switch (e.g. 3.0x3.0mm)
-        half_x = 2.0
-        half_y = 1.5
-        drill = 0.8
-        pad_diam = 1.4
+        half_x = _TACT_SMALL_HALF_X
+        half_y = _TACT_SMALL_HALF_Y
+        drill = _TACT_SMALL_DRILL
+        pad_diam = _TACT_SMALL_PAD_DIAM
     elif size_mm <= 5.0:
         # Medium tact switch (e.g. 4.5x4.5mm)
-        half_x = 2.75
-        half_y = 2.0
-        drill = 0.9
-        pad_diam = 1.6
+        half_x = _TACT_MEDIUM_HALF_X
+        half_y = _TACT_MEDIUM_HALF_Y
+        drill = _TACT_MEDIUM_DRILL
+        pad_diam = _TACT_MEDIUM_PAD_DIAM
     else:
         # Standard 6mm tact switch
-        half_x = 3.25
-        half_y = 2.25
-        drill = 1.0
-        pad_diam = 1.8
+        half_x = _TACT_LARGE_HALF_X
+        half_y = _TACT_LARGE_HALF_Y
+        drill = _TACT_LARGE_DRILL
+        pad_diam = _TACT_LARGE_PAD_DIAM
 
     pads = (
         _thru_pad("1", -half_x, -half_y, pad_diam, drill),
@@ -947,10 +1126,10 @@ def make_smd_tact_switch(
     # XKB TS-1187A dimensions from datasheet:
     # Body: 5.1×5.1mm, pad size: 1.5×3.0mm
     # Pad centers: horizontal span 7.0mm (±3.5), vertical span 5.0mm (±2.5)
-    pad_size_x = 1.5
-    pad_size_y = 3.0
-    pad_x = 3.5   # horizontal center-to-center / 2
-    pad_y = 2.5   # vertical center-to-center / 2
+    pad_size_x = _SMD_TACT_PAD_W
+    pad_size_y = _SMD_TACT_PAD_H
+    pad_x = _SMD_TACT_PAD_X   # horizontal center-to-center / 2
+    pad_y = _SMD_TACT_PAD_Y   # vertical center-to-center / 2
 
     # 4 pads: two "1" pads (left+right, top row), two "2" pads (left+right, bottom)
     pads = (
@@ -995,28 +1174,25 @@ def make_relay_spdt(
         Fully constructed :class:`Footprint`.
     """
     # Pad positions from KiCad's official footprint (origin at pin 1)
-    # Pins 1,3,4 = 3mm pad / 1.3mm drill (contacts); Pins 2,5 = 2.5mm pad / 1.0mm drill (coil)
     pads = (
-        _thru_pad("1", 0.0, 0.0, 3.0, 1.3),         # COM (switching arm)
-        _thru_pad("2", 1.95, 6.05, 2.5, 1.0),        # Coil-
-        _thru_pad("3", 14.15, 6.05, 3.0, 1.3),       # NO (normally open)
-        _thru_pad("4", 14.2, -6.0, 3.0, 1.3),        # NC (normally closed)
-        _thru_pad("5", 1.95, -5.95, 2.5, 1.0),       # Coil+
+        _thru_pad("1", 0.0, 0.0, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),       # COM
+        _thru_pad("2", 1.95, 6.05, _RELAY_COIL_PAD_DIAM, _RELAY_COIL_DRILL),            # Coil-
+        _thru_pad("3", 14.15, 6.05, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),     # NO
+        _thru_pad("4", 14.2, -6.0, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),      # NC
+        _thru_pad("5", 1.95, -5.95, _RELAY_COIL_PAD_DIAM, _RELAY_COIL_DRILL),           # Coil+
     )
-    # Body outline: -1.4 to 18.4 in X, -7.8 to 7.8 in Y
-    body_w = 19.8  # 18.4 - (-1.4)
-    body_h = 15.6  # 7.8 - (-7.8)
-    # Courtyard centred on body centre (8.5, 0)
-    cx = (-1.4 + 18.4) / 2.0
-    cy = (-7.8 + 7.8) / 2.0
+    body_w = _RELAY_BODY_X_MAX - _RELAY_BODY_X_MIN
+    body_h = _RELAY_BODY_Y_MAX - _RELAY_BODY_Y_MIN
+    cx = (_RELAY_BODY_X_MIN + _RELAY_BODY_X_MAX) / 2.0
+    cy = (_RELAY_BODY_Y_MIN + _RELAY_BODY_Y_MAX) / 2.0
     hw = body_w / 2.0 + PCB_COURTYARD_CLEARANCE_MM
     hh = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM
     # U-shaped isolation cutout around COM pin (pin 1 at 0,0).
     # Lives on Edge.Cuts inside the footprint so it moves with the relay.
     # The U opens toward positive X (toward relay body).
-    _cutout_w = 1.0       # slot width (mm)
-    _cutout_clr = 2.0     # clearance from pad edge to inner slot edge
-    _com_pad_r = 3.0 / 2  # COM pad radius (3mm pad)
+    _cutout_w = _RELAY_CUTOUT_WIDTH
+    _cutout_clr = _RELAY_CUTOUT_CLEARANCE
+    _com_pad_r = _RELAY_CONTACT_PAD_DIAM / 2.0
     _u_half = _com_pad_r + _cutout_clr   # half-height of the U
     _u_closed_x = -(_com_pad_r + _cutout_clr)  # closed end (left)
     _u_open_x = _com_pad_r + _cutout_clr       # open end (right, toward body)
@@ -1094,11 +1270,11 @@ def make_esp32_wroom(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    body_w = 18.0
-    body_h = 25.5
-    pad_w = 0.9
-    pad_h = 1.2
-    pitch = 1.27
+    body_w = _ESP32_BODY_W
+    body_h = _ESP32_BODY_H
+    pad_w = _ESP32_PAD_W
+    pad_h = _ESP32_PAD_H
+    pitch = _ESP32_PITCH
 
     # 41 pads: left(14) + bottom(12) + right(14) + center GND(1)
     pad_list: list[Pad] = []
@@ -1106,9 +1282,9 @@ def make_esp32_wroom(
     # Left and right columns share the same vertical span so pin 1
     # (top-left) aligns with pin 40 (top-right), and pin 14 (bottom-left)
     # aligns with pin 27 (bottom-right) — per datasheet Figure 3-1.
-    n_side = 14
-    col_top_y = -(body_h / 2.0) + 2.5 + pad_h / 2.0  # 2.5mm below top edge
-    col_bot_y = col_top_y + (n_side - 1) * pitch       # bottom of both columns
+    n_side = _ESP32_SIDE_PINS
+    col_top_y = -(body_h / 2.0) + _ESP32_TOP_MARGIN + pad_h / 2.0
+    col_bot_y = col_top_y + (n_side - 1) * pitch
 
     # Left column: 14 pads (pins 1-14), top to bottom
     # Pin 1 (GND) at top-left near antenna, pin 14 (IO20) at bottom-left.
@@ -1121,7 +1297,7 @@ def make_esp32_wroom(
     # Bottom row: 12 pads (pins 15-26), left to right
     # Pin 15 (IO3) at bottom-left, pin 26 (IO45) at bottom-right.
     bottom_y = body_h / 2.0 - pad_h / 2.0
-    n_bottom = 12
+    n_bottom = _ESP32_BOTTOM_PINS
     start_x = -((n_bottom - 1) * pitch) / 2.0
     for i in range(n_bottom):
         pad_list.append(_smd_pad(
@@ -1142,8 +1318,8 @@ def make_esp32_wroom(
         pad_type="smd",
         shape="rect",
         position=Point(0.0, 0.0),
-        size_x=6.7,
-        size_y=6.7,
+        size_x=_ESP32_GND_PAD_SIZE,
+        size_y=_ESP32_GND_PAD_SIZE,
         layers=(layer, LAYER_F_PASTE if layer == LAYER_F_CU else LAYER_B_PASTE,
                 LAYER_F_MASK if layer == LAYER_F_CU else LAYER_B_MASK),
     ))
@@ -1182,12 +1358,12 @@ def make_crystal_smd(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    pad_w = 1.2
-    pad_h = 1.0
+    pad_w = _CRYSTAL_PAD_W
+    pad_h = _CRYSTAL_PAD_H
     pitch = size_w - pad_w + 0.4
     # Signal pads (1, 2) + shield/ground pads (3, 4) for 4-pin crystals.
     # 4-pin variants (3.2x2.5mm etc.) have ground pads at corners.
-    has_shield = size_h >= 2.0
+    has_shield = size_h >= _CRYSTAL_SHIELD_MIN_HEIGHT
     pads_list = [
         _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
         _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
@@ -1413,10 +1589,10 @@ def make_generic_smd_ic(
     """
     _log.debug("make_generic_smd_ic ref=%s pins=%d pitch=%.2f", ref, pin_count, pitch_mm)
     half = pin_count // 2
-    pad_w = min(pitch_mm * 0.6, 0.5)
-    pad_h = min(pitch_mm * 0.8, 1.5)
+    pad_w = min(pitch_mm * 0.6, _IC_PAD_W_MAX)
+    pad_h = min(pitch_mm * 0.8, _IC_PAD_H_MAX)
     row_span = (half - 1) * pitch_mm
-    col_pitch = row_span / 2.0 + 1.5  # distance from center to pad column
+    col_pitch = row_span / 2.0 + _IC_COL_OFFSET
 
     pads: list[Pad] = []
     for i in range(half):
@@ -1499,8 +1675,8 @@ def make_pin_header_socket(
         "make_pin_header_socket ref=%s pins=%d rows=%d layer=%s",
         ref, pin_count, rows, layer,
     )
-    drill_mm = 1.0
-    pad_diam = 1.7
+    drill_mm = _THT_CONNECTOR_DRILL
+    pad_diam = _THT_CONNECTOR_PAD_DIAM
     cols = pin_count // max(rows, 1)
     row_pitch = pitch_mm if rows > 1 else 0.0
 
@@ -1593,8 +1769,8 @@ def make_terminal_block(
         Fully constructed :class:`Footprint`.
     """
     _log.debug("make_terminal_block ref=%s pins=%d pitch=%.2f", ref, pin_count, pitch_mm)
-    drill_mm = 1.3
-    pad_diam = 2.5
+    drill_mm = _TB_DRILL
+    pad_diam = _TB_PAD_DIAM
 
     # Pin 1 at origin, extending right — matches KiCad MKDS convention
     pads = tuple(
@@ -1608,8 +1784,8 @@ def make_terminal_block(
         for i in range(pin_count)
     )
     span = (pin_count - 1) * pitch_mm
-    body_w = span + pad_diam + 4.0
-    body_h = pad_diam + 6.0
+    body_w = span + pad_diam + _TB_BODY_W_MARGIN
+    body_h = pad_diam + _TB_BODY_H_MARGIN
     # Center courtyard on the pad span
     cx = span / 2.0
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx),)
@@ -1663,10 +1839,10 @@ def make_dip_switch(
         Fully constructed :class:`Footprint`.
     """
     _log.debug("make_dip_switch ref=%s pins=%d", ref, pin_count)
-    drill_mm = 1.0
-    pad_diam = 1.7
+    drill_mm = _DIP_SWITCH_DRILL
+    pad_diam = _DIP_SWITCH_PAD_DIAM
     half = pin_count // 2
-    row_pitch = 7.62  # standard DIP row spacing
+    row_pitch = _DIP_ROW_SPACING
 
     # KiCad convention: pin 1 at origin, pin N+1 at (row_pitch, 0) for x01
     # Multi-position: left column pins 1..half going down, right column bottom-to-top
@@ -1732,8 +1908,8 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
         _smd_pad(pad_id, x, y, w, h, layer)
         for x, y, w, h, pad_id in _USBC_PADS
     )
-    body_w = 9.0
-    body_h = 7.35
+    body_w = _USBC_BODY_W
+    body_h = _USBC_BODY_H
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
@@ -1804,10 +1980,10 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
         )
 
     # Courtyard matches official KiCad RJHSE538X: (-6.22, -8.5) to (13.34, 8.25)
-    cx = 3.56   # (13.34 + -6.22) / 2
-    cy = -0.125  # (8.25 + -8.5) / 2
-    body_w = 19.56  # 13.34 - -6.22
-    body_h = 16.75  # 8.25 - -8.5
+    cx = _RJ45_COURTYARD_CX
+    cy = _RJ45_COURTYARD_CY
+    body_w = _RJ45_COURTYARD_W
+    body_h = _RJ45_COURTYARD_H
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
     texts = (
         _ref_text(ref, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + 0.5), LAYER_F_SILKSCREEN),
@@ -1897,11 +2073,11 @@ def make_sod323(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    body_w = 1.7
-    body_h = 1.25
-    pad_w = 0.6
-    pad_h = 0.55
-    pitch = 2.1
+    body_w = _SOD323_BODY_W
+    body_h = _SOD323_BODY_H
+    pad_w = _SOD323_PAD_W
+    pad_h = _SOD323_PAD_H
+    pitch = _SOD323_PITCH
     pads = (
         _smd_pad("1", -pitch / 2.0, 0.0, pad_w, pad_h, layer),
         _smd_pad("2", pitch / 2.0, 0.0, pad_w, pad_h, layer),
@@ -1947,8 +2123,8 @@ def make_dip_package(
         Fully constructed :class:`Footprint`.
     """
     _log.debug("make_dip_package ref=%s pins=%d", ref, pin_count)
-    drill_mm = 0.8
-    pad_diam = 1.6
+    drill_mm = _DIP_DRILL
+    pad_diam = _DIP_PAD_DIAM
     half = pin_count // 2
 
     pads: list[Pad] = []
@@ -2035,33 +2211,14 @@ def make_ws2812b(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    if size == "2020":
-        # WS2812C-2020: 2.0×2.0 mm body, 4 bottom pads
-        pad_w = 0.7
-        pad_h = 0.5
-        x_pitch = 0.75
-        y_pitch = 0.55
-        body_w = 2.6
-        body_h = 2.6
-        lib_id = "LED_SMD:LED_WS2812B_PLCC4_2.0x2.0mm"
-    elif size == "3535":
-        # WS2812B-Mini: 3.5×3.5 mm body
-        pad_w = 1.0
-        pad_h = 0.8
-        x_pitch = 1.65
-        y_pitch = 1.05
-        body_w = 4.0
-        body_h = 4.0
-        lib_id = "LED_SMD:LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm"
-    else:
-        # WS2812B standard 5050: 5.0×5.0 mm body
-        pad_w = 1.5
-        pad_h = 1.0
-        x_pitch = 2.45
-        y_pitch = 1.6
-        body_w = 5.4
-        body_h = 5.4
-        lib_id = "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm"
+    dims = _WS2812B_DIMS.get(size, _WS2812B_DIMS["5050"])
+    pad_w, pad_h, x_pitch, y_pitch, body_w, body_h = dims
+    _WS2812B_LIB_IDS = {
+        "2020": "LED_SMD:LED_WS2812B_PLCC4_2.0x2.0mm",
+        "3535": "LED_SMD:LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm",
+        "5050": "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm",
+    }
+    lib_id = _WS2812B_LIB_IDS.get(size, _WS2812B_LIB_IDS["5050"])
 
     pads = (
         _smd_pad("1", -x_pitch, -y_pitch, pad_w, pad_h, layer),  # VDD
@@ -2099,23 +2256,17 @@ def make_microsd_slot(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    # 8 signal pads (1.1mm pitch) + 2 shield pads
-    signal_pitch = 1.1
-    pad_w = 0.7
-    pad_h = 1.8
-    signal_y = -5.5  # signal pads at front edge
+    # 8 signal pads + 2 shield pads
     pads: list[Pad] = []
     for i in range(8):
-        x = (i - 3.5) * signal_pitch
-        pads.append(_smd_pad(str(i + 1), x, signal_y, pad_w, pad_h, LAYER_F_CU))
+        x = (i - 3.5) * _MICROSD_SIGNAL_PITCH
+        pads.append(_smd_pad(str(i + 1), x, _MICROSD_SIGNAL_Y, _MICROSD_PAD_W, _MICROSD_PAD_H, LAYER_F_CU))
     # Shield / card detect pads (larger, on sides)
-    shield_pad_w = 1.2
-    shield_pad_h = 2.0
-    pads.append(_smd_pad("9", -7.0, -1.5, shield_pad_w, shield_pad_h, LAYER_F_CU))
-    pads.append(_smd_pad("10", 7.0, -1.5, shield_pad_w, shield_pad_h, LAYER_F_CU))
+    pads.append(_smd_pad("9", -7.0, -1.5, _MICROSD_SHIELD_PAD_W, _MICROSD_SHIELD_PAD_H, LAYER_F_CU))
+    pads.append(_smd_pad("10", 7.0, -1.5, _MICROSD_SHIELD_PAD_W, _MICROSD_SHIELD_PAD_H, LAYER_F_CU))
 
-    body_w = 15.0
-    body_h = 14.5
+    body_w = _MICROSD_BODY_W
+    body_h = _MICROSD_BODY_H
     graphics = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + 1.0), LAYER_F_SILKSCREEN),
@@ -2207,6 +2358,192 @@ def _try_jlcpcb_footprint(
 # ---------------------------------------------------------------------------
 
 
+def _route_fp_passive_led(
+    ref: str, value: str, fid: str, upper: str, layer: str,
+) -> Footprint | None:
+    """Match WS2812, LED, R_, C_, SOD, L_, SOT packages."""
+    if "WS2812" in upper:
+        ws_size = "5050"
+        if "2020" in fid:
+            ws_size = "2020"
+        elif "3535" in fid:
+            ws_size = "3535"
+        return make_ws2812b(ref, value, layer=layer, size=ws_size)
+
+    if upper.startswith("LED_"):
+        pkg = fid[4:].upper()
+        pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
+        return make_smd_led(ref, value, package=pkg_norm)
+
+    if upper.startswith(("R_", "C_")):
+        pkg = fid[2:].upper()
+        pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
+        return make_smd_resistor_capacitor(ref, value, package=pkg_norm)
+
+    if upper.startswith("SOD-323"):
+        return make_sod323(ref, value, layer=layer)
+
+    if upper.startswith("SOD-123"):
+        return make_sod123(ref, value)
+
+    if upper.startswith("L_"):
+        pkg = fid[2:].upper()
+        return make_inductor_smd(ref, value, package=pkg)
+
+    if upper == "SOT-223":
+        return make_sot23(ref, value, variant="SOT-23")
+
+    if upper.startswith(("SOT-23", "TSOT-23")):
+        variant = fid.upper().replace("TSOT-", "SOT-")
+        if variant not in _SOT23_VARIANTS:
+            variant = "SOT-23"
+        return make_sot23(ref, value, variant=variant)
+
+    return None
+
+
+def _route_fp_connector(
+    ref: str, value: str, fid: str, upper: str, layer: str,
+) -> Footprint | None:
+    """Match USB-C, RJ45, PinHeader, PinSocket, Conn_, TerminalBlock."""
+    if upper.startswith(("USB-C", "USB_C")):
+        return make_usbc_connector(ref, value)
+
+    if upper.startswith("RJ45"):
+        return make_rj45(ref, value)
+
+    if upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        rows = 2 if "2X" in upper or "2x" in fid else 1
+        rpi_swap = "2X20" in upper or "RPI" in upper or "RASPBERRY" in upper
+        return make_pin_header_socket(
+            ref, value, pin_count, pitch, rows, lib_id=fid, row_swap=rpi_swap,
+            layer=layer,
+        )
+
+    if upper.startswith("TERMINALBLOCK") or upper.startswith("TB_"):
+        pin_count = _parse_pin_count(fid)
+        pitch = _parse_pitch(fid)
+        return make_terminal_block(ref, value, pin_count, pitch)
+
+    if upper.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")):
+        return make_microsd_slot(ref, value)
+
+    return None
+
+
+def _route_fp_switch_misc(
+    ref: str, value: str, fid: str, upper: str, layer: str,
+) -> Footprint | None:
+    """Match DIP switches, tactile switches, relays, ESP32, crystals, test points, DIP packages."""
+    if upper.startswith(("SW_DIP", "DIP_SWITCH")):
+        import re as _re
+        pos_m = _re.search(r"x(\d+)", fid)
+        if pos_m:
+            pin_count = int(pos_m.group(1)) * 2
+        else:
+            pin_count = _parse_pin_count(fid)
+            if pin_count < 2:
+                pin_count = 8
+        return make_dip_switch(ref, value, pin_count)
+
+    if upper.startswith("RELAY"):
+        return make_relay_spdt(ref, value)
+
+    if "ESP32" in upper or "WROOM" in upper:
+        return make_esp32_wroom(ref, value)
+
+    # SMD tactile switches must come before generic SW_ check
+    if upper.startswith("SW_") and "SMD" in upper:
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        w = float(size_m.group(1)) if size_m else 3.0
+        h = float(size_m.group(2)) if size_m else 2.5
+        return make_smd_tact_switch(ref, value, width_mm=w, height_mm=h)
+
+    if upper.startswith("SW_"):
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        size_mm = float(size_m.group(1)) if size_m else 4.5
+        return make_tact_switch(ref, value, size_mm=size_mm)
+
+    if upper.startswith("CRYSTAL"):
+        import re as _re
+        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        w = float(dim_m.group(1)) if dim_m else 3.2
+        h = float(dim_m.group(2)) if dim_m else 1.5
+        return make_crystal_smd(ref, value, size_w=w, size_h=h)
+
+    if upper.startswith(("TP_", "TESTPOINT")):
+        import re as _re
+        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+        pad_size = float(size_m.group(1)) if size_m else 1.5
+        return make_test_point(ref, value, pad_size=pad_size, layer=layer)
+
+    if upper.startswith("DIP-") or (upper.startswith("DIP_") and "SWITCH" not in upper):
+        pin_count = _parse_pin_count(fid)
+        if pin_count < 2:
+            pin_count = 4
+        return make_dip_package(ref, value, pin_count)
+
+    return None
+
+
+def _route_fp_smd_ic(
+    ref: str, value: str, fid: str, upper: str,
+) -> Footprint | None:
+    """Match generic SMD IC packages (MSOP, TSSOP, SOIC, QFP, QFN, etc.)."""
+    ic_prefixes = ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
+    if not any(upper.startswith(p) for p in ic_prefixes):
+        return None
+    pin_count = _parse_pin_count(fid)
+    if pin_count < 2:
+        pin_count = 8
+    pitch = _parse_pitch(fid)
+    if pitch > 2.0:
+        if upper.startswith(("SOP", "SOIC")):
+            pitch = 1.27
+        else:
+            pitch = 0.5
+    return make_generic_smd_ic(ref, value, pin_count, pitch, lib_id=fid)
+
+
+def _route_footprint(
+    ref: str,
+    value: str,
+    fid: str,
+    upper: str,
+    layer: str,
+    footprint_id: str,
+) -> tuple[Footprint, str]:
+    """Route a footprint ID to the correct generator. Returns (fp, source)."""
+    _source = "parametric"
+
+    fp = _route_fp_passive_led(ref, value, fid, upper, layer)
+    if fp is not None:
+        return fp, _source
+
+    fp = _route_fp_connector(ref, value, fid, upper, layer)
+    if fp is not None:
+        return fp, _source
+
+    fp = _route_fp_switch_misc(ref, value, fid, upper, layer)
+    if fp is not None:
+        return fp, _source
+
+    fp = _route_fp_smd_ic(ref, value, fid, upper)
+    if fp is not None:
+        return fp, _source
+
+    _log.warning(
+        "footprint_for_component: unknown footprint_id '%s' for ref %s; using 0805 fallback",
+        footprint_id,
+        ref,
+    )
+    return make_smd_resistor_capacitor(ref, value, package="0805"), "parametric-fallback"
+
+
 def footprint_for_component(
     ref: str,
     value: str,
@@ -2252,170 +2589,7 @@ def footprint_for_component(
     fid = footprint_id.strip()
     upper = fid.upper()
 
-    fp: Footprint
-    _source = "parametric"  # overridden to "parametric-fallback" if unknown footprint_id
-
-    # WS2812B / addressable LED (before generic LED_ check)
-    if "WS2812" in upper:
-        ws_size = "5050"
-        if "2020" in fid:
-            ws_size = "2020"
-        elif "3535" in fid:
-            ws_size = "3535"
-        fp = make_ws2812b(ref, value, layer=layer, size=ws_size)
-
-    # LED packages
-    elif upper.startswith("LED_"):
-        pkg = fid[4:].upper()
-        pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
-        fp = make_smd_led(ref, value, package=pkg_norm)
-
-    # Resistor / capacitor (R_pkg or C_pkg)
-    elif upper.startswith(("R_", "C_")):
-        pkg = fid[2:].upper()
-        pkg_norm = pkg if pkg in _SMD_RC_DIMS else "0805"
-        fp = make_smd_resistor_capacitor(ref, value, package=pkg_norm)
-
-    # SOD-323 diodes
-    elif upper.startswith("SOD-323"):
-        fp = make_sod323(ref, value, layer=layer)
-
-    # SOD-123 diodes
-    elif upper.startswith("SOD-123"):
-        fp = make_sod123(ref, value)
-
-    # Inductors (L_xxxx)
-    elif upper.startswith("L_"):
-        pkg = fid[2:].upper()
-        fp = make_inductor_smd(ref, value, package=pkg)
-
-    # SOT-223 (special case before SOT-23 prefix check)
-    elif upper == "SOT-223":
-        fp = make_sot23(ref, value, variant="SOT-23")
-
-    # SOT-23 / TSOT-23 family
-    elif upper.startswith(("SOT-23", "TSOT-23")):
-        # Normalize TSOT-23-6 → SOT-23-6
-        variant = fid.upper().replace("TSOT-", "SOT-")
-        if variant not in _SOT23_VARIANTS:
-            variant = "SOT-23"
-        fp = make_sot23(ref, value, variant=variant)
-
-    # USB-C
-    elif upper.startswith(("USB-C", "USB_C")):
-        fp = make_usbc_connector(ref, value)
-
-    # RJ45
-    elif upper.startswith("RJ45"):
-        fp = make_rj45(ref, value)
-
-    # Pin headers and sockets (including Conn_NxM patterns)
-    elif upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        # Detect dual-row from "2x" in the footprint ID
-        rows = 2 if "2X" in upper or "2x" in fid else 1
-        # Detect RPi-related footprint IDs and pass row_swap=True
-        rpi_swap = "2X20" in upper or "RPI" in upper or "RASPBERRY" in upper
-        fp = make_pin_header_socket(
-            ref, value, pin_count, pitch, rows, lib_id=fid, row_swap=rpi_swap,
-            layer=layer,
-        )
-
-    # Terminal blocks
-    elif upper.startswith("TERMINALBLOCK") or upper.startswith("TB_"):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        fp = make_terminal_block(ref, value, pin_count, pitch)
-
-    # DIP switches (SW_DIP* or DIP_Switch*)
-    elif upper.startswith(("SW_DIP", "DIP_SWITCH")):
-        import re as _re
-        # Extract position count from "SW_DIP_x01" style names
-        pos_m = _re.search(r"x(\d+)", fid)
-        if pos_m:
-            pin_count = int(pos_m.group(1)) * 2  # 2 pins per position
-        else:
-            pin_count = _parse_pin_count(fid)
-            if pin_count < 2:
-                pin_count = 8
-        fp = make_dip_switch(ref, value, pin_count)
-
-    # Relay (SPDT)
-    elif upper.startswith("RELAY"):
-        fp = make_relay_spdt(ref, value)
-
-    # ESP32 modules
-    elif "ESP32" in upper or "WROOM" in upper:
-        fp = make_esp32_wroom(ref, value)
-
-    # SMD tactile switches (SW_SPST_SMD_*, SW_Push_SMD_*)
-    elif upper.startswith("SW_") and "SMD" in upper:
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        w = float(size_m.group(1)) if size_m else 3.0
-        h = float(size_m.group(2)) if size_m else 2.5
-        fp = make_smd_tact_switch(ref, value, width_mm=w, height_mm=h)
-
-    # Through-hole tactile switches (SW_SPST, SW_Push, etc.)
-    elif upper.startswith("SW_"):
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        size_mm = float(size_m.group(1)) if size_m else 4.5
-        fp = make_tact_switch(ref, value, size_mm=size_mm)
-
-    # Crystal oscillators
-    elif upper.startswith("CRYSTAL"):
-        import re as _re
-        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        w = float(dim_m.group(1)) if dim_m else 3.2
-        h = float(dim_m.group(2)) if dim_m else 1.5
-        fp = make_crystal_smd(ref, value, size_w=w, size_h=h)
-
-    # Test points (TP_*, TestPoint_*)
-    elif upper.startswith(("TP_", "TESTPOINT")):
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        pad_size = float(size_m.group(1)) if size_m else 1.5
-        fp = make_test_point(ref, value, pad_size=pad_size, layer=layer)
-
-    # Micro SD card slot
-    elif upper.startswith(("TF_PUSH", "MICROSD", "MICRO_SD")):
-        fp = make_microsd_slot(ref, value)
-
-    # Through-hole DIP packages (DIP-N, but not DIP_SWITCH)
-    elif upper.startswith("DIP-") or (upper.startswith("DIP_") and "SWITCH" not in upper):
-        pin_count = _parse_pin_count(fid)
-        if pin_count < 2:
-            pin_count = 4
-        fp = make_dip_package(ref, value, pin_count)
-
-    # Generic SMD IC packages (MSOP, TSSOP, SOIC, QFP, QFN, SOP, DFN, etc.)
-    elif any(
-        upper.startswith(prefix)
-        for prefix in ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
-    ):
-        pin_count = _parse_pin_count(fid)
-        if pin_count < 2:
-            pin_count = 8
-        pitch = _parse_pitch(fid)
-        if pitch > 2.0:
-            # Default pitch by package family: SOP/SOIC = 1.27mm, others = 0.5mm
-            if upper.startswith(("SOP", "SOIC")):
-                pitch = 1.27
-            else:
-                pitch = 0.5
-        fp = make_generic_smd_ic(ref, value, pin_count, pitch, lib_id=fid)
-
-    # Fallback
-    else:
-        _log.warning(
-            "footprint_for_component: unknown footprint_id '%s' for ref %s; using 0805 fallback",
-            footprint_id,
-            ref,
-        )
-        fp = make_smd_resistor_capacitor(ref, value, package="0805")
-        _source = "parametric-fallback"
+    fp, _source = _route_footprint(ref, value, fid, upper, layer, footprint_id)
 
     # Attach LCSC and source tag
     fp = Footprint(
