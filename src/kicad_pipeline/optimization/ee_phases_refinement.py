@@ -39,6 +39,7 @@ from kicad_pipeline.pcb.pin_map import (
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import PCBDesign
+    from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.review_agent import PlacementReview
 
 _log = logging.getLogger(__name__)
@@ -207,6 +208,39 @@ def _resolve_post_phase_collisions(
     return _resolve_collisions(positions, fp_sizes, bounds, targeted)
 
 
+def _compute_edge_distance(
+    cx: float, cy: float, cw: float, ch: float,
+    ix: float, iy: float, iw: float, ih: float,
+) -> float:
+    """Compute edge-to-edge distance between two component bounding boxes."""
+    dx_edge = abs(cx - ix) - (iw + cw) / 2.0
+    dy_edge = abs(cy - iy) - (ih + ch) / 2.0
+    if dx_edge <= 0 and dy_edge <= 0:
+        return 0.0
+    if dx_edge <= 0:
+        return dy_edge
+    if dy_edge <= 0:
+        return dx_edge
+    return math.sqrt(dx_edge ** 2 + dy_edge ** 2)
+
+
+def _cap_side_position(
+    placed_count: int,
+    ix: float, iy: float, iw: float, ih: float,
+    cw: float, ch: float,
+) -> tuple[float, float]:
+    """Compute decoupling cap position on one of 4 IC sides in round-robin order."""
+    side = placed_count % 4
+    tier = placed_count // 4
+    if side == 0:
+        return ix + tier * (cw + 0.5), iy - ih / 2.0 - ch / 2.0 - 0.5
+    if side == 1:
+        return ix + tier * (cw + 0.5), iy + ih / 2.0 + ch / 2.0 + 0.5
+    if side == 2:
+        return ix + iw / 2.0 + cw / 2.0 + 0.5, iy + tier * (ch + 0.5)
+    return ix - iw / 2.0 - cw / 2.0 - 0.5, iy + tier * (ch + 0.5)
+
+
 def _post_clamp_decoupling_repull(
     ctx: PlacementContext,
 ) -> None:
@@ -242,31 +276,10 @@ def _post_clamp_decoupling_repull(
                 continue
             cx, cy, crot = ctx.positions[cap_ref]
             cw, ch = ctx.fp_sizes.get(cap_ref, (1.5, 1.0))
-            dx_edge = abs(cx - ix) - (iw + cw) / 2.0
-            dy_edge = abs(cy - iy) - (ih + ch) / 2.0
-            if dx_edge <= 0 and dy_edge <= 0:
-                edge_dist = 0.0
-            elif dx_edge <= 0:
-                edge_dist = dy_edge
-            elif dy_edge <= 0:
-                edge_dist = dx_edge
-            else:
-                edge_dist = math.sqrt(dx_edge ** 2 + dy_edge ** 2)
+            edge_dist = _compute_edge_distance(cx, cy, cw, ch, ix, iy, iw, ih)
             if edge_dist <= 5.0:
                 continue
-            side = placed_count % 4
-            if side == 0:
-                tx = ix + placed_count // 4 * (cw + 0.5)
-                ty = iy - ih / 2.0 - ch / 2.0 - 0.5
-            elif side == 1:
-                tx = ix + placed_count // 4 * (cw + 0.5)
-                ty = iy + ih / 2.0 + ch / 2.0 + 0.5
-            elif side == 2:
-                tx = ix + iw / 2.0 + cw / 2.0 + 0.5
-                ty = iy + placed_count // 4 * (ch + 0.5)
-            else:
-                tx = ix - iw / 2.0 - cw / 2.0 - 0.5
-                ty = iy + placed_count // 4 * (ch + 0.5)
+            tx, ty = _cap_side_position(placed_count, ix, iy, iw, ih, cw, ch)
             tx = max(ctx.bounds[0] + 1.0, min(ctx.bounds[2] - 1.0, tx))
             ty = max(ctx.bounds[1] + 1.0, min(ctx.bounds[3] - 1.0, ty))
             ctx.positions[cap_ref] = (tx, ty, crot)
@@ -345,42 +358,18 @@ def _phase_late_decoupling(ctx: PlacementContext) -> None:
                 continue
             if cap_ref not in ctx.positions:
                 continue
+            if cap_ref in ctx.power_group_fixed:
+                continue
             cap_group = _ref_to_group.get(cap_ref, "")
             if cap_group != ic_group:
                 continue
-            if cap_ref in ctx.power_group_fixed:
-                continue
             cx, cy, crot = ctx.positions[cap_ref]
             cw, ch = ctx.fp_sizes.get(cap_ref, (1.5, 1.0))
-
-            dx_edge = abs(cx - ix) - (iw + cw) / 2.0
-            dy_edge = abs(cy - iy) - (ih + ch) / 2.0
-            if dx_edge <= 0 and dy_edge <= 0:
-                edge_dist = 0.0
-            elif dx_edge <= 0:
-                edge_dist = dy_edge
-            elif dy_edge <= 0:
-                edge_dist = dx_edge
-            else:
-                edge_dist = math.sqrt(dx_edge ** 2 + dy_edge ** 2)
-
+            edge_dist = _compute_edge_distance(cx, cy, cw, ch, ix, iy, iw, ih)
             if edge_dist <= 3.0:
                 continue
 
-            side = placed_count % 4
-            if side == 0:
-                tx = ix + (placed_count // 4) * (cw + 0.5)
-                ty = iy - ih / 2.0 - ch / 2.0 - 0.5
-            elif side == 1:
-                tx = ix + (placed_count // 4) * (cw + 0.5)
-                ty = iy + ih / 2.0 + ch / 2.0 + 0.5
-            elif side == 2:
-                tx = ix + iw / 2.0 + cw / 2.0 + 0.5
-                ty = iy + (placed_count // 4) * (ch + 0.5)
-            else:
-                tx = ix - iw / 2.0 - cw / 2.0 - 0.5
-                ty = iy + (placed_count // 4) * (ch + 0.5)
-
+            tx, ty = _cap_side_position(placed_count, ix, iy, iw, ih, cw, ch)
             tx = max(bounds[0] + 1.0, min(bounds[2] - 1.0, tx))
             ty = max(bounds[1] + 1.0, min(bounds[3] - 1.0, ty))
             ctx.positions[cap_ref] = (tx, ty, crot)
@@ -533,13 +522,71 @@ def _phase_review_loop(ctx: PlacementContext) -> None:
     ctx._domain_map = domain_map  # type: ignore[attr-defined]
 
 
+def _build_r_top_connector_x_map(
+    requirements: ProjectRequirements,
+    best_positions: dict[str, tuple[float, float, float]],
+) -> dict[str, float]:
+    """Map R-prefixed refs to their connected connector's X position."""
+    r_top_x: dict[str, float] = {}
+    for net in requirements.nets:
+        j_conns = [c for c in net.connections if c.ref.startswith("J")]
+        r_conns = [c for c in net.connections
+                   if c.ref.startswith("R") and c.ref in best_positions]
+        if not (j_conns and r_conns):
+            continue
+        for j_conn in j_conns:
+            j_pos = best_positions.get(j_conn.ref)
+            if j_pos:
+                for r_conn in r_conns:
+                    r_top_x[r_conn.ref] = j_pos[0]
+    return r_top_x
+
+
+def _build_adc_strip_order(passives: list[str]) -> list[str]:
+    """Build the vertical strip order for an ADC channel's passives."""
+    r_refs = sorted(r for r in passives if r.startswith("R"))
+    d_refs = [r for r in passives if r.startswith("D")]
+    c_refs = [r for r in passives if r.startswith("C")]
+    strip_order: list[str] = []
+    if len(r_refs) >= 1:
+        strip_order.append(r_refs[0])
+    strip_order.extend(c_refs)
+    strip_order.extend(d_refs)
+    if len(r_refs) >= 2:
+        strip_order.append(r_refs[1])
+    return strip_order
+
+
+def _place_adc_strip(
+    strip_order: list[str],
+    ch_x: float,
+    ch_y_top: float,
+    strip_gap: float,
+    best_positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+) -> int:
+    """Place a single ADC channel's passive strip vertically. Returns realigned count."""
+    realigned = 0
+    strip_y = ch_y_top
+    for ref in strip_order:
+        if ref not in best_positions:
+            continue
+        _raw_w, raw_h = fp_sizes.get(ref, (2.0, 2.0))
+        target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, ch_x))
+        target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, strip_y + raw_h / 2.0))
+        old_x, old_y, _old_rot = best_positions[ref]
+        if abs(old_x - target_x) > 1.0 or abs(old_y - target_y) > 1.0:
+            realigned += 1
+        best_positions[ref] = (target_x, target_y, 0.0)
+        strip_y = target_y + raw_h / 2.0 + strip_gap
+    return realigned
+
+
 def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
     """3c2-late: Post-collision ADC channel re-alignment."""
     adc_channels: list[tuple[str, str, list[str]]] = getattr(
         ctx, "_adc_channels", [],
-    )
-    _r_top_connector_x: dict[str, float] = getattr(
-        ctx, "_r_top_connector_x", {},
     )
     _STRIP_GAP_MM: float = getattr(ctx, "_STRIP_GAP_MM", 1.5)
     _CHANNEL_SPACING_MM: float = getattr(ctx, "_CHANNEL_SPACING_MM", 8.0)
@@ -548,32 +595,18 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
         return
 
     _log.info("  3c2-late: ADC channel re-alignment (connector-ordered)")
-    _realigned = 0
     bounds = ctx.bounds
 
-    # Build R_top -> connector X mapping using FINAL positions
-    _late_r_top_x: dict[str, float] = {}
-    for net in ctx.requirements.nets:
-        j_conns = [c for c in net.connections if c.ref.startswith("J")]
-        r_conns = [c for c in net.connections
-                   if c.ref.startswith("R") and c.ref in ctx.best_positions]
-        if j_conns and r_conns:
-            for j_conn in j_conns:
-                j_pos = ctx.best_positions.get(j_conn.ref)
-                if j_pos:
-                    for r_conn in r_conns:
-                        _late_r_top_x[r_conn.ref] = j_pos[0]
+    late_r_top_x = _build_r_top_connector_x_map(ctx.requirements, ctx.best_positions)
 
     _all_ch_with_x: list[tuple[float, str, str, list[str]]] = []
     for ic_ref, ic_pin, passives in adc_channels:
         conn_x = 999.0
-        r_refs_ch = sorted(r for r in passives if r.startswith("R"))
-        for r in r_refs_ch:
-            if r in _late_r_top_x:
-                conn_x = _late_r_top_x[r]
+        for r in sorted(r for r in passives if r.startswith("R")):
+            if r in late_r_top_x:
+                conn_x = late_r_top_x[r]
                 break
         _all_ch_with_x.append((conn_x, ic_ref, ic_pin, passives))
-
     _all_ch_with_x.sort(key=lambda t: t[0])
 
     _az = None
@@ -581,52 +614,27 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
         if z.name == "analog":
             _az = z
             break
-    if _az:
-        az_x1, az_y1, az_x2, az_y2 = _az.rect
-    else:
-        az_x1, az_y1, az_x2, az_y2 = bounds
+    az_x1, az_y1, az_x2, _az_y2 = _az.rect if _az else bounds
 
     n_total_ch = len(_all_ch_with_x)
     ch_zone_width = az_x2 - az_x1 - 4.0
-    ch_spacing = min(_CHANNEL_SPACING_MM,
-                     ch_zone_width / max(n_total_ch - 1, 1))
+    ch_spacing = min(_CHANNEL_SPACING_MM, ch_zone_width / max(n_total_ch - 1, 1))
     total_ch_width = (n_total_ch - 1) * ch_spacing
     ch_x_start = az_x1 + 2.0 + (ch_zone_width - total_ch_width) / 2.0
+    ch_y_top = az_y1 + 2.0
 
-    _ch_y_top = az_y1 + 2.0
+    _realigned = 0
     _ic_ch_xs: dict[str, list[float]] = {}
 
     for ch_idx, (conn_x, ic_ref, ic_pin, passives) in enumerate(_all_ch_with_x):
         ch_x = ch_x_start + ch_idx * ch_spacing
         _ic_ch_xs.setdefault(ic_ref, []).append(ch_x)
 
-        r_refs = sorted([r for r in passives if r.startswith("R")])
-        d_refs = [r for r in passives if r.startswith("D")]
-        c_refs = [r for r in passives if r.startswith("C")]
-
-        strip_order: list[str] = []
-        if len(r_refs) >= 1:
-            strip_order.append(r_refs[0])
-        strip_order.extend(c_refs)
-        strip_order.extend(d_refs)
-        if len(r_refs) >= 2:
-            strip_order.append(r_refs[1])
-
-        strip_y = _ch_y_top
-        for ref in strip_order:
-            if ref not in ctx.best_positions:
-                continue
-            raw_w, raw_h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            target_x = ch_x
-            target_y = strip_y + raw_h / 2.0
-            target_x = max(bounds[0] + 2.0, min(bounds[2] - 2.0, target_x))
-            target_y = max(bounds[1] + 2.0, min(bounds[3] - 2.0, target_y))
-            old_x, old_y, _old_rot = ctx.best_positions[ref]
-            if abs(old_x - target_x) > 1.0 or abs(old_y - target_y) > 1.0:
-                _realigned += 1
-            ctx.best_positions[ref] = (target_x, target_y, 0.0)
-            strip_y = target_y + raw_h / 2.0 + _STRIP_GAP_MM
-
+        strip_order = _build_adc_strip_order(passives)
+        _realigned += _place_adc_strip(
+            strip_order, ch_x, ch_y_top, _STRIP_GAP_MM,
+            ctx.best_positions, ctx.fp_sizes, bounds,
+        )
         _log.info(
             "    3c2-late: ch%d (%s.%s) -> x=%.1f (conn_x=%.1f)",
             ch_idx, ic_ref, ic_pin, ch_x, conn_x,
@@ -637,7 +645,7 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
         if ic_ref not in ctx.best_positions:
             continue
         ic_new_x = sum(ch_xs) / len(ch_xs)
-        ic_new_y = _ch_y_top + 22.0
+        ic_new_y = ch_y_top + 22.0
         iw, ih = ctx.fp_sizes.get(ic_ref, (5.0, 5.0))
         ic_new_x = max(bounds[0] + iw / 2, min(bounds[2] - iw / 2, ic_new_x))
         ic_new_y = max(bounds[1] + ih / 2, min(bounds[3] - ih / 2, ic_new_y))
@@ -824,14 +832,103 @@ def _phase_final_clamp(ctx: PlacementContext) -> None:
     )
 
 
+def _post_apply_pad_extent_clamp(
+    final_pcb: PCBDesign,
+    bounds: tuple[float, float, float, float],
+    edge_m: float,
+) -> PCBDesign:
+    """Clamp footprints so pad extents stay within board bounds."""
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
+    min_x, min_y, max_x, max_y = bounds
+    clamped = 0
+    new_fps = list(final_pcb.footprints)
+    for i, fp in enumerate(new_fps):
+        if not fp.pads:
+            continue
+        ox, oy = fp.position.x, fp.position.y
+        rot = fp.rotation
+        px0, py0, px1, py1 = pad_extent_in_board_space(fp, ox, oy, rot)
+        shift_x = shift_y = 0.0
+        if px0 < min_x + edge_m:
+            shift_x = (min_x + edge_m) - px0
+        elif px1 > max_x - edge_m:
+            shift_x = (max_x - edge_m) - px1
+        if py0 < min_y + edge_m:
+            shift_y = (min_y + edge_m) - py0
+        elif py1 > max_y - edge_m:
+            shift_y = (max_y - edge_m) - py1
+        if shift_x != 0.0 or shift_y != 0.0:
+            new_fps[i] = replace(fp, position=Point(x=ox + shift_x, y=oy + shift_y))
+            clamped += 1
+            _log.info("  Post-apply clamp %s: shifted (%.1f, %.1f)", fp.ref, shift_x, shift_y)
+    if clamped:
+        final_pcb = replace(final_pcb, footprints=tuple(new_fps))
+        _log.info("Post-apply board-edge clamp: %d components", clamped)
+    return final_pcb
+
+
+def _filter_stale_violations(
+    best_review: PlacementReview,
+    final_pcb: PCBDesign,
+    best_positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> PlacementReview:
+    """Remove violations that no longer apply after final clamping."""
+    from kicad_pipeline.optimization.review_agent import (
+        PlacementReview as _PlacementReview,
+        PlacementRule,
+        PlacementViolation,
+        _check_board_edge_clearance,
+        _compute_grade,
+    )
+
+    fresh_edge = _check_board_edge_clearance(final_pcb)
+    fresh_edge_refs = {r for v in fresh_edge for r in v.refs}
+    fresh_collision_pairs = {
+        tuple(sorted((a, b))) for a, b in _count_collisions(best_positions, fp_sizes)
+    }
+
+    filtered: list[PlacementViolation] = []
+    stale = 0
+    for v in best_review.violations:
+        if v.rule == PlacementRule.BOARD_EDGE_CLEARANCE:
+            if not any(r in fresh_edge_refs for r in v.refs):
+                stale += 1
+                continue
+            matched = next((fv for fv in fresh_edge if fv.refs == v.refs), v)
+            filtered.append(matched)
+        elif v.rule == PlacementRule.COLLISION:
+            if tuple(sorted(v.refs)) not in fresh_collision_pairs:
+                stale += 1
+                continue
+            filtered.append(v)
+        else:
+            filtered.append(v)
+
+    if not stale:
+        return best_review
+
+    _log.info("Filtered %d stale edge clearance violations", stale)
+    grade = _compute_grade(tuple(filtered))
+    n_crit = sum(1 for v in filtered if v.severity == "critical")
+    n_major = sum(1 for v in filtered if v.severity == "major")
+    n_minor = sum(1 for v in filtered if v.severity == "minor")
+    return _PlacementReview(
+        violations=tuple(filtered),
+        summary=f"Grade {grade}: {len(filtered)} violations "
+                f"({n_crit} critical, {n_major} major, "
+                f"{n_minor} minor)",
+        grade=grade,
+    )
+
+
 def _phase_build_final(
     ctx: PlacementContext,
 ) -> tuple[PCBDesign, PlacementReview]:
     """Build final PCB and filter stale violations."""
     from kicad_pipeline.optimization.placement_guard import validate_placement
-    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
 
-    min_x, min_y, max_x, max_y = ctx.bounds
     _edge_m: float = getattr(ctx, "_edge_m", 1.5)
     best_review: PlacementReview | None = getattr(ctx, "_best_review", None)
     domain_map = getattr(ctx, "_domain_map", {})
@@ -853,86 +950,12 @@ def _phase_build_final(
         positions_tuple = _dict_to_positions(ctx.best_positions)
         final_pcb = _apply_positions(ctx.initial_pcb, positions_tuple)
 
-    # Post-apply pad extent check
-    _post_apply_clamp = 0
-    new_fps = list(final_pcb.footprints)
-    for i, fp in enumerate(new_fps):
-        if not fp.pads:
-            continue
-        ox, oy = fp.position.x, fp.position.y
-        rot = fp.rotation
-        px0, py0, px1, py1 = pad_extent_in_board_space(fp, ox, oy, rot)
-        shift_x = shift_y = 0.0
-        if px0 < min_x + _edge_m:
-            shift_x = (min_x + _edge_m) - px0
-        elif px1 > max_x - _edge_m:
-            shift_x = (max_x - _edge_m) - px1
-        if py0 < min_y + _edge_m:
-            shift_y = (min_y + _edge_m) - py0
-        elif py1 > max_y - _edge_m:
-            shift_y = (max_y - _edge_m) - py1
-        if shift_x != 0.0 or shift_y != 0.0:
-            new_pos = Point(x=ox + shift_x, y=oy + shift_y)
-            new_fps[i] = replace(fp, position=new_pos)
-            _post_apply_clamp += 1
-            _log.info("  Post-apply clamp %s: shifted (%.1f, %.1f)", fp.ref, shift_x, shift_y)
-    if _post_apply_clamp:
-        final_pcb = replace(final_pcb, footprints=tuple(new_fps))
-        _log.info("Post-apply board-edge clamp: %d components", _post_apply_clamp)
+    final_pcb = _post_apply_pad_extent_clamp(final_pcb, ctx.bounds, _edge_m)
 
-    # Filter stale violations
     if best_review is not None:
-        from kicad_pipeline.optimization.review_agent import (
-            PlacementReview as _PR,
+        best_review = _filter_stale_violations(
+            best_review, final_pcb, ctx.best_positions, ctx.fp_sizes,
         )
-        from kicad_pipeline.optimization.review_agent import (
-            PlacementRule,
-            PlacementViolation,
-            _check_board_edge_clearance,
-            _compute_grade,
-        )
-        fresh_edge = _check_board_edge_clearance(final_pcb)
-        fresh_edge_refs = {r for v in fresh_edge for r in v.refs}
-
-        fresh_collisions = _count_collisions(ctx.best_positions, ctx.fp_sizes)
-        fresh_collision_pairs = {
-            tuple(sorted((a, b))) for a, b in fresh_collisions
-        }
-
-        filtered: list[PlacementViolation] = []
-        _stale = 0
-        for v in best_review.violations:
-            if v.rule == PlacementRule.BOARD_EDGE_CLEARANCE:
-                if not any(r in fresh_edge_refs for r in v.refs):
-                    _stale += 1
-                    continue
-                for fv in fresh_edge:
-                    if fv.refs == v.refs:
-                        filtered.append(fv)
-                        break
-                else:
-                    filtered.append(v)
-            elif v.rule == PlacementRule.COLLISION:
-                pair = tuple(sorted(v.refs))
-                if pair not in fresh_collision_pairs:
-                    _stale += 1
-                    continue
-                filtered.append(v)
-            else:
-                filtered.append(v)
-        if _stale:
-            _log.info("Filtered %d stale edge clearance violations", _stale)
-            grade = _compute_grade(tuple(filtered))
-            n_crit = sum(1 for v in filtered if v.severity == "critical")
-            n_major = sum(1 for v in filtered if v.severity == "major")
-            n_minor = sum(1 for v in filtered if v.severity == "minor")
-            best_review = _PR(
-                violations=tuple(filtered),
-                summary=f"Grade {grade}: {len(filtered)} violations "
-                        f"({n_crit} critical, {n_major} major, "
-                        f"{n_minor} minor)",
-                grade=grade,
-            )
 
     # Validation gate
     guard = validate_placement(final_pcb, ctx.requirements)

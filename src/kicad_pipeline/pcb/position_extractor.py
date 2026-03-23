@@ -570,6 +570,41 @@ def _extract_user_zones(
     return zones
 
 
+def _extract_zone_layers(node: list[object]) -> list[str]:
+    """Extract layer names from a zone node (supports both 'layer' and 'layers')."""
+    layers: list[str] = []
+    for child in node:
+        if not isinstance(child, list) or not child:
+            continue
+        if child[0] == "layers":
+            layers.extend(str(v) for v in child[1:] if isinstance(v, str))
+        elif child[0] == "layer":
+            layers.append(str(child[1]))
+    return layers
+
+
+def _parse_keepout_rules(
+    keepout_node: list[object],
+) -> tuple[bool, bool, bool]:
+    """Parse keepout rules from a keepout S-expression node.
+
+    Returns (no_copper, no_tracks, no_vias).
+    """
+    no_copper = False
+    no_tracks = False
+    no_vias = False
+    for child in keepout_node:
+        if not isinstance(child, list) or len(child) != 2:
+            continue
+        if child[0] == "copperpour" and child[1] == "not_allowed":
+            no_copper = True
+        elif child[0] == "tracks" and child[1] == "not_allowed":
+            no_tracks = True
+        elif child[0] == "vias" and child[1] == "not_allowed":
+            no_vias = True
+    return no_copper, no_tracks, no_vias
+
+
 def _extract_user_keepouts(tree: SExpNode) -> list[Keepout]:
     """Extract user-created keepout zones with full multi-layer support."""
     keepouts: list[Keepout] = []
@@ -586,29 +621,12 @@ def _extract_user_keepouts(tree: SExpNode) -> list[Keepout]:
                 break
         if keepout_node is None:
             continue
-        # Extract layers (multi-layer keepouts use "layers" not "layer")
-        layers: list[str] = []
-        for child in node:
-            if isinstance(child, list) and child:
-                if child[0] == "layers":
-                    layers.extend(str(v) for v in child[1:] if isinstance(v, str))
-                elif child[0] == "layer":
-                    layers.append(str(child[1]))
+
+        layers = _extract_zone_layers(node)
         uuid = _str_val(node, "uuid")
-        # Extract polygon
         points = _extract_polygon_points(node)
-        # Extract keepout rules
-        no_copper = False
-        no_tracks = False
-        no_vias = False
-        for child in keepout_node:
-            if isinstance(child, list) and len(child) == 2:
-                if child[0] == "copperpour" and child[1] == "not_allowed":
-                    no_copper = True
-                elif child[0] == "tracks" and child[1] == "not_allowed":
-                    no_tracks = True
-                elif child[0] == "vias" and child[1] == "not_allowed":
-                    no_vias = True
+        no_copper, no_tracks, no_vias = _parse_keepout_rules(keepout_node)
+
         if points:
             keepouts.append(Keepout(
                 polygon=tuple(points),

@@ -470,6 +470,56 @@ def _detect_relay_clusters(
                     ))
 
 
+def _build_net_ref_indices(
+    requirements: ProjectRequirements,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Build net->refs and ref->nets indices from pin connections."""
+    net_to_refs: dict[str, set[str]] = {}
+    ref_pin_nets: dict[str, set[str]] = {}
+    for comp in requirements.components:
+        for pin in comp.pins:
+            if pin.net:
+                net_to_refs.setdefault(pin.net, set()).add(comp.ref)
+                ref_pin_nets.setdefault(comp.ref, set()).add(pin.net)
+    return net_to_refs, ref_pin_nets
+
+
+def _find_npn_cluster(
+    comp: object,
+    net_to_refs: dict[str, set[str]],
+    subcircuit_grouped: set[str],
+) -> list[str] | None:
+    """Find an NPN driver cluster (Q + base R + collector D/K).
+
+    Returns list of refs if cluster has 3+ members, else None.
+    """
+    q_nets: dict[str, str] = {}
+    for pin in comp.pins:  # type: ignore[attr-defined]
+        if pin.net:
+            q_nets[pin.name] = pin.net
+    base_net = q_nets.get("B") or q_nets.get("1")
+    collector_net = q_nets.get("C") or q_nets.get("2")
+    if not base_net or not collector_net:
+        return None
+
+    cluster = [comp.ref]  # type: ignore[attr-defined]
+    # Find base resistor
+    for other_ref in net_to_refs.get(base_net, set()):
+        if other_ref == comp.ref or other_ref in subcircuit_grouped:  # type: ignore[attr-defined]
+            continue
+        if other_ref.startswith("R"):
+            cluster.append(other_ref)
+            break
+    # Find collector diode/relay
+    for other_ref in net_to_refs.get(collector_net, set()):
+        if other_ref == comp.ref or other_ref in subcircuit_grouped:  # type: ignore[attr-defined]
+            continue
+        if other_ref.startswith(("D", "K")):
+            cluster.append(other_ref)
+            break
+    return cluster if len(cluster) >= 3 else None
+
+
 def _detect_npn_driver_clusters(
     requirements: ProjectRequirements,
     constraints: list[PlacementConstraint],
@@ -477,53 +527,24 @@ def _detect_npn_driver_clusters(
     layout: str,
 ) -> None:
     """Infer NPN driver subcircuit clusters from netlist patterns."""
-    # Pre-build net_name -> set[ref] index for O(1) lookups
-    net_to_refs: dict[str, set[str]] = {}
-    # Pre-build ref -> set[net_name] index via pin connections
-    ref_pin_nets: dict[str, set[str]] = {}
-    for comp in requirements.components:
-        for pin in comp.pins:
-            if pin.net:
-                net_to_refs.setdefault(pin.net, set()).add(comp.ref)
-                ref_pin_nets.setdefault(comp.ref, set()).add(pin.net)
+    net_to_refs, _ref_pin_nets = _build_net_ref_indices(requirements)
 
     for comp in requirements.components:
         if not comp.ref.startswith("Q") or comp.ref in subcircuit_grouped:
             continue
-        q_nets: dict[str, str] = {}
-        for pin in comp.pins:
-            if pin.net:
-                q_nets[pin.name] = pin.net
-        base_net_name = q_nets.get("B") or q_nets.get("1")
-        collector_net_name = q_nets.get("C") or q_nets.get("2")
-        if not base_net_name or not collector_net_name:
+        cluster = _find_npn_cluster(comp, net_to_refs, subcircuit_grouped)
+        if cluster is None:
             continue
-        cluster = [comp.ref]
-        # Find base resistor: R* on base net
-        for other_ref in net_to_refs.get(base_net_name, set()):
-            if other_ref == comp.ref or other_ref in subcircuit_grouped:
-                continue
-            if other_ref.startswith("R"):
-                cluster.append(other_ref)
-                break
-        # Find collector diode/relay: D*/K* on collector net
-        for other_ref in net_to_refs.get(collector_net_name, set()):
-            if other_ref == comp.ref or other_ref in subcircuit_grouped:
-                continue
-            if other_ref.startswith(("D", "K")):
-                cluster.append(other_ref)
-                break
-        if len(cluster) >= 3:
-            group_name = f"_subcircuit_{comp.ref}"
-            for ref in cluster:
-                subcircuit_grouped.add(ref)
-                constraints.append(PlacementConstraint(
-                    ref=ref,
-                    constraint_type=PlacementConstraintType.GROUP,
-                    group_name=group_name,
-                    priority=18,
-                    subcircuit_layout=layout,
-                ))
+        group_name = f"_subcircuit_{comp.ref}"
+        for ref in cluster:
+            subcircuit_grouped.add(ref)
+            constraints.append(PlacementConstraint(
+                ref=ref,
+                constraint_type=PlacementConstraintType.GROUP,
+                group_name=group_name,
+                priority=18,
+                subcircuit_layout=layout,
+            ))
 
 
 def _detect_subcircuit_clusters(
@@ -1697,6 +1718,96 @@ def _get_component_pad_offsets(
     return {pad.number: (pad.position.x, pad.position.y) for pad in fp.pads}
 
 
+def _find_multipin_refs(requirements: ProjectRequirements) -> set[str]:
+    """Identify multi-pin switches/connectors/relays with 4+ pins."""
+    _ALIGN_PREFIXES = frozenset({"SW", "J", "K"})
+    result: set[str] = set()
+    for comp in requirements.components:
+        if len(comp.pins) < 4:
+            continue
+        prefix = "".join(ch for ch in comp.ref if ch.isalpha()).upper()
+        if prefix in _ALIGN_PREFIXES:
+            result.add(comp.ref)
+    return result
+
+
+def _find_passive_target(
+    ref: str,
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    multipin_refs: set[str],
+    positions: dict[str, Point],
+) -> tuple[str, str, str] | None:
+    """Find the multi-pin target connected to a 2-pin passive.
+
+    Returns (target_ref, my_pin, target_pin) or None.
+    """
+    for pin in ("1", "2"):
+        for nb_ref, nb_pin in pad_conn.get((ref, pin), []):
+            if nb_ref in multipin_refs and nb_ref in positions:
+                return nb_ref, pin, nb_pin
+    return None
+
+
+def _compute_passive_alignment(
+    pad_dx: float,
+    pad_dy: float,
+    rot_dx: float,
+    rot_dy: float,
+    pad_abs_x: float,
+    pad_abs_y: float,
+    passive_w: float,
+    my_pin: str,
+) -> tuple[float, float, float]:
+    """Compute aligned position and rotation for a passive near a target pad.
+
+    Returns (new_x, new_y, best_rot).
+    """
+    if abs(pad_dx) >= abs(pad_dy):
+        # Pad is on left or right side -- approach horizontally
+        if rot_dx > 0:
+            new_x = pad_abs_x + passive_w / 2.0 + 0.5
+            best_rot = 180.0 if my_pin == "1" else 0.0
+        else:
+            new_x = pad_abs_x - passive_w / 2.0 - 0.5
+            best_rot = 0.0 if my_pin == "1" else 180.0
+        return new_x, pad_abs_y, best_rot
+
+    # Pad is on top or bottom -- approach vertically
+    if rot_dy > 0:
+        new_y = pad_abs_y + passive_w / 2.0 + 0.5
+        best_rot = 270.0 if my_pin == "1" else 90.0
+    else:
+        new_y = pad_abs_y - passive_w / 2.0 - 0.5
+        best_rot = 90.0 if my_pin == "1" else 270.0
+    return pad_abs_x, new_y, best_rot
+
+
+def _is_within_board(
+    new_x: float,
+    new_y: float,
+    passive_w: float,
+    passive_h: float,
+    best_rot: float,
+    origin_x: float,
+    origin_y: float,
+    board_w: float,
+    board_h: float,
+) -> bool:
+    """Check whether a passive at (new_x, new_y) fits within board bounds."""
+    local_x = new_x - origin_x
+    local_y = new_y - origin_y
+    gw, gh = passive_w, passive_h
+    if best_rot in (90.0, 270.0):
+        gw, gh = gh, gw
+    margin = 1.0
+    return (
+        local_x - gw / 2.0 >= margin
+        and local_y - gh / 2.0 >= margin
+        and local_x + gw / 2.0 <= board_w - margin
+        and local_y + gh / 2.0 <= board_h - margin
+    )
+
+
 def align_passives_to_pads(
     positions: dict[str, Point],
     rotations: dict[str, float],
@@ -1731,7 +1842,6 @@ def align_passives_to_pads(
     positions = dict(positions)
     rotations = dict(rotations)
 
-    # Cache pad offsets for multi-pin components
     pad_offsets_cache: dict[str, dict[str, tuple[float, float]] | None] = {}
 
     def _get_cached_offsets(
@@ -1741,16 +1851,7 @@ def align_passives_to_pads(
             pad_offsets_cache[ref] = _get_component_pad_offsets(ref, requirements)
         return pad_offsets_cache[ref]
 
-    # Identify multi-pin components suitable for pad alignment (switches,
-    # connectors with 4+ pins — NOT ICs which have dense pad layouts)
-    multipin_refs: set[str] = set()
-    for comp in requirements.components:
-        if len(comp.pins) < 4:
-            continue
-        # Only align to switches and connectors, not ICs
-        prefix = "".join(ch for ch in comp.ref if ch.isalpha()).upper()
-        if prefix in ("SW", "J", "K"):
-            multipin_refs.add(comp.ref)
+    multipin_refs = _find_multipin_refs(requirements)
 
     for ref in list(positions):
         if not _is_two_pin_passive(ref):
@@ -1759,24 +1860,11 @@ def align_passives_to_pads(
         if size is None:
             continue
 
-        # Find connections from this passive to multi-pin components
-        target_ref: str | None = None
-        my_pin: str | None = None
-        target_pin: str | None = None
-        for pin in ("1", "2"):
-            for nb_ref, nb_pin in pad_conn.get((ref, pin), []):
-                if nb_ref in multipin_refs and nb_ref in positions:
-                    target_ref = nb_ref
-                    my_pin = pin
-                    target_pin = nb_pin
-                    break
-            if target_ref is not None:
-                break
-
-        if target_ref is None or my_pin is None or target_pin is None:
+        match = _find_passive_target(ref, pad_conn, multipin_refs, positions)
+        if match is None:
             continue
+        target_ref, my_pin, target_pin = match
 
-        # Get target pad's absolute position
         target_offsets = _get_cached_offsets(target_ref)
         if target_offsets is None or target_pin not in target_offsets:
             continue
@@ -1785,49 +1873,18 @@ def align_passives_to_pads(
         target_rot = rotations.get(target_ref, 0.0)
         pad_dx, pad_dy = target_offsets[target_pin]
         rot_dx, rot_dy = _rotated_pad_offset(pad_dx, pad_dy, target_rot)
-        # Absolute pad position
         pad_abs_x = target_pos.x + rot_dx
         pad_abs_y = target_pos.y + rot_dy
 
         passive_w, passive_h = size
+        new_x, new_y, best_rot = _compute_passive_alignment(
+            pad_dx, pad_dy, rot_dx, rot_dy, pad_abs_x, pad_abs_y, passive_w, my_pin,
+        )
 
-        # Check if pad is on left/right or top/bottom side of the component
-        # For corner pads (equal dx/dy), prefer horizontal approach
-        if abs(pad_dx) >= abs(pad_dy):
-            # Pad is on left or right side — approach horizontally
-            if rot_dx > 0:
-                # Pad is on right side — passive goes further right
-                new_x = pad_abs_x + passive_w / 2.0 + 0.5
-                best_rot = 180.0 if my_pin == "1" else 0.0
-            else:
-                # Pad is on left side — passive goes further left
-                new_x = pad_abs_x - passive_w / 2.0 - 0.5
-                best_rot = 0.0 if my_pin == "1" else 180.0
-            new_y = pad_abs_y
-        else:
-            # Pad is on top or bottom — approach vertically
-            if rot_dy > 0:
-                # Pad is below center — passive goes further down
-                new_y = pad_abs_y + passive_w / 2.0 + 0.5
-                best_rot = 270.0 if my_pin == "1" else 90.0
-            else:
-                # Pad is above center — passive goes up
-                new_y = pad_abs_y - passive_w / 2.0 - 0.5
-                best_rot = 90.0 if my_pin == "1" else 270.0
-            new_x = pad_abs_x
-
-        # Verify new position is within board bounds
-        local_x = new_x - origin_x
-        local_y = new_y - origin_y
-        gw, gh = passive_w, passive_h
-        if best_rot in (90.0, 270.0):
-            gw, gh = gh, gw
-
-        margin = 1.0  # mm margin from board edge
-        if (local_x - gw / 2.0 >= margin
-                and local_y - gh / 2.0 >= margin
-                and local_x + gw / 2.0 <= board_w - margin
-                and local_y + gh / 2.0 <= board_h - margin):
+        if _is_within_board(
+            new_x, new_y, passive_w, passive_h, best_rot,
+            origin_x, origin_y, board_w, board_h,
+        ):
             positions[ref] = Point(x=new_x, y=new_y)
             rotations[ref] = best_rot
 

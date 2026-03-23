@@ -43,6 +43,71 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+def _find_relay_zone(
+    zones: Sequence[BoardZone] | None,
+) -> BoardZone | None:
+    """Find the relay zone from a sequence of BoardZones."""
+    if not zones:
+        return None
+    for z in zones:
+        if z.name == "relay":
+            return z
+    return None
+
+
+def _compute_relay_row_x_range(
+    min_x: float,
+    max_x: float,
+    relay_zone: BoardZone | None,
+    max_relay_half_w: float,
+) -> tuple[float, float]:
+    """Compute the X range for relay row placement."""
+    x1 = min_x + BOARD_EDGE_MARGIN_MM
+    x2 = max_x - 15.0  # leave room for edge connectors
+    if relay_zone is not None:
+        x1 = max(x1, relay_zone.rect[0])
+        x2 = min(x2, relay_zone.rect[2] - 5.0)
+    x2 = min(x2, max_x - max_relay_half_w - 1.5)
+    return x1, x2
+
+
+def _compute_relay_row_y(
+    avg_y: float,
+    min_y: float,
+    max_relay_h: float,
+    start_x: float,
+    total_width: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    row_refs: set[str],
+    relay_zone: BoardZone | None,
+) -> float:
+    """Compute the Y position for the relay row, avoiding top-edge obstacles."""
+    # Find the lowest bottom edge of any component above the relay row
+    relay_x_min = start_x
+    relay_x_max = start_x + total_width
+    top_obstacle_y = min_y
+    for ref, (ox, oy, _orot) in positions.items():
+        if ref in row_refs:
+            continue
+        ow, oh = _rotation_aware_size(ref, positions, fp_sizes)
+        if ox + ow / 2 > relay_x_min and ox - ow / 2 < relay_x_max:
+            obstacle_bot = oy + oh / 2.0
+            if obstacle_bot < avg_y:
+                top_obstacle_y = max(top_obstacle_y, obstacle_bot)
+
+    min_relay_y = top_obstacle_y + max_relay_h / 2.0 + 2.0
+
+    if relay_zone is not None:
+        zone_center_y = (relay_zone.rect[1] + relay_zone.rect[3]) / 2.0
+        min_relay_y = max(min_relay_y, relay_zone.rect[1] + max_relay_h / 2.0 + 2.0)
+        avg_y = max(avg_y, zone_center_y)
+
+    # Fallback: enforce minimum 25mm from top edge
+    min_relay_y = max(min_relay_y, min_y + max_relay_h / 2.0 + 15.0)
+    return max(min_relay_y, avg_y)
+
+
 def _place_row_layout(
     subcircuits: Sequence[DetectedSubCircuit],
     positions: dict[str, tuple[float, float, float]],
@@ -65,127 +130,75 @@ def _place_row_layout(
             continue
         type_groups.setdefault(sc.circuit_type.value, []).append(sc)
 
+    relay_zone = _find_relay_zone(zones)
+
     for _circuit_type, group in type_groups.items():
         if len(group) < 2:
             continue
 
-        # Find the current average position of anchors
-        anchor_positions = []
+        anchor_positions: list[tuple[float, float, DetectedSubCircuit]] = []
         for sc in group:
             if sc.anchor_ref in positions and sc.anchor_ref not in fixed_refs:
-                x, y, rot = positions[sc.anchor_ref]
+                x, y, _rot = positions[sc.anchor_ref]
                 anchor_positions.append((x, y, sc))
 
         if len(anchor_positions) < 2:
             continue
 
-        # Compute the row center and direction
         avg_y = sum(p[1] for p in anchor_positions) / len(anchor_positions)
-
-        # Sort anchors left-to-right
         anchor_positions.sort(key=lambda p: p[0])
-
-        # Relay rotation: 90 deg for vertical coil orientation
         relay_rotation = 90.0
 
-        # Compute row spacing based on anchor widths (swapped for 90 deg rotation)
+        # Compute total row width (swapped w/h for 90 deg rotation)
         total_width = 0.0
         for _, _, sc in anchor_positions:
             aw, ah = fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)
-            # Swap w/h because relay is rotated 90 deg
-            aw, ah = ah, aw
-            total_width += aw + 2.0  # gap between relays
+            total_width += ah + 2.0  # ah because rotated 90 deg
 
-        # Place anchors in a row, constrained to relay zone if available
-        relay_zone_x1 = min_x + BOARD_EDGE_MARGIN_MM
-        relay_zone_x2 = max_x - 15.0  # leave room for edge connectors
-        if zones:
-            for z in zones:
-                if z.name == "relay":
-                    relay_zone_x1 = max(min_x + BOARD_EDGE_MARGIN_MM, z.rect[0])
-                    relay_zone_x2 = min(max_x - 15.0, z.rect[2] - 5.0)
-                    break
-        # Ensure rightmost relay stays within board with margin
-        # Each relay at 90 deg has X half-width = aw/2 ~ 8.8mm
         max_relay_half_w = max(
             (fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)[1] for _, _, sc in anchor_positions),
             default=8.8,
         ) / 2.0
-        relay_zone_x2 = min(relay_zone_x2, max_x - max_relay_half_w - 1.5)
-        # Center the row within the available zone X range
-        zone_center_x = (relay_zone_x1 + relay_zone_x2) / 2.0
-        start_x = zone_center_x - total_width / 2.0
-        # Clamp to zone bounds
-        start_x = max(relay_zone_x1, start_x)
-        if start_x + total_width > relay_zone_x2:
-            start_x = relay_zone_x2 - total_width
-        row_grid = _PlacementGrid(bounds)
 
-        # Register all non-row components first
+        zone_x1, zone_x2 = _compute_relay_row_x_range(
+            min_x, max_x, relay_zone, max_relay_half_w,
+        )
+        zone_center_x = (zone_x1 + zone_x2) / 2.0
+        start_x = max(zone_x1, zone_center_x - total_width / 2.0)
+        if start_x + total_width > zone_x2:
+            start_x = zone_x2 - total_width
+
+        # Collect row refs and register non-row components on grid
         row_refs: set[str] = set()
         for _, _, sc in anchor_positions:
             row_refs.update(sc.refs)
+        row_grid = _PlacementGrid(bounds)
         for ref, (ox, oy, _orot) in positions.items():
             if ref not in row_refs:
                 ow, oh = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
                 row_grid.place(ox, oy, ow, oh)
 
-        # Force all relay anchors to the same Y (avg_y) in a tight row
-        # Ensure minimum Y so relays don't overlap top-edge connectors.
-        # Find the lowest bottom edge of any component above the relay row
-        # in the relay X range to prevent vertical overlap.
+        # relay_rotation is 90 deg, so effective height = w (swapped)
         max_relay_h = max(
-            (lambda w, h: h if relay_rotation % 180 == 0 else w)(
-                *fp_sizes.get(sc.anchor_ref, (18.0, 16.0))
-            )
+            fp_sizes.get(sc.anchor_ref, (18.0, 16.0))[0]  # w becomes h at 90 deg
             for _, _, sc in anchor_positions
         )
-        # Check for components in the top area that overlap the relay X range
-        relay_x_min = start_x
-        relay_x_max = start_x + total_width
-        top_obstacle_y = min_y  # highest bottom edge of obstacles above
-        for ref, (ox, oy, _orot) in positions.items():
-            if ref in row_refs:
-                continue
-            ow, oh = _rotation_aware_size(ref, positions, fp_sizes)
-            # Check X overlap with relay row
-            if ox + ow / 2 > relay_x_min and ox - ow / 2 < relay_x_max:
-                obstacle_bot = oy + oh / 2.0
-                if obstacle_bot < avg_y:  # obstacle is above relay row
-                    top_obstacle_y = max(top_obstacle_y, obstacle_bot)
-        min_relay_y = top_obstacle_y + max_relay_h / 2.0 + 2.0
-        # Use relay zone Y if available -- ensures relays are placed within
-        # their assigned zone, well below screw terminals.
-        if zones:
-            for z in zones:
-                if z.name == "relay":
-                    # Place relay centroids at the vertical center of the relay zone
-                    zone_center_y = (z.rect[1] + z.rect[3]) / 2.0
-                    min_relay_y = max(min_relay_y, z.rect[1] + max_relay_h / 2.0 + 2.0)
-                    avg_y = max(avg_y, zone_center_y)
-                    break
-        # Fallback: enforce minimum 25mm from top edge (below screw terminal zone)
-        min_relay_y = max(min_relay_y, min_y + max_relay_h / 2.0 + 15.0)
-        row_y = max(min_relay_y, avg_y)
+
+        row_y = _compute_relay_row_y(
+            avg_y, min_y, max_relay_h, start_x, total_width,
+            positions, fp_sizes, row_refs, relay_zone,
+        )
 
         cursor_x = start_x
         for _, _, sc in anchor_positions:
             anchor_ref = sc.anchor_ref
             aw, ah = fp_sizes.get(anchor_ref, DEFAULT_IC_SIZE_MM)
-            # Swap w/h for 90 deg rotation
-            aw, ah = ah, aw
+            aw, ah = ah, aw  # Swap for 90 deg rotation
             target_x = cursor_x + aw / 2.0
-            # Leave 15mm margin on right for edge connectors (J14, J15)
             target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - 15.0, target_x))
             target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, row_y))
-
-            # Place relay at 90 deg rotation for vertical coil orientation
             positions[anchor_ref] = (target_x, target_y, relay_rotation)
             row_grid.place(target_x, target_y, aw, ah)
-
-            # Support components are placed by Level 3b -- skip here to
-            # avoid double-placement and congestion.
-
             cursor_x += aw + 2.0
 
     return positions
@@ -939,6 +952,65 @@ def _apply_cross_domain_affinity_overrides(
     return result
 
 
+_REF_PREFIX_TO_ROLE: dict[str, str] = {
+    "R": "series",
+    "C": "shunt",
+    "D": "shunt_d",
+    "Q": "switch",
+    "L": "series_l",
+}
+
+
+def _classify_refs_by_role(
+    refs: tuple[str, ...],
+    anchor_ref: str,
+    positions: dict[str, tuple[float, float, float]],
+    fixed_refs: set[str],
+) -> dict[str, list[str]]:
+    """Classify subcircuit component refs by role based on ref prefix."""
+    role_refs: dict[str, list[str]] = {}
+    for ref in refs:
+        if ref == anchor_ref or ref not in positions or ref in fixed_refs:
+            continue
+        r_upper = ref.upper()
+        for prefix, role in _REF_PREFIX_TO_ROLE.items():
+            if r_upper.startswith(prefix):
+                role_refs.setdefault(role, []).append(ref)
+                break
+    return role_refs
+
+
+def _try_template_place(
+    slot: object,
+    ref: str,
+    ax: float,
+    ay: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    template_fixed: set[str],
+) -> bool:
+    """Place ref at slot offset, skipping if it would collide."""
+    min_x, min_y, max_x, max_y = bounds
+    nx = ax + slot.offset_x  # type: ignore[union-attr]
+    ny = ay + slot.offset_y  # type: ignore[union-attr]
+    w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
+    nx = max(min_x + w / 2, min(max_x - w / 2, nx))
+    ny = max(min_y + h / 2, min(max_y - h / 2, ny))
+    for other_ref, (ox, oy, _orot) in positions.items():
+        if other_ref == ref:
+            continue
+        ow, oh = fp_sizes.get(other_ref, DEFAULT_FP_SIZE_MM)
+        gap_x = abs(nx - ox) - (w + ow) / 2
+        gap_y = abs(ny - oy) - (h + oh) / 2
+        if gap_x < 0.2 and gap_y < 0.2:
+            return False
+    rot = slot.rotation if slot.rotation != 0.0 else positions[ref][2]  # type: ignore[union-attr]
+    positions[ref] = (nx, ny, rot)
+    template_fixed.add(ref)
+    return True
+
+
 def _apply_template_refinement(
     positions: dict[str, tuple[float, float, float]],
     fp_sizes: dict[str, tuple[float, float]],
@@ -971,85 +1043,41 @@ def _apply_template_refinement(
     )
 
     template_fixed: set[str] = set()
-    min_x, min_y, max_x, max_y = bounds
 
     for sc in subcircuits:
         tmpl = get_subcircuit_template_by_type(sc.circuit_type)
         if tmpl is None:
             continue
-
-        # Find anchor position -- the anchor_ref is the reference point
         anchor_ref = sc.anchor_ref
         if anchor_ref not in positions:
             continue
-        ax, ay, arot = positions[anchor_ref]
+        ax, ay, _arot = positions[anchor_ref]
 
-        # Simple role-based matching: map subcircuit refs to template slots
-        # For now, use positional matching (first SERIES ref -> first SERIES slot, etc.)
-        role_refs: dict[str, list[str]] = {}
-        for ref in sc.refs:
-            if ref == anchor_ref:
-                continue
-            if ref not in positions or ref in fixed_refs:
-                continue
-            # Classify by ref prefix
-            r_upper = ref.upper()
-            if r_upper.startswith("R"):
-                role_refs.setdefault("series", []).append(ref)
-            elif r_upper.startswith("C"):
-                role_refs.setdefault("shunt", []).append(ref)
-            elif r_upper.startswith("D"):
-                role_refs.setdefault("shunt_d", []).append(ref)
-            elif r_upper.startswith("Q"):
-                role_refs.setdefault("switch", []).append(ref)
-            elif r_upper.startswith("L"):
-                role_refs.setdefault("series_l", []).append(ref)
+        role_refs = _classify_refs_by_role(sc.refs, anchor_ref, positions, fixed_refs)
 
-        # Match slots to available refs
-        series_slots = [s for s in tmpl.slots if s.role == ComponentRole.SERIES]
-        shunt_slots = [s for s in tmpl.slots if s.role == ComponentRole.SHUNT]
-        switch_slots = [s for s in tmpl.slots if s.role == ComponentRole.SWITCH]
+        # Match slots to available refs by role
+        role_slot_map: list[tuple[list[object], list[str]]] = [
+            (
+                [s for s in tmpl.slots if s.role == ComponentRole.SERIES],
+                role_refs.get("series", []) + role_refs.get("series_l", []),
+            ),
+            (
+                [s for s in tmpl.slots if s.role == ComponentRole.SHUNT],
+                role_refs.get("shunt", []) + role_refs.get("shunt_d", []),
+            ),
+            (
+                [s for s in tmpl.slots if s.role == ComponentRole.SWITCH],
+                role_refs.get("switch", []),
+            ),
+        ]
 
         placed_count = 0
-
-        def _try_place(slot: object, ref: str) -> bool:
-            """Place ref at slot offset, skipping if it would collide."""
-            nx = ax + slot.offset_x  # type: ignore[union-attr]
-            ny = ay + slot.offset_y  # type: ignore[union-attr]
-            w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
-            nx = max(min_x + w / 2, min(max_x - w / 2, nx))
-            ny = max(min_y + h / 2, min(max_y - h / 2, ny))
-            # Check for collisions with existing positions
-            for other_ref, (ox, oy, _orot) in positions.items():
-                if other_ref == ref:
-                    continue
-                ow, oh = fp_sizes.get(other_ref, DEFAULT_FP_SIZE_MM)
-                gap_x = abs(nx - ox) - (w + ow) / 2
-                gap_y = abs(ny - oy) - (h + oh) / 2
-                if gap_x < 0.2 and gap_y < 0.2:
-                    return False  # Would collide -- skip
-            rot = slot.rotation if slot.rotation != 0.0 else positions[ref][2]  # type: ignore[union-attr]
-            positions[ref] = (nx, ny, rot)
-            template_fixed.add(ref)
-            return True
-
-        # Place series components (R, L)
-        series_refs = role_refs.get("series", []) + role_refs.get("series_l", [])
-        for slot, ref in zip(series_slots, series_refs, strict=False):
-            if _try_place(slot, ref):
-                placed_count += 1
-
-        # Place shunt components (C, D)
-        shunt_refs = role_refs.get("shunt", []) + role_refs.get("shunt_d", [])
-        for slot, ref in zip(shunt_slots, shunt_refs, strict=False):
-            if _try_place(slot, ref):
-                placed_count += 1
-
-        # Place switch components (Q)
-        switch_refs = role_refs.get("switch", [])
-        for slot, ref in zip(switch_slots, switch_refs, strict=False):
-            if _try_place(slot, ref):
-                placed_count += 1
+        for slots, refs in role_slot_map:
+            for slot, ref in zip(slots, refs, strict=False):
+                if _try_template_place(
+                    slot, ref, ax, ay, positions, fp_sizes, bounds, template_fixed,
+                ):
+                    placed_count += 1
 
         if placed_count > 0:
             _log.info(

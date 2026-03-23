@@ -2433,20 +2433,29 @@ def _route_fp_connector(
     return None
 
 
+def _parse_dip_switch_pin_count(fid: str) -> int:
+    """Parse pin count for DIP switches, accounting for xN notation."""
+    import re as _re
+    pos_m = _re.search(r"x(\d+)", fid)
+    if pos_m:
+        return int(pos_m.group(1)) * 2
+    pin_count = _parse_pin_count(fid)
+    return pin_count if pin_count >= 2 else 8
+
+
+def _parse_dimensions(fid: str) -> tuple[float, float] | None:
+    """Parse WxH dimensions from a footprint ID string."""
+    import re as _re
+    m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
 def _route_fp_switch_misc(
     ref: str, value: str, fid: str, upper: str, layer: str,
 ) -> Footprint | None:
     """Match DIP switches, tactile switches, relays, ESP32, crystals, test points, DIP packages."""
     if upper.startswith(("SW_DIP", "DIP_SWITCH")):
-        import re as _re
-        pos_m = _re.search(r"x(\d+)", fid)
-        if pos_m:
-            pin_count = int(pos_m.group(1)) * 2
-        else:
-            pin_count = _parse_pin_count(fid)
-            if pin_count < 2:
-                pin_count = 8
-        return make_dip_switch(ref, value, pin_count)
+        return make_dip_switch(ref, value, _parse_dip_switch_pin_count(fid))
 
     if upper.startswith("RELAY"):
         return make_relay_spdt(ref, value)
@@ -2456,36 +2465,28 @@ def _route_fp_switch_misc(
 
     # SMD tactile switches must come before generic SW_ check
     if upper.startswith("SW_") and "SMD" in upper:
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        w = float(size_m.group(1)) if size_m else 3.0
-        h = float(size_m.group(2)) if size_m else 2.5
+        dims = _parse_dimensions(fid)
+        w, h = dims if dims else (3.0, 2.5)
         return make_smd_tact_switch(ref, value, width_mm=w, height_mm=h)
 
     if upper.startswith("SW_"):
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        size_mm = float(size_m.group(1)) if size_m else 4.5
+        dims = _parse_dimensions(fid)
+        size_mm = dims[0] if dims else 4.5
         return make_tact_switch(ref, value, size_mm=size_mm)
 
     if upper.startswith("CRYSTAL"):
-        import re as _re
-        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        w = float(dim_m.group(1)) if dim_m else 3.2
-        h = float(dim_m.group(2)) if dim_m else 1.5
+        dims = _parse_dimensions(fid)
+        w, h = dims if dims else (3.2, 1.5)
         return make_crystal_smd(ref, value, size_w=w, size_h=h)
 
     if upper.startswith(("TP_", "TESTPOINT")):
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        pad_size = float(size_m.group(1)) if size_m else 1.5
+        dims = _parse_dimensions(fid)
+        pad_size = dims[0] if dims else 1.5
         return make_test_point(ref, value, pad_size=pad_size, layer=layer)
 
     if upper.startswith("DIP-") or (upper.startswith("DIP_") and "SWITCH" not in upper):
         pin_count = _parse_pin_count(fid)
-        if pin_count < 2:
-            pin_count = 4
-        return make_dip_package(ref, value, pin_count)
+        return make_dip_package(ref, value, max(pin_count, 4) if pin_count < 2 else pin_count)
 
     return None
 
@@ -3039,6 +3040,129 @@ def validate_3d_model_orientation(fp: Footprint) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def _estimate_smd_rc(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for SMD R/C/LED packages."""
+    for prefix in ("R_", "C_", "LED_"):
+        if upper.startswith(prefix):
+            pkg = fid[len(prefix):].upper()
+            if pkg in _SMD_RC_DIMS:
+                _, _, _pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
+                return (body_w + 0.5, body_h + 0.5)
+            return (2.5, 1.75)  # 0805 fallback
+    return None
+
+
+def _estimate_inductor(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for inductor packages."""
+    if not upper.startswith("L_"):
+        return None
+    pkg = fid[2:].upper()
+    if pkg in _SMD_RC_DIMS:
+        _, _, _pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
+        return (body_w + 0.5, body_h + 0.5)
+    return (4.0, 3.0)
+
+
+def _estimate_sot23(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for SOT-23 / TSOT-23 family."""
+    if not upper.startswith(("SOT-23", "TSOT-23")):
+        return None
+    variant = fid.upper().replace("TSOT-", "SOT-")
+    if variant in _SOT23_VARIANTS:
+        _, _, coords = _SOT23_VARIANTS[variant]
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        return (max(xs) - min(xs) + 1.5, max(ys) - min(ys) + 1.5)
+    return (3.0, 3.0)
+
+
+def _estimate_connector(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for pin headers, sockets, and generic connectors."""
+    if not upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
+        return None
+    pin_count = _parse_pin_count(fid)
+    pitch = _parse_pitch(fid)
+    num_cols = 2 if "2X" in upper or "2x" in fid else 1
+    pins_per_col = pin_count // max(num_cols, 1)
+    pad_margin = 3.5 if pitch >= 2.0 else 2.5
+    w = (num_cols - 1) * pitch + pad_margin
+    h = (pins_per_col - 1) * pitch + pad_margin
+    return (w, h)
+
+
+def _estimate_terminal_block(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for terminal blocks."""
+    if not upper.startswith(("TERMINALBLOCK", "TB_")):
+        return None
+    pin_count = _parse_pin_count(fid)
+    pitch = _parse_pitch(fid)
+    return ((pin_count - 1) * pitch + 5.0, 7.0)
+
+
+def _estimate_dip_switch(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for DIP switches."""
+    if not upper.startswith("SW_DIP"):
+        return None
+    import re as _re
+    dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)mm", fid)
+    if dim_m:
+        return (float(dim_m.group(1)) + 1.0, float(dim_m.group(2)) + 1.0)
+    pin_count = _parse_pin_count(fid)
+    half = max(pin_count // 2, 2)
+    return (8.5, (half - 1) * 2.54 + 3.0)
+
+
+def _estimate_tactile_switch(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for tactile switches (must be checked after SW_DIP)."""
+    if not upper.startswith("SW_"):
+        return None
+    import re as _re
+    size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+    if size_m:
+        return (float(size_m.group(1)) + 2.0, float(size_m.group(2)) + 2.0)
+    return (7.0, 7.0)
+
+
+def _estimate_crystal(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for crystal oscillators."""
+    if not upper.startswith("CRYSTAL"):
+        return None
+    import re as _re
+    dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
+    if dim_m:
+        return (float(dim_m.group(1)) + 0.5, float(dim_m.group(2)) + 0.5)
+    return (4.0, 2.0)
+
+
+_SMD_IC_PREFIXES = ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
+
+
+def _estimate_smd_ic(fid: str, upper: str) -> tuple[float, float] | None:
+    """Estimate size for generic SMD IC packages."""
+    if not any(upper.startswith(p) for p in _SMD_IC_PREFIXES):
+        return None
+    pin_count = _parse_pin_count(fid)
+    pitch = _parse_pitch(fid)
+    if pitch > 2.0:
+        pitch = 0.5
+    half = pin_count // 2
+    row_span = (half - 1) * pitch
+    return (row_span / 2.0 + 3.0, row_span + 1.5)
+
+
+# Fixed-prefix size lookups (checked via startswith)
+_FIXED_SIZE_PREFIXES: tuple[tuple[tuple[str, ...], tuple[float, float]], ...] = (
+    (("SOD-123",), (3.5, 2.5)),
+    (("SOT-223",), (7.0, 4.0)),
+    (("USB-C", "USB_C"), (9.5, 8.0)),
+    (("RJ45",), (17.0, 23.0)),
+    (("RELAY",), (20.0, 16.5)),
+)
+
+# ESP32 uses 'in' check, not startswith
+_ESP32_SIZE: tuple[float, float] = (18.5, 26.0)
+
+
 def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
     """Estimate the physical dimensions (width, height) of a footprint in mm.
 
@@ -3054,112 +3178,35 @@ def estimate_footprint_size(footprint_id: str) -> tuple[float, float]:
     fid = footprint_id.strip()
     upper = fid.upper()
 
-    # SMD R/C packages
-    for prefix in ("R_", "C_", "LED_"):
-        if upper.startswith(prefix):
-            pkg = fid[len(prefix):].upper()
-            if pkg in _SMD_RC_DIMS:
-                _, _, pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
-                return (body_w + 0.5, body_h + 0.5)
-            return (2.5, 1.75)  # 0805 fallback
+    # SMD R/C/LED packages
+    result = _estimate_smd_rc(fid, upper)
+    if result is not None:
+        return result
 
-    # SOD-123 diodes
-    if upper.startswith("SOD-123"):
-        return (3.5, 2.5)
+    # Fixed-prefix lookups
+    for prefixes, size in _FIXED_SIZE_PREFIXES:
+        if upper.startswith(prefixes):
+            return size
 
-    # Inductors
-    if upper.startswith("L_"):
-        pkg = fid[2:].upper()
-        if pkg in _SMD_RC_DIMS:
-            _, _, pitch, body_w, body_h = _SMD_RC_DIMS[pkg]
-            return (body_w + 0.5, body_h + 0.5)
-        return (4.0, 3.0)
-
-    # SOT-23 / TSOT-23 family
-    if upper.startswith(("SOT-23", "TSOT-23")):
-        variant = fid.upper().replace("TSOT-", "SOT-")
-        if variant in _SOT23_VARIANTS:
-            _, _, coords = _SOT23_VARIANTS[variant]
-            xs = [c[0] for c in coords]
-            ys = [c[1] for c in coords]
-            return (max(xs) - min(xs) + 1.5, max(ys) - min(ys) + 1.5)
-        return (3.0, 3.0)
-
-    if upper == "SOT-223":
-        return (7.0, 4.0)
-
-    # USB-C
-    if upper.startswith(("USB-C", "USB_C")):
-        return (9.5, 8.0)
-
-    # RJ45 (HR911105A: ~16.5mm wide, ~22mm deep)
-    if upper.startswith("RJ45"):
-        return (17.0, 23.0)
-
-    # Pin headers/sockets/connectors (Conn_01x02, Conn_02x20_Stacking, etc.)
-    # Layout convention: pins run vertically (Y axis), dual-row spans X axis.
-    # So "2x20" means 2 columns (X) of 20 rows (Y).
-    if upper.startswith(("PINHEADER", "PINSOCKET", "CONN_")):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        num_cols = 2 if "2X" in upper or "2x" in fid else 1
-        pins_per_col = pin_count // max(num_cols, 1)
-        # Pad width (1.7mm typical for 2.54mm pitch THT) + courtyard margin
-        pad_margin = 3.5 if pitch >= 2.0 else 2.5
-        w = (num_cols - 1) * pitch + pad_margin  # across columns (X)
-        h = (pins_per_col - 1) * pitch + pad_margin  # along columns (Y)
-        return (w, h)
-
-    # Terminal blocks
-    if upper.startswith(("TERMINALBLOCK", "TB_")):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        return ((pin_count - 1) * pitch + 5.0, 7.0)
-
-    # DIP switches — try to parse explicit dimensions from name first
-    if upper.startswith("SW_DIP"):
-        import re as _re
-        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)mm", fid)
-        if dim_m:
-            return (float(dim_m.group(1)) + 1.0, float(dim_m.group(2)) + 1.0)
-        pin_count = _parse_pin_count(fid)
-        half = max(pin_count // 2, 2)
-        return (8.5, (half - 1) * 2.54 + 3.0)
-
-    # Relays
-    if upper.startswith("RELAY"):
-        return (20.0, 16.5)
-
-    # ESP32 modules
+    # ESP32 modules (uses 'in' check)
     if "ESP32" in upper or "WROOM" in upper:
-        return (18.5, 26.0)
+        return _ESP32_SIZE
 
-    # Tactile switches
-    if upper.startswith("SW_"):
-        import re as _re
-        size_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        if size_m:
-            return (float(size_m.group(1)) + 2.0, float(size_m.group(2)) + 2.0)
-        return (7.0, 7.0)
-
-    # Crystal oscillators
-    if upper.startswith("CRYSTAL"):
-        import re as _re
-        dim_m = _re.search(r"(\d+\.?\d*)x(\d+\.?\d*)", fid)
-        if dim_m:
-            return (float(dim_m.group(1)) + 0.5, float(dim_m.group(2)) + 0.5)
-        return (4.0, 2.0)
-
-    # Generic SMD ICs
-    ic_prefixes = ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
-    if any(upper.startswith(p) for p in ic_prefixes):
-        pin_count = _parse_pin_count(fid)
-        pitch = _parse_pitch(fid)
-        if pitch > 2.0:
-            pitch = 0.5
-        half = pin_count // 2
-        row_span = (half - 1) * pitch
-        return (row_span / 2.0 + 3.0, row_span + 1.5)
+    # Parameterized estimators (order matters: SW_DIP before SW_)
+    estimators = (
+        _estimate_inductor,
+        _estimate_sot23,
+        _estimate_connector,
+        _estimate_terminal_block,
+        _estimate_dip_switch,
+        _estimate_crystal,
+        _estimate_tactile_switch,
+        _estimate_smd_ic,
+    )
+    for estimator in estimators:
+        result = estimator(fid, upper)
+        if result is not None:
+            return result
 
     # Generic fallback
     return (3.0, 3.0)

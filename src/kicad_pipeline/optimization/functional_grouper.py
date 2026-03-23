@@ -364,6 +364,72 @@ def _build_relay_hierarchy(
     )
 
 
+def _find_relay_support_components(
+    relay_ref: str,
+    adj: dict[str, set[str]],
+    ref_to_nets: dict[str, set[str]],
+    net_to_refs: dict[str, set[str]],
+    comp_map: dict[str, object],
+    claimed: set[str],
+) -> tuple[list[str], str | None]:
+    """Find transistor, flyback diode, gate resistor, LED, and LED resistor.
+
+    Returns (refs_list, transistor_ref).
+    """
+    refs: list[str] = [relay_ref]
+    relay_nets = ref_to_nets.get(relay_ref, set())
+
+    # Transistor
+    transistor: str | None = None
+    for nb in adj.get(relay_ref, set()):
+        if _ref_prefix(nb) == "Q" and nb not in claimed:
+            transistor = nb
+            refs.append(nb)
+            break
+
+    # Flyback diode
+    best_d, _best_net = _find_flyback_diode(
+        relay_nets, net_to_refs, ref_to_nets, comp_map, claimed, refs,
+    )
+    if best_d:
+        refs.append(best_d)
+
+    # Gate resistor
+    if transistor:
+        for nb in adj.get(transistor, set()):
+            if _ref_prefix(nb) == "R" and nb not in claimed and nb not in refs:
+                refs.append(nb)
+                break
+
+    # LED on collector path
+    if transistor:
+        led = _find_collector_led(
+            transistor, ref_to_nets, net_to_refs, comp_map, claimed, refs,
+        )
+        if led:
+            refs.append(led)
+
+    # LED current-limiting resistor
+    for lr in refs[:]:
+        if _ref_prefix(lr) not in ("LED", "D"):
+            continue
+        for nb in adj.get(lr, set()):
+            if _ref_prefix(nb) == "R" and nb not in claimed and nb not in refs:
+                refs.append(nb)
+                break
+
+    return refs, transistor
+
+
+def _relay_domain(relay_nets: set[str]) -> VoltageDomain:
+    """Determine voltage domain from relay nets."""
+    for net_name in relay_nets:
+        v = _parse_voltage_from_net(net_name)
+        if v is not None and v > 0:
+            return _classify_voltage(v)
+    return VoltageDomain.MIXED
+
+
 def _detect_relay_drivers(
     requirements: ProjectRequirements,
     net_to_refs: dict[str, set[str]],
@@ -380,65 +446,24 @@ def _detect_relay_drivers(
     for relay in relays:
         if relay.ref in claimed:
             continue
-        refs: list[str] = [relay.ref]
+
+        refs, transistor = _find_relay_support_components(
+            relay.ref, adj, ref_to_nets, net_to_refs, comp_map, claimed,
+        )
+
         relay_nets = ref_to_nets.get(relay.ref, set())
         all_nets: set[str] = set(relay_nets)
-
-        # Find transistor driving the relay coil
-        signal_neighbours = adj.get(relay.ref, set())
-        transistor: str | None = None
-        for nb in signal_neighbours:
-            if _ref_prefix(nb) == "Q" and nb not in claimed:
-                transistor = nb
-                refs.append(nb)
-                break
-
-        # Find flyback diode
         best_d, best_net = _find_flyback_diode(
             relay_nets, net_to_refs, ref_to_nets, comp_map, claimed, refs,
         )
-        if best_d:
-            refs.append(best_d)
-            if best_net:
-                all_nets.add(best_net)
+        if best_net:
+            all_nets.add(best_net)
 
-        # Find gate resistor — connected to transistor
-        if transistor:
-            t_neighbours = adj.get(transistor, set())
-            for nb in t_neighbours:
-                if _ref_prefix(nb) == "R" and nb not in claimed and nb not in refs:
-                    refs.append(nb)
-                    break
-
-        # Find LED on collector path
-        if transistor:
-            led = _find_collector_led(
-                transistor, ref_to_nets, net_to_refs, comp_map, claimed, refs,
-            )
-            if led:
-                refs.append(led)
-
-        # Find LED current-limiting resistor
-        led_refs = [r for r in refs if _ref_prefix(r) in ("LED", "D")]
-        for lr in led_refs:
-            lr_neighbours = adj.get(lr, set())
-            for nb in lr_neighbours:
-                if _ref_prefix(nb) == "R" and nb not in claimed and nb not in refs:
-                    refs.append(nb)
-                    break
-
-        # Determine domain from relay nets
-        domain = VoltageDomain.MIXED
-        for net_name in relay_nets:
-            v = _parse_voltage_from_net(net_name)
-            if v is not None and v > 0:
-                domain = _classify_voltage(v)
-                break
+        domain = _relay_domain(relay_nets)
 
         for r in refs:
             claimed.add(r)
 
-        # Build hierarchical structure
         driver_refs, led_node_refs, led_ref, _ = _classify_relay_hierarchy_refs(
             refs, relay.ref, transistor, comp_map, adj,
         )

@@ -334,6 +334,83 @@ _VIN_RELAY_NAMES: frozenset[str] = frozenset(
 )
 
 
+def _check_relay_com_polarity(
+    comp: object,
+    com_net: str,
+) -> DRCViolation | None:
+    """Check if COM net name follows VIN/GND naming convention."""
+    upper_com = com_net.upper().strip()
+    if upper_com in _GND_RELAY_NAMES or upper_com in _VIN_RELAY_NAMES:
+        return None
+    if upper_com.startswith(("VIN", "+", "V")):
+        return None
+    return DRCViolation(
+        rule="relay_polarity",
+        message=(
+            f"{comp.ref}: COM net '{com_net}' is ambiguous — "  # type: ignore[attr-defined]
+            "expected VIN/GND pattern"
+        ),
+        severity=Severity.WARNING,
+        ref=comp.ref,  # type: ignore[attr-defined]
+    )
+
+
+def _check_relay_coil(
+    comp: object,
+    net_to_refs: dict[str, set[str]],
+) -> list[DRCViolation]:
+    """Check flyback diode, coil short, and transistor driver on relay coil net."""
+    violations: list[DRCViolation] = []
+    coil_pin = next(
+        (p for p in comp.pins if p.name.upper() in ("COIL-", "COIL_MINUS")),  # type: ignore[attr-defined]
+        None,
+    )
+    if coil_pin is None:
+        coil_pin = comp.get_pin("2")  # type: ignore[attr-defined]
+    coil_net = coil_pin.net if coil_pin else None
+    if not coil_net:
+        return violations
+
+    coil_refs = net_to_refs.get(coil_net, set())
+
+    # Flyback diode check
+    d_refs = [r for r in coil_refs if "".join(c for c in r if c.isalpha()) == "D"]
+    if not d_refs:
+        violations.append(DRCViolation(
+            rule="relay_flyback",
+            message=f"{comp.ref}: no flyback diode on coil net '{coil_net}'",  # type: ignore[attr-defined]
+            severity=Severity.WARNING,
+            ref=comp.ref,  # type: ignore[attr-defined]
+        ))
+
+    # Coil short check
+    coil_plus = next(
+        (p for p in comp.pins if p.name.upper() in ("COIL+", "COIL_PLUS")),  # type: ignore[attr-defined]
+        None,
+    )
+    if coil_plus is None:
+        coil_plus = comp.get_pin("5")  # type: ignore[attr-defined]
+    if coil_plus and coil_plus.net and coil_plus.net == coil_net:
+        violations.append(DRCViolation(
+            rule="relay_coil_short",
+            message=f"{comp.ref}: COIL+ and COIL- on same net '{coil_net}'",  # type: ignore[attr-defined]
+            severity=Severity.ERROR,
+            ref=comp.ref,  # type: ignore[attr-defined]
+        ))
+
+    # Transistor driver check
+    q_refs = [r for r in coil_refs if "".join(c for c in r if c.isalpha()) == "Q"]
+    if not q_refs:
+        violations.append(DRCViolation(
+            rule="relay_driver",
+            message=f"{comp.ref}: no transistor driver on coil net '{coil_net}'",  # type: ignore[attr-defined]
+            severity=Severity.WARNING,
+            ref=comp.ref,  # type: ignore[attr-defined]
+        ))
+
+    return violations
+
+
 def _check_relay_polarity(
     requirements: ProjectRequirements | None,
 ) -> list[DRCViolation]:
@@ -343,19 +420,15 @@ def _check_relay_polarity(
 
     violations: list[DRCViolation] = []
 
-    # Build net→refs map
     net_to_refs: dict[str, set[str]] = {}
     for net in requirements.nets:
         net_to_refs[net.name] = {conn.ref for conn in net.connections}
-
-    {c.ref: c for c in requirements.components}
 
     for comp in requirements.components:
         prefix = "".join(c for c in comp.ref if c.isalpha())
         if prefix != "K":
             continue
 
-        # COM pin
         com_pin = next((p for p in comp.pins if p.name.upper() == "COM"), None)
         if com_pin is None:
             com_pin = comp.get_pin("1")
@@ -370,64 +443,10 @@ def _check_relay_polarity(
             ))
             continue
 
-        upper_com = com_net.upper().strip()
-        if upper_com not in _GND_RELAY_NAMES and upper_com not in _VIN_RELAY_NAMES:
-            if not upper_com.startswith(("VIN", "+", "V")):
-                violations.append(DRCViolation(
-                    rule="relay_polarity",
-                    message=(
-                        f"{comp.ref}: COM net '{com_net}' is ambiguous — "
-                        "expected VIN/GND pattern"
-                    ),
-                    severity=Severity.WARNING,
-                    ref=comp.ref,
-                ))
+        polarity_v = _check_relay_com_polarity(comp, com_net)
+        if polarity_v is not None:
+            violations.append(polarity_v)
 
-        # Check flyback diode on coil
-        coil_pin = next(
-            (p for p in comp.pins if p.name.upper() in ("COIL-", "COIL_MINUS")),
-            None,
-        )
-        if coil_pin is None:
-            coil_pin = comp.get_pin("2")
-        coil_net = coil_pin.net if coil_pin else None
-
-        if coil_net:
-            coil_refs = net_to_refs.get(coil_net, set())
-            d_refs = [r for r in coil_refs if "".join(c for c in r if c.isalpha()) == "D"]
-            if not d_refs:
-                violations.append(DRCViolation(
-                    rule="relay_flyback",
-                    message=f"{comp.ref}: no flyback diode on coil net '{coil_net}'",
-                    severity=Severity.WARNING,
-                    ref=comp.ref,
-                ))
-
-            # Check coil pins not shorted
-            coil_plus = next(
-                (p for p in comp.pins if p.name.upper() in ("COIL+", "COIL_PLUS")),
-                None,
-            )
-            if coil_plus is None:
-                coil_plus = comp.get_pin("5")
-            if coil_plus and coil_plus.net and coil_plus.net == coil_net:
-                violations.append(DRCViolation(
-                    rule="relay_coil_short",
-                    message=f"{comp.ref}: COIL+ and COIL- on same net '{coil_net}'",
-                    severity=Severity.ERROR,
-                    ref=comp.ref,
-                ))
-
-        # Check GPIO traces to MCU
-        if coil_net:
-            coil_refs = net_to_refs.get(coil_net, set())
-            q_refs = [r for r in coil_refs if "".join(c for c in r if c.isalpha()) == "Q"]
-            if not q_refs:
-                violations.append(DRCViolation(
-                    rule="relay_driver",
-                    message=f"{comp.ref}: no transistor driver on coil net '{coil_net}'",
-                    severity=Severity.WARNING,
-                    ref=comp.ref,
-                ))
+        violations.extend(_check_relay_coil(comp, net_to_refs))
 
     return violations

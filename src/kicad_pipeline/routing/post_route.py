@@ -170,6 +170,82 @@ def drop_pad_crossing_tracks(
     return updated
 
 
+def _find_clearance_violations(
+    results: list[RouteResult],
+    min_gap: float,
+) -> set[int]:
+    """Find net numbers involved in cross-net clearance violations."""
+    net_tracks: dict[int, list[Track]] = {}
+    for r in results:
+        if r.routed:
+            net_tracks[r.net_number] = list(r.tracks)
+
+    violating_nets: set[int] = set()
+    net_nums = list(net_tracks.keys())
+    for i in range(len(net_nums)):
+        for j in range(i + 1, len(net_nums)):
+            n1, n2 = net_nums[i], net_nums[j]
+            for t1 in net_tracks[n1]:
+                for t2 in net_tracks[n2]:
+                    if t1.layer != t2.layer:
+                        continue
+                    hw1 = t1.width / 2.0
+                    hw2 = t2.width / 2.0
+                    edge_dist = segment_min_distance(
+                        t1.start.x, t1.start.y, t1.end.x, t1.end.y,
+                        t2.start.x, t2.start.y, t2.end.x, t2.end.y,
+                    ) - hw1 - hw2
+                    if edge_dist < min_gap - 0.001:
+                        violating_nets.add(n1)
+                        violating_nets.add(n2)
+    return violating_nets
+
+
+def _rank_ripup_candidates(
+    scored: list[tuple[float, int]],
+    results: list[RouteResult],
+    previously_ripped: set[str],
+) -> list[tuple[float, int]]:
+    """Rank violating nets for rip-up: prefer F.Cu-only and never-ripped nets."""
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Deprioritize nets with B.Cu routes (vias)
+    fcu_only = [(s, i) for s, i in scored if not results[i].vias]
+    has_vias = [(s, i) for s, i in scored if results[i].vias]
+    scored = fcu_only + has_vias
+
+    # Break rip-up oscillation: prefer nets not yet ripped
+    if previously_ripped:
+        never_ripped = [(s, i) for s, i in scored
+                        if results[i].net_name not in previously_ripped]
+        prev_ripped = [(s, i) for s, i in scored
+                       if results[i].net_name in previously_ripped]
+        scored = never_ripped + prev_ripped
+
+    return scored
+
+
+def _unmark_ripped_routes(
+    results: list[RouteResult],
+    ripup_indices: list[int],
+    grid: _Grid,
+    bcu_grid: _Grid,
+    grid_step_mm: float,
+) -> None:
+    """Unmark tracks and vias from ripped routes on both grids."""
+    for ri in ripup_indices:
+        rr = results[ri]
+        for trk in rr.tracks:
+            if trk.layer == "F.Cu":
+                unmark_route_tracks(grid, [trk], grid_step_mm)
+            elif trk.layer == "B.Cu":
+                unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
+        for via in rr.vias:
+            vc, vr_ = grid.to_cell(via.position.x, via.position.y)
+            grid.unmark(vc, vr_)
+            bcu_grid.unmark(vc, vr_)
+
+
 def validate_track_clearances(
     results: list[RouteResult],
     grid: _Grid,
@@ -192,40 +268,16 @@ def validate_track_clearances(
     from kicad_pipeline.routing.grid_router import _score_route
 
     log = _log
-
     previously_ripped: set[str] = set()
 
     for iteration in range(3):
-        # Build per-net track lists
-        net_tracks: dict[int, list[Track]] = {}
+        # Build result index
         net_result_idx: dict[int, int] = {}
         for idx, r in enumerate(results):
-            if not r.routed:
-                continue
-            net_tracks[r.net_number] = list(r.tracks)
-            net_result_idx[r.net_number] = idx
+            if r.routed:
+                net_result_idx[r.net_number] = idx
 
-        # Check all cross-net pairs for clearance violations
-        violating_nets: set[int] = set()
-        net_nums = list(net_tracks.keys())
-        for i in range(len(net_nums)):
-            for j in range(i + 1, len(net_nums)):
-                n1, n2 = net_nums[i], net_nums[j]
-                for t1 in net_tracks[n1]:
-                    for t2 in net_tracks[n2]:
-                        if t1.layer != t2.layer:
-                            continue
-                        hw1 = t1.width / 2.0
-                        hw2 = t2.width / 2.0
-                        min_gap = CLEARANCE_DEFAULT_MM
-                        edge_dist = segment_min_distance(
-                            t1.start.x, t1.start.y, t1.end.x, t1.end.y,
-                            t2.start.x, t2.start.y, t2.end.x, t2.end.y,
-                        ) - hw1 - hw2
-                        if edge_dist < min_gap - 0.001:
-                            violating_nets.add(n1)
-                            violating_nets.add(n2)
-
+        violating_nets = _find_clearance_violations(results, CLEARANCE_DEFAULT_MM)
         if not violating_nets:
             return results
 
@@ -234,7 +286,7 @@ def validate_track_clearances(
             iteration + 1, len(violating_nets),
         )
 
-        # Score violating nets, rip up the worst half
+        # Score violating nets
         scored: list[tuple[float, int]] = []
         for net_num in violating_nets:
             maybe_idx = net_result_idx.get(net_num)
@@ -251,43 +303,12 @@ def validate_track_clearances(
         if not scored:
             return results
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        # Deprioritize nets with B.Cu routes (vias) -- they are
-        # harder to re-route and may lose B.Cu corridors.
-        fcu_only = [(s, i) for s, i in scored
-                    if not results[i].vias]
-        has_vias = [(s, i) for s, i in scored
-                    if results[i].vias]
-        scored = fcu_only + has_vias
-
-        # Break rip-up oscillation: on iteration 2+, prefer ripping nets
-        # that haven't been ripped before so both sides get a chance.
-        if previously_ripped:
-            never_ripped = [(s, i) for s, i in scored
-                            if results[i].net_name not in previously_ripped]
-            prev_ripped = [(s, i) for s, i in scored
-                           if results[i].net_name in previously_ripped]
-            scored = never_ripped + prev_ripped
+        scored = _rank_ripup_candidates(scored, results, previously_ripped)
 
         n_ripup = max(1, len(scored) // 2)
         ripup_indices = [idx for _, idx in scored[:n_ripup]]
 
-        # Unmark tracks and vias from ripped routes
-        for ri in ripup_indices:
-            rr = results[ri]
-            for trk in rr.tracks:
-                if trk.layer == "F.Cu":
-                    unmark_route_tracks(grid, [trk], grid_step_mm)
-                elif trk.layer == "B.Cu":
-                    unmark_route_tracks(bcu_grid, [trk], grid_step_mm)
-            # Unmark vias on BOTH grids (vias span both layers)
-            for via in rr.vias:
-                vc, vr_ = grid.to_cell(
-                    via.position.x, via.position.y,
-                )
-                grid.unmark(vc, vr_)
-                bcu_grid.unmark(vc, vr_)
+        _unmark_ripped_routes(results, ripup_indices, grid, bcu_grid, grid_step_mm)
 
         ripped_names: set[str] = set()
         for ri in ripup_indices:

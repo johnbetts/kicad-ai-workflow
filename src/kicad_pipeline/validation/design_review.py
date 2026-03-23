@@ -888,6 +888,45 @@ def generate_design_review(
     )
 
 
+def _format_board_summary(s: BoardSummary) -> list[str]:
+    """Format board summary section as Markdown lines."""
+    lines = [
+        "## Board Summary",
+        f"- Size: {s.board_size_mm[0]}x{s.board_size_mm[1]}mm",
+        f"- Components: {s.component_count}",
+        f"- Nets: {s.unique_nets}",
+        f"- Layers: {s.layer_count}",
+    ]
+    if s.power_nets:
+        lines.append(f"- Power nets: {', '.join(s.power_nets)}")
+    specials = [
+        label
+        for flag, label in (
+            (s.has_wifi, "WiFi"), (s.has_relays, "Relays"), (s.has_adc, "ADC"),
+        )
+        if flag
+    ]
+    if specials:
+        lines.append(f"- Special: {', '.join(specials)}")
+    lines.append("")
+    return lines
+
+
+def _format_severity_section(
+    heading: str,
+    items: list[ReviewItem],
+) -> list[str]:
+    """Format a severity-level section as a Markdown checklist."""
+    if not items:
+        return []
+    lines = [heading]
+    for item in items:
+        ref_str = f" (affects: {', '.join(item.affected_refs)})" if item.affected_refs else ""
+        lines.append(f"- [ ] **{item.title}**: {item.description}{ref_str}")
+    lines.append("")
+    return lines
+
+
 def format_design_review(
     review: DesignReview,
     project_name: str = "",
@@ -906,27 +945,9 @@ def format_design_review(
     lines.append(heading)
     lines.append("")
 
-    # --- Board Summary ---
-    s = review.board_summary
-    lines.append("## Board Summary")
-    lines.append(f"- Size: {s.board_size_mm[0]}x{s.board_size_mm[1]}mm")
-    lines.append(f"- Components: {s.component_count}")
-    lines.append(f"- Nets: {s.unique_nets}")
-    lines.append(f"- Layers: {s.layer_count}")
-    if s.power_nets:
-        lines.append(f"- Power nets: {', '.join(s.power_nets)}")
-    specials: list[str] = []
-    if s.has_wifi:
-        specials.append("WiFi")
-    if s.has_relays:
-        specials.append("Relays")
-    if s.has_adc:
-        specials.append("ADC")
-    if specials:
-        lines.append(f"- Special: {', '.join(specials)}")
-    lines.append("")
+    lines.extend(_format_board_summary(review.board_summary))
 
-    # --- Component Groups ---
+    # Component Groups
     if review.component_groups:
         lines.append("## Component Groups")
         for group in review.component_groups:
@@ -940,30 +961,14 @@ def format_design_review(
                     lines.append(f"    _{sub.description}_")
             lines.append("")
 
-    # Partition items by severity.
-    required = [i for i in review.items if i.severity == "required"]
-    recommended = [i for i in review.items if i.severity == "recommended"]
-    optional = [i for i in review.items if i.severity == "optional"]
-
-    if required:
-        lines.append("## Required Actions")
-        for item in required:
-            ref_str = f" (affects: {', '.join(item.affected_refs)})" if item.affected_refs else ""
-            lines.append(f"- [ ] **{item.title}**: {item.description}{ref_str}")
-        lines.append("")
-
-    if recommended:
-        lines.append("## Recommended")
-        for item in recommended:
-            ref_str = f" (affects: {', '.join(item.affected_refs)})" if item.affected_refs else ""
-            lines.append(f"- [ ] **{item.title}**: {item.description}{ref_str}")
-        lines.append("")
-
-    if optional:
-        lines.append("## Optional")
-        for item in optional:
-            ref_str = f" (affects: {', '.join(item.affected_refs)})" if item.affected_refs else ""
-            lines.append(f"- [ ] **{item.title}**: {item.description}{ref_str}")
-        lines.append("")
+    # Partition items by severity
+    severity_sections = [
+        ("## Required Actions", "required"),
+        ("## Recommended", "recommended"),
+        ("## Optional", "optional"),
+    ]
+    for section_heading, severity in severity_sections:
+        items = [i for i in review.items if i.severity == severity]
+        lines.extend(_format_severity_section(section_heading, items))
 
     return "\n".join(lines)

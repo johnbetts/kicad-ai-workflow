@@ -266,42 +266,42 @@ def _diff_pair_spec(net_name: str) -> tuple[str, str]:
     return "—", "Check datasheet"
 
 
-def _routing_constraints(req: ProjectRequirements) -> str:
-    """Generate routing constraint tables."""
-    lines = ["## Routing Constraints", ""]
+def _diff_pair_table(req: ProjectRequirements) -> list[str]:
+    """Generate differential pair table rows."""
+    diff_nets = sorted(n.name for n in req.nets if _DIFF_PAIR_PATTERNS.search(n.name))
+    if not diff_nets:
+        return []
+    lines = [
+        "### Differential Pairs", "",
+        "| Signal | Impedance | Length Match |",
+        "|--------|-----------|-------------|",
+    ]
+    for net_name in diff_nets:
+        impedance, length_match = _diff_pair_spec(net_name)
+        lines.append(f"| {net_name} | {impedance} | {length_match} |")
+    lines.append("")
+    return lines
 
-    # --- Differential pairs ---
-    diff_nets: list[str] = []
-    for net in req.nets:
-        if _DIFF_PAIR_PATTERNS.search(net.name):
-            diff_nets.append(net.name)
 
-    if diff_nets:
-        lines.append("### Differential Pairs")
-        lines.append("")
-        lines.append("| Signal | Impedance | Length Match |")
-        lines.append("|--------|-----------|-------------|")
-        for net_name in sorted(diff_nets):
-            impedance, length_match = _diff_pair_spec(net_name)
-            lines.append(f"| {net_name} | {impedance} | {length_match} |")
-        lines.append("")
+def _power_trace_table(req: ProjectRequirements) -> list[str]:
+    """Generate power trace width table rows."""
+    if not (req.power_budget and req.power_budget.rails):
+        return []
+    lines = [
+        "### Power Traces", "",
+        "| Net | Current | Min Width |",
+        "|-----|---------|-----------|",
+    ]
+    for rail in req.power_budget.rails:
+        current_a = rail.current_ma / 1000.0
+        width = _trace_width_mm(current_a)
+        lines.append(f"| {rail.name} | {rail.current_ma:.0f}mA | {width:.1f}mm |")
+    lines.append("")
+    return lines
 
-    # --- Power traces ---
-    if req.power_budget and req.power_budget.rails:
-        lines.append("### Power Traces")
-        lines.append("")
-        lines.append("| Net | Current | Min Width |")
-        lines.append("|-----|---------|-----------|")
-        for rail in req.power_budget.rails:
-            current_a = rail.current_ma / 1000.0
-            width = _trace_width_mm(current_a)
-            lines.append(
-                f"| {rail.name} | {rail.current_ma:.0f}mA | {width:.1f}mm |"
-            )
-        lines.append("")
 
-    # --- Keep-away rules ---
-    # Detect which IC subtypes are present
+def _keepaway_table(req: ProjectRequirements) -> list[str]:
+    """Generate keep-away rules table rows."""
     present_subtypes: dict[str, list[str]] = {}
     for comp in req.components:
         rtype = _ref_type(comp.ref)
@@ -309,28 +309,43 @@ def _routing_constraints(req: ProjectRequirements) -> str:
             subtype = _detect_ic_subtype(comp)
             if subtype:
                 present_subtypes.setdefault(subtype, []).append(comp.ref)
-        elif rtype == "relay":
-            present_subtypes.setdefault("relay", []).append(comp.ref)
-        elif rtype == "crystal":
-            present_subtypes.setdefault("crystal", []).append(comp.ref)
+        elif rtype in ("relay", "crystal"):
+            present_subtypes.setdefault(rtype, []).append(comp.ref)
 
-    keepaway_rows: list[tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for type_a, type_b, distance, reason in _ISOLATION_PAIRS:
         if type_a in present_subtypes and type_b in present_subtypes:
-            refs_a = ", ".join(present_subtypes[type_a])
-            refs_b = ", ".join(present_subtypes[type_b])
-            keepaway_rows.append((refs_a, refs_b, distance, reason))
+            rows.append((
+                ", ".join(present_subtypes[type_a]),
+                ", ".join(present_subtypes[type_b]),
+                distance, reason,
+            ))
+    if not rows:
+        return []
+    lines = [
+        "### Keep-Away Rules", "",
+        "| From | To | Distance | Reason |",
+        "|------|----|----------|--------|",
+    ]
+    for from_refs, to_refs, dist, reason in rows:
+        lines.append(f"| {from_refs} | {to_refs} | ≥{dist} | {reason} |")
+    lines.append("")
+    return lines
 
-    if keepaway_rows:
-        lines.append("### Keep-Away Rules")
-        lines.append("")
-        lines.append("| From | To | Distance | Reason |")
-        lines.append("|------|----|----------|--------|")
-        for from_refs, to_refs, dist, reason in keepaway_rows:
-            lines.append(f"| {from_refs} | {to_refs} | ≥{dist} | {reason} |")
-        lines.append("")
 
-    if not diff_nets and not (req.power_budget and req.power_budget.rails) and not keepaway_rows:
+def _routing_constraints(req: ProjectRequirements) -> str:
+    """Generate routing constraint tables."""
+    lines = ["## Routing Constraints", ""]
+
+    diff = _diff_pair_table(req)
+    power = _power_trace_table(req)
+    keepaway = _keepaway_table(req)
+
+    lines.extend(diff)
+    lines.extend(power)
+    lines.extend(keepaway)
+
+    if not diff and not power and not keepaway:
         lines.append("No special routing constraints detected.")
         lines.append("")
 

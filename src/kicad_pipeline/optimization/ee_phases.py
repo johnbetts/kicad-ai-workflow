@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_pipeline.models.requirements import ProjectRequirements
 
 from kicad_pipeline.optimization.collision_resolver import (
     _PlacementGrid,
@@ -304,46 +308,103 @@ def _phase_decoupling(ctx: PlacementContext) -> None:
             ctx.positions[cap_ref] = (tx, ty, crot)
 
 
+_GND_NET_NAMES: frozenset[str] = frozenset(
+    {"GND", "AGND", "DGND", "PGND", "VSS", "AVSS"},
+)
+
+
+def _build_crystal_net_maps(
+    requirements: ProjectRequirements,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Build crystal-ref-to-nets and net-to-components maps.
+
+    Returns (crystal_ref_to_nets, net_to_components).
+    """
+    crystal_ref_to_nets: dict[str, set[str]] = {}
+    net_to_components: dict[str, set[str]] = {}
+    for net in requirements.nets:
+        refs_in_net: set[str] = set()
+        for conn in net.connections:
+            refs_in_net.add(conn.ref)
+        net_to_components[net.name] = refs_in_net
+        for conn in net.connections:
+            if conn.ref.startswith("Y"):
+                crystal_ref_to_nets.setdefault(conn.ref, set()).add(net.name)
+    return crystal_ref_to_nets, net_to_components
+
+
+def _find_crystal_target_ic(
+    crystal_ref: str,
+    crystal_ref_to_nets: dict[str, set[str]],
+    net_to_components: dict[str, set[str]],
+    positions: dict[str, tuple[float, float, float]],
+    requirements: ProjectRequirements,
+) -> str | None:
+    """Find the IC connected to a crystal via signal nets."""
+    crystal_nets = crystal_ref_to_nets.get(crystal_ref, set())
+    for net_name in crystal_nets:
+        if net_name.upper() in _GND_NET_NAMES:
+            continue
+        for r in net_to_components.get(net_name, set()):
+            if r.startswith("U") and r in positions and r != crystal_ref:
+                return r
+    # Fallback: use MCU ref
+    from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref
+    return _find_mcu_ref(requirements)
+
+
+def _find_best_ic_adjacent_position(
+    ref: str,
+    ic_x: float,
+    ic_y: float,
+    ic_w: float,
+    ic_h: float,
+    ctx: PlacementContext,
+) -> tuple[float, float] | None:
+    """Find the closest free position adjacent to an IC for a crystal component."""
+    rx, ry, _rrot = ctx.positions[ref]
+    dist = math.sqrt((rx - ic_x) ** 2 + (ry - ic_y) ** 2)
+    if dist <= 10.0:
+        return None
+    w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+    gap = 1.0
+    candidates = [
+        (ic_x + (ic_w + w) / 2.0 + gap, ic_y),
+        (ic_x - (ic_w + w) / 2.0 - gap, ic_y),
+        (ic_x, ic_y + (ic_h + h) / 2.0 + gap),
+        (ic_x, ic_y - (ic_h + h) / 2.0 - gap),
+    ]
+    pull_grid = _PlacementGrid(ctx.bounds)
+    for oref, (ox, oy, _or) in ctx.positions.items():
+        if oref != ref:
+            ow, oh = _rotation_aware_size(oref, ctx.positions, ctx.fp_sizes)
+            pull_grid.place(ox, oy, ow, oh)
+    best_pos: tuple[float, float] | None = None
+    best_dist = dist
+    for txx, tyy in candidates:
+        fx, fy = pull_grid.find_free_pos(txx, tyy, w, h)
+        new_d = math.sqrt((fx - ic_x) ** 2 + (fy - ic_y) ** 2)
+        if new_d < best_dist:
+            best_dist = new_d
+            best_pos = (fx, fy)
+    return best_pos
+
+
 def _phase_crystal_placement(ctx: PlacementContext) -> None:
     """3d: Crystal-IC proximity — within 10mm of connected IC."""
     _log.info("  3d: Crystal-IC proximity")
     sc_list = list(ctx.subcircuits)
-    bounds = ctx.bounds
 
-    # Build crystal->IC map via net connectivity
-    _crystal_ref_to_nets: dict[str, set[str]] = {}
-    _net_to_components: dict[str, set[str]] = {}
-    for net in ctx.requirements.nets:
-        refs_in_net: set[str] = set()
-        for conn in net.connections:
-            refs_in_net.add(conn.ref)
-        _net_to_components[net.name] = refs_in_net
-        for conn in net.connections:
-            if conn.ref.startswith("Y"):
-                _crystal_ref_to_nets.setdefault(conn.ref, set()).add(net.name)
+    crystal_ref_to_nets, net_to_components = _build_crystal_net_maps(ctx.requirements)
 
     for sc in sc_list:
         if sc.circuit_type != SubCircuitType.CRYSTAL_OSC:
             continue
         crystal_ref = sc.anchor_ref
-        target_ic: str | None = None
-        crystal_nets = _crystal_ref_to_nets.get(crystal_ref, set())
-        for net_name in crystal_nets:
-            _nl = net_name.upper()
-            if _nl in ("GND", "AGND", "DGND", "PGND", "VSS", "AVSS"):
-                continue
-            for r in _net_to_components.get(net_name, set()):
-                if r.startswith("U") and r in ctx.positions and r != crystal_ref:
-                    target_ic = r
-                    break
-            if target_ic:
-                break
-
-        if not target_ic:
-            from kicad_pipeline.optimization.functional_grouper import (
-                _find_mcu_ref,
-            )
-            target_ic = _find_mcu_ref(ctx.requirements)
+        target_ic = _find_crystal_target_ic(
+            crystal_ref, crystal_ref_to_nets, net_to_components,
+            ctx.positions, ctx.requirements,
+        )
         if not target_ic or target_ic not in ctx.positions:
             continue
 
@@ -355,35 +416,19 @@ def _phase_crystal_placement(ctx: PlacementContext) -> None:
         for ref in sc.refs:
             if ref in ctx.fixed_refs or ref not in ctx.positions:
                 continue
-            rx, ry, rrot = ctx.positions[ref]
-            dist = math.sqrt((rx - ic_x) ** 2 + (ry - ic_y) ** 2)
-            if dist <= 10.0:
-                continue
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            gap = 1.0
-            candidates = [
-                (ic_x + (ic_w + w) / 2.0 + gap, ic_y),
-                (ic_x - (ic_w + w) / 2.0 - gap, ic_y),
-                (ic_x, ic_y + (ic_h + h) / 2.0 + gap),
-                (ic_x, ic_y - (ic_h + h) / 2.0 - gap),
-            ]
-            pull_grid = _PlacementGrid(bounds)
-            for oref, (ox, oy, _or) in ctx.positions.items():
-                if oref != ref:
-                    ow, oh = _rotation_aware_size(oref, ctx.positions, ctx.fp_sizes)
-                    pull_grid.place(ox, oy, ow, oh)
-            best_pos: tuple[float, float] | None = None
-            best_dist = dist
-            for txx, tyy in candidates:
-                fx, fy = pull_grid.find_free_pos(txx, tyy, w, h)
-                new_d = math.sqrt((fx - ic_x) ** 2 + (fy - ic_y) ** 2)
-                if new_d < best_dist:
-                    best_dist = new_d
-                    best_pos = (fx, fy)
+            _rrot = ctx.positions[ref][2]
+            best_pos = _find_best_ic_adjacent_position(
+                ref, ic_x, ic_y, ic_w, ic_h, ctx,
+            )
             if best_pos is not None:
-                ctx.positions[ref] = (best_pos[0], best_pos[1], rrot)
+                rx, ry = ctx.positions[ref][0], ctx.positions[ref][1]
+                old_dist = math.sqrt((rx - ic_x) ** 2 + (ry - ic_y) ** 2)
+                new_dist = math.sqrt(
+                    (best_pos[0] - ic_x) ** 2 + (best_pos[1] - ic_y) ** 2,
+                )
+                ctx.positions[ref] = (best_pos[0], best_pos[1], _rrot)
                 _log.info("    %s pulled to (%.1f, %.1f) dist=%.1f->%.1f from %s",
-                          ref, best_pos[0], best_pos[1], dist, best_dist,
+                          ref, best_pos[0], best_pos[1], old_dist, new_dist,
                           target_ic)
 
 
