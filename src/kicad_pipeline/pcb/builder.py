@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import logging
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -106,6 +107,7 @@ from kicad_pipeline.sexp.writer import SExpNode, write_file
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import Component, ProjectRequirements
+    from kicad_pipeline.pcb.board_templates import BoardTemplate
     from kicad_pipeline.pcb.placement import LayoutResult
 
 log = logging.getLogger(__name__)
@@ -322,6 +324,845 @@ def _apply_nets_to_footprint(
 
 
 # ---------------------------------------------------------------------------
+# build_pcb helper context
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _BuildContext:
+    """Mutable state container threaded through build_pcb helper functions."""
+
+    board_width_mm: float
+    board_height_mm: float
+    origin_x: float
+    origin_y: float
+    corner_radius_mm: float
+    layer_count: int
+    project_name: str | None
+    outline: BoardOutline
+    nets: tuple[NetEntry, ...]
+    net_lookup: dict[str, int]
+    keepouts: list[Keepout]
+    zones: list[ZonePolygon]
+    fixed_positions: dict[str, tuple[float, float, float]] | None
+    layer_overrides: dict[str, str]
+    template_mounting_positions: tuple[tuple[float, float], ...] | None
+    template_mounting_diameter: float | None
+    tmpl_obj: BoardTemplate | None
+    preserved_ref_text_positions: dict[str, tuple[float, float, float]]
+    has_rf: bool
+    rf_pos: tuple[float, float, float] | None
+    fp_sizes: dict[str, tuple[float, float]]
+    fp_bboxes: dict[str, object]
+
+
+# ---------------------------------------------------------------------------
+# build_pcb extracted helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_board_template(
+    requirements: ProjectRequirements,
+    board_template: str | None,
+    board_width_mm: float | None,
+    board_height_mm: float | None,
+) -> tuple[
+    str | None,
+    float | None,
+    float | None,
+    float,
+    dict[str, tuple[float, float, float]] | None,
+    dict[str, str],
+    tuple[tuple[float, float], ...] | None,
+    float | None,
+    BoardTemplate | None,
+]:
+    """Resolve board template, extracting dimensions and fixed positions.
+
+    Returns:
+        (board_template, board_width_mm, board_height_mm, corner_radius_mm,
+         fixed_positions, layer_overrides, template_mounting_positions,
+         template_mounting_diameter, tmpl_obj)
+    """
+    fixed_positions: dict[str, tuple[float, float, float]] | None = None
+    layer_overrides: dict[str, str] = {}
+    corner_radius_mm: float = 0.0
+    template_mounting_positions: tuple[tuple[float, float], ...] | None = None
+    template_mounting_diameter: float | None = None
+    tmpl_obj: BoardTemplate | None = None
+
+    if board_template is None and requirements.mechanical is not None:
+        from kicad_pipeline.pcb.board_templates import detect_template
+        auto_tmpl = detect_template(requirements.mechanical)
+        if auto_tmpl is not None:
+            board_template = auto_tmpl.name
+            log.info("build_pcb: auto-detected board template '%s'", board_template)
+
+    if board_template is not None:
+        tmpl = get_template(board_template)
+        tmpl_obj = tmpl
+        log.info("build_pcb: using board template '%s'", tmpl.name)
+        if board_width_mm is None:
+            board_width_mm = tmpl.board_width_mm
+        if board_height_mm is None:
+            board_height_mm = tmpl.board_height_mm
+        corner_radius_mm = tmpl.corner_radius_mm
+        if tmpl.mounting_holes:
+            template_mounting_positions = tuple(
+                (h.x_mm, h.y_mm) for h in tmpl.mounting_holes
+            )
+            template_mounting_diameter = tmpl.mounting_holes[0].diameter_mm
+        if tmpl.fixed_components:
+            fixed_positions = _match_template_fixed_components(
+                tmpl, requirements,
+            )
+            for fc in tmpl.fixed_components:
+                matched = _find_template_match(fc, requirements)
+                if matched is not None and fc.layer != "F.Cu":
+                    layer_overrides[matched] = fc.layer
+
+    return (
+        board_template, board_width_mm, board_height_mm, corner_radius_mm,
+        fixed_positions, layer_overrides, template_mounting_positions,
+        template_mounting_diameter, tmpl_obj,
+    )
+
+
+def _match_template_fixed_components(
+    tmpl: BoardTemplate,
+    requirements: ProjectRequirements,
+) -> dict[str, tuple[float, float, float]]:
+    """Match template fixed components to requirement components."""
+    fixed_positions: dict[str, tuple[float, float, float]] = {}
+    for fc in tmpl.fixed_components:
+        matched_ref = _find_template_match(fc, requirements)
+        if matched_ref is not None:
+            fixed_positions[matched_ref] = (fc.x_mm, fc.y_mm, fc.rotation)
+            log.info(
+                "build_pcb: template fixed %s at (%.1f, %.1f) layer=%s",
+                matched_ref, fc.x_mm, fc.y_mm, fc.layer,
+            )
+    return fixed_positions
+
+
+def _find_template_match(
+    fc: object,
+    requirements: ProjectRequirements,
+) -> str | None:
+    """Find a component ref matching a template fixed component."""
+    is_gpio = "GPIO" in fc.description.upper()  # type: ignore[union-attr]
+    for comp in requirements.components:
+        if comp.ref == fc.ref_pattern:  # type: ignore[union-attr]
+            if is_gpio and len(comp.pins) < 10:
+                continue
+            return comp.ref
+    if is_gpio:
+        for comp in requirements.components:
+            fp_upper = comp.footprint.upper()
+            if "02X20" in fp_upper or "2X20" in fp_upper:
+                return comp.ref
+    return None
+
+
+def _resolve_preserved_positions(
+    preserve_from: str | Path | object | None,
+    preserve_ref_text: bool,
+    requirements: ProjectRequirements,
+    fixed_positions: dict[str, tuple[float, float, float]] | None,
+) -> tuple[
+    dict[str, tuple[float, float, float]] | None,
+    dict[str, tuple[float, float, float]],
+]:
+    """Extract positions from an existing PCB or IPC connection.
+
+    Returns:
+        (fixed_positions, preserved_ref_text_positions)
+    """
+    preserved_ref_text_positions: dict[str, tuple[float, float, float]] = {}
+    if preserve_from is None:
+        return fixed_positions, preserved_ref_text_positions
+
+    from kicad_pipeline.pcb.position_extractor import (
+        positions_from_source,
+        ref_text_positions_from_source,
+    )
+
+    existing = positions_from_source(preserve_from)
+    current_refs = {c.ref for c in requirements.components}
+    if fixed_positions is None:
+        fixed_positions = {}
+    for ref, pos in existing.items():
+        if ref in current_refs:
+            fixed_positions[ref] = pos
+    if preserve_ref_text:
+        preserved_ref_text_positions = ref_text_positions_from_source(preserve_from)
+    log.info(
+        "build_pcb: preserved %d/%d positions, %d ref text positions",
+        len(fixed_positions), len(existing), len(preserved_ref_text_positions),
+    )
+    return fixed_positions, preserved_ref_text_positions
+
+
+def _resolve_board_dimensions(
+    board_width_mm: float | None,
+    board_height_mm: float | None,
+    requirements: ProjectRequirements,
+) -> tuple[float, float, bool]:
+    """Determine board width/height from requirements or defaults.
+
+    Returns:
+        (board_width_mm, board_height_mm, explicit_dimensions)
+    """
+    explicit_dimensions = (
+        (board_width_mm is not None and board_height_mm is not None)
+        or requirements.mechanical is not None
+    )
+    if board_width_mm is None:
+        if requirements.mechanical is not None:
+            board_width_mm = requirements.mechanical.board_width_mm
+        else:
+            board_width_mm = _DEFAULT_BOARD_WIDTH_MM
+
+    if board_height_mm is None:
+        if requirements.mechanical is not None:
+            board_height_mm = requirements.mechanical.board_height_mm
+        else:
+            board_height_mm = _DEFAULT_BOARD_HEIGHT_MM
+
+    log.info("build_pcb: board %.1f x %.1f mm", board_width_mm, board_height_mm)
+    return board_width_mm, board_height_mm, explicit_dimensions
+
+
+def _auto_size_board(
+    board_width_mm: float,
+    board_height_mm: float,
+    origin_x: float,
+    origin_y: float,
+    corner_radius_mm: float,
+    fp_sizes: dict[str, tuple[float, float]],
+    total_area: float,
+) -> tuple[float, float, BoardOutline]:
+    """Auto-size the board if footprint area demands it.
+
+    Returns:
+        (board_width_mm, board_height_mm, outline)
+    """
+    import math as _math
+
+    min_board_area = total_area * 3.0
+    min_width = _math.sqrt(min_board_area * 2.0)
+    min_height = min_width / 2.0
+    new_width = max(board_width_mm, min_width)
+    new_height = max(board_height_mm, min_height)
+    max_fp_w = max((s[0] for s in fp_sizes.values()), default=0.0)
+    max_fp_h = max((s[1] for s in fp_sizes.values()), default=0.0)
+    new_width = max(new_width, max_fp_w + 20.0)
+    new_height = max(new_height, max_fp_h + 20.0)
+    if new_width > 2.5 * new_height:
+        new_height = new_width / 2.0
+    elif new_height > 2.5 * new_width:
+        new_width = new_height / 2.0
+
+    if new_width > board_width_mm or new_height > board_height_mm:
+        board_width_mm = new_width
+        board_height_mm = new_height
+        log.info(
+            "build_pcb: auto-sized board to %.1f x %.1f mm",
+            board_width_mm, board_height_mm,
+        )
+
+    outline = _make_board_outline(
+        board_width_mm, board_height_mm, origin_x, origin_y,
+        corner_radius_mm=corner_radius_mm,
+    )
+    return board_width_mm, board_height_mm, outline
+
+
+def _warn_board_size(
+    board_width_mm: float,
+    board_height_mm: float,
+    total_area: float,
+) -> None:
+    """Emit a warning if board area is too small for component footprints."""
+    board_area = board_width_mm * board_height_mm
+    min_area = total_area * 3.0
+    if total_area > 0.0 and board_area < min_area:
+        import math as _math
+        suggested_w = _math.sqrt(min_area * (board_width_mm / board_height_mm))
+        suggested_h = min_area / suggested_w
+        _size_key = (round(board_width_mm), round(board_height_mm), round(total_area))
+        if _size_key not in _board_size_warned:
+            _board_size_warned.add(_size_key)
+            log.warning(
+                "build_pcb: board %.0fx%.0fmm (%.0f mm^2) may be too small for "
+                "%.0f mm^2 of footprints (suggest %.0fx%.0fmm)",
+                board_width_mm, board_height_mm, board_area,
+                total_area, suggested_w, suggested_h,
+            )
+
+
+def _build_pre_footprints(
+    requirements: ProjectRequirements,
+    net_lookup: dict[str, int],
+    layer_overrides: dict[str, str],
+    project_name: str | None,
+) -> list[Footprint]:
+    """Create footprints for all components (without placement positions)."""
+    pre_footprints: list[Footprint] = []
+    for comp in requirements.components:
+        comp_layer = layer_overrides.get(comp.ref, LAYER_F_CU)
+        fp = footprint_for_component(
+            comp.ref, comp.value, comp.footprint, comp.lcsc, layer=comp_layer,
+        )
+        fp = _apply_nets_to_footprint(fp, comp, net_lookup)
+        if comp.datasheet or comp.description:
+            fp = Footprint(
+                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+                datasheet=comp.datasheet, description=comp.description,
+            )
+        if project_name is not None:
+            new_lib_id = _footprint_lib_id(comp, project_name=project_name)
+            fp = Footprint(
+                lib_id=new_lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+                datasheet=fp.datasheet, description=fp.description,
+            )
+        pre_footprints.append(fp)
+    return pre_footprints
+
+
+def _build_pre_placement_keepouts(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+) -> None:
+    """Create keepout zones before placement (RF, mounting holes)."""
+    if ctx.has_rf and ctx.fixed_positions:
+        for comp in requirements.components:
+            val_lower = comp.value.lower()
+            if any(kw in val_lower for kw in _RF_KEYWORDS):
+                if comp.ref in ctx.fixed_positions:
+                    px, py, pr = ctx.fixed_positions[comp.ref]
+                    ctx.rf_pos = (px, py, pr)
+                    log.info(
+                        "build_pcb: anchoring antenna keepout to %s at "
+                        "(%.1f, %.1f, rot=%.0f)",
+                        comp.ref, px, py, pr,
+                    )
+                break
+    if ctx.has_rf and ctx.rf_pos is not None:
+        antenna_ko = _make_antenna_keepout(
+            ctx.board_width_mm,
+            _ANTENNA_KEEPOUT_WIDTH_MM,
+            _ANTENNA_KEEPOUT_HEIGHT_MM,
+            rf_position=ctx.rf_pos,
+            layer_count=ctx.layer_count,
+            board_height=ctx.board_height_mm,
+        )
+        ctx.keepouts.append(antenna_ko)
+        body_ko = _make_rf_module_body_keepout(
+            ctx.rf_pos,
+            layer_count=ctx.layer_count,
+            board_width=ctx.board_width_mm,
+            board_height=ctx.board_height_mm,
+        )
+        if body_ko is not None:
+            log.info("build_pcb: adding RF module body keepout on inner layers")
+            ctx.keepouts.append(body_ko)
+    elif ctx.has_rf:
+        log.info(
+            "build_pcb: RF module detected but position unknown — "
+            "antenna keepout deferred to post-placement (KI-019)"
+        )
+
+    # Mounting-hole keepouts
+    mount_positions = ctx.template_mounting_positions
+    mount_radius = _KEEPOUT_MARGIN_MM
+    if (
+        mount_positions is None
+        and requirements.mechanical is not None
+        and requirements.mechanical.mounting_hole_positions
+    ):
+        mount_positions = requirements.mechanical.mounting_hole_positions
+    if ctx.template_mounting_diameter is not None:
+        mount_radius = ctx.template_mounting_diameter / 2.0 + 1.0
+    elif requirements.mechanical is not None:
+        mount_radius = requirements.mechanical.mounting_hole_diameter_mm / 2.0 + 1.0
+
+    corner_keepouts = _make_mounting_hole_keepouts(
+        ctx.board_width_mm,
+        ctx.board_height_mm,
+        _MOUNTING_HOLE_INSET_MM,
+        mount_radius,
+        mounting_positions=mount_positions,
+    )
+    ctx.keepouts.extend(corner_keepouts)
+
+
+def _run_placement(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    pre_footprints: list[Footprint],
+    placement_mode: str,
+) -> list[Footprint]:
+    """Run placement and apply positions/rotations to footprints."""
+    layout_result: LayoutResult
+    if placement_mode == "grouped":
+        layout_result = place_groups_off_board(
+            footprints=tuple(pre_footprints),
+            features=requirements.features,
+            requirements=requirements,
+            board_height_mm=ctx.board_height_mm,
+            footprint_sizes=ctx.fp_sizes,
+            fixed_positions=ctx.fixed_positions,
+        )
+    else:
+        layout_result = layout_pcb(
+            requirements, ctx.outline, footprint_sizes=ctx.fp_sizes,
+            fixed_positions=ctx.fixed_positions,
+            board_template=ctx.tmpl_obj,
+            keepouts=tuple(ctx.keepouts),
+            footprint_bboxes=ctx.fp_bboxes,
+        )
+
+    if layout_result.layers:
+        for ref, lyr in layout_result.layers.items():
+            if ref not in ctx.layer_overrides:
+                ctx.layer_overrides[ref] = lyr
+
+    footprints_with_pos: list[Footprint] = []
+    for fp in pre_footprints:
+        pos = layout_result.positions.get(fp.ref, Point(x=0.0, y=0.0))
+        rot = layout_result.rotations.get(fp.ref, fp.rotation)
+        fp_placed = Footprint(
+            lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+            position=pos, rotation=rot, layer=fp.layer,
+            pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+            lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+            models=fp.models, datasheet=fp.datasheet,
+            description=fp.description,
+        )
+        footprints_with_pos.append(fp_placed)
+    return footprints_with_pos
+
+
+def _create_post_placement_keepouts(
+    ctx: _BuildContext,
+    footprints_with_pos: list[Footprint],
+) -> None:
+    """Create antenna keepout from actual placed position (KI-019)."""
+    if not (ctx.has_rf and ctx.rf_pos is None):
+        return
+    for fp in footprints_with_pos:
+        val_lower = fp.value.lower() if fp.value else ""
+        if any(kw in val_lower for kw in _RF_KEYWORDS):
+            ctx.rf_pos = (fp.position.x, fp.position.y, fp.rotation)
+            log.info(
+                "build_pcb: creating post-placement antenna keepout for %s "
+                "at (%.1f, %.1f, rot=%.0f)",
+                fp.ref, fp.position.x, fp.position.y, fp.rotation,
+            )
+            antenna_ko = _make_antenna_keepout(
+                ctx.board_width_mm,
+                _ANTENNA_KEEPOUT_WIDTH_MM,
+                _ANTENNA_KEEPOUT_HEIGHT_MM,
+                rf_position=ctx.rf_pos,
+                layer_count=ctx.layer_count,
+                board_height=ctx.board_height_mm,
+            )
+            ctx.keepouts.append(antenna_ko)
+            body_ko = _make_rf_module_body_keepout(
+                ctx.rf_pos,
+                layer_count=ctx.layer_count,
+                board_width=ctx.board_width_mm,
+                board_height=ctx.board_height_mm,
+            )
+            if body_ko is not None:
+                ctx.keepouts.append(body_ko)
+            break
+
+
+def _build_gnd_zones(
+    ctx: _BuildContext,
+    skip_inner_zones: bool,
+) -> None:
+    """Create GND copper pour zones and inner-layer zones."""
+    gnd_net_num = ctx.net_lookup.get("GND", 1)
+    zone_clearance = ZONE_CLEARANCE_DEFAULT_MM
+    gnd_strategy = "both"
+    gnd_zones = _make_gnd_zones(
+        ctx.outline, gnd_net_num, zone_clearance, strategy=gnd_strategy,
+    )
+    ctx.zones.extend(gnd_zones)
+
+    if ctx.layer_count >= 4 and not skip_inner_zones:
+        from kicad_pipeline.pcb.zones import make_gnd_pour, make_power_pour
+
+        in1_gnd = make_gnd_pour(
+            ctx.outline, net_number=gnd_net_num, net_name="GND",
+            layer="In1.Cu",
+        )
+        ctx.zones.append(in1_gnd)
+        log.info("build_pcb: added In1.Cu GND plane zone")
+
+        power5v_num = ctx.net_lookup.get("+5V")
+        if power5v_num is not None:
+            in2_5v = make_power_pour(
+                ctx.outline, net_number=power5v_num, net_name="+5V",
+                layer="In2.Cu",
+            )
+            ctx.zones.append(in2_5v)
+            log.info("build_pcb: added In2.Cu +5V power plane zone")
+    elif skip_inner_zones:
+        log.info("build_pcb: skipping inner-layer zone generation (user-managed)")
+
+
+def _apply_silkscreen_pass(
+    ctx: _BuildContext,
+    footprints_with_pos: list[Footprint],
+) -> list[Footprint]:
+    """Add silkscreen labels, clamp to board, resolve collisions."""
+    final_footprints = []
+    for fp in footprints_with_pos:
+        fp_with_silk = add_silkscreen_to_footprint(fp)
+        if (fp.position.x >= ctx.origin_x
+                and fp.position.x <= ctx.origin_x + ctx.board_width_mm
+                and fp.position.y >= ctx.origin_y
+                and fp.position.y <= ctx.origin_y + ctx.board_height_mm):
+            fp_with_silk = _clamp_silk_to_board(
+                fp_with_silk,
+                ctx.origin_x, ctx.origin_y,
+                ctx.board_width_mm, ctx.board_height_mm,
+            )
+        final_footprints.append(fp_with_silk)
+
+    final_footprints = _resolve_silk_collisions(final_footprints)
+
+    if ctx.preserved_ref_text_positions:
+        final_footprints = _restore_ref_text_positions(
+            final_footprints, ctx.preserved_ref_text_positions,
+        )
+
+    return final_footprints
+
+
+def _restore_ref_text_positions(
+    footprints: list[Footprint],
+    ref_text_positions: dict[str, tuple[float, float, float]],
+) -> list[Footprint]:
+    """Restore reference text positions from a preserved layout."""
+    restored: list[Footprint] = []
+    for fp in footprints:
+        if fp.ref in ref_text_positions:
+            tx, ty, trot = ref_text_positions[fp.ref]
+            new_texts: list[FootprintText] = []
+            for t in fp.texts:
+                if t.text_type == "reference":
+                    new_texts.append(FootprintText(
+                        text_type=t.text_type,
+                        text=t.text,
+                        position=Point(x=tx, y=ty),
+                        layer=t.layer,
+                        rotation=trot,
+                        effects_size=t.effects_size,
+                        hidden=t.hidden,
+                        uuid=t.uuid,
+                    ))
+                else:
+                    new_texts.append(t)
+            restored.append(Footprint(
+                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+                models=fp.models, datasheet=fp.datasheet,
+                description=fp.description,
+            ))
+        else:
+            restored.append(fp)
+    log.info(
+        "build_pcb: restored %d ref text positions from preserved layout",
+        len(ref_text_positions),
+    )
+    return restored
+
+
+def _add_mounting_hole_footprints(
+    ctx: _BuildContext,
+    final_footprints: list[Footprint],
+    corner_keepouts: list[Keepout],
+    requirements: ProjectRequirements,
+) -> None:
+    """Add NPTH mounting hole footprints to the board."""
+    mh_positions = ctx.template_mounting_positions
+    mh_diameter = ctx.template_mounting_diameter
+    if mh_positions is None and requirements.mechanical is not None:
+        if requirements.mechanical.mounting_hole_positions:
+            mh_positions = requirements.mechanical.mounting_hole_positions
+        if mh_diameter is None:
+            mh_diameter = requirements.mechanical.mounting_hole_diameter_mm
+    if mh_positions is None and corner_keepouts:
+        inset = _MOUNTING_HOLE_INSET_MM
+        mh_positions = (
+            (inset, inset),
+            (ctx.board_width_mm - inset, inset),
+            (ctx.board_width_mm - inset, ctx.board_height_mm - inset),
+            (inset, ctx.board_height_mm - inset),
+        )
+    if mh_diameter is None:
+        mh_diameter = _MOUNTING_HOLE_DIAMETER_MM
+
+    if mh_positions:
+        for idx, (mx, my) in enumerate(mh_positions, start=1):
+            mh_ref = f"H{idx}"
+            mh_fp = make_mounting_hole(mh_ref, drill_diameter=mh_diameter)
+            mh_fp = Footprint(
+                lib_id=mh_fp.lib_id, ref=mh_fp.ref, value=mh_fp.value,
+                position=Point(mx, my), rotation=0.0, layer=mh_fp.layer,
+                pads=mh_fp.pads, graphics=mh_fp.graphics, texts=mh_fp.texts,
+                uuid=mh_fp.uuid, attr=mh_fp.attr,
+            )
+            final_footprints.append(mh_fp)
+        log.info(
+            "build_pcb: added %d mounting hole footprints",
+            len(mh_positions),
+        )
+
+
+def _run_autoroute_step(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    final_footprints: list[Footprint],
+    auto_route: bool,
+    netclasses: tuple[object, ...],
+) -> tuple[tuple[Track, ...], tuple[Via, ...], bool]:
+    """Run autorouting (FreeRouting then grid router fallback).
+
+    Returns:
+        (all_tracks, all_vias, freerouting_used)
+    """
+    all_tracks: tuple[Track, ...] = ()
+    all_vias: tuple[Via, ...] = ()
+    freerouting_used = False
+
+    if not auto_route:
+        return all_tracks, all_vias, freerouting_used
+
+    from kicad_pipeline.routing.freerouting import (
+        find_freerouting_jar,
+        route_with_freerouting,
+        ses_to_tracks,
+        ses_to_vias,
+    )
+
+    jar_path = find_freerouting_jar()
+    if jar_path is not None:
+        log.info("build_pcb: FreeRouting JAR found at %s", jar_path)
+        from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints, build_netlist
+        netlist = build_netlist(requirements)
+        pre_route_fps = assign_net_numbers_to_footprints(
+            list(final_footprints), netlist,
+        )
+        design_rules = DesignRules(layer_count=ctx.layer_count)
+        pre_route_design = PCBDesign(
+            outline=ctx.outline,
+            design_rules=design_rules,
+            nets=ctx.nets,
+            footprints=tuple(pre_route_fps),
+            tracks=(), vias=(), zones=(),
+            keepouts=tuple(ctx.keepouts),
+            netclasses=netclasses,
+        )
+        import tempfile
+        dsn_dir = tempfile.mkdtemp(prefix="kicad_freeroute_")
+        dsn_path = Path(dsn_dir) / "design.dsn"
+        from kicad_pipeline.routing.dsn_export import write_dsn
+        write_dsn(pre_route_design, dsn_path)
+        log.info("build_pcb: exported DSN to %s", dsn_path)
+
+        fr_result = route_with_freerouting(
+            str(dsn_path), jar_path=jar_path, timeout_seconds=300,
+        )
+        if fr_result.success and fr_result.ses_file is not None:
+            ses_content = Path(fr_result.ses_file).read_text(encoding="utf-8")
+            all_tracks = ses_to_tracks(ses_content, pre_route_design)
+            all_vias = ses_to_vias(ses_content, pre_route_design)
+            freerouting_used = True
+            log.info(
+                "build_pcb: FreeRouting complete — %d tracks, %d vias",
+                len(all_tracks), len(all_vias),
+            )
+        else:
+            log.warning(
+                "build_pcb: FreeRouting failed (%s), falling back to grid router",
+                fr_result.error,
+            )
+    else:
+        log.info("build_pcb: FreeRouting JAR not found, using grid router")
+
+    if not freerouting_used:
+        all_tracks, all_vias = _run_grid_router(
+            ctx, requirements, final_footprints, netclasses,
+        )
+
+    return all_tracks, all_vias, freerouting_used
+
+
+def _run_grid_router(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    final_footprints: list[Footprint],
+    netclasses: tuple[object, ...],
+) -> tuple[tuple[Track, ...], tuple[Via, ...]]:
+    """Run the grid router fallback."""
+    from kicad_pipeline.pcb.netclasses import net_clearance_map, net_width_map
+    from kicad_pipeline.pcb.netlist import build_netlist
+    from kicad_pipeline.routing.grid_router import (
+        collect_tracks,
+        collect_vias,
+        route_all_nets,
+    )
+
+    netlist = build_netlist(requirements)
+    widths = net_width_map(netclasses)
+    clearances = net_clearance_map(netclasses)
+    route_results = route_all_nets(
+        netlist, final_footprints,
+        ctx.board_width_mm, ctx.board_height_mm,
+        grid_step_mm=0.25,
+        net_widths=widths,
+        net_clearances=clearances,
+        keepouts=tuple(ctx.keepouts),
+        corner_radius_mm=ctx.corner_radius_mm,
+    )
+    all_tracks = collect_tracks(route_results, routed_only=False)
+    all_vias = collect_vias(route_results)
+    routed = sum(1 for r in route_results if r.routed)
+    unrouted = sum(1 for r in route_results if not r.routed)
+    log.info(
+        "build_pcb: autoroute complete — %d tracks, %d routed, %d unrouted",
+        len(all_tracks), routed, unrouted,
+    )
+
+    from kicad_pipeline.routing.metrics import compute_board_metrics
+    metrics = compute_board_metrics(route_results, final_footprints)
+    log.info(
+        "build_pcb: routing %.1fmm total (%.2fx ideal), %d vias, %d/%d nets",
+        metrics.total_track_length_mm,
+        metrics.overall_length_ratio,
+        metrics.total_vias,
+        metrics.nets_routed,
+        metrics.nets_routed + metrics.nets_failed,
+    )
+
+    return all_tracks, all_vias
+
+
+def _add_rf_via_fence(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    final_footprints: list[Footprint],
+    all_vias: tuple[Via, ...],
+) -> tuple[Via, ...]:
+    """Add RF via fence if an RF module is present."""
+    if _has_rf_module(requirements):
+        from kicad_pipeline.constants import RF_VIA_FENCE_SPACING_MM
+        gnd_net_num = ctx.net_lookup.get("GND", 1)
+        rf_fence_vias = _make_rf_via_fence(
+            tuple(ctx.keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
+            footprints=tuple(final_footprints),
+            board_width=ctx.board_width_mm, board_height=ctx.board_height_mm,
+        )
+        if rf_fence_vias:
+            all_vias = all_vias + rf_fence_vias
+            log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
+    return all_vias
+
+
+def _add_gnd_stitching_vias(
+    ctx: _BuildContext,
+    final_footprints: list[Footprint],
+    all_vias: tuple[Via, ...],
+    all_tracks: tuple[Track, ...],
+    auto_route: bool,
+    freerouting_used: bool,
+) -> tuple[Via, ...]:
+    """Add GND stitching vias when using grid router."""
+    if auto_route and not freerouting_used:
+        gnd_net_num = ctx.net_lookup.get("GND", 1)
+        stitch_vias = _make_gnd_stitching_vias(
+            ctx.outline, gnd_net_num, tuple(final_footprints),
+            all_vias, all_tracks,
+            keepout_zones=tuple(ctx.keepouts),
+        )
+        if stitch_vias:
+            all_vias = all_vias + stitch_vias
+            log.info("build_pcb: added %d GND stitching vias", len(stitch_vias))
+    return all_vias
+
+
+def _preserve_user_routing(
+    ctx: _BuildContext,
+    preserve_from: str | Path | object | None,
+    preserve_routing: bool,
+    pcb_file_path: str | Path | None,
+    all_tracks: tuple[Track, ...],
+    all_vias: tuple[Via, ...],
+) -> tuple[tuple[Track, ...], tuple[Via, ...]]:
+    """Preserve routing from an existing PCB (tracks, vias, zones, edge cuts)."""
+    if not (preserve_routing and preserve_from is not None):
+        return all_tracks, all_vias
+
+    from kicad_pipeline.pcb.position_extractor import (
+        remap_routing,
+        routing_from_source,
+    )
+
+    _pcb_path = pcb_file_path
+    if _pcb_path is None and isinstance(preserve_from, str | Path):
+        _pcb_path = preserve_from
+
+    preserved = routing_from_source(preserve_from, pcb_file_path=_pcb_path)
+    if preserved is None or not (
+        preserved.tracks or preserved.vias or preserved.zones
+        or preserved.edge_cuts
+    ):
+        return all_tracks, all_vias
+
+    new_net_map: dict[str, int] = {}
+    for net_entry in ctx.nets:
+        new_net_map[net_entry.name] = net_entry.number
+
+    remapped_tracks, remapped_vias, remapped_zones = remap_routing(
+        preserved, new_net_map,
+    )
+    all_tracks = all_tracks + remapped_tracks
+    all_vias = all_vias + remapped_vias
+    ctx.zones.extend(remapped_zones)
+
+    if preserved.keepouts:
+        log.info(
+            "build_pcb: preserving %d user keepout zones",
+            len(preserved.keepouts),
+        )
+        ctx.keepouts.extend(preserved.keepouts)
+
+    if preserved.edge_cuts:
+        log.info(
+            "build_pcb: preserving %d user edge cut segments",
+            len(preserved.edge_cuts),
+        )
+        _preserved_edge_cuts.clear()
+        _preserved_edge_cuts.extend(preserved.edge_cuts)
+
+    return all_tracks, all_vias
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -386,7 +1227,6 @@ def build_pcb(
     if not requirements.components:
         raise PCBError("Cannot build PCB: requirements has no components")
 
-    # Clear stale preserved edge cuts from any previous build
     _preserved_edge_cuts.clear()
 
     log.info(
@@ -395,165 +1235,41 @@ def build_pcb(
         len(requirements.nets),
     )
 
-    # ------------------------------------------------------------------
-    # Step 0: Board template (if specified)
-    # ------------------------------------------------------------------
-    fixed_positions: dict[str, tuple[float, float, float]] | None = None
-    layer_overrides: dict[str, str] = {}
-    corner_radius_mm: float = 0.0
-    template_mounting_positions: tuple[tuple[float, float], ...] | None = None
-    template_mounting_diameter: float | None = None
-    tmpl_obj: object | None = None
-    # Auto-detect board template from mechanical constraints when not
-    # explicitly provided.
-    if board_template is None and requirements.mechanical is not None:
-        from kicad_pipeline.pcb.board_templates import detect_template
-        auto_tmpl = detect_template(requirements.mechanical)
-        if auto_tmpl is not None:
-            board_template = auto_tmpl.name
-            log.info("build_pcb: auto-detected board template '%s'", board_template)
-    if board_template is not None:
-        tmpl = get_template(board_template)
-        tmpl_obj = tmpl
-        log.info("build_pcb: using board template '%s'", tmpl.name)
-        if board_width_mm is None:
-            board_width_mm = tmpl.board_width_mm
-        if board_height_mm is None:
-            board_height_mm = tmpl.board_height_mm
-        corner_radius_mm = tmpl.corner_radius_mm
-        # Extract mounting hole positions from template
-        if tmpl.mounting_holes:
-            template_mounting_positions = tuple(
-                (h.x_mm, h.y_mm) for h in tmpl.mounting_holes
-            )
-            template_mounting_diameter = tmpl.mounting_holes[0].diameter_mm
-        # Extract fixed component positions from template
-        if tmpl.fixed_components:
-            fixed_positions = {}
-            for fc in tmpl.fixed_components:
-                matched_ref: str | None = None
-                is_gpio = "GPIO" in fc.description.upper()
-                for comp in requirements.components:
-                    if comp.ref == fc.ref_pattern:
-                        # Don't match small connectors to a GPIO header
-                        if is_gpio and len(comp.pins) < 10:
-                            continue
-                        matched_ref = comp.ref
-                        break
-                # Fallback: for GPIO header templates, match any 2x20 connector
-                if matched_ref is None and is_gpio:
-                    for comp in requirements.components:
-                        fp_upper = comp.footprint.upper()
-                        if "02X20" in fp_upper or "2X20" in fp_upper:
-                            matched_ref = comp.ref
-                            break
-                if matched_ref is not None:
-                    fixed_positions[matched_ref] = (
-                        fc.x_mm, fc.y_mm, fc.rotation,
-                    )
-                    if fc.layer != "F.Cu":
-                        layer_overrides[matched_ref] = fc.layer
-                    log.info(
-                        "build_pcb: template fixed %s at (%.1f, %.1f) layer=%s",
-                        matched_ref, fc.x_mm, fc.y_mm, fc.layer,
-                    )
-
-    # ------------------------------------------------------------------
-    # Step 0b: Preserve layout from existing PCB / IPC connection
-    # ------------------------------------------------------------------
-    preserved_ref_text_positions: dict[str, tuple[float, float, float]] = {}
-    if preserve_from is not None:
-        from kicad_pipeline.pcb.position_extractor import (
-            positions_from_source,
-            ref_text_positions_from_source,
-        )
-
-        existing = positions_from_source(preserve_from)
-        current_refs = {c.ref for c in requirements.components}
-        if fixed_positions is None:
-            fixed_positions = {}
-        for ref, pos in existing.items():
-            if ref in current_refs:
-                fixed_positions[ref] = pos
-        # Also preserve reference text positions (unless caller wants fresh placement)
-        if preserve_ref_text:
-            preserved_ref_text_positions = ref_text_positions_from_source(preserve_from)
-        log.info(
-            "build_pcb: preserved %d/%d positions, %d ref text positions",
-            len(fixed_positions), len(existing), len(preserved_ref_text_positions),
-        )
-
-    # ------------------------------------------------------------------
-    # Step 1: Board dimensions
-    # ------------------------------------------------------------------
-    _explicit_dimensions = (
-        (board_width_mm is not None and board_height_mm is not None)
-        or requirements.mechanical is not None
+    # Step 0: Board template
+    (
+        board_template, board_width_mm, board_height_mm, corner_radius_mm,
+        fixed_positions, layer_overrides, template_mounting_positions,
+        template_mounting_diameter, tmpl_obj,
+    ) = _resolve_board_template(
+        requirements, board_template, board_width_mm, board_height_mm,
     )
-    if board_width_mm is None:
-        if requirements.mechanical is not None:
-            board_width_mm = requirements.mechanical.board_width_mm
-        else:
-            board_width_mm = _DEFAULT_BOARD_WIDTH_MM
 
-    if board_height_mm is None:
-        if requirements.mechanical is not None:
-            board_height_mm = requirements.mechanical.board_height_mm
-        else:
-            board_height_mm = _DEFAULT_BOARD_HEIGHT_MM
+    # Step 0b: Preserve positions from existing PCB
+    fixed_positions, preserved_ref_text_positions = _resolve_preserved_positions(
+        preserve_from, preserve_ref_text, requirements, fixed_positions,
+    )
 
-    log.info("build_pcb: board %.1f x %.1f mm", board_width_mm, board_height_mm)
+    # Step 1: Board dimensions
+    board_width_mm, board_height_mm, _explicit_dimensions = _resolve_board_dimensions(
+        board_width_mm, board_height_mm, requirements,
+    )
 
-    # ------------------------------------------------------------------
     # Step 2: Board outline
-    # ------------------------------------------------------------------
     outline = _make_board_outline(
         board_width_mm, board_height_mm, origin_x, origin_y,
         corner_radius_mm=corner_radius_mm,
     )
 
-    # ------------------------------------------------------------------
     # Step 3: Nets
-    # ------------------------------------------------------------------
     nets = _build_nets(requirements)
     net_lookup: dict[str, int] = {n.name: n.number for n in nets}
 
-    # ------------------------------------------------------------------
-    # Step 4: Footprints (without position — placement assigns positions)
-    # Uses footprint_for_component from footprints.py for proper geometry,
-    # then applies net assignments from component pins.
-    # ------------------------------------------------------------------
-    pre_footprints: list[Footprint] = []
-    for comp in requirements.components:
-        comp_layer = layer_overrides.get(comp.ref, LAYER_F_CU)
-        fp = footprint_for_component(
-            comp.ref, comp.value, comp.footprint, comp.lcsc, layer=comp_layer,
-        )
-        fp = _apply_nets_to_footprint(fp, comp, net_lookup)
-        # Copy datasheet and description from component to footprint
-        if comp.datasheet or comp.description:
-            fp = Footprint(
-                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
-                position=fp.position, rotation=fp.rotation, layer=fp.layer,
-                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
-                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
-                datasheet=comp.datasheet, description=comp.description,
-            )
-        # Remap lib_id to project-local library prefix
-        if project_name is not None:
-            new_lib_id = _footprint_lib_id(comp, project_name=project_name)
-            fp = Footprint(
-                lib_id=new_lib_id, ref=fp.ref, value=fp.value,
-                position=fp.position, rotation=fp.rotation, layer=fp.layer,
-                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
-                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
-                datasheet=fp.datasheet, description=fp.description,
-            )
-        pre_footprints.append(fp)
+    # Step 4: Footprints
+    pre_footprints = _build_pre_footprints(
+        requirements, net_lookup, layer_overrides, project_name,
+    )
 
-    # ------------------------------------------------------------------
-    # Step 4b: Compute footprint sizes and auto-size board if needed
-    # ------------------------------------------------------------------
+    # Step 4b: Compute sizes and auto-size board
     fp_sizes: dict[str, tuple[float, float]] = {}
     total_area = 0.0
     for comp in requirements.components:
@@ -561,581 +1277,95 @@ def build_pcb(
         fp_sizes[comp.ref] = sz
         total_area += sz[0] * sz[1]
 
-    # Only auto-size when no template constrains dimensions and
-    # dimensions were not explicitly passed by the caller.
     if tmpl_obj is None and not _explicit_dimensions:
-        import math as _math
-
-        # Estimate minimum board area as 3x total footprint area
-        min_board_area = total_area * 3.0
-        # Maintain ~2:1 aspect ratio: w * h = area, h = w/2 → w = sqrt(2*area)
-        min_width = _math.sqrt(min_board_area * 2.0)
-        min_height = min_width / 2.0
-        new_width = max(board_width_mm, min_width)
-        new_height = max(board_height_mm, min_height)
-        # Ensure largest footprint fits with at least 10mm margin on each side
-        max_fp_w = max((s[0] for s in fp_sizes.values()), default=0.0)
-        max_fp_h = max((s[1] for s in fp_sizes.values()), default=0.0)
-        new_width = max(new_width, max_fp_w + 20.0)
-        new_height = max(new_height, max_fp_h + 20.0)
-        # Cap aspect ratio to 2.5:1 max
-        if new_width > 2.5 * new_height:
-            new_height = new_width / 2.0
-        elif new_height > 2.5 * new_width:
-            new_width = new_height / 2.0
-
-        if new_width > board_width_mm or new_height > board_height_mm:
-            board_width_mm = new_width
-            board_height_mm = new_height
-            outline = _make_board_outline(
-                board_width_mm, board_height_mm, origin_x, origin_y,
-                corner_radius_mm=corner_radius_mm,
-            )
-            log.info(
-                "build_pcb: auto-sized board to %.1f x %.1f mm",
-                board_width_mm,
-                board_height_mm,
-            )
-
-    # Warn if board area is too small for component footprints (once per size)
-    board_area = board_width_mm * board_height_mm
-    min_area = total_area * 3.0  # rule of thumb: 3x footprint area
-    if total_area > 0.0 and board_area < min_area:
-        import math as _math
-        suggested_w = _math.sqrt(min_area * (board_width_mm / board_height_mm))
-        suggested_h = min_area / suggested_w
-        _size_key = (round(board_width_mm), round(board_height_mm), round(total_area))
-        if _size_key not in _board_size_warned:
-            _board_size_warned.add(_size_key)
-            log.warning(
-                "build_pcb: board %.0fx%.0fmm (%.0f mm^2) may be too small for "
-                "%.0f mm^2 of footprints (suggest %.0fx%.0fmm)",
-                board_width_mm, board_height_mm, board_area,
-                total_area, suggested_w, suggested_h,
-            )
-
-    # ------------------------------------------------------------------
-    # Step 4c: Create keepouts BEFORE placement so solver can avoid them
-    # ------------------------------------------------------------------
-    keepouts: list[Keepout] = []
-    # Track whether we have an RF module — keepout created AFTER placement
-    # (KI-019: never create antenna keepout at hardcoded fallback position).
-    _has_rf = _has_rf_module(requirements)
-    rf_pos: tuple[float, float, float] | None = None
-    if _has_rf and fixed_positions:
-        for comp in requirements.components:
-            val_lower = comp.value.lower()
-            if any(kw in val_lower for kw in _RF_KEYWORDS):
-                if comp.ref in fixed_positions:
-                    px, py, pr = fixed_positions[comp.ref]
-                    rf_pos = (px, py, pr)
-                    log.info(
-                        "build_pcb: anchoring antenna keepout to %s at (%.1f, %.1f, rot=%.0f)",
-                        comp.ref, px, py, pr,
-                    )
-                break
-    if _has_rf and rf_pos is not None:
-        # Only create pre-placement keepout when position is known (preserved layout)
-        antenna_ko = _make_antenna_keepout(
-            board_width_mm,
-            _ANTENNA_KEEPOUT_WIDTH_MM,
-            _ANTENNA_KEEPOUT_HEIGHT_MM,
-            rf_position=rf_pos,
-            layer_count=layer_count,
-            board_height=board_height_mm,
-        )
-        keepouts.append(antenna_ko)
-        body_ko = _make_rf_module_body_keepout(
-            rf_pos,
-            layer_count=layer_count,
-            board_width=board_width_mm,
-            board_height=board_height_mm,
-        )
-        if body_ko is not None:
-            log.info("build_pcb: adding RF module body keepout on inner layers")
-            keepouts.append(body_ko)
-    elif _has_rf:
-        log.info(
-            "build_pcb: RF module detected but position unknown — "
-            "antenna keepout deferred to post-placement (KI-019)"
+        board_width_mm, board_height_mm, outline = _auto_size_board(
+            board_width_mm, board_height_mm, origin_x, origin_y,
+            corner_radius_mm, fp_sizes, total_area,
         )
 
-    # Mounting-hole keepouts
-    mount_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
-    mount_radius = _KEEPOUT_MARGIN_MM
-    if (
-        mount_positions is None
-        and requirements.mechanical is not None
-        and requirements.mechanical.mounting_hole_positions
-    ):
-        mount_positions = requirements.mechanical.mounting_hole_positions
-    if template_mounting_diameter is not None:
-        mount_radius = template_mounting_diameter / 2.0 + 1.0
-    elif requirements.mechanical is not None:
-        mount_radius = requirements.mechanical.mounting_hole_diameter_mm / 2.0 + 1.0
+    _warn_board_size(board_width_mm, board_height_mm, total_area)
 
-    corner_keepouts = _make_mounting_hole_keepouts(
-        board_width_mm,
-        board_height_mm,
-        _MOUNTING_HOLE_INSET_MM,
-        mount_radius,
-        mounting_positions=mount_positions,
-    )
-    keepouts.extend(corner_keepouts)
-
-    # ------------------------------------------------------------------
-    # Step 4c: Compute bounding boxes from actual footprint geometry
-    # ------------------------------------------------------------------
+    # Step 4c: Compute bounding boxes
     fp_bboxes: dict[str, object] = {}
     for fp in pre_footprints:
         fp_bboxes[fp.ref] = compute_footprint_bbox(fp)
 
-    # ------------------------------------------------------------------
-    # Step 5: Layout placement (with keepouts available to solver)
-    # ------------------------------------------------------------------
-    layout_result: LayoutResult
-    if placement_mode == "grouped":
-        layout_result = place_groups_off_board(
-            footprints=tuple(pre_footprints),
-            features=requirements.features,
-            requirements=requirements,
-            board_height_mm=board_height_mm,
-            footprint_sizes=fp_sizes,
-            fixed_positions=fixed_positions,
-        )
-    else:
-        layout_result = layout_pcb(
-            requirements, outline, footprint_sizes=fp_sizes,
-            fixed_positions=fixed_positions,
-            board_template=tmpl_obj,
-            keepouts=tuple(keepouts),
-            footprint_bboxes=fp_bboxes,
-        )
-
-    # Merge layer overrides from layout result (constraint solver)
-    if layout_result.layers:
-        for ref, lyr in layout_result.layers.items():
-            if ref not in layer_overrides:
-                layer_overrides[ref] = lyr
-
-    # Apply positions and rotations to footprints
-    footprints_with_pos: list[Footprint] = []
-    for fp in pre_footprints:
-        pos = layout_result.positions.get(fp.ref, Point(x=0.0, y=0.0))
-        rot = layout_result.rotations.get(fp.ref, fp.rotation)
-        fp_placed = Footprint(
-            lib_id=fp.lib_id,
-            ref=fp.ref,
-            value=fp.value,
-            position=pos,
-            rotation=rot,
-            layer=fp.layer,
-            pads=fp.pads,
-            graphics=fp.graphics,
-            texts=fp.texts,
-            lcsc=fp.lcsc,
-            uuid=fp.uuid,
-            attr=fp.attr,
-            models=fp.models, datasheet=fp.datasheet, description=fp.description,
-        )
-        footprints_with_pos.append(fp_placed)
-
-    # ------------------------------------------------------------------
-    # Step 5a-post: Create antenna keepout from actual placed position
-    # (KI-019: deferred from step 4c when position was unknown)
-    # ------------------------------------------------------------------
-    if _has_rf and rf_pos is None:
-        for fp in footprints_with_pos:
-            val_lower = fp.value.lower() if fp.value else ""
-            if any(kw in val_lower for kw in _RF_KEYWORDS):
-                rf_pos = (fp.position.x, fp.position.y, fp.rotation)
-                log.info(
-                    "build_pcb: creating post-placement antenna keepout for %s "
-                    "at (%.1f, %.1f, rot=%.0f)",
-                    fp.ref, fp.position.x, fp.position.y, fp.rotation,
-                )
-                antenna_ko = _make_antenna_keepout(
-                    board_width_mm,
-                    _ANTENNA_KEEPOUT_WIDTH_MM,
-                    _ANTENNA_KEEPOUT_HEIGHT_MM,
-                    rf_position=rf_pos,
-                    layer_count=layer_count,
-                    board_height=board_height_mm,
-                )
-                keepouts.append(antenna_ko)
-                body_ko = _make_rf_module_body_keepout(
-                    rf_pos,
-                    layer_count=layer_count,
-                    board_width=board_width_mm,
-                    board_height=board_height_mm,
-                )
-                if body_ko is not None:
-                    keepouts.append(body_ko)
-                break
-
-    # ------------------------------------------------------------------
-    # Step 5b: Net classification
-    # ------------------------------------------------------------------
-    netclasses = classify_nets(nets)
-
-    # Zone clearance uses the safe default — KiCad enforces per-netclass
-    # clearance on tracks separately, so zones should not inherit the max.
-    zone_clearance = ZONE_CLEARANCE_DEFAULT_MM
-
-    # ------------------------------------------------------------------
-    # Step 6: GND pours
-    # ------------------------------------------------------------------
-    gnd_net_num = net_lookup.get("GND", 1)
-    # Use "both" — F.Cu pour connects SMD GND pads, B.Cu pour provides
-    # ground plane.  KiCad automatically keeps clearance from signal tracks.
-    gnd_strategy = "both"
-    gnd_zones = _make_gnd_zones(outline, gnd_net_num, zone_clearance, strategy=gnd_strategy)
-    zones: list[ZonePolygon] = list(gnd_zones)
-
-    # ------------------------------------------------------------------
-    # Step 6b: Inner-layer zones (4-layer stackup)
-    # ------------------------------------------------------------------
-    design_rules = DesignRules(layer_count=layer_count)
-
-    if layer_count >= 4 and not skip_inner_zones:
-        from kicad_pipeline.pcb.zones import make_gnd_pour, make_power_pour
-
-        in1_gnd = make_gnd_pour(
-            outline, net_number=gnd_net_num, net_name="GND",
-            layer="In1.Cu",
-        )
-        zones.append(in1_gnd)
-        log.info("build_pcb: added In1.Cu GND plane zone")
-
-        # In2.Cu: +5V power plane (if net exists)
-        power5v_num = net_lookup.get("+5V")
-        if power5v_num is not None:
-            in2_5v = make_power_pour(
-                outline, net_number=power5v_num, net_name="+5V",
-                layer="In2.Cu",
-            )
-            zones.append(in2_5v)
-            log.info("build_pcb: added In2.Cu +5V power plane zone")
-    elif skip_inner_zones:
-        log.info("build_pcb: skipping inner-layer zone generation (user-managed)")
-
-    # ------------------------------------------------------------------
-    # Step 7-8: Keepouts already created in step 4c (before placement)
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # Step 9: Silkscreen
-    # ------------------------------------------------------------------
-    final_footprints = []
-    for fp in footprints_with_pos:
-        fp_with_silk = add_silkscreen_to_footprint(fp)
-        # Only clamp silk to board for on-board footprints; off-board
-        # footprints (grouped placement) keep labels at their local position.
-        if (fp.position.x >= origin_x
-                and fp.position.x <= origin_x + board_width_mm
-                and fp.position.y >= origin_y
-                and fp.position.y <= origin_y + board_height_mm):
-            fp_with_silk = _clamp_silk_to_board(
-                fp_with_silk,
-                origin_x, origin_y, board_width_mm, board_height_mm,
-            )
-        final_footprints.append(fp_with_silk)
-
-    # Post-pass: push silk labels that overlap other components' pads.
-    # For each ref label, check if its board-space bbox overlaps any
-    # pad on a neighbouring footprint; if so, shift it to the opposite
-    # side (below pads instead of above, or vice-versa).
-    final_footprints = _resolve_silk_collisions(final_footprints)
-
-    # Apply preserved reference text positions (from preserve_from)
-    if preserved_ref_text_positions:
-        restored: list[Footprint] = []
-        for fp in final_footprints:
-            if fp.ref in preserved_ref_text_positions:
-                tx, ty, trot = preserved_ref_text_positions[fp.ref]
-                new_texts: list[FootprintText] = []
-                for t in fp.texts:
-                    if t.text_type == "reference":
-                        new_texts.append(FootprintText(
-                            text_type=t.text_type,
-                            text=t.text,
-                            position=Point(x=tx, y=ty),
-                            layer=t.layer,
-                            rotation=trot,
-                            effects_size=t.effects_size,
-                            hidden=t.hidden,
-                            uuid=t.uuid,
-                        ))
-                    else:
-                        new_texts.append(t)
-                restored.append(Footprint(
-                    lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
-                    position=fp.position, rotation=fp.rotation, layer=fp.layer,
-                    pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
-                    lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
-                    models=fp.models, datasheet=fp.datasheet,
-                    description=fp.description,
-                ))
-            else:
-                restored.append(fp)
-        final_footprints = restored
-        log.info(
-            "build_pcb: restored %d ref text positions from preserved layout",
-            len(preserved_ref_text_positions),
-        )
-
-    # ------------------------------------------------------------------
-    # Step 9b: Mounting hole footprints (NPTH, no net)
-    # ------------------------------------------------------------------
-    # Use template positions if available, otherwise fall back to
-    # requirements.mechanical positions (KI-020: both paths must create
-    # actual NPTH footprints, not just keepout zones).
-    mh_positions: tuple[tuple[float, float], ...] | None = template_mounting_positions
-    mh_diameter = template_mounting_diameter
-    if mh_positions is None and requirements.mechanical is not None:
-        if requirements.mechanical.mounting_hole_positions:
-            mh_positions = requirements.mechanical.mounting_hole_positions
-        if mh_diameter is None:
-            mh_diameter = requirements.mechanical.mounting_hole_diameter_mm
-    # Fallback: if keepouts were created at 4-corner positions but no explicit
-    # positions were given, generate footprints at the same 4-corner defaults.
-    if mh_positions is None and corner_keepouts:
-        inset = _MOUNTING_HOLE_INSET_MM
-        mh_positions = (
-            (inset, inset),
-            (board_width_mm - inset, inset),
-            (board_width_mm - inset, board_height_mm - inset),
-            (inset, board_height_mm - inset),
-        )
-    if mh_diameter is None:
-        mh_diameter = _MOUNTING_HOLE_DIAMETER_MM
-
-    if mh_positions:
-        for idx, (mx, my) in enumerate(mh_positions, start=1):
-            mh_ref = f"H{idx}"
-            mh_fp = make_mounting_hole(mh_ref, drill_diameter=mh_diameter)
-            mh_fp = Footprint(
-                lib_id=mh_fp.lib_id,
-                ref=mh_fp.ref,
-                value=mh_fp.value,
-                position=Point(mx, my),
-                rotation=0.0,
-                layer=mh_fp.layer,
-                pads=mh_fp.pads,
-                graphics=mh_fp.graphics,
-                texts=mh_fp.texts,
-                uuid=mh_fp.uuid,
-                attr=mh_fp.attr,
-            )
-            final_footprints.append(mh_fp)
-        log.info(
-            "build_pcb: added %d mounting hole footprints",
-            len(mh_positions),
-        )
-
-    # ------------------------------------------------------------------
-    # Step 10: Autoroute (when enabled)
-    # ------------------------------------------------------------------
-    all_tracks: tuple[Track, ...] = ()
-    all_vias: tuple[Via, ...] = ()
-    from kicad_pipeline.pcb.netlist import build_netlist
-    netlist = build_netlist(requirements)
-    freerouting_used = False
-    if auto_route:
-        # --- Try FreeRouting first (handles complex boards better) ---
-        from kicad_pipeline.routing.freerouting import (
-            find_freerouting_jar,
-            route_with_freerouting,
-            ses_to_tracks,
-            ses_to_vias,
-        )
-
-        jar_path = find_freerouting_jar()
-        if jar_path is not None:
-            log.info("build_pcb: FreeRouting JAR found at %s", jar_path)
-            # Build a pre-route design (placement + nets, no tracks)
-            from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints
-            pre_route_fps = assign_net_numbers_to_footprints(
-                list(final_footprints), netlist,
-            )
-            pre_route_design = PCBDesign(
-                outline=outline,
-                design_rules=design_rules,
-                nets=nets,
-                footprints=tuple(pre_route_fps),
-                tracks=(),
-                vias=(),
-                zones=(),
-                keepouts=tuple(keepouts),
-                netclasses=netclasses,
-            )
-            import tempfile
-            dsn_dir = tempfile.mkdtemp(prefix="kicad_freeroute_")
-            dsn_path = Path(dsn_dir) / "design.dsn"
-            from kicad_pipeline.routing.dsn_export import write_dsn
-            write_dsn(pre_route_design, dsn_path)
-            log.info("build_pcb: exported DSN to %s", dsn_path)
-
-            fr_result = route_with_freerouting(
-                str(dsn_path), jar_path=jar_path, timeout_seconds=300,
-            )
-            if fr_result.success and fr_result.ses_file is not None:
-                ses_content = Path(fr_result.ses_file).read_text(encoding="utf-8")
-                all_tracks = ses_to_tracks(ses_content, pre_route_design)
-                all_vias = ses_to_vias(ses_content, pre_route_design)
-                freerouting_used = True
-                log.info(
-                    "build_pcb: FreeRouting complete — %d tracks, %d vias",
-                    len(all_tracks), len(all_vias),
-                )
-            else:
-                log.warning(
-                    "build_pcb: FreeRouting failed (%s), falling back to grid router",
-                    fr_result.error,
-                )
-        else:
-            log.info("build_pcb: FreeRouting JAR not found, using grid router")
-
-        # --- Fall back to grid router if FreeRouting unavailable/failed ---
-        if not freerouting_used:
-            from kicad_pipeline.pcb.netclasses import net_clearance_map, net_width_map
-            from kicad_pipeline.routing.grid_router import (
-                collect_tracks,
-                collect_vias,
-                route_all_nets,
-            )
-
-            widths = net_width_map(netclasses)
-            clearances = net_clearance_map(netclasses)
-            route_results = route_all_nets(
-                netlist, final_footprints,
-                board_width_mm, board_height_mm,
-                grid_step_mm=0.25,
-                net_widths=widths,
-                net_clearances=clearances,
-                keepouts=tuple(keepouts),
-                corner_radius_mm=corner_radius_mm,
-            )
-            all_tracks = collect_tracks(route_results, routed_only=False)
-            all_vias = collect_vias(route_results)
-            routed = sum(1 for r in route_results if r.routed)
-            unrouted = sum(1 for r in route_results if not r.routed)
-            log.info(
-                "build_pcb: autoroute complete — %d tracks, %d routed, %d unrouted",
-                len(all_tracks), routed, unrouted,
-            )
-
-            # Log board-level routing quality metrics
-            from kicad_pipeline.routing.metrics import compute_board_metrics
-
-            metrics = compute_board_metrics(route_results, final_footprints)
-            log.info(
-                "build_pcb: routing %.1fmm total (%.2fx ideal), %d vias, %d/%d nets",
-                metrics.total_track_length_mm,
-                metrics.overall_length_ratio,
-                metrics.total_vias,
-                metrics.nets_routed,
-                metrics.nets_routed + metrics.nets_failed,
-            )
-
-        # Note: GND pads on F.Cu connect to the B.Cu GND pour through
-        # the zone fill (applied when opening in KiCad).  THT pads already
-        # have plated holes.  SMD GND pads may show as "unconnected" in
-        # DRC until zones are filled.
-
-    # ------------------------------------------------------------------
-    # Step 10b: RF via fence (GND vias around RF keepouts, only when
-    #           the design actually contains an RF module)
-    # ------------------------------------------------------------------
-    if _has_rf_module(requirements):
-        from kicad_pipeline.constants import RF_VIA_FENCE_SPACING_MM
-
-        rf_fence_vias = _make_rf_via_fence(
-            tuple(keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
-            footprints=tuple(final_footprints),
-            board_width=board_width_mm, board_height=board_height_mm,
-        )
-        if rf_fence_vias:
-            all_vias = all_vias + rf_fence_vias
-            log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
-
-    # ------------------------------------------------------------------
-    # Step 10c: GND stitching vias (spec: every 10-20mm, only for grid router)
-    # ------------------------------------------------------------------
-    if auto_route and not freerouting_used:
-        stitch_vias = _make_gnd_stitching_vias(
-            outline, gnd_net_num, tuple(final_footprints),
-            all_vias, all_tracks,
-            keepout_zones=tuple(keepouts),
-        )
-        if stitch_vias:
-            all_vias = all_vias + stitch_vias
-            log.info("build_pcb: added %d GND stitching vias", len(stitch_vias))
-
-    # ------------------------------------------------------------------
-    # Step 10d: Preserve user routing from existing PCB
-    # ------------------------------------------------------------------
-    if preserve_routing and preserve_from is not None:
-        from kicad_pipeline.pcb.position_extractor import (
-            remap_routing,
-            routing_from_source,
-        )
-
-        # Determine on-disk file path for IPC connections
-        _pcb_path = pcb_file_path
-        if _pcb_path is None and isinstance(preserve_from, str | Path):
-            _pcb_path = preserve_from
-
-        preserved = routing_from_source(preserve_from, pcb_file_path=_pcb_path)
-        if preserved is not None and (
-            preserved.tracks or preserved.vias or preserved.zones
-            or preserved.edge_cuts
-        ):
-            # Build net name → new number map
-            new_net_map: dict[str, int] = {}
-            for net_entry in nets:
-                new_net_map[net_entry.name] = net_entry.number
-
-            remapped_tracks, remapped_vias, remapped_zones = remap_routing(
-                preserved, new_net_map,
-            )
-            # Merge with any autorouter results
-            all_tracks = all_tracks + remapped_tracks
-            all_vias = all_vias + remapped_vias
-            # User zones go after auto-generated zones
-            zones.extend(remapped_zones)
-
-            # Preserve user keepout zones (exclusion zones, no-fill areas)
-            if preserved.keepouts:
-                log.info(
-                    "build_pcb: preserving %d user keepout zones",
-                    len(preserved.keepouts),
-                )
-                keepouts.extend(preserved.keepouts)
-
-            # Preserve edge cuts (board slots/cutouts)
-            # These are stored separately and emitted in the outline section
-            if preserved.edge_cuts:
-                log.info(
-                    "build_pcb: preserving %d user edge cut segments",
-                    len(preserved.edge_cuts),
-                )
-                # Store on a module-level for the serialiser to pick up
-                _preserved_edge_cuts.clear()
-                _preserved_edge_cuts.extend(preserved.edge_cuts)
-
-    # ------------------------------------------------------------------
-    # Step 11: Assign net numbers to footprint pads
-    # ------------------------------------------------------------------
-    from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints
-
-    final_footprints = assign_net_numbers_to_footprints(
-        final_footprints, netlist,
+    # Build shared context for remaining steps
+    ctx = _BuildContext(
+        board_width_mm=board_width_mm,
+        board_height_mm=board_height_mm,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        corner_radius_mm=corner_radius_mm,
+        layer_count=layer_count,
+        project_name=project_name,
+        outline=outline,
+        nets=nets,
+        net_lookup=net_lookup,
+        keepouts=[],
+        zones=[],
+        fixed_positions=fixed_positions,
+        layer_overrides=layer_overrides,
+        template_mounting_positions=template_mounting_positions,
+        template_mounting_diameter=template_mounting_diameter,
+        tmpl_obj=tmpl_obj,
+        preserved_ref_text_positions=preserved_ref_text_positions,
+        has_rf=_has_rf_module(requirements),
+        rf_pos=None,
+        fp_sizes=fp_sizes,
+        fp_bboxes=fp_bboxes,
     )
 
-    # ------------------------------------------------------------------
-    # Step 12: Generate DRC exclusions for dense IC intra-footprint clearance
-    # ------------------------------------------------------------------
+    # Step 4c: Create keepouts BEFORE placement
+    _build_pre_placement_keepouts(ctx, requirements)
+    # Snapshot corner keepouts for mounting hole fallback
+    corner_keepouts = list(ctx.keepouts)
+
+    # Step 5: Placement
+    footprints_with_pos = _run_placement(
+        ctx, requirements, pre_footprints, placement_mode,
+    )
+
+    # Step 5a-post: Antenna keepout from actual placement
+    _create_post_placement_keepouts(ctx, footprints_with_pos)
+
+    # Step 5b: Net classification
+    netclasses = classify_nets(nets)
+
+    # Step 6: GND pours and inner-layer zones
+    _build_gnd_zones(ctx, skip_inner_zones)
+
+    # Step 9: Silkscreen
+    final_footprints = _apply_silkscreen_pass(ctx, footprints_with_pos)
+
+    # Step 9b: Mounting holes
+    _add_mounting_hole_footprints(ctx, final_footprints, corner_keepouts, requirements)
+
+    # Step 10: Autoroute
+    all_tracks, all_vias, freerouting_used = _run_autoroute_step(
+        ctx, requirements, final_footprints, auto_route, netclasses,
+    )
+
+    # Step 10b: RF via fence
+    all_vias = _add_rf_via_fence(ctx, requirements, final_footprints, all_vias)
+
+    # Step 10c: GND stitching vias
+    all_vias = _add_gnd_stitching_vias(
+        ctx, final_footprints, all_vias, all_tracks, auto_route, freerouting_used,
+    )
+
+    # Step 10d: Preserve user routing
+    all_tracks, all_vias = _preserve_user_routing(
+        ctx, preserve_from, preserve_routing, pcb_file_path,
+        all_tracks, all_vias,
+    )
+
+    # Step 11: Assign net numbers to footprint pads
+    from kicad_pipeline.pcb.netlist import assign_net_numbers_to_footprints, build_netlist
+    netlist = build_netlist(requirements)
+    final_footprints = assign_net_numbers_to_footprints(final_footprints, netlist)
+
+    # Step 12: DRC exclusions
     drc_exclusions = _generate_ic_drc_exclusions(final_footprints)
     if drc_exclusions:
         log.info(
@@ -1143,15 +1373,13 @@ def build_pcb(
             len(drc_exclusions),
         )
 
+    design_rules = DesignRules(layer_count=layer_count)
+
     log.info(
         "build_pcb complete: %d footprints, %d nets, %d zones, %d keepouts, "
         "%d tracks, %d vias",
-        len(final_footprints),
-        len(nets),
-        len(zones),
-        len(keepouts),
-        len(all_tracks),
-        len(all_vias),
+        len(final_footprints), len(nets), len(ctx.zones), len(ctx.keepouts),
+        len(all_tracks), len(all_vias),
     )
 
     return PCBDesign(
@@ -1161,8 +1389,8 @@ def build_pcb(
         footprints=tuple(final_footprints),
         tracks=all_tracks,
         vias=all_vias,
-        zones=tuple(zones),
-        keepouts=tuple(keepouts),
+        zones=tuple(ctx.zones),
+        keepouts=tuple(ctx.keepouts),
         netclasses=netclasses,
         drc_exclusions=drc_exclusions,
         version=KICAD_PCB_VERSION,
