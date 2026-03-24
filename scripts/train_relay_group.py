@@ -17,8 +17,8 @@ Relay pinout reference (Songle SRD-05VDC-SL-C, standard SPDT):
 
 Power architecture:
     +5V_LOGIC --[L1 ferrite]--> +5V_RELAY --[relay coils]
-    GND is shared (single-point star ground recommended).
-    C1_bulk (100uF electrolytic) + C2_bulk (10uF ceramic) on relay side.
+    GND       --[L2 ferrite]--> GND_RELAY  --[Q emitters, LED cathodes, bulk caps]
+    C1_bulk (100uF MLCC 0805) + C2_bulk (10uF ceramic) on relay side.
 
 DFM note — creepage isolation:
     The relay footprint should include an Edge.Cuts semicircle slot between
@@ -111,7 +111,7 @@ def _make_transistor(ch: int) -> Component:
         pins=(
             Pin("1", "B", PinType.INPUT, net=f"RELAY_DRIVE{ch}"),
             Pin("2", "C", PinType.OUTPUT, net=f"RELAY_COIL{ch}"),
-            Pin("3", "E", PinType.PASSIVE, PinFunction.GND, net="GND"),
+            Pin("3", "E", PinType.PASSIVE, PinFunction.GND, net="GND_RELAY"),
         ),
     )
 
@@ -170,7 +170,7 @@ def _make_led(ch: int) -> Component:
         description=f"Red LED 0805 — Channel {ch} indicator",
         pins=(
             Pin("1", "A", PinType.PASSIVE, net=f"LED{ch}_A"),
-            Pin("2", "K", PinType.PASSIVE, net="GND"),
+            Pin("2", "K", PinType.PASSIVE, net="GND_RELAY"),
         ),
     )
 
@@ -244,6 +244,7 @@ def _make_ferrite_bead() -> Component:
 def _make_gnd_ferrite_bead() -> Component:
     """Ferrite bead on GND rail — isolates relay return current from logic GND.
 
+    Pin 1 = GND (source/logic side), Pin 2 = GND_RELAY (relay side).
     BUG-R05: L2 for GND isolation was missing.
     """
     return Component(
@@ -253,8 +254,8 @@ def _make_gnd_ferrite_bead() -> Component:
         lcsc="C1015",
         description="Ferrite bead 0805 — relay GND isolation",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="GND_LOGIC"),
-            Pin("2", "2", PinType.PASSIVE, net="GND"),
+            Pin("1", "1", PinType.PASSIVE, net="GND"),
+            Pin("2", "2", PinType.PASSIVE, net="GND_RELAY"),
         ),
     )
 
@@ -265,11 +266,11 @@ def _make_bulk_cap_elec() -> Component:
         ref="C1",
         value="100uF",
         footprint=_CAP_ELEC_FP,
-        lcsc="C65221",
-        description="100uF electrolytic — relay bulk decoupling",
+        lcsc=None,  # Force parametric 0805; C65221 is electrolytic (wrong package)
+        description="100uF MLCC 0805 — relay bulk decoupling",
         pins=(
             Pin("1", "+", PinType.PASSIVE, net="+5V_RELAY"),
-            Pin("2", "-", PinType.PASSIVE, net="GND"),
+            Pin("2", "-", PinType.PASSIVE, net="GND_RELAY"),
         ),
     )
 
@@ -284,7 +285,7 @@ def _make_bulk_cap_ceramic() -> Component:
         description="10uF ceramic — relay high-freq decoupling",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+5V_RELAY"),
-            Pin("2", "2", PinType.PASSIVE, net="GND"),
+            Pin("2", "2", PinType.PASSIVE, net="GND_RELAY"),
         ),
     )
 
@@ -365,7 +366,8 @@ def _build_requirements() -> ProjectRequirements:
 
     Power architecture:
         +5V_LOGIC → L1 (ferrite) → +5V_RELAY → relay coils
-        C1 (100uF) + C2 (10uF) on +5V_RELAY for bulk decoupling.
+        GND       → L2 (ferrite) → GND_RELAY → Q emitters, LED cathodes, bulk caps
+        C1 (100uF MLCC) + C2 (10uF ceramic) on +5V_RELAY/GND_RELAY for bulk decoupling.
 
     Channel hierarchy:
         Channel N: K{N} relay, Q{N} transistor, D{N} flyback, R{N} base resistor,
@@ -419,26 +421,26 @@ def _build_requirements() -> ProjectRequirements:
         relay_5v_conns.append(NetConnection(f"K{ch}", "1"))
         relay_5v_conns.append(NetConnection(f"D{ch}", "2"))
 
-    # GND_LOGIC: clean side — connects to L2 input
-    gnd_logic_conns: list[NetConnection] = [
+    # GND: source/logic side — connects to L2 input
+    gnd_conns: list[NetConnection] = [
         NetConnection("L2", "1"),
     ]
 
-    # GND: relay side — L2 output, transistor emitters, LED cathodes, bulk caps
-    gnd_conns: list[NetConnection] = [
+    # GND_RELAY: relay side — L2 output, transistor emitters, LED cathodes, bulk caps
+    gnd_relay_conns: list[NetConnection] = [
         NetConnection("L2", "2"),
         NetConnection("C1", "2"),
         NetConnection("C2", "2"),
     ]
     for ch in range(1, 5):
-        gnd_conns.append(NetConnection(f"Q{ch}", "3"))
-        gnd_conns.append(NetConnection(f"D{ch + 4}", "2"))
+        gnd_relay_conns.append(NetConnection(f"Q{ch}", "3"))
+        gnd_relay_conns.append(NetConnection(f"D{ch + 4}", "2"))
 
     nets.append(Net(name="+5V_LOGIC", connections=tuple(logic_5v_conns)))
     nets.append(Net(name="+5V_RELAY", connections=tuple(relay_5v_conns)))
-    nets.append(Net(name="GND_LOGIC", connections=tuple(gnd_logic_conns)))
     nets.append(Net(name="GND", connections=tuple(gnd_conns)))
-    all_net_names.extend(["+5V_LOGIC", "+5V_RELAY", "GND_LOGIC", "GND"])
+    nets.append(Net(name="GND_RELAY", connections=tuple(gnd_relay_conns)))
+    all_net_names.extend(["+5V_LOGIC", "+5V_RELAY", "GND", "GND_RELAY"])
 
     relay_feature = FeatureBlock(
         name="Relay Outputs",
