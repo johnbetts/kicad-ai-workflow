@@ -1758,9 +1758,9 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
     for pad in fp.pads:
         node.append(_pad_sexp(pad))
 
-    # Footprint-level keepout zones (e.g. antenna keepout on RF modules)
-    for fz in fp.fp_zones:
-        node.append(_fp_keepout_sexp(fz))
+    # Footprint-level keepout zones are emitted at BOARD level in pcb_to_sexp(),
+    # not inside the footprint node. KiCad does not support (zone ...) inside
+    # (footprint ...) blocks.
 
     # 3D model references
     for model in fp.models:
@@ -2030,6 +2030,22 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
         root.append(_zone_sexp(zone))
     for keepout in design.keepouts:
         root.append(_keepout_sexp(keepout))
+
+    # Footprint-level keepout zones emitted at board level with board-space coords
+    import math as _math
+    for fp in design.footprints:
+        for fz in fp.fp_zones:
+            # Transform polygon from footprint-local to board-space
+            rot_rad = _math.radians(fp.rotation)
+            cos_r, sin_r = _math.cos(rot_rad), _math.sin(rot_rad)
+            board_pts: list[Point] = []
+            for pt in fz.polygon:
+                bx = fp.position.x + pt.x * cos_r - pt.y * sin_r
+                by = fp.position.y + pt.x * sin_r + pt.y * cos_r
+                board_pts.append(Point(x=round(bx, 4), y=round(by, 4)))
+            from dataclasses import replace as _replace
+            board_fz = _replace(fz, polygon=tuple(board_pts))
+            root.append(_fp_keepout_sexp(board_fz))
 
     # Tracks and vias
     for track in design.tracks:
