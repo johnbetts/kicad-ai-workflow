@@ -1686,8 +1686,8 @@ def _fp_graphic_sexp(graphic: FootprintLine | FootprintArc | FootprintCircle) ->
 def _fp_keepout_sexp(keepout: FootprintKeepout) -> SExpNode:
     """Serialise a :class:`FootprintKeepout` to a KiCad ``(zone ...)`` node.
 
-    Footprint-level keepout zones use the same ``(zone ...)`` syntax as
-    board-level keepouts but live inside the ``(footprint ...)`` node.
+    Footprint-level keepout zones are emitted at board level using the same
+    ``(zone ...)`` syntax as board-level keepouts (see :func:`_keepout_sexp`).
 
     Args:
         keepout: Footprint keepout zone to serialise.
@@ -1695,9 +1695,10 @@ def _fp_keepout_sexp(keepout: FootprintKeepout) -> SExpNode:
     Returns:
         ``SExpNode`` list.
     """
-    pts: list[SExpNode] = ["pts"]
+    pts_node: list[SExpNode] = ["pts"]
     for pt in keepout.polygon:
-        pts.append(["xy", pt.x, pt.y])
+        pts_node.append(["xy", pt.x, pt.y])
+
     # KiCad 9 keepout format requires all five rule entries.
     rules: list[SExpNode] = [
         "keepout",
@@ -1707,15 +1708,22 @@ def _fp_keepout_sexp(keepout: FootprintKeepout) -> SExpNode:
         ["tracks", "not_allowed" if keepout.no_tracks else "allowed"],
         ["vias", "not_allowed" if keepout.no_vias else "allowed"],
     ]
+
+    # Must match _keepout_sexp() ordering exactly: net, net_name, layers,
+    # uuid, hatch, keepout rules, polygon.
     node: list[SExpNode] = [
-        "zone", "",
+        "zone",
         ["net", 0],
-        rules,
+        ["net_name", ""],
         ["layers", *keepout.layers],
-        ["polygon", pts],
     ]
     if keepout.uuid:
         node.append(["uuid", keepout.uuid])
+    node.extend([
+        ["hatch", "edge", 0.508],
+        rules,
+        ["polygon", pts_node],
+    ])
     return node
 
 

@@ -156,12 +156,19 @@ def partition_board(
     sum(zone_component_count.values()) or 1
     half_gap = _ZONE_GAP_MM / 2.0
 
+    # When there's only one zone, give it the full board area
+    single_zone = len(zone_groups) == 1
+
     zones: list[BoardZone] = []
     for zone_name, group_names in zone_groups.items():
-        fracs = _DEFAULT_ZONE_FRACTIONS.get(zone_name)
-        if fracs is None:
-            # Unknown zone — assign a center region
-            fracs = (0.30, 0.30, 0.70, 0.70)
+        if single_zone:
+            # Single-zone boards (training boards, small designs): use full board
+            fracs = (0.0, 0.0, 1.0, 1.0)
+        else:
+            fracs = _DEFAULT_ZONE_FRACTIONS.get(zone_name)
+            if fracs is None:
+                # Unknown zone — assign a center region
+                fracs = (0.30, 0.30, 0.70, 0.70)
 
         fx1, fy1, fx2, fy2 = fracs
 

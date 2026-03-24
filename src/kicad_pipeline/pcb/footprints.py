@@ -2658,6 +2658,23 @@ def _try_jlcpcb_footprint(
                 )
                 _log.info("Added thermal pad %d to QFN footprint %s", pin_count + 1, ref)
 
+        # JLCPCB .kicad_mod files rarely include 3D model references.
+        # Resolve a model from the original footprint_id or the JLCPCB lib_id.
+        if not fp.models:
+            model = _model_for_package(footprint_id, layer)
+            if model is None:
+                model = _model_for_package(fp.lib_id, layer)
+            if model is not None:
+                fp = Footprint(
+                    lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                    position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                    pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+                    lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+                    models=(model,),
+                    datasheet=fp.datasheet, description=fp.description,
+                    footprint_source=fp.footprint_source, fp_zones=fp.fp_zones,
+                )
+
         _log.info(
             "Using JLCPCB footprint for %s (%s): %d pads from %s",
             ref, lcsc, len(fp.pads), mod_path.name,

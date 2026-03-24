@@ -309,6 +309,26 @@ def _make_ldo_output_cap() -> Component:
     )
 
 
+def _make_ldo_hf_bypass_cap() -> Component:
+    """C6: 100nF HF bypass capacitor for LDO output, 0805.
+
+    In parallel with C5 (22uF) for high-frequency filtering.
+    AMS1117 datasheet recommends a ceramic cap close to output.
+    On same private subnet +3V3_C5_DEC so optimizer places it next to C5/U2.
+    """
+    return Component(
+        ref="C6",
+        value="100nF",
+        footprint=_C0805_FP,
+        lcsc="C49678",
+        description="100nF HF bypass cap for LDO output 0805",
+        pins=(
+            Pin("1", "1", PinType.PASSIVE, net="+3V3_C5_DEC"),
+            Pin("2", "2", PinType.PASSIVE, net="GND"),
+        ),
+    )
+
+
 def _make_input_connector() -> Component:
     """J1: 2-pin screw terminal for 24V power input."""
     return Component(
@@ -372,7 +392,7 @@ def _build_nets() -> tuple[Net, ...]:
         +5V:        R1.1, J2.1                   (shared 5V rail — test point & FB divider)
         +5V_C4_DEC: U2.VIN, C4.1                (LDO input node — C4 right at U2 VIN)
         FB:         R1.2, R2.1, U1.VSNS         (feedback sense)
-        +3V3_C5_DEC: U2.VOUT, U2.VOUT_TAB, C5.1 (LDO output node — C5 right at U2 VOUT)
+        +3V3_C5_DEC: U2.VOUT, U2.VOUT_TAB, C5.1, C6.1 (LDO output — C5+C6 right at U2 VOUT)
         +3V3:       J3.1                         (shared 3.3V rail — test point)
     """
     return (
@@ -398,6 +418,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U2", "1"),
                 NetConnection("C4", "2"),
                 NetConnection("C5", "2"),
+                NetConnection("C6", "2"),  # HF bypass cap
                 NetConnection("J2", "2"),
                 NetConnection("J3", "2"),
             ),
@@ -450,13 +471,14 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "5"),  # VSNS pin
             ),
         ),
-        # Private subnet: LDO output — C5 must be right at U2 VOUT
+        # Private subnet: LDO output — C5+C6 must be right at U2 VOUT
         Net(
             name="+3V3_C5_DEC",
             connections=(
                 NetConnection("U2", "2"),   # VOUT
                 NetConnection("U2", "4"),   # VOUT tab
-                NetConnection("C5", "1"),   # output cap
+                NetConnection("C5", "1"),   # output cap (22uF bulk)
+                NetConnection("C6", "1"),   # HF bypass (100nF ceramic)
             ),
         ),
         # Shared +3V3 rail — test point
@@ -492,6 +514,7 @@ def _build_requirements() -> ProjectRequirements:
         _make_ldo(),
         _make_ldo_input_cap(),
         _make_ldo_output_cap(),
+        _make_ldo_hf_bypass_cap(),
         _make_input_connector(),
         _make_5v_test_header(),
         _make_3v3_test_header(),
@@ -832,7 +855,7 @@ def main() -> None:
     pcb_path = output_dir / "train_power.kicad_pcb"
 
     # Preserve existing PCB if it exists (may be human-edited reference)
-    ref_dir = output_dir / "reference"
+    ref_dir = output_dir / "training_reference_boards"
     ref_dir.mkdir(exist_ok=True)
     if pcb_path.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -845,7 +868,7 @@ def main() -> None:
     print(f"  KiCad PCB: {pcb_path}")
 
     # Compare against most recent reference if it exists
-    ref_files = sorted(ref_dir.glob("train_power_*.kicad_pcb"))
+    ref_files = sorted(ref_dir.glob("train_power*.kicad_pcb"))
     if ref_files:
         latest_ref = ref_files[-1]
         print(f"\n  Comparing against reference: {latest_ref.name}")

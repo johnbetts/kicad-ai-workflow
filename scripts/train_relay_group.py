@@ -680,7 +680,7 @@ def main() -> None:
     pcb_path = output_dir / "train_relay.kicad_pcb"
 
     # Preserve existing PCB if it exists (may be human-edited reference)
-    ref_dir = output_dir / "reference"
+    ref_dir = output_dir / "training_reference_boards"
     ref_dir.mkdir(exist_ok=True)
     if pcb_path.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -693,7 +693,7 @@ def main() -> None:
     print(f"  KiCad PCB: {pcb_path}")
 
     # Compare against most recent reference if it exists
-    ref_files = sorted(ref_dir.glob("train_relay_*.kicad_pcb"))
+    ref_files = sorted(ref_dir.glob("train_relay*.kicad_pcb"))
     if ref_files:
         latest_ref = ref_files[-1]
         print(f"\n  Comparing against reference: {latest_ref.name}")
