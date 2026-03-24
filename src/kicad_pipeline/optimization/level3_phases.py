@@ -150,10 +150,13 @@ def _place_row_layout(
         relay_rotation = 90.0
 
         # Compute total row width (swapped w/h for 90 deg rotation)
-        total_width = 0.0
+        # Use actual relay widths + courtyard gap (min 1mm) for spacing
+        courtyard_gap = 1.0
+        relay_widths: list[float] = []
         for _, _, sc in anchor_positions:
             aw, ah = fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)
-            total_width += ah + 2.0  # ah because rotated 90 deg
+            relay_widths.append(ah)  # ah because rotated 90 deg
+        total_width = sum(relay_widths) + courtyard_gap * (len(relay_widths) - 1)
 
         max_relay_half_w = max(
             (fp_sizes.get(sc.anchor_ref, DEFAULT_IC_SIZE_MM)[1] for _, _, sc in anchor_positions),
@@ -189,17 +192,32 @@ def _place_row_layout(
             positions, fp_sizes, row_refs, relay_zone,
         )
 
-        cursor_x = start_x
-        for _, _, sc in anchor_positions:
+        # Even spacing: divide usable width evenly among relays.
+        # If the zone is too narrow for all relays, fall back to full board width.
+        n_relays = len(anchor_positions)
+        usable_width = zone_x2 - zone_x1
+        if usable_width < total_width:
+            # Zone too narrow — use full board width with margins
+            board_margin = max_relay_half_w + 2.0
+            zone_x1 = min_x + board_margin
+            zone_x2 = max_x - board_margin
+            usable_width = zone_x2 - zone_x1
+            start_x = zone_x1
+        # Ensure spacing is at least relay_width + courtyard gap
+        min_spacing = max(relay_widths) + courtyard_gap
+        relay_spacing = max(min_spacing, usable_width / n_relays)
+        for idx, (_, _, sc) in enumerate(anchor_positions):
             anchor_ref = sc.anchor_ref
             aw, ah = fp_sizes.get(anchor_ref, DEFAULT_IC_SIZE_MM)
             aw, ah = ah, aw  # Swap for 90 deg rotation
-            target_x = cursor_x + aw / 2.0
+            # Center each relay in its slot
+            target_x = zone_x1 + relay_spacing * (idx + 0.5)
             target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - 15.0, target_x))
             target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, row_y))
             positions[anchor_ref] = (target_x, target_y, relay_rotation)
             row_grid.place(target_x, target_y, aw, ah)
-            cursor_x += aw + 2.0
+            _log.info("    relay %s -> (%.1f, %.1f) rot=%.0f spacing=%.1f",
+                       anchor_ref, target_x, target_y, relay_rotation, relay_spacing)
 
     return positions
 

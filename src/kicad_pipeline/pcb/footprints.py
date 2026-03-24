@@ -38,7 +38,9 @@ from kicad_pipeline.exceptions import ConfigurationError, PCBError
 from kicad_pipeline.models.pcb import (
     Footprint,
     Footprint3DModel,
+    FootprintArc,
     FootprintBBox,
+    FootprintCircle,
     FootprintLine,
     FootprintText,
     OriginType,
@@ -2306,6 +2308,98 @@ def make_microsd_slot(
 
 
 # ---------------------------------------------------------------------------
+# Relay footprint post-processing (BUG-R07: grey blob → Edge.Cuts slot)
+# ---------------------------------------------------------------------------
+
+# Minimum F.Fab line width to classify as the EasyEDA coil-symbol blob.
+_RELAY_FAB_BLOB_MIN_WIDTH: float = 2.0
+
+# Relay isolation slot parameters — vertical slot between coil/COM and NC/NO
+# groups, spanning the relay body height on Edge.Cuts.
+_RELAY_SLOT_WIDTH: float = 1.0  # routed slot milling width (mm)
+
+
+def _is_relay_footprint(fp: Footprint) -> bool:
+    """Return True if *fp* looks like an SPDT relay (SRD series or similar)."""
+    upper_id = fp.lib_id.upper()
+    return "RELAY" in upper_id and len(fp.pads) == 5
+
+
+def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
+    """Remove the EasyEDA coil-symbol F.Fab blob and add an Edge.Cuts isolation slot.
+
+    The EasyEDA/JLCPCB relay footprint contains thick (3mm width) F.Fab lines
+    that render as a grey blob in KiCad.  This function:
+
+    1. Strips those thick F.Fab lines.
+    2. Computes the midpoint X between the coil-side pads (pins 1, 4, 5) and
+       the contact-side pads (pins 2, 3) to place a vertical Edge.Cuts slot
+       for creepage isolation between low-voltage coil and mains/load contacts.
+    """
+    # --- Step 1: remove thick F.Fab blob lines ---
+    cleaned: list[FootprintLine | FootprintArc | FootprintCircle] = []
+    for g in fp.graphics:
+        if (
+            isinstance(g, FootprintLine)
+            and "Fab" in g.layer
+            and g.width >= _RELAY_FAB_BLOB_MIN_WIDTH
+        ):
+            continue  # drop the blob line
+        cleaned.append(g)
+
+    # --- Step 2: compute isolation slot position from pad geometry ---
+    # SRD pinout: 1=Coil+, 4=Coil-, 5=COM (low-voltage side)
+    #             2=NC, 3=NO (high-voltage contact side)
+    coil_pins = {"1", "4", "5"}
+    contact_pins = {"2", "3"}
+
+    coil_xs: list[float] = []
+    contact_xs: list[float] = []
+    all_ys: list[float] = []
+    for pad in fp.pads:
+        all_ys.append(pad.position.y)
+        if pad.number in coil_pins:
+            coil_xs.append(pad.position.x)
+        elif pad.number in contact_pins:
+            contact_xs.append(pad.position.x)
+
+    if coil_xs and contact_xs and all_ys:
+        coil_max_x = max(coil_xs)
+        contact_min_x = min(contact_xs)
+        slot_x = (coil_max_x + contact_min_x) / 2.0
+
+        # Slot spans slightly beyond the outermost pad Y positions.
+        pad_r = max((p.size_x for p in fp.pads), default=2.0) / 2.0
+        y_min = min(all_ys) - pad_r - 1.0
+        y_max = max(all_ys) + pad_r + 1.0
+
+        slot_line = FootprintLine(
+            start=Point(slot_x, y_min),
+            end=Point(slot_x, y_max),
+            layer=LAYER_EDGE_CUTS,
+            width=_RELAY_SLOT_WIDTH,
+        )
+        cleaned.append(slot_line)
+        _log.info(
+            "Relay %s: added Edge.Cuts isolation slot at x=%.1f (y %.1f..%.1f)",
+            fp.ref, slot_x, y_min, y_max,
+        )
+    else:
+        _log.warning(
+            "Relay %s: could not determine pad groups for isolation slot", fp.ref,
+        )
+
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=fp.pads, graphics=tuple(cleaned), texts=fp.texts,
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+        datasheet=fp.datasheet, description=fp.description,
+        footprint_source=fp.footprint_source,
+    )
+
+
+# ---------------------------------------------------------------------------
 # JLCPCB footprint loader integration
 # ---------------------------------------------------------------------------
 
@@ -2343,6 +2437,9 @@ def _try_jlcpcb_footprint(
             datasheet=fp.datasheet, description=fp.description,
             footprint_source="jlcpcb",
         )
+        # Relay post-processing: remove F.Fab blob, add Edge.Cuts isolation slot
+        if _is_relay_footprint(fp):
+            fp = _postprocess_relay_footprint(fp)
         # QFN/DFN packages: add thermal/exposed pad if the JLCPCB footprint
         # doesn't include one.  The pad number is pin_count+1.
         # Check both the JLCPCB lib_id and the original requested footprint_id.

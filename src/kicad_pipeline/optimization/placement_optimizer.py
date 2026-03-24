@@ -153,6 +153,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     Returns relay_leds data for late-phase use.
     """
     phases["relay_rows"](ctx)  # type: ignore[operator]
+    phases["relay_connector_align"](ctx)  # type: ignore[operator]
     phases["relay_drivers"](ctx)  # type: ignore[operator]
     relay_leds, _relay_led_refs = phases["relay_leds"](ctx)  # type: ignore[operator]
     phases["decoupling"](ctx)  # type: ignore[operator]
@@ -222,6 +223,7 @@ def optimize_placement_ee(
         _phase_mcu_decoupling_repull,
         _phase_mcu_group,
         _phase_power_group,
+        _phase_relay_connector_alignment,
         _phase_relay_drivers,
         _phase_relay_leds,
         _phase_relay_rows,
@@ -247,6 +249,7 @@ def optimize_placement_ee(
     _relay_leds = _run_level3_phases(
         ctx,
         relay_rows=_phase_relay_rows,
+        relay_connector_align=_phase_relay_connector_alignment,
         relay_drivers=_phase_relay_drivers,
         relay_leds=_phase_relay_leds,
         decoupling=_phase_decoupling,

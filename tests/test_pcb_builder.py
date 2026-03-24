@@ -722,8 +722,8 @@ def test_zone_sexp_no_fill_yes_without_filled_polygons() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_footprint_sexp_uses_silk_ref_position() -> None:
-    """_footprint_sexp uses reference text position from fp.texts if available."""
+def test_footprint_sexp_centers_ref_on_body() -> None:
+    """BUG-R06: Reference and Value labels are always centered at (0, 0) on the footprint."""
     fp = Footprint(
         lib_id="R_0805:R_0805_2012Metric",
         ref="R1",
@@ -747,23 +747,25 @@ def test_footprint_sexp_uses_silk_ref_position() -> None:
     )
     sexp = _footprint_sexp(fp)
 
-    # Find the Reference property node
+    # Find the Reference property node — should be centered at (0, 0)
     ref_props = [
         s for s in sexp
         if isinstance(s, list) and len(s) >= 3 and s[0] == "property" and s[1] == "Reference"
     ]
     assert len(ref_props) == 1
     at_node = [s for s in ref_props[0] if isinstance(s, list) and s and s[0] == "at"]
-    assert at_node[0][2] == pytest.approx(-3.7), "Reference Y should use fp.texts position"
+    assert at_node[0][1] == pytest.approx(0.0), "Reference X should be 0"
+    assert at_node[0][2] == pytest.approx(0.0), "Reference Y should be 0 (centered on body)"
 
-    # Find the Value property node
+    # Find the Value property node — should also be centered at (0, 0)
     val_props = [
         s for s in sexp
         if isinstance(s, list) and len(s) >= 3 and s[0] == "property" and s[1] == "Value"
     ]
     assert len(val_props) == 1
     at_node_v = [s for s in val_props[0] if isinstance(s, list) and s and s[0] == "at"]
-    assert at_node_v[0][2] == pytest.approx(3.2), "Value Y should use fp.texts position"
+    assert at_node_v[0][1] == pytest.approx(0.0), "Value X should be 0"
+    assert at_node_v[0][2] == pytest.approx(0.0), "Value Y should be 0 (centered on body)"
 
 
 

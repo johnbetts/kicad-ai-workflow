@@ -336,6 +336,23 @@ When optimizing PCB placement, follow this group-by-group workflow with **dual-p
 - The layout must look **clean, organized, and grid-aligned** — not scattered and random
 - Reference `docs/board_guidelines.md` Section 10 for subcircuit pattern layouts
 
+## No Shortcuts — Ever
+
+**NEVER work around a problem — fix the root cause.**
+
+- Do NOT use post-placement overrides to mask optimizer bugs. Fix the optimizer.
+- Do NOT claim a bug is "fixed" without verifying the fix in the actual output.
+- Do NOT acknowledge a bug and defer it — fix it or explicitly say "I cannot fix this yet because X".
+- Do NOT let the same bug be reported twice. Track bugs in `docs/design_rules/*_bugs.md` and check them BEFORE showing output to the human.
+- Do NOT bypass footprint generation issues with script workarounds. Fix `footprints.py` or `builder.py`.
+- Do NOT skip the dual-persona review. Run it and address findings before human review.
+- If the optimizer produces wrong output, fix the optimizer code — not the test script.
+- If a footprint has wrong labels, fix the footprint generator — not the render.
+- If a component is missing, add it to the requirements AND the pipeline — not just the script.
+
+**The training board scripts should use the SAME pipeline code as production boards.
+Any fix that only works in the training script is not a fix.**
+
 ## Quality Gates
 
 Before marking any module complete:

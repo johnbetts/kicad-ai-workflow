@@ -736,33 +736,148 @@ def _phase_late_relay_realignment(
             r for r in sc.refs
             if r != anchor and r in ctx.best_positions
         ]
-        support_members.sort(key=lambda r: (
-            0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
-        ))
+
+        # Classify by component type
+        q_refs = sorted(r for r in support_members if r.startswith("Q"))
+        d_refs = sorted(r for r in support_members if r.startswith("D"))
+        all_r_refs = sorted(r for r in support_members if r.startswith("R"))
+        other_refs = sorted(
+            r for r in support_members
+            if not r.startswith("Q") and not r.startswith("D") and not r.startswith("R")
+        )
+
+        # Separate gate resistors from LED resistors
+        power_nets = {"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"}
+        r_refs: list[str] = []
+        r_other: list[str] = []
+        for r_ref in all_r_refs:
+            shares_net = False
+            for net in ctx.requirements.nets:
+                if net.name.upper() in power_nets:
+                    continue
+                r_in = any(c.ref == r_ref for c in net.connections)
+                q_in = any(c.ref in q_refs for c in net.connections)
+                if r_in and q_in:
+                    shares_net = True
+                    break
+            if shares_net:
+                r_refs.append(r_ref)
+            else:
+                r_other.append(r_ref)
+
+        # Also find gate resistors NOT in subcircuit but sharing a DRIVE net with Q
+        for net in ctx.requirements.nets:
+            if net.name.upper() in power_nets:
+                continue
+            if "DRIVE" not in net.name.upper():
+                continue
+            q_in_net = any(c.ref in q_refs for c in net.connections)
+            if not q_in_net:
+                continue
+            for conn in net.connections:
+                if (conn.ref.startswith("R")
+                        and conn.ref not in r_refs
+                        and conn.ref not in r_other
+                        and conn.ref in ctx.best_positions):
+                    r_refs.append(conn.ref)
+
+        other_refs.extend(r_other)
 
         led_members = sorted(
             set(_relay_leds.get(anchor, []))
             & set(ctx.best_positions.keys()),
         )
 
-        target_y_base = ky + kh / 2.0 + 1.0
-        cols_per_row = 2
+        # Design-rules placement: Q beside K, D mirrored, R below Q
+        driver_y = ky + kh / 2.0 + 3.0
+        q_x_offset = 4.0
+        d_x_offset = -4.0
+        r_gate_offset_y = 2.7
 
-        count, row_y, col, row_max_h = _place_grid_below_anchor(
-            support_members, kx, kw, target_y_base, cols_per_row,
-            bounds, ctx.fp_sizes, ctx.best_positions,
+        for q_ref in q_refs:
+            old_x, old_y, old_rot = ctx.best_positions[q_ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx + q_x_offset))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, driver_y))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[q_ref] = (px, py, 0.0)
+
+        for d_ref in d_refs:
+            old_x, old_y, old_rot = ctx.best_positions[d_ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx + d_x_offset))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, driver_y))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[d_ref] = (px, py, 0.0)
+
+        for r_ref in r_refs:
+            old_x, old_y, old_rot = ctx.best_positions[r_ref]
+            if q_refs and q_refs[0] in ctx.best_positions:
+                qx, qy, _ = ctx.best_positions[q_refs[0]]
+                px, py = qx, qy + r_gate_offset_y
+            else:
+                px = kx + q_x_offset
+                py = driver_y + r_gate_offset_y
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[r_ref] = (px, py, 180.0)
+
+        # Place other support refs in grid below
+        if other_refs:
+            other_y = driver_y + r_gate_offset_y + 3.0
+            count_other, _, _, _ = _place_grid_below_anchor(
+                other_refs, kx, kw, other_y, 2,
+                bounds, ctx.fp_sizes, ctx.best_positions,
+            )
+            _relay_realigned += count_other
+
+        # LED pairs: R_LED at kx-1.5, D_LED at kx+1.5
+        led_y = driver_y + r_gate_offset_y + 2.8
+        led_r = sorted(r for r in led_members if r.startswith("R"))
+        led_d = sorted(r for r in led_members if r.startswith("D"))
+        led_other = sorted(
+            r for r in led_members
+            if not r.startswith("R") and not r.startswith("D")
         )
-        _relay_realigned += count
+        for ref in led_r:
+            old_x, old_y, old_rot = ctx.best_positions[ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx - 1.5))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, led_y))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[ref] = (px, py, 180.0)
+        for ref in led_d:
+            old_x, old_y, old_rot = ctx.best_positions[ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx + 1.5))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, led_y))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[ref] = (px, py, 0.0)
+        if led_other:
+            count_led, _, _, _ = _place_grid_below_anchor(
+                led_other, kx, kw, led_y + 2.5, 2,
+                bounds, ctx.fp_sizes, ctx.best_positions,
+            )
+            _relay_realigned += count_led
 
-        # Advance to next row if support members ended mid-row
-        if col > 0:
-            row_y += row_max_h + 0.5
-
-        count2, _, _, _ = _place_grid_below_anchor(
-            led_members, kx, kw, row_y, cols_per_row,
-            bounds, ctx.fp_sizes, ctx.best_positions,
-        )
-        _relay_realigned += count2
+    # Also re-align relay terminal connectors (J) to their relay X
+    from kicad_pipeline.optimization.ee_phases import _build_connector_to_relay_map
+    _conn_to_relay = _build_connector_to_relay_map(ctx.requirements)
+    min_x, min_y, max_x, max_y = bounds
+    terminal_y = min_y + 5.0
+    for j_ref, k_ref in _conn_to_relay.items():
+        if j_ref not in ctx.best_positions or k_ref not in ctx.best_positions:
+            continue
+        kx_late, _ky_late, _krot_late = ctx.best_positions[k_ref]
+        old_jx, old_jy, _old_jrot = ctx.best_positions[j_ref]
+        px = max(min_x + 2.0, min(max_x - 2.0, kx_late))
+        py = max(min_y + 2.0, min(max_y - 2.0, terminal_y))
+        if abs(old_jx - px) > 1.0 or abs(old_jy - py) > 1.0:
+            _relay_realigned += 1
+        ctx.best_positions[j_ref] = (px, py, 180.0)
+        _all_relay_refs.add(j_ref)
 
     if _relay_realigned:
         _log.info("    3b-late: re-aligned %d relay support components", _relay_realigned)

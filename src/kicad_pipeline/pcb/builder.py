@@ -1593,10 +1593,12 @@ def _fp_standard_properties(fp: Footprint) -> list[list[SExpNode]]:
     """Build Reference, Value, Footprint, Datasheet, Description properties."""
     fab = "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"
 
-    # Reference property — use position/layer from fp.texts if available
+    # Reference property — always centered on footprint body (at 0 0).
+    # Footprint text entries may carry offsets for standalone .kicad_mod files,
+    # but in PCB files the reference label belongs at the footprint origin.
     ref_text = next((t for t in fp.texts if t.text_type == "reference"), None)
-    ref_x = ref_text.position.x if ref_text else 0.0
-    ref_y = ref_text.position.y if ref_text else -2.5
+    ref_x = 0.0
+    ref_y = 0.0
     default_silk = "B.SilkS" if fp.layer == LAYER_B_CU else "F.SilkS"
     ref_layer = ref_text.layer if ref_text else default_silk
     ref_size = ref_text.effects_size if ref_text else 1.0
@@ -1609,8 +1611,8 @@ def _fp_standard_properties(fp: Footprint) -> list[list[SExpNode]]:
         ref_effects.append(["hide", "yes"])
 
     val_text = next((t for t in fp.texts if t.text_type == "value"), None)
-    val_x = val_text.position.x if val_text else 0.0
-    val_y = val_text.position.y if val_text else 2.5
+    val_x = 0.0
+    val_y = 0.0
 
     props: list[list[SExpNode]] = [
         [

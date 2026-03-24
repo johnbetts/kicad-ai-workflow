@@ -147,8 +147,83 @@ def _phase_relay_rows(ctx: PlacementContext) -> None:
     )
 
 
+def _build_connector_to_relay_map(
+    requirements: ProjectRequirements,
+) -> dict[str, str]:
+    """Map connector (J*) refs to their relay (K*) via shared nets.
+
+    A connector serves a relay when they share COM/NO/NC nets.  This is
+    determined by finding nets that connect both a J* and a K* component.
+    """
+    connector_to_relay: dict[str, str] = {}
+    for net in requirements.nets:
+        j_refs: list[str] = []
+        k_refs: list[str] = []
+        for conn in net.connections:
+            if conn.ref.startswith("J"):
+                j_refs.append(conn.ref)
+            elif conn.ref.startswith("K"):
+                k_refs.append(conn.ref)
+        # If a net connects exactly one J to one K, that's a relay terminal
+        if len(j_refs) == 1 and len(k_refs) == 1:
+            j_ref = j_refs[0]
+            k_ref = k_refs[0]
+            # Only map if not already mapped (first net wins)
+            if j_ref not in connector_to_relay:
+                connector_to_relay[j_ref] = k_ref
+    return connector_to_relay
+
+
+def _phase_relay_connector_alignment(ctx: PlacementContext) -> None:
+    """3a2: Align relay terminal connectors (J) to their relay (K) X position.
+
+    Design rules (from relay_driver.md):
+    - Each J that serves a K gets J.x = K.x (via shared COM/NO/NC nets)
+    - J.y = near board top edge (terminal_y = min_y + 5mm)
+    - J.rotation = 180 deg (pads face board edge)
+    """
+    _log.info("  3a2: Relay connector-relay alignment")
+    bounds = ctx.bounds
+    min_x, min_y, max_x, max_y = bounds
+
+    connector_to_relay = _build_connector_to_relay_map(ctx.requirements)
+    if not connector_to_relay:
+        _log.info("    No connector-relay associations found")
+        return
+
+    # Terminal row Y: near the top board edge
+    terminal_y = min_y + 5.0
+
+    aligned = 0
+    for j_ref, k_ref in sorted(connector_to_relay.items()):
+        if j_ref not in ctx.positions or j_ref in ctx.fixed_refs:
+            continue
+        if k_ref not in ctx.positions:
+            continue
+
+        kx, _ky, _krot = ctx.positions[k_ref]
+
+        # Set J position: same X as relay, near top edge, rotated 180 deg
+        px = max(min_x + 2.0, min(max_x - 2.0, kx))
+        py = max(min_y + 2.0, min(max_y - 2.0, terminal_y))
+        ctx.positions[j_ref] = (px, py, 180.0)
+        ctx.relay_support_refs.add(j_ref)
+        aligned += 1
+        _log.info("    %s -> (%.1f, %.1f) rot=180 aligned to %s",
+                   j_ref, px, py, k_ref)
+
+    _log.info("    Aligned %d connectors to their relays", aligned)
+
+
 def _phase_relay_drivers(ctx: PlacementContext) -> None:
-    """3b: Relay driver subgroup tightening — Q+D+R within 8mm of K."""
+    """3b: Relay driver placement — Q+D flanking K, R_gate below Q.
+
+    Design rules (from relay_driver.md):
+    - Q (transistor) beside relay on coil-pin side, ~4mm offset from K center
+    - D_flyback mirrors Q on opposite side of K center, same Y
+    - R_gate directly below Q (dx~0, dy~+2.7mm)
+    - All at Y = bottom edge of relay + offset
+    """
     _log.info("  3b: Relay driver subgroup tightening")
     sc_list = list(ctx.subcircuits)
     bounds = ctx.bounds
@@ -168,30 +243,117 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
             r for r in sc.refs
             if r != anchor and r in ctx.positions and r not in ctx.fixed_refs
         ]
-        support_members.sort(key=lambda r: (
-            0 if r.startswith("Q") else 1 if r.startswith("D") else 2, r,
-        ))
 
-        target_y_base = ky + kh / 2.0 + 0.5
-        col = 0
-        row_y = target_y_base
-        row_max_h = 0.0
-        cols_per_row = 3
+        # Classify support members by type
+        q_refs = sorted(r for r in support_members if r.startswith("Q"))
+        d_refs = sorted(r for r in support_members if r.startswith("D"))
+        all_r_refs = sorted(r for r in support_members if r.startswith("R"))
+        other_refs = sorted(
+            r for r in support_members
+            if not r.startswith("Q") and not r.startswith("D") and not r.startswith("R")
+        )
 
-        for ref in support_members:
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx - kw / 2.0 + (col + 0.5) * (kw / cols_per_row)
-            py = row_y + h / 2.0
+        # Separate gate resistors from LED resistors:
+        # Gate resistor shares a DRIVE net with a Q ref in this subcircuit.
+        # Also look for gate resistors NOT in the subcircuit but connected
+        # to Q via a DRIVE net (subcircuit detection may miss them).
+        power_nets = {"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"}
+        r_gate_refs: list[str] = []
+        r_other_refs: list[str] = []
+        for r_ref in all_r_refs:
+            shares_net_with_q = False
+            for net in ctx.requirements.nets:
+                if net.name.upper() in power_nets:
+                    continue
+                r_in_net = any(c.ref == r_ref for c in net.connections)
+                q_in_net = any(c.ref in q_refs for c in net.connections)
+                if r_in_net and q_in_net:
+                    shares_net_with_q = True
+                    break
+            if shares_net_with_q:
+                r_gate_refs.append(r_ref)
+            else:
+                r_other_refs.append(r_ref)
+
+        # Also find gate resistors NOT in subcircuit but sharing a DRIVE net with Q
+        for net in ctx.requirements.nets:
+            if net.name.upper() in power_nets:
+                continue
+            if "DRIVE" not in net.name.upper():
+                continue
+            q_in_net = any(c.ref in q_refs for c in net.connections)
+            if not q_in_net:
+                continue
+            for conn in net.connections:
+                if (conn.ref.startswith("R")
+                        and conn.ref not in r_gate_refs
+                        and conn.ref not in r_other_refs
+                        and conn.ref in ctx.positions
+                        and conn.ref not in ctx.fixed_refs):
+                    r_gate_refs.append(conn.ref)
+                    _log.info("    Found external gate R %s via net %s",
+                               conn.ref, net.name)
+
+        r_refs = r_gate_refs
+        # LED resistors go to other_refs for generic grid placement
+        other_refs.extend(r_other_refs)
+
+        # Driver row: below relay, offset from relay center
+        driver_y = ky + kh / 2.0 + 3.0
+        q_x_offset = 4.0   # Q offset from K center (right side = coil pin side)
+        d_x_offset = -4.0   # D_flyback mirrors Q on left side
+
+        # Place Q transistors beside relay (coil-pin side)
+        for q_ref in q_refs:
+            qw, qh = ctx.fp_sizes.get(q_ref, (2.0, 2.0))
+            px = kx + q_x_offset
+            py = driver_y
             px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
             py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-            ctx.positions[ref] = (px, py, 0.0)
-            ctx.relay_support_refs.add(ref)
-            row_max_h = max(row_max_h, h)
-            col += 1
-            if col >= cols_per_row:
-                col = 0
-                row_y += row_max_h + 0.5
-                row_max_h = 0.0
+            ctx.positions[q_ref] = (px, py, 0.0)
+            ctx.relay_support_refs.add(q_ref)
+            _log.info("    Q %s -> (%.1f, %.1f) beside %s", q_ref, px, py, anchor)
+
+        # Place D_flyback mirrored on opposite side from Q, same Y
+        for d_ref in d_refs:
+            dw, dh = ctx.fp_sizes.get(d_ref, (2.0, 2.0))
+            px = kx + d_x_offset
+            py = driver_y
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            ctx.positions[d_ref] = (px, py, 0.0)
+            ctx.relay_support_refs.add(d_ref)
+            _log.info("    D %s -> (%.1f, %.1f) mirrored from Q", d_ref, px, py)
+
+        # Place R_gate directly below Q (dx~0, dy~+2.7mm)
+        r_gate_offset_y = 2.7
+        for r_ref in r_refs:
+            rw, rh = ctx.fp_sizes.get(r_ref, (2.0, 2.0))
+            # R_gate goes below Q — use Q position if available
+            if q_refs and q_refs[0] in ctx.positions:
+                qx, qy, _ = ctx.positions[q_refs[0]]
+                px = qx
+                py = qy + r_gate_offset_y
+            else:
+                px = kx + q_x_offset
+                py = driver_y + r_gate_offset_y
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            ctx.positions[r_ref] = (px, py, 180.0)
+            ctx.relay_support_refs.add(r_ref)
+            _log.info("    R %s -> (%.1f, %.1f) below Q", r_ref, px, py)
+
+        # Place any remaining components in a grid below
+        if other_refs:
+            other_y = driver_y + r_gate_offset_y + 3.0
+            for i, ref in enumerate(other_refs):
+                w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+                px = kx - kw / 4.0 + (i % 2) * (kw / 2.0)
+                py = other_y + (i // 2) * (h + 0.5)
+                px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+                py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+                ctx.positions[ref] = (px, py, 0.0)
+                ctx.relay_support_refs.add(ref)
 
 
 def _build_coil_net_to_relay(
@@ -214,8 +376,59 @@ def _find_relay_led_pairs(
     coil_net_to_relay: dict[str, str],
     relay_support_refs: set[str],
 ) -> dict[str, list[str]]:
-    """Find LED+resistor refs per relay via coil and LED nets."""
+    """Find LED+resistor refs per relay via coil and LED nets.
+
+    Detection strategy:
+    1. Find R refs on COIL nets (these are LED resistors connected to the coil)
+    2. Trace those R refs to LED nets to find the LED D refs
+    3. Also find D refs on COIL nets not already in support (original path)
+    """
     relay_leds: dict[str, list[str]] = {}
+
+    # Build ref-to-nets map for tracing
+    ref_to_nets: dict[str, set[str]] = {}
+    net_to_refs: dict[str, set[str]] = {}
+    for net in requirements.nets:
+        refs_in_net: set[str] = set()
+        for conn in net.connections:
+            refs_in_net.add(conn.ref)
+            ref_to_nets.setdefault(conn.ref, set()).add(net.name)
+        net_to_refs[net.name] = refs_in_net
+
+    # Strategy 1: R refs on COIL nets → trace via LED nets → find D_LED
+    for net in requirements.nets:
+        name_upper = net.name.upper()
+        if "_COIL" not in name_upper:
+            continue
+        k_ref = coil_net_to_relay.get(net.name)
+        if not k_ref:
+            continue
+
+        # Find R refs on this COIL net (these are LED current-limiting resistors)
+        r_refs_on_coil = [
+            c.ref for c in net.connections
+            if c.ref.startswith("R")
+        ]
+
+        for r_ref in r_refs_on_coil:
+            # Trace this R through its other nets to find LED D refs
+            for other_net_name in ref_to_nets.get(r_ref, set()):
+                if other_net_name == net.name:
+                    continue  # Skip the COIL net itself
+                other_refs = net_to_refs.get(other_net_name, set())
+                for ref in other_refs:
+                    if ref.startswith("D") and ref != r_ref and ref not in relay_support_refs:
+                        # Check this D is not a flyback diode (not on a COIL net)
+                        d_nets = ref_to_nets.get(ref, set())
+                        is_flyback = any("_COIL" in n.upper() for n in d_nets)
+                        if not is_flyback:
+                            led_list = relay_leds.setdefault(k_ref, [])
+                            if ref not in led_list:
+                                led_list.append(ref)
+                            if r_ref not in led_list:
+                                led_list.append(r_ref)
+
+    # Strategy 2 (original): D refs on COIL nets not in support → LED nets → R refs
     for net in requirements.nets:
         name_upper = net.name.upper()
         if "_COIL" in name_upper:
@@ -224,15 +437,20 @@ def _find_relay_led_pairs(
                 continue
             for conn in net.connections:
                 if conn.ref.startswith("D") and conn.ref not in relay_support_refs:
-                    relay_leds.setdefault(k_ref, []).append(conn.ref)
-        elif "_LED" in name_upper:
+                    led_list = relay_leds.setdefault(k_ref, [])
+                    if conn.ref not in led_list:
+                        led_list.append(conn.ref)
+        elif "LED" in name_upper:
             d_refs_in = [c.ref for c in net.connections if c.ref.startswith("D")]
             r_refs_in = [c.ref for c in net.connections if c.ref.startswith("R")]
             for d_ref in d_refs_in:
                 for _k_ref, led_list in relay_leds.items():
                     if d_ref in led_list:
-                        led_list.extend(r_refs_in)
+                        for r in r_refs_in:
+                            if r not in led_list:
+                                led_list.append(r)
                         break
+
     return relay_leds
 
 
@@ -251,7 +469,9 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         ctx.requirements, coil_net_to_relay, ctx.relay_support_refs,
     )
 
-    # Place LED pairs below each relay's support row
+    # Place LED pairs below each relay's driver components.
+    # Design rule: LED pair at K.x (+/-1.5mm), below R_gate.
+    # R_LED at (kx - 1.5, led_y), D_LED at (kx + 1.5, led_y)
     for k_ref in sorted(_relay_leds):
         if k_ref not in ctx.positions:
             continue
@@ -265,25 +485,53 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         if not led_members:
             continue
 
-        led_y_base = ky + kh / 2.0 + 5.5
-        led_col = 0
-        led_cols_per_row = min(len(led_members), 2)
-        for ref in led_members:
+        # LED row Y: below driver components (Q+D at kh/2+3, R_gate at +2.7, LED at +2.8 more)
+        led_y = ky + kh / 2.0 + 3.0 + 2.7 + 2.8
+
+        # Separate R_LED and D_LED refs
+        r_led_refs = sorted(r for r in led_members if r.startswith("R"))
+        d_led_refs = sorted(r for r in led_members if r.startswith("D"))
+        other_led_refs = sorted(
+            r for r in led_members
+            if not r.startswith("R") and not r.startswith("D")
+        )
+
+        # Place R_LED at kx - 1.5, D_LED at kx + 1.5
+        led_x_offset = 1.5
+        for ref in r_led_refs:
             _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx - kw / 4.0 + led_col * (kw / 2.0)
-            py = led_y_base + h / 2.0
+            px = kx - led_x_offset
+            py = led_y
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            ctx.positions[ref] = (px, py, 180.0)
+            ctx.relay_support_refs.add(ref)
+            relay_led_refs.add(ref)
+
+        for ref in d_led_refs:
+            _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+            px = kx + led_x_offset
+            py = led_y
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            ctx.positions[ref] = (px, py, 0.0)
+            ctx.relay_support_refs.add(ref)
+            relay_led_refs.add(ref)
+
+        # Remaining LED-related refs in a row below
+        for i, ref in enumerate(other_led_refs):
+            _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+            px = kx - led_x_offset + i * (led_x_offset * 2)
+            py = led_y + 2.5
             px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
             py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
             _, _, rot = ctx.positions[ref]
             ctx.positions[ref] = (px, py, rot)
             ctx.relay_support_refs.add(ref)
             relay_led_refs.add(ref)
-            led_col += 1
-            if led_col >= led_cols_per_row:
-                led_col = 0
-                led_y_base += h + 0.5
 
-        _log.info("    3b2: placed %d LED refs for %s", len(led_members), k_ref)
+        _log.info("    3b2: placed %d LED refs for %s at Y=%.1f",
+                   len(led_members), k_ref, led_y)
 
     return _relay_leds, relay_led_refs
 
