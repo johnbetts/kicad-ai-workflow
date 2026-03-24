@@ -353,6 +353,10 @@ When optimizing PCB placement, follow this group-by-group workflow with **dual-p
 **The training board scripts should use the SAME pipeline code as production boards.
 Any fix that only works in the training script is not a fix.**
 
+- NEVER overwrite human-edited PCB files without backing up first
+- Training scripts must auto-backup to output/reference/ before writing
+- Always compare generated output against the latest reference board
+
 ## Quality Gates
 
 Before marking any module complete:

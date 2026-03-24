@@ -29,7 +29,10 @@ Per-channel signal chain:
 
 from __future__ import annotations
 
+import math
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Ensure the package is importable when running from the repo root.
@@ -832,9 +835,52 @@ def main() -> None:
 
     # 6. Write KiCad PCB file
     pcb_path = output_dir / "train_analog_input.kicad_pcb"
+
+    # Preserve existing PCB if it exists (may be human-edited reference)
+    ref_dir = output_dir / "reference"
+    ref_dir.mkdir(exist_ok=True)
+    if pcb_path.exists():
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = ref_dir / f"train_analog_input_{timestamp}.kicad_pcb"
+        shutil.copy2(pcb_path, backup)
+        print(f"  Backed up existing PCB to {backup}")
+
     print(f"Writing KiCad PCB to {pcb_path} ...")
     write_pcb(optimized_pcb, pcb_path, fill_zones=False)
     print(f"  KiCad PCB: {pcb_path}")
+
+    # Compare against most recent reference if it exists
+    ref_files = sorted(ref_dir.glob("train_analog_input_*.kicad_pcb"))
+    if ref_files:
+        latest_ref = ref_files[-1]
+        print(f"\n  Comparing against reference: {latest_ref.name}")
+        from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
+
+        ref_positions = positions_from_pcb_file(latest_ref)
+        gen_positions = positions_from_pcb_file(pcb_path)
+
+        print(
+            f"  {'Ref':<8} {'Gen X':>7} {'Ref X':>7} {'dX':>6}"
+            f" {'Gen Y':>7} {'Ref Y':>7} {'dY':>6} {'Dist':>6}"
+        )
+        total_drift = 0.0
+        count = 0
+        for ref in sorted(set(gen_positions) & set(ref_positions)):
+            if ref.startswith("H"):
+                continue
+            gx, gy, _gr = gen_positions[ref]
+            rx, ry, _rr = ref_positions[ref]
+            dist = math.sqrt((gx - rx) ** 2 + (gy - ry) ** 2)
+            total_drift += dist
+            count += 1
+            marker = "***" if dist > 3 else ""
+            print(
+                f"  {ref:<8} {gx:>7.1f} {rx:>7.1f} {gx - rx:>+6.1f}"
+                f" {gy:>7.1f} {ry:>7.1f} {gy - ry:>+6.1f}"
+                f" {dist:>6.1f} {marker}"
+            )
+        if count:
+            print(f"  Average drift from reference: {total_drift / count:.1f}mm")
     print()
 
     # 7. Write KiCad project file
