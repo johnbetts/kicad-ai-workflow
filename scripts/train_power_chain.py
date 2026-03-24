@@ -784,11 +784,11 @@ def main() -> None:
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
     # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS
-    # Enforce left-to-right signal flow and correct rotations learned
-    # from the human reference layout.
+    # POST-PLACEMENT CORRECTIONS — now handled by the optimizer's
+    # _phase_power_chain_flow() phase (learned patterns moved to
+    # ee_phases_groups.py).  The override function below is kept for
+    # reference but no longer called.
     # ---------------------------------------------------------------
-    optimized_pcb = _apply_power_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")

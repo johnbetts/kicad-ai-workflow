@@ -28,6 +28,7 @@ from kicad_pipeline.optimization.ee_phases_groups import (  # noqa: F401
     _phase_adc_channels,
     _phase_ethernet_group,
     _phase_mcu_group,
+    _phase_power_chain_flow,
     _phase_power_group,
 )
 

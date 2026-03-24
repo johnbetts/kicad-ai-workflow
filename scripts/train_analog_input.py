@@ -998,11 +998,11 @@ def main() -> None:
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
     # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS
-    # Place channel components along the signal path from their
-    # connector to U1 (ADC), with correct ordering and rotations.
+    # POST-PLACEMENT CORRECTIONS — now handled by the optimizer's
+    # enhanced _adc_place_channel_strip() with radial fan layout
+    # (learned patterns moved to ee_phases_groups.py).  The override
+    # function below is kept for reference but no longer called.
     # ---------------------------------------------------------------
-    optimized_pcb = _apply_analog_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")

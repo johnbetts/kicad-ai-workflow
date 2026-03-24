@@ -158,6 +158,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     relay_leds, _relay_led_refs = phases["relay_leds"](ctx)  # type: ignore[operator]
     phases["decoupling"](ctx)  # type: ignore[operator]
     phases["power_group"](ctx)  # type: ignore[operator]
+    phases["power_chain_flow"](ctx)  # type: ignore[operator]
     phases["adc_channels"](ctx)  # type: ignore[operator]
     phases["adc_analog_cluster"](ctx)  # type: ignore[operator]
     phases["crystal"](ctx)  # type: ignore[operator]
@@ -222,6 +223,7 @@ def optimize_placement_ee(
         _phase_late_relay_realignment,
         _phase_mcu_decoupling_repull,
         _phase_mcu_group,
+        _phase_power_chain_flow,
         _phase_power_group,
         _phase_relay_connector_alignment,
         _phase_relay_drivers,
@@ -254,6 +256,7 @@ def optimize_placement_ee(
         relay_leds=_phase_relay_leds,
         decoupling=_phase_decoupling,
         power_group=_phase_power_group,
+        power_chain_flow=_phase_power_chain_flow,
         adc_channels=_phase_adc_channels,
         adc_analog_cluster=_phase_adc_analog_cluster,
         crystal=_phase_crystal_placement,

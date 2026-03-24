@@ -1034,7 +1034,20 @@ def _adc_place_channel_strip(
     strip_gap: float,
     ctx: PlacementContext,
 ) -> None:
-    """Place one ADC channel's passives in a vertical strip."""
+    """Place one ADC channel's passives along a radial fan from ADC to connector.
+
+    Learned from human-reference layout:
+    - Components are placed along the vector from the ADC IC toward each
+      channel's input connector.
+    - C_filt (filter cap) closest to ADC (~5-7mm), R_top at medium distance
+      (~9-14mm), R_bot offset toward board center, D_tvs along the path.
+    - All passives rotated 0deg (matching human convention).
+    - When no connector position is known, falls back to a vertical strip.
+
+    The radial placement produces a fan-like layout where each channel's
+    signal chain is visually distinct and follows the physical signal path
+    from connector to ADC pin.
+    """
     bounds = ctx.bounds
     r_refs = sorted([r for r in passives if r.startswith("R")])
     d_refs = [r for r in passives if r.startswith("D")]
@@ -1042,6 +1055,20 @@ def _adc_place_channel_strip(
 
     ch_x = ch_x_start + ch_idx * channel_spacing
 
+    # --- Try radial fan placement ---
+    # Find the connector for this channel via net connectivity
+    connector_pos = _find_channel_connector_pos(passives, ctx)
+    # Find ADC IC position (the IC this channel feeds into)
+    adc_ic_pos = _find_adc_ic_pos_for_channel(passives, ctx)
+
+    if connector_pos is not None and adc_ic_pos is not None:
+        _adc_place_channel_radial(
+            r_refs, d_refs, c_refs,
+            adc_ic_pos, connector_pos, bounds, ctx,
+        )
+        return
+
+    # --- Fallback: vertical strip (original behavior) ---
     strip_order: list[str] = []
     if len(r_refs) >= 2:
         strip_order.append(r_refs[1])
@@ -1060,6 +1087,113 @@ def _adc_place_channel_strip(
         ctx.positions[ref] = (target_x, target_y, 0.0)
         ctx.adc_channel_refs.add(ref)
         strip_y = target_y - (h / 2.0 + strip_gap)
+
+
+def _find_channel_connector_pos(
+    passives: list[str],
+    ctx: PlacementContext,
+) -> tuple[float, float] | None:
+    """Find the connector position for an ADC channel's passives.
+
+    Walks nets from the channel's R refs to find connected J* connectors.
+    """
+    for net in ctx.requirements.nets:
+        j_refs = [c.ref for c in net.connections if c.ref.startswith("J")]
+        r_in_ch = [c.ref for c in net.connections if c.ref in passives and c.ref.startswith("R")]
+        if j_refs and r_in_ch:
+            for j_ref in j_refs:
+                if j_ref in ctx.positions:
+                    jx, jy, _ = ctx.positions[j_ref]
+                    return (jx, jy)
+    return None
+
+
+def _find_adc_ic_pos_for_channel(
+    passives: list[str],
+    ctx: PlacementContext,
+) -> tuple[float, float] | None:
+    """Find the ADC IC position this channel connects to."""
+    for net in ctx.requirements.nets:
+        passive_in_ch = [c.ref for c in net.connections if c.ref in passives]
+        ic_in_net = [c.ref for c in net.connections
+                     if c.ref.startswith("U") and c.ref in ctx.positions]
+        if passive_in_ch and ic_in_net:
+            ic_ref = ic_in_net[0]
+            ix, iy, _ = ctx.positions[ic_ref]
+            return (ix, iy)
+    return None
+
+
+# Radial placement parameters learned from human reference ADC layout.
+# (radius_mm, angle_offset_deg) per component type, keyed by connector
+# quadrant relative to ADC IC.
+_ADC_RADIAL_TOP: dict[str, tuple[float, float]] = {
+    # Connector above ADC IC (top edge) — components fan down-left
+    "C_filt": (6.0, -40.0),
+    "R_top": (11.0, -20.0),
+    "R_bot": (14.0, 20.0),
+    "D_tvs": (17.0, 0.0),
+}
+_ADC_RADIAL_BOTTOM: dict[str, tuple[float, float]] = {
+    # Connector below or same level as ADC IC — components route leftward
+    "C_filt": (5.0, 170.0),
+    "R_top": (9.0, -80.0),
+    "R_bot": (12.0, 5.0),
+    "D_tvs": (17.0, -50.0),
+}
+
+
+def _adc_place_channel_radial(
+    r_refs: list[str],
+    d_refs: list[str],
+    c_refs: list[str],
+    adc_pos: tuple[float, float],
+    connector_pos: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place ADC channel passives in a radial fan from ADC IC toward connector.
+
+    Learned from human reference board (60x40mm analog input board):
+    - ADC IC at bottom, connectors at top edge
+    - Each channel's passives interpolated along the IC-to-connector vector
+    - Component type determines radius and angular offset from that vector
+    - Connector quadrant (above/below IC) selects different offset tables
+    """
+    ic_x, ic_y = adc_pos
+    jx, jy = connector_pos
+    board_h = bounds[3] - bounds[1]
+
+    # Base angle from ADC IC toward connector
+    base_angle = math.atan2(jy - ic_y, jx - ic_x)
+
+    # Select radial parameters based on connector quadrant
+    params = _ADC_RADIAL_TOP if jy < (bounds[1] + board_h * 0.5) else _ADC_RADIAL_BOTTOM
+
+    # Build ref-to-role mapping
+    role_map: dict[str, str] = {}
+    if len(r_refs) >= 1:
+        role_map[r_refs[0]] = "R_top"    # lower-numbered R = top of divider
+    if len(r_refs) >= 2:
+        role_map[r_refs[1]] = "R_bot"
+    for d in d_refs:
+        role_map[d] = "D_tvs"
+    for c in c_refs:
+        role_map[c] = "C_filt"
+
+    for ref, role in role_map.items():
+        if ref not in ctx.positions or ref in ctx.fixed_refs:
+            continue
+        if role not in params:
+            continue
+        radius, angle_off_deg = params[role]
+        angle = base_angle + math.radians(angle_off_deg)
+        new_x = ic_x + radius * math.cos(angle)
+        new_y = ic_y + radius * math.sin(angle)
+        # Clamp inside board bounds
+        new_x, new_y = _clamp_to_bounds(new_x, new_y, bounds)
+        ctx.positions[ref] = (new_x, new_y, 0.0)
+        ctx.adc_channel_refs.add(ref)
 
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1301,373 @@ def _classify_power_columns(
         "buck2_right": buck2_right,
         "tail": tail,
     }
+
+
+# ---------------------------------------------------------------------------
+# Power chain signal-flow phase (learned from human reference boards)
+# ---------------------------------------------------------------------------
+
+# Relative offsets (dx, dy, rotation) for passives around a BUCK IC anchor.
+# Learned from human-routed TPS54331 layout on a 50x40mm board.
+# Coordinates are relative to the buck IC centroid.
+_BUCK_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
+    # (role, (dx, dy, rotation))  — role matched by net name keywords
+    "input_cap": (-0.9, -5.3, 0.0),       # C on VIN rail, above IC
+    "bootstrap_cap": (0.1, 4.8, 0.0),     # C on BST/BOOT net, below IC
+    "inductor": (8.3, -1.2, 0.0),         # L on SW/PH net, right of IC
+    "catch_diode": (7.8, 2.2, 180.0),     # D on SW/PH net, right-below IC
+    "fb_top_r": (8.0, 6.8, 180.0),        # R on FB/VSNS net (top of divider)
+    "fb_bot_r": (8.0, 4.3, 0.0),          # R on FB/VSNS net (bottom of divider)
+    "output_cap": (12.6, 1.5, -90.0),     # C at output (past inductor)
+}
+
+# Relative offsets for passives around an LDO IC anchor.
+# Learned from human-routed AMS1117-3.3 layout.
+_LDO_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
+    "input_cap": (-17.4, -1.5, -90.0),    # C on VIN side, left of LDO
+    "output_cap": (6.9, 1.1, -90.0),      # C on VOUT side, right of LDO
+}
+
+# Net-name keywords used to classify passive roles in power subcircuits.
+_VIN_KEYWORDS = ("VIN", "+24V", "+12V", "VBUS", "V_IN")
+_BST_KEYWORDS = ("BST", "BOOT", "BOOTSTRAP")
+_SW_KEYWORDS = ("SW", "PH", "PHASE")
+_FB_KEYWORDS = ("FB", "VSNS", "FEEDBACK", "SENSE")
+_OUTPUT_KEYWORDS = ("+5V", "+3V3", "+3.3V", "+1V8", "VOUT", "V_OUT", "BUCK_5V")
+
+
+def _classify_passive_role_power(
+    ref: str,
+    ctx: PlacementContext,
+    ic_ref: str,
+    subcircuit_refs: set[str],
+    ic_input_voltage: float = 0.0,
+    ic_output_voltage: float = 0.0,
+) -> str | None:
+    """Classify a passive's role relative to its power IC via net connectivity.
+
+    Returns a role key matching ``_BUCK_PASSIVE_OFFSETS`` /
+    ``_LDO_PASSIVE_OFFSETS``, or ``None`` if unclassified.
+
+    Args:
+        ic_input_voltage: Estimated input voltage of the regulator (for
+            distinguishing input vs output caps when net names are ambiguous).
+        ic_output_voltage: Estimated output voltage of the regulator.
+    """
+    if ref == ic_ref or ref not in ctx.positions:
+        return None
+
+    # Collect net names this passive shares with the IC
+    shared_nets: list[str] = []
+    all_nets_for_ref: list[str] = []
+    for net in ctx.requirements.nets:
+        conn_refs = {c.ref for c in net.connections}
+        if ref in conn_refs:
+            all_nets_for_ref.append(net.name.upper())
+            if ic_ref in conn_refs:
+                shared_nets.append(net.name.upper())
+
+    # Classify by net keyword priority
+    prefix = ref[0]
+
+    if prefix == "L":
+        for n in all_nets_for_ref:
+            if any(kw in n for kw in _SW_KEYWORDS):
+                return "inductor"
+        return "inductor"  # inductors in power subcircuit are almost always the main inductor
+
+    if prefix == "D":
+        for n in all_nets_for_ref:
+            if any(kw in n for kw in _SW_KEYWORDS):
+                return "catch_diode"
+        return "catch_diode"
+
+    if prefix == "C":
+        # Bootstrap cap: on BST net
+        for n in all_nets_for_ref:
+            if any(kw in n for kw in _BST_KEYWORDS):
+                return "bootstrap_cap"
+        # Input cap: on VIN net shared with IC
+        for n in shared_nets:
+            if any(kw in n for kw in _VIN_KEYWORDS):
+                return "input_cap"
+        # For regulators with known voltages, use voltage magnitude to
+        # distinguish input vs output caps.  Higher voltage net = input.
+        if ic_input_voltage > 0 and ic_output_voltage > 0:
+            cap_voltage = _estimate_net_voltage(all_nets_for_ref)
+            if cap_voltage is not None:
+                # If cap voltage is closer to input voltage, it's input cap
+                in_diff = abs(cap_voltage - ic_input_voltage)
+                out_diff = abs(cap_voltage - ic_output_voltage)
+                if in_diff < out_diff:
+                    return "input_cap"
+                return "output_cap"
+        # Output cap: on output net or not sharing any net with IC directly
+        for n in all_nets_for_ref:
+            if any(kw in n for kw in _OUTPUT_KEYWORDS):
+                return "output_cap"
+        # Fallback: if shared net with IC, likely input; otherwise output
+        return "input_cap" if shared_nets else "output_cap"
+
+    if prefix == "R":
+        for n in all_nets_for_ref:
+            if any(kw in n for kw in _FB_KEYWORDS):
+                # Determine top vs bottom: top R connects to output rail,
+                # bottom R connects to GND
+                for n2 in all_nets_for_ref:
+                    if n2 in ("GND", "AGND", "DGND", "PGND"):
+                        return "fb_bot_r"
+                return "fb_top_r"
+        return None
+
+    return None
+
+
+def _estimate_net_voltage(net_names: list[str]) -> float | None:
+    """Estimate voltage from net name keywords.
+
+    Returns the voltage in volts, or None if no voltage keyword found.
+    """
+    for n in net_names:
+        # Try common voltage patterns
+        for prefix, voltage in (
+            ("+24V", 24.0), ("+12V", 12.0), ("+9V", 9.0),
+            ("+5V", 5.0), ("+3V3", 3.3), ("+3.3V", 3.3),
+            ("+1V8", 1.8), ("+1.8V", 1.8), ("+2V5", 2.5),
+        ):
+            if prefix in n:
+                return voltage
+    return None
+
+
+def _estimate_regulator_voltages(
+    ic_ref: str,
+    ctx: PlacementContext,
+) -> tuple[float, float]:
+    """Estimate input and output voltages for a regulator IC from net names.
+
+    Returns (input_voltage, output_voltage).  Both 0.0 if unknown.
+    """
+    voltages: list[float] = []
+    for net in ctx.requirements.nets:
+        if not any(c.ref == ic_ref for c in net.connections):
+            continue
+        if net.name.upper() in ("GND", "AGND", "DGND", "PGND"):
+            continue
+        v = _estimate_net_voltage([net.name.upper()])
+        if v is not None:
+            voltages.append(v)
+    if len(voltages) >= 2:
+        return (max(voltages), min(voltages))
+    if len(voltages) == 1:
+        return (voltages[0], 0.0)
+    return (0.0, 0.0)
+
+
+def _phase_power_chain_flow(ctx: PlacementContext) -> None:
+    """3c1b: Power chain signal-flow ordering.
+
+    Enforces left-to-right signal flow for power conversion chains:
+    input connector -> buck IC -> inductor -> output cap -> LDO -> output.
+
+    Learned from human reference boards:
+    - Buck IC rotated -90deg, placed at ~17% board width
+    - LDO at ~82% board width, rotated 0deg
+    - Passives placed at fixed offsets from their parent IC
+    - Caps on output side rotated -90deg (vertical, matching horizontal flow)
+
+    This phase runs after ``_phase_power_group`` and applies signal-flow
+    corrections to power subcircuit components that were column-placed.
+    """
+    from kicad_pipeline.optimization.functional_grouper import (
+        SubCircuitType,
+        compute_power_flow_topology,
+    )
+
+    _log.info("  3c1b: Power chain signal-flow ordering")
+
+    # Collect power regulator subcircuits
+    buck_scs = [sc for sc in ctx.subcircuits
+                if sc.circuit_type == SubCircuitType.BUCK_CONVERTER]
+    ldo_scs = [sc for sc in ctx.subcircuits
+               if sc.circuit_type == SubCircuitType.LDO_REGULATOR]
+
+    if not (buck_scs or ldo_scs):
+        _log.info("    No power regulators found — skipping signal-flow phase")
+        return
+
+    # Get power zone bounds.  If the zone is too small for the learned
+    # offsets (~25mm width for buck+LDO chain), expand to board bounds.
+    min_power_zone_w = 25.0
+    power_zone_rect = _find_zone_rect(ctx, "power")
+    if power_zone_rect is None:
+        power_zone_rect = ctx.bounds
+    zx1, zy1, zx2, zy2 = power_zone_rect
+    zone_w = zx2 - zx1
+    zone_h = zy2 - zy1
+    if zone_w < min_power_zone_w and len(buck_scs) + len(ldo_scs) >= 2:
+        _log.info("    3c1b: power zone too narrow (%.1fmm) — expanding to board bounds",
+                  zone_w)
+        zx1, zy1, zx2, zy2 = ctx.bounds
+        zone_w = zx2 - zx1
+        zone_h = zy2 - zy1
+
+    # Order regulators by power flow topology (highest voltage -> lowest)
+    all_reg_scs = buck_scs + ldo_scs
+    topology = compute_power_flow_topology(tuple(ctx.subcircuits))
+
+    def _regulator_flow_order(sc: object) -> float:
+        """Return flow-order index: earlier in chain = lower index = further left.
+
+        Falls back to input voltage magnitude (higher voltage = earlier in chain).
+        """
+        if sc.input_domain and sc.input_domain in topology.domain_order:
+            return float(list(topology.domain_order).index(sc.input_domain))
+        # Fallback: estimate input voltage from net names connected to IC
+        max_v = 0.0
+        for net in ctx.requirements.nets:
+            if not any(c.ref == sc.anchor_ref for c in net.connections):
+                continue
+            upper = net.name.upper()
+            for prefix in ("+24V", "+12V", "+5V", "+3V3", "+3.3V", "+1V8"):
+                if prefix in upper:
+                    try:
+                        v = float(prefix.replace("+", "").replace("V", ".").rstrip("."))
+                    except ValueError:
+                        continue
+                    max_v = max(max_v, v)
+            if "VIN" in upper or "V_IN" in upper:
+                max_v = max(max_v, 100.0)  # VIN is usually the highest
+        # Higher voltage = lower sort key = placed further left
+        return -max_v if max_v > 0 else 999.0
+
+    all_reg_scs.sort(key=_regulator_flow_order)
+
+    if not all_reg_scs:
+        return
+
+    # Compute horizontal positions: spread regulators left-to-right across zone
+    n_regs = len(all_reg_scs)
+    # For 1 regulator: center at 30% zone width (leaving room for output passives)
+    # For 2 regulators: 17% and 82% (learned from human reference)
+    # For N regulators: evenly spread from 15% to 85%
+    if n_regs == 1:
+        x_fracs = [0.30]
+    elif n_regs == 2:
+        x_fracs = [0.17, 0.82]
+    else:
+        x_fracs = [0.15 + 0.70 * i / (n_regs - 1) for i in range(n_regs)]
+
+    for reg_idx, sc in enumerate(all_reg_scs):
+        ic_ref = sc.anchor_ref
+        if ic_ref not in ctx.positions:
+            continue
+
+        is_buck = sc.circuit_type == SubCircuitType.BUCK_CONVERTER
+        offsets = _BUCK_PASSIVE_OFFSETS if is_buck else _LDO_PASSIVE_OFFSETS
+
+        # Place IC at signal-flow position
+        ic_x = zx1 + zone_w * x_fracs[reg_idx]
+        # Vertical: keep current Y or use 40% zone height (learned from reference)
+        _, old_y, _ = ctx.positions[ic_ref]
+        ic_y = _clamp(old_y, zy1 + 3.0, zy2 - 3.0)
+        # Buck ICs are rotated -90deg for signal flow; LDOs stay at 0
+        ic_rot = -90.0 if is_buck else 0.0
+
+        ctx.positions[ic_ref] = (ic_x, ic_y, ic_rot)
+        ctx.power_group_fixed.add(ic_ref)
+
+        # Gather ALL passives connected to this IC via nets (the subcircuit
+        # detector often only captures a subset).  Include power group refs
+        # that share a non-GND net with the IC.
+        power_group_refs = _collect_feature_refs(ctx, "power", "supply")
+        ic_net_refs: set[str] = set(sc.refs)
+        for net in ctx.requirements.nets:
+            conn_refs = {c.ref for c in net.connections}
+            if ic_ref not in conn_refs:
+                continue
+            # Skip pure GND nets — they connect everything
+            if net.name.upper() in ("GND", "AGND", "DGND", "PGND"):
+                continue
+            for c in net.connections:
+                if (c.ref != ic_ref
+                        and c.ref in ctx.positions
+                        and c.ref[0] in "RCLDF"
+                        and (c.ref in power_group_refs or c.ref in sc.refs)):
+                    ic_net_refs.add(c.ref)
+        # Also look for passives 1 hop away (e.g. FB divider bottom R
+        # connects to GND, not to IC directly, but top R connects to IC)
+        for net in ctx.requirements.nets:
+            if net.name.upper() in ("GND", "AGND", "DGND", "PGND"):
+                continue
+            conn_refs = {c.ref for c in net.connections}
+            # If any ref in ic_net_refs is in this net, grab other small
+            # passives from the same power group
+            if conn_refs & ic_net_refs:
+                for c in net.connections:
+                    if (c.ref not in ic_net_refs
+                            and c.ref != ic_ref
+                            and c.ref in ctx.positions
+                            and c.ref[0] in "RCLDF"
+                            and c.ref in power_group_refs):
+                        ic_net_refs.add(c.ref)
+
+        # Estimate input/output voltages to disambiguate input vs output caps
+        in_v, out_v = _estimate_regulator_voltages(ic_ref, ctx)
+
+        # Place passives at learned offsets from IC
+        placed_roles: set[str] = set()
+        for ref in sorted(ic_net_refs):
+            if ref == ic_ref:
+                continue
+            role = _classify_passive_role_power(
+                ref, ctx, ic_ref, ic_net_refs, in_v, out_v,
+            )
+            if role is None or role not in offsets:
+                continue
+            # Only place one component per role (first match wins)
+            if role in placed_roles:
+                continue
+            placed_roles.add(role)
+            dx, dy, rot = offsets[role]
+            px = ic_x + dx
+            py = ic_y + dy
+            # Clamp inside zone
+            px = _clamp(px, zx1 + 1.0, zx2 - 1.0)
+            py = _clamp(py, zy1 + 1.0, zy2 - 1.0)
+            ctx.positions[ref] = (px, py, rot)
+            ctx.power_group_fixed.add(ref)
+
+        _log.info(
+            "    3c1b: placed %s (%s) at (%.1f, %.1f, %.0f) with %d passives",
+            ic_ref,
+            "buck" if is_buck else "ldo",
+            ic_x, ic_y, ic_rot,
+            sum(1 for r in sc.refs if r != ic_ref and r in ctx.positions),
+        )
+
+    # Place connectors at zone edges (learned: input connector near top, test
+    # points between/after stages)
+    power_group_refs = _collect_feature_refs(ctx, "power", "supply")
+    power_connectors = sorted(
+        r for r in power_group_refs
+        if r.startswith("J") and r in ctx.positions
+    )
+    if power_connectors and all_reg_scs:
+        # First connector (input): near top of zone, aligned with first regulator
+        first_ic_x = zx1 + zone_w * x_fracs[0]
+        if len(power_connectors) >= 1:
+            j_ref = power_connectors[0]
+            if j_ref not in ctx.fixed_refs:
+                _, jy, _ = ctx.positions[j_ref]
+                jy = _clamp(jy, zy1 + 2.0, zy1 + zone_h * 0.20)
+                ctx.positions[j_ref] = (first_ic_x + 7.7, jy, 0.0)
+                ctx.power_group_fixed.add(j_ref)
+
+    _log.info(
+        "    3c1b: signal-flow ordered %d regulators across power zone",
+        n_regs,
+    )
 
 
 def _phase_power_group(ctx: PlacementContext) -> None:
@@ -1606,6 +2107,12 @@ def _phase_mcu_group(ctx: PlacementContext) -> None:
     from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref as _find_mcu
     mcu_ref_c3 = _find_mcu(ctx.requirements)
     if not (mcu_ref_c3 and mcu_ref_c3 in ctx.positions):
+        return
+    # Skip if the "MCU" is actually a power regulator IC that has already
+    # been placed by _phase_power_chain_flow.
+    if mcu_ref_c3 in ctx.power_group_fixed:
+        _log.info("    3c3: skipping %s — already placed by power chain phase",
+                  mcu_ref_c3)
         return
 
     _mcu_x, _mcu_y, _mcu_rot_orig = ctx.positions[mcu_ref_c3]
