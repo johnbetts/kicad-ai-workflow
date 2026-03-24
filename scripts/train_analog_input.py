@@ -78,6 +78,14 @@ def _make_ads1115() -> Component:
     Pin mapping:
         1=ADDR (tied GND), 2=ALERT (NC), 3=GND, 4=AIN0, 5=AIN1,
         6=AIN2, 7=AIN3, 8=VDD, 9=SDA, 10=SCL.
+
+    Channel-to-pin mapping (avoids trace crossing when J1-J4 left-to-right):
+        MSOP-10 left column (top-to-bottom): pin 5 (AIN1), pin 4 (AIN0)
+        MSOP-10 right column (top-to-bottom): pin 6 (AIN2), pin 7 (AIN3)
+        J1 (leftmost)  -> pin 5 (AIN1) — top-left, shortest path
+        J2 (second)     -> pin 4 (AIN0) — second-from-top-left
+        J3 (third)      -> pin 6 (AIN2) — top-right
+        J4 (rightmost)  -> pin 7 (AIN3) — second-from-top-right
     """
     return Component(
         ref="U1",
@@ -89,8 +97,8 @@ def _make_ads1115() -> Component:
             Pin("1", "ADDR", PinType.INPUT, net="GND"),
             Pin("2", "ALERT", PinType.OUTPUT),  # no connect
             Pin("3", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
-            Pin("4", "AIN0", PinType.INPUT, PinFunction.ADC, net="AIN1_DIV"),
-            Pin("5", "AIN1", PinType.INPUT, PinFunction.ADC, net="AIN2_DIV"),
+            Pin("4", "AIN0", PinType.INPUT, PinFunction.ADC, net="AIN2_DIV"),
+            Pin("5", "AIN1", PinType.INPUT, PinFunction.ADC, net="AIN1_DIV"),
             Pin("6", "AIN2", PinType.INPUT, PinFunction.ADC, net="AIN3_DIV"),
             Pin("7", "AIN3", PinType.INPUT, PinFunction.ADC, net="AIN4_DIV"),
             Pin("8", "VDD", PinType.POWER_IN, PinFunction.VCC, net="+3V3"),
@@ -292,7 +300,10 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
     r_top = 2 * ch - 1  # R1, R3, R5, R7
     r_bot = 2 * ch      # R2, R4, R6, R8
     c_filt = ch + 1     # C2, C3, C4, C5
-    ain_pin = str(ch + 3)  # U1 pins 4,5,6,7 for AIN0-AIN3
+    # Channel-to-pin mapping avoids trace crossing with L-R connector order:
+    # CH1->pin5(AIN1), CH2->pin4(AIN0), CH3->pin6(AIN2), CH4->pin7(AIN3)
+    _CH_TO_PIN = {1: "5", 2: "4", 3: "6", 4: "7"}
+    ain_pin = _CH_TO_PIN[ch]
 
     return (
         # Raw input from connector to divider top

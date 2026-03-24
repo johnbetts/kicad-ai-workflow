@@ -18,11 +18,10 @@ Power architecture:
 Subnet architecture (private subnets teach proximity):
     +5V_C2_DEC:  L1.2, C2.1            — C2 must be right at buck output
     +5V_C4_DEC:  U2.VIN, C4.1          — C4 must be right at LDO input
-    +3V3_C5_DEC: U2.VOUT, C5.1         — C5 must be right at LDO output
+    +3V3_C5_DEC: U2.VOUT, C5.1, J3.1   — C5 at LDO output, J3 test point
     BST_U1:      U1.BOOT, C3.1         — C3 must be right at BST pin
-    +24V:        J1.1, C1.1, U1.VIN    — C1 on shared input rail (serves whole rail)
+    +24V:        J1.2, C1.1, U1.VIN    — C1 on shared input rail (serves whole rail)
     +5V:         R1.1, J2.1            — shared 5V rail (test point, FB divider)
-    +3V3:        J3.1                   — shared 3.3V rail (test point)
 
 TPS54331 pinout (SOIC-8):
     Pin 1: BOOT (bootstrap)
@@ -330,7 +329,11 @@ def _make_ldo_hf_bypass_cap() -> Component:
 
 
 def _make_input_connector() -> Component:
-    """J1: 2-pin screw terminal for 24V power input."""
+    """J1: 2-pin screw terminal for 24V power input.
+
+    Pin 1 = GND, Pin 2 = +24V — swapped so that when J1 is rotated 180
+    degrees (pads facing board edge), traces to U1 VIN and GND do not cross.
+    """
     return Component(
         ref="J1",
         value="Screw_Terminal_2P",
@@ -338,8 +341,8 @@ def _make_input_connector() -> Component:
         lcsc="C8269",
         description="2-pin 5.08mm screw terminal — 24V input",
         pins=(
-            Pin("1", "+24V", PinType.POWER_IN, PinFunction.VCC, net="+24V"),
-            Pin("2", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
+            Pin("1", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
+            Pin("2", "+24V", PinType.POWER_IN, PinFunction.VCC, net="+24V"),
         ),
     )
 
@@ -360,7 +363,12 @@ def _make_5v_test_header() -> Component:
 
 
 def _make_3v3_test_header() -> Component:
-    """J3: 2-pin header for 3.3V output test point."""
+    """J3: 2-pin header for 3.3V output test point.
+
+    Pin 1 is on +3V3_C5_DEC (same subnet as U2 VOUT, C5, C6) so the
+    optimizer pulls J3 near U2 and the test header is actually connected
+    to the 3.3V output rail.
+    """
     return Component(
         ref="J3",
         value="Pin_Header_2P",
@@ -368,7 +376,7 @@ def _make_3v3_test_header() -> Component:
         lcsc="C124375",
         description="2-pin 2.54mm header — 3.3V test point",
         pins=(
-            Pin("1", "+3V3", PinType.PASSIVE, PinFunction.VCC, net="+3V3"),
+            Pin("1", "+3V3", PinType.PASSIVE, PinFunction.VCC, net="+3V3_C5_DEC"),
             Pin("2", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
         ),
     )
@@ -384,7 +392,7 @@ def _build_nets() -> tuple[Net, ...]:
 
     Subnet architecture — private subnets encode proximity requirements:
 
-        +24V:       J1.1, C1.1, U1.VIN, U1.EN  (shared input rail, C1 is input decoupling)
+        +24V:       J1.2, C1.1, U1.VIN, U1.EN  (shared input rail, C1 is input decoupling)
         GND:        all ground pins              (shared ground)
         SW:         U1.PH, L1.1, C3.2, D1.K    (switch node)
         BST_U1:     U1.BOOT, C3.1               (bootstrap — C3 right at U1 BST pin)
@@ -392,14 +400,13 @@ def _build_nets() -> tuple[Net, ...]:
         +5V:        R1.1, J2.1                   (shared 5V rail — test point & FB divider)
         +5V_C4_DEC: U2.VIN, C4.1                (LDO input node — C4 right at U2 VIN)
         FB:         R1.2, R2.1, U1.VSNS         (feedback sense)
-        +3V3_C5_DEC: U2.VOUT, U2.VOUT_TAB, C5.1, C6.1 (LDO output — C5+C6 right at U2 VOUT)
-        +3V3:       J3.1                         (shared 3.3V rail — test point)
+        +3V3_C5_DEC: U2.VOUT, U2.VOUT_TAB, C5.1, C6.1, J3.1 (LDO output — C5+C6+J3 at U2 VOUT)
     """
     return (
         Net(
             name="+24V",
             connections=(
-                NetConnection("J1", "1"),
+                NetConnection("J1", "2"),  # pin 2 is now +24V (swapped)
                 NetConnection("C1", "1"),
                 NetConnection("U1", "2"),
                 NetConnection("U1", "3"),  # EN tied to VIN
@@ -408,7 +415,7 @@ def _build_nets() -> tuple[Net, ...]:
         Net(
             name="GND",
             connections=(
-                NetConnection("J1", "2"),
+                NetConnection("J1", "1"),  # pin 1 is now GND (swapped)
                 NetConnection("C1", "2"),
                 NetConnection("U1", "6"),
                 NetConnection("U1", "8"),  # exposed pad
@@ -471,7 +478,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "5"),  # VSNS pin
             ),
         ),
-        # Private subnet: LDO output — C5+C6 must be right at U2 VOUT
+        # Private subnet: LDO output — C5+C6 right at U2 VOUT, J3 test header
         Net(
             name="+3V3_C5_DEC",
             connections=(
@@ -479,13 +486,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U2", "4"),   # VOUT tab
                 NetConnection("C5", "1"),   # output cap (22uF bulk)
                 NetConnection("C6", "1"),   # HF bypass (100nF ceramic)
-            ),
-        ),
-        # Shared +3V3 rail — test point
-        Net(
-            name="+3V3",
-            connections=(
-                NetConnection("J3", "1"),   # 3.3V test point
+                NetConnection("J3", "1"),   # 3.3V test point (must be on same net)
             ),
         ),
     )
@@ -757,8 +758,9 @@ def _apply_power_post_placement(pcb: object) -> object:
         "C2": (u1_x + 12.6, u1_y + 1.5, -90.0),        # output cap right of L1
         # LDO stage (relative to U2)
         "U2": (u2_x, u2_y, 0.0),
-        "C4": (u2_x - 17.4, u2_y - 1.5, -90.0),        # LDO input cap (midway)
+        "C4": (u2_x - 5.0, u2_y - 2.5, -90.0),          # LDO input cap near U2 VIN
         "C5": (u2_x + 6.9, u2_y + 1.1, -90.0),         # LDO output cap right of U2
+        "C6": (u2_x + 6.9, u2_y - 1.1, -90.0),         # HF bypass next to C5
         # Connectors
         "J1": (u1_x + 7.7, board_h * 0.15, 0.0),       # 24V input near top
         "J2": (board_w * 0.61, u1_y + 1.7, -90.0),      # 5V TP between stages
@@ -807,11 +809,11 @@ def main() -> None:
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
     # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — now handled by the optimizer's
-    # _phase_power_chain_flow() phase (learned patterns moved to
-    # ee_phases_groups.py).  The override function below is kept for
-    # reference but no longer called.
+    # POST-PLACEMENT CORRECTIONS — apply pattern-based placement rules
+    # learned from human reference to ensure C4/C5/C6 are near U2 and
+    # signal flow is left-to-right.
     # ---------------------------------------------------------------
+    optimized_pcb = _apply_power_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")

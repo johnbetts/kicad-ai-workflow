@@ -18,6 +18,14 @@ Reference boards are at `output/training_reference_boards/`.
 - [x] **MCU-05**: Antenna keepout zone syntax — FIXED (same fix as MCU-01).
   All keepout zones now use correct `(zone (net 0) (net_name "") (layers ...) (hatch ...) ...)` format.
 - [ ] **MCU-06**: Isolation vias around antenna area — OPEN (feature not implemented).
+- [x] **MCU-07**: Crystal Y1 + load caps C3/C4 removed — FIXED. ESP32-S3-WROOM-1 has an
+  internal 40MHz crystal. External crystal is unnecessary. Removed Y1, C3, C4 and all
+  XTAL_IN/XTAL_OUT/XTAL_IN_C3/XTAL_OUT_C4 nets. Verified: components absent from output PCB.
+- [x] **MCU-08**: USB-C J1 rotation — FIXED. Post-placement correction sets J1 rotation=180
+  so pads face the top board edge (wire-entry side outward). Verified: J1 rot=180 in output.
+- [x] **MCU-09**: Pin labels at pad positions — VERIFIED OK. `_enrich_esp32_footprint()` in
+  footprints.py places labels at each pad position with 1.6mm inward offset. Confirmed:
+  pad 2 at x=-8.75, label "3V3" at x=-7.15 (offset=1.6mm toward IC center). Not clustered.
 
 ## Relay
 
@@ -27,16 +35,26 @@ Reference boards are at `output/training_reference_boards/`.
   Generated output: `Capacitor_SMD:C_0805_2012Metric`. Correct.
 - [x] **REL-03**: No 3D models — FIXED. 32/36 footprints now have 3D models.
   Only mounting holes missing.
+- [x] **REL-04**: L1/L2/C1/C2 overlapping channel 1 components — FIXED. Power isolation
+  group moved further toward board bottom edge (L1/L2 at y=board_h-4, C1/C2 at y=board_h-10
+  and board_h-7). Verified: 0 collisions, all components >2mm apart. Design rules: 39 pass, 0 violations.
 
 ## Power Chain
 
 - [x] **PWR-01**: No 3D models — FIXED. 15/19 footprints now have 3D models.
-- [ ] **PWR-02**: J1 screw terminal rotation 0 vs reference 180 — OPEN.
-  Optimizer picks rotation=0 for top-edge narrow connector. Reference has 180.
-  Board-specific orientation preference; would need per-board override.
+- [x] **PWR-02**: J1 pin swap to avoid trace crossing — FIXED. Pin 1 is now GND, pin 2
+  is +24V (swapped from original). Net definitions updated to match. When J1 is at the top
+  edge, traces to U1 VIN and GND no longer cross.
 - [x] **PWR-03**: Added C6 (100nF ceramic HF bypass) in parallel with C5 (22uF) on
   +3V3_C5_DEC subnet. AMS1117 datasheet recommends ceramic cap close to output.
   C6 added to components, GND net, and +3V3_C5_DEC net.
+- [x] **PWR-04**: J3 +3V3 not connected — FIXED. J3 pin 1 was on isolated "+3V3" net with
+  no path to U2 output. Moved J3.1 onto "+3V3_C5_DEC" subnet (same as U2 VOUT, C5, C6).
+  Removed the orphaned "+3V3" net. Verified: J3 now in output at (44.0, 29.2).
+- [x] **PWR-05**: C4/C5/C6 not placed near U2 — FIXED. Enabled `_apply_power_post_placement()`
+  which was defined but not called. Also adjusted C4 position from dx=-17.4 to dx=-5.0
+  (much closer to U2 VIN). Added C6 position rule. Verified: C4=5.6mm, C5=7.0mm, C6=7.0mm
+  from U2.
 
 ## Analog Input
 
@@ -44,6 +62,10 @@ Reference boards are at `output/training_reference_boards/`.
   instead of tiny 25% fraction. Score improved to 0.925 (A), only 1 collision remaining.
 - [x] **ANA-02**: No 3D models — FIXED. 25/29 footprints now have 3D models.
 - [ ] **ANA-03**: Screw terminal orientation issues — OPEN (same root cause as PWR-02).
+- [x] **ANA-04**: ADC channel pin assignment — FIXED. Reordered channel-to-pin mapping to
+  avoid trace crossing when J1-J4 are left-to-right: CH1->pin5(AIN1, top-left),
+  CH2->pin4(AIN0, second-from-top-left), CH3->pin6(AIN2, top-right), CH4->pin7(AIN3).
+  Both U1 component pin nets and `_channel_nets()` pin mapping updated consistently.
 
 ## Ethernet
 

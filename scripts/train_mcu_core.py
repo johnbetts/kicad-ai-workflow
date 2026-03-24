@@ -65,7 +65,6 @@ _ESP32_FP = "RF_Module:ESP32-S3-WROOM-1"
 _R0805_FP = "R_0805"
 _C0805_FP = "C_0805"
 _LED0805_FP = "LED_0805"
-_CRYSTAL_FP = "Crystal_SMD_3215"
 _USBC_FP = "USB-C"
 _SW_FP = "SW_Push_4.5x4.5mm"
 _HEADER_FP = "PinHeader_1x04_P2.54mm"
@@ -177,45 +176,10 @@ def _make_bulk_10uf() -> Component:
     )
 
 
-def _make_crystal() -> Component:
-    """Y1: 40MHz crystal oscillator (SMD 3215 package).
-
-    Included for training even though WROOM has an internal crystal.
-    """
-    return Component(
-        ref="Y1",
-        value="40MHz",
-        footprint=_CRYSTAL_FP,
-        lcsc="C13738",
-        description="40MHz crystal SMD",
-        pins=(
-            Pin("1", "1", PinType.PASSIVE, net="XTAL_IN"),
-            Pin("2", "2", PinType.PASSIVE, net="XTAL_OUT"),
-        ),
-    )
-
-
-def _make_crystal_cap(num: int) -> Component:
-    """C3/C4: 22pF crystal load capacitor (0805).
-
-    Uses private subnets XTAL_IN_C3 / XTAL_OUT_C4 so that C3/C4 are tied
-    directly to U1's oscillator pins rather than floating on shared crystal nets.
-
-    Args:
-        num: 3 or 4 (for C3 or C4).
-    """
-    net = f"XTAL_IN_C{num}" if num == 3 else f"XTAL_OUT_C{num}"
-    return Component(
-        ref=f"C{num}",
-        value="22pF",
-        footprint=_C0805_FP,
-        lcsc="C1804",
-        description="22pF crystal load cap 0805",
-        pins=(
-            Pin("1", "1", PinType.PASSIVE, net=net),
-            Pin("2", "2", PinType.PASSIVE, net="GND"),
-        ),
-    )
+# NOTE: Y1 (40MHz crystal) and C3/C4 (load caps) REMOVED.
+# The ESP32-S3-WROOM-1 module has an internal 40MHz crystal.
+# External crystal is NOT needed and its nets (XTAL_IN, XTAL_OUT,
+# XTAL_IN_C3, XTAL_OUT_C4) have been removed.
 
 
 def _make_boot_switch() -> Component:
@@ -400,7 +364,7 @@ def _build_nets() -> tuple[Net, ...]:
     Net connectivity (subnet architecture):
         +3V3:         C2 pin 1 (bulk), R1 pin 1, R2 pin 1, J2 pin 3
         +3V3_U1_DEC:  U1 pin 2 (3V3) -> C1 pin 1 (100nF decoupling private)
-        GND:          U1 pins 1/40/41, C1-C5 pin 2, SW1/SW2 pin 2,
+        GND:          U1 pins 1/40/41, C1/C2/C5 pin 2, SW1/SW2 pin 2,
                       J1 A1/S1, R3/R4 pin 2, D1 K, J2 pin 4
         VBUS:         J1 A4 (not connected to 3V3 -- regulator omitted)
         USB_DP:       J1 A6 (D+) -> U1 pin 13 (IO19)
@@ -414,10 +378,7 @@ def _build_nets() -> tuple[Net, ...]:
         LED_A:        R5 pin 2 -> D1 A
         CC1:          J1 A5 -> R3 pin 1
         CC2:          J1 B5 -> R4 pin 1
-        XTAL_IN:      Y1 pin 1 (shared crystal net)
-        XTAL_OUT:     Y1 pin 2 (shared crystal net)
-        XTAL_IN_C3:   C3 pin 1 -> U1 OSC_IN (private subnet for load cap)
-        XTAL_OUT_C4:  C4 pin 1 -> U1 OSC_OUT (private subnet for load cap)
+        (Crystal nets removed — WROOM-1 has internal crystal)
     """
     return (
         # --- Shared +3V3 rail (bulk cap, pull-ups, header) ---
@@ -446,8 +407,6 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "41"),
                 NetConnection("C1", "2"),
                 NetConnection("C2", "2"),
-                NetConnection("C3", "2"),
-                NetConnection("C4", "2"),
                 NetConnection("C5", "2"),
                 NetConnection("SW1", "2"),
                 NetConnection("SW2", "2"),
@@ -545,33 +504,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("R4", "1"),
             ),
         ),
-        # --- Crystal nets: Y1 shared, C3/C4 on private subnets ---
-        Net(
-            name="XTAL_IN",
-            connections=(
-                NetConnection("Y1", "1"),
-            ),
-        ),
-        Net(
-            name="XTAL_OUT",
-            connections=(
-                NetConnection("Y1", "2"),
-            ),
-        ),
-        Net(
-            name="XTAL_IN_C3",
-            connections=(
-                NetConnection("C3", "1"),
-                NetConnection("Y1", "1"),
-            ),
-        ),
-        Net(
-            name="XTAL_OUT_C4",
-            connections=(
-                NetConnection("C4", "1"),
-                NetConnection("Y1", "2"),
-            ),
-        ),
+        # Crystal nets removed — ESP32-S3-WROOM-1 has internal crystal
     )
 
 
@@ -590,9 +523,7 @@ def _build_requirements() -> ProjectRequirements:
         _make_esp32(),
         _make_decoupling_100nf(),
         _make_bulk_10uf(),
-        _make_crystal(),
-        _make_crystal_cap(3),
-        _make_crystal_cap(4),
+        # Y1/C3/C4 removed — ESP32-S3-WROOM-1 has internal crystal
         _make_boot_switch(),
         _make_reset_switch(),
         _make_en_pullup(),
@@ -613,12 +544,12 @@ def _build_requirements() -> ProjectRequirements:
     mcu_feature = FeatureBlock(
         name="MCU Core",
         description=(
-            "ESP32-S3-WROOM-1 with decoupling, crystal, boot/reset buttons, "
+            "ESP32-S3-WROOM-1 with decoupling, boot/reset buttons, "
             "USB-C programming port, status LED, and UART debug header"
         ),
         components=all_refs,
         nets=all_net_names,
-        subcircuits=("crystal_osc", "decoupling"),
+        subcircuits=("decoupling",),
     )
 
     return ProjectRequirements(
@@ -746,15 +677,7 @@ def _check_design_rules(
     _check_dist("C2", "U1", 15.0, "Bulk decoupling (C2)")
     print()
 
-    # ---------------------------------------------------------------
-    # 2. Crystal proximity to U1
-    # ---------------------------------------------------------------
-    print("--- Crystal Proximity (Y1 within 5mm of U1) ---")
-    _check_dist("Y1", "U1", 18.0, "Crystal (Y1)")
-    # Crystal load caps near Y1
-    _check_dist("C3", "Y1", 8.0, "Crystal cap C3")
-    _check_dist("C4", "Y1", 8.0, "Crystal cap C4")
-    print()
+    # Crystal check removed — WROOM-1 has internal crystal; Y1/C3/C4 removed
 
     # ---------------------------------------------------------------
     # 3. USB-C at board edge
@@ -918,6 +841,18 @@ def main() -> None:
     # 3. Run placement optimizer
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
+
+    # Post-placement correction: rotate USB-C J1 by 180 degrees so pads
+    # face the top board edge (wire-entry side outward).
+    from dataclasses import replace as _dc_replace
+
+    new_fps: list[object] = []
+    for fp in optimized_pcb.footprints:
+        if fp.ref == "J1":
+            fp = _dc_replace(fp, rotation=180.0)
+        new_fps.append(fp)
+    optimized_pcb = _dc_replace(optimized_pcb, footprints=tuple(new_fps))
+
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
     if review.violations:

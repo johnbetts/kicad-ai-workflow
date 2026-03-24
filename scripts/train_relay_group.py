@@ -545,29 +545,31 @@ def _apply_relay_post_placement(pcb: object) -> object:
                         rotation=0.0,
                     )
 
-        # --- Pattern 2: Power isolation in bottom-left ---
+        # --- Pattern 2: Power isolation in bottom-left corner ---
+        # Pushed further toward bottom edge to avoid overlap with channel 1
+        # Q1/R5 components.  Board bottom edge is at board_y_min + board_h.
         if ref == "L1":
             updated = replace(
                 fp,
-                position=Point(bl_x, board_y_min + board_h - 9.0),
+                position=Point(bl_x, board_y_min + board_h - 4.0),
                 rotation=90.0,
             )
         elif ref == "L2":
             updated = replace(
                 fp,
-                position=Point(bl_x + 3.0, board_y_min + board_h - 9.0),
+                position=Point(bl_x + 3.0, board_y_min + board_h - 4.0),
                 rotation=90.0,
             )
         elif ref == "C1":
             updated = replace(
                 fp,
-                position=Point(bl_x + 2.0, board_y_min + board_h - 18.0),
+                position=Point(bl_x + 1.5, board_y_min + board_h - 10.0),
                 rotation=180.0,
             )
         elif ref == "C2":
             updated = replace(
                 fp,
-                position=Point(bl_x + 2.0, board_y_min + board_h - 13.0),
+                position=Point(bl_x + 1.5, board_y_min + board_h - 7.0),
                 rotation=0.0,
             )
 
