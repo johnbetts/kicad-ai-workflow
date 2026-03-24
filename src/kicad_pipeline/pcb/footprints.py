@@ -2598,6 +2598,75 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
 
 
 # ---------------------------------------------------------------------------
+# ESP32 thermal pad post-processor
+# ---------------------------------------------------------------------------
+
+
+def _postprocess_esp32_thermal_pad(fp: Footprint) -> Footprint:
+    """Merge multiple pad-41 entries into one central thermal pad.
+
+    JLCPCB ESP32 footprints store the exposed ground pad as a 3x3 grid of
+    small pads all numbered "41".  KiCad expects a single pad at the centre.
+    This function merges them into one rectangle that spans the bounding box
+    of all pad-41 entries.
+
+    Args:
+        fp: An ESP32 footprint (possibly with multiple pad 41).
+
+    Returns:
+        A copy of *fp* with at most one pad "41".
+    """
+    p41_pads = [p for p in fp.pads if p.number == "41"]
+    if len(p41_pads) <= 1:
+        return fp  # Already correct — nothing to do.
+
+    # Compute bounding box of all pad-41 entries (pad extent, not centres).
+    min_x = min(p.position.x - p.size_x / 2 for p in p41_pads)
+    max_x = max(p.position.x + p.size_x / 2 for p in p41_pads)
+    min_y = min(p.position.y - p.size_y / 2 for p in p41_pads)
+    max_y = max(p.position.y + p.size_y / 2 for p in p41_pads)
+
+    cx = (min_x + max_x) / 2
+    cy = (min_y + max_y) / 2
+    w = max_x - min_x
+    h = max_y - min_y
+
+    # Build a single merged pad, copying attributes from the first pad-41.
+    template = p41_pads[0]
+    merged = Pad(
+        number=template.number,
+        pad_type=template.pad_type,
+        shape=template.shape,
+        position=Point(x=cx, y=cy),
+        size_x=w,
+        size_y=h,
+        layers=template.layers,
+        net_number=template.net_number,
+        net_name=template.net_name,
+        drill_diameter=template.drill_diameter,
+        roundrect_ratio=template.roundrect_ratio,
+        uuid=template.uuid,
+    )
+
+    # Replace all pad-41 entries with the single merged pad.
+    new_pads = tuple(p for p in fp.pads if p.number != "41") + (merged,)
+    _log.info(
+        "%s: merged %d pad-41 grid entries into single %.1fx%.1fmm thermal pad "
+        "at (%.1f, %.1f)",
+        fp.ref, len(p41_pads), w, h, cx, cy,
+    )
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=new_pads, graphics=fp.graphics, texts=fp.texts,
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+        datasheet=fp.datasheet, description=fp.description,
+        footprint_source=fp.footprint_source, mpn=fp.mpn,
+        manufacturer=fp.manufacturer, fp_zones=fp.fp_zones,
+    )
+
+
+# ---------------------------------------------------------------------------
 # JLCPCB footprint loader integration
 # ---------------------------------------------------------------------------
 
@@ -3074,6 +3143,7 @@ def footprint_for_component(
             # labels, antenna keepout, and 3D model.
             fid_upper = footprint_id.strip().upper()
             if "ESP32" in fid_upper or "WROOM" in fid_upper:
+                fp = _postprocess_esp32_thermal_pad(fp)
                 fp = _enrich_esp32_footprint(fp)
             return fp
 
@@ -3105,6 +3175,7 @@ def footprint_for_component(
     # 3D model regardless of whether they came from JLCPCB cache or
     # parametric generator.
     if "ESP32" in upper or "WROOM" in upper:
+        fp = _postprocess_esp32_thermal_pad(fp)
         fp = _enrich_esp32_footprint(fp)
 
     return fp
