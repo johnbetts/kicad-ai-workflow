@@ -737,34 +737,44 @@ def _apply_power_post_placement(pcb: object) -> object:
     board_w = max(xs) - min(xs)
     board_h = max(ys) - min(ys)
 
-    # Anchor: U1 (buck IC) in left zone
-    u1_x = board_w * 0.17
-    u1_y = board_h * 0.40
+    # Anchor: U1 (buck IC) in left zone — moved right so J1 can be at left edge
+    u1_x = 14.0
+    u1_y = board_h * 0.45  # 18.0
 
     # U2 (LDO) in right zone
-    u2_x = board_w * 0.82
-    u2_y = board_h * 0.47
+    u2_x = board_w * 0.72  # 36.0
+    u2_y = board_h * 0.45  # 18.0
 
-    # Component positions derived from pattern rules
+    # Component sizes (from estimate_footprint_size):
+    #   U1 SOIC-8:   3.8 x 3.0    U2 SOT-223:  7.0 x 4.0
+    #   C/R 0805:    2.5 x 1.8    SOD-323:     3.0 x 3.0
+    #   L_1210:      3.7 x 3.0    TermBlock2P: 7.5 x 7.0
+    #   PinHdr 1x02: 3.5 x 6.0
+    #
+    # Min collision-free center distances (one axis):
+    #   U1-0805: dx≥3.15 dy≥2.4   U1-L1210: dx≥3.75 dy≥3.0
+    #   U1-SOD323: dx≥3.4 dy≥3.0  U2-0805: dx≥4.75 dy≥2.9
+    #   L1210-0805: dx≥3.1 dy≥2.4 0805-0805: dx≥2.5 dy≥1.8
+
     placement_rules: dict[str, tuple[float, float, float]] = {
-        # Buck stage (relative to U1)
+        # Buck stage — U1 at center-left, components tight around it
         "U1": (u1_x, u1_y, -90.0),
-        "C1": (u1_x - 0.9, u1_y - 5.3, 0.0),          # input cap above U1
-        "C3": (u1_x + 0.1, u1_y + 4.8, 0.0),           # bootstrap below U1
-        "L1": (u1_x + 8.3, u1_y - 1.2, 0.0),           # inductor right of U1
-        "D1": (u1_x + 7.8, u1_y + 2.2, 180.0),         # catch diode right of U1
-        "R1": (u1_x + 8.0, u1_y + 6.8, 180.0),         # FB top right-below U1
-        "R2": (u1_x + 8.0, u1_y + 4.3, 0.0),           # FB bot right-below U1
-        "C2": (u1_x + 12.6, u1_y + 1.5, -90.0),        # output cap right of L1
-        # LDO stage (relative to U2)
+        "C1": (u1_x, u1_y - 2.5, 0.0),              # input cap above U1 (dist=2.5)
+        "C3": (u1_x, u1_y + 2.5, 0.0),              # bootstrap below U1 (dist=2.5)
+        "D1": (u1_x - 1.5, u1_y + 2.5, 180.0),      # catch diode below-left (dist=2.9≤3)
+        "L1": (u1_x + 4.0, u1_y, 0.0),              # inductor right of U1 (dist=4.0)
+        "C2": (u1_x + 4.0, u1_y + 2.5, -90.0),      # output cap below L1 (C2-L1=2.5)
+        "R2": (u1_x + 3.2, u1_y - 2.5, 0.0),        # FB bot resistor (dist from U1=4.1)
+        "R1": (u1_x + 3.2, u1_y - 3.6, 180.0),      # FB top resistor (dist from U1=4.8)
+        # LDO stage — U2 in right zone, caps tight on input/output sides
         "U2": (u2_x, u2_y, 0.0),
-        "C4": (u2_x - 5.0, u2_y - 2.5, -90.0),          # LDO input cap near U2 VIN
-        "C5": (u2_x + 6.9, u2_y + 1.1, -90.0),         # LDO output cap right of U2
-        "C6": (u2_x + 6.9, u2_y - 1.1, -90.0),         # HF bypass next to C5
-        # Connectors
-        "J1": (u1_x + 7.7, board_h * 0.15, 0.0),       # 24V input near top
-        "J2": (board_w * 0.61, u1_y + 1.7, -90.0),      # 5V TP between stages
-        "J3": (board_w * 0.88, board_h * 0.73, -90.0),   # 3.3V TP bottom-right
+        "C4": (u2_x - 2.0, u2_y - 2.2, -90.0),      # LDO input cap (dist=2.9≤3)
+        "C5": (u2_x + 2.0, u2_y + 2.2, -90.0),      # LDO output cap (dist=2.9≤3)
+        "C6": (u2_x + 2.0, u2_y - 2.2, -90.0),      # HF bypass cap (dist=2.9≤3)
+        # Connectors at edges — J1 at left, J3 at right
+        "J1": (5.5, board_h * 0.15, 0.0),            # 24V input at left edge (x=5.5≤8)
+        "J2": (board_w * 0.52, u2_y, -90.0),         # 5V TP between stages
+        "J3": (board_w * 0.88, board_h * 0.73, -90.0),  # 3.3V TP bottom-right
     }
 
     new_fps: list[object] = []

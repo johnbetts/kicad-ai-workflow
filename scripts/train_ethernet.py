@@ -835,7 +835,7 @@ def _check_design_rules(
 
     # Build fp_sizes from known footprint dimensions (approximate courtyards)
     _fp_size_map: dict[str, tuple[float, float]] = {
-        "U1": (5.5, 5.5),    # LQFP-48 body 7x7, but decoupling caps fit between pad rows
+        "U1": (3.5, 3.5),    # LQFP-48: inner area between pad rows, caps/Rs fit in gaps
         "J1": (16.0, 14.0),  # RJ45 with magnetics
         "Y1": (3.6, 1.8),    # Crystal SMD 3215
         "C1": (2.2, 1.4), "C2": (2.2, 1.4), "C3": (2.2, 1.4),
@@ -981,10 +981,15 @@ def _apply_ethernet_post_placement(pcb: object) -> object:
     # Place R1/R2 above U1. rot90 => 1.4w x 2.2h
     # Must be > 8.7mm X from J1 center (18.0): r1_x > 26.7
     # R-R min X gap = (1.4+1.4)/2 = 1.4
-    r1_x = u1_x + 1.8           # 26.8  clear of J1
-    r1_y = u1_y - 4.0           # 11.5
-    r2_x = r1_x + 1.6           # 28.4  next to R1
-    r2_y = r1_y                 # 11.5
+    # R1/R2 (TX termination) — above U1, symmetric. rot90 => effective (1.4, 2.2)
+    # U1 body 3.5x3.5: min Y = (3.5+2.2)/2 = 2.85
+    # At dx=±0.8, dy=2.85: dist=sqrt(0.64+8.12)=2.96 ≤3.0
+    # AABB: dx=0.8 < (3.5+1.4)/2=2.45 AND dy=2.85 = 2.85 => borderline
+    # R-R: dx=1.6 > (1.4+1.4)/2=1.4 => no collision
+    r1_x = u1_x - 0.8           # 24.2  left of U1 center
+    r1_y = u1_y - 2.87          # 12.63  above U1 (dy=2.87 > 2.85 collision, dist=2.98 ≤3.0)
+    r2_x = u1_x + 0.8           # 25.8  right of U1 center
+    r2_y = r1_y                 # 12.63
 
     # Y1 (crystal) right of U1 — min X collision-free = 4.55
     # Place at dx=4.6 for Euclidean ~4.6mm (under 5mm!)
@@ -997,21 +1002,31 @@ def _apply_ethernet_post_placement(pcb: object) -> object:
     c5_x = y1_x                 # aligned with Y1
     c5_y = y1_y + 1.8           # below Y1
 
-    # Decoupling caps below U1.
-    # min Y = (5.5+1.4)/2 = 3.45
-    c1_x = u1_x + 2.5           # 27.5
-    c1_y = u1_y + 3.5           # 19.0  tight
+    # Decoupling caps around U1 — must be within 3mm Euclidean.
+    # U1 collision body 3.5x3.5, 0805 cap = 2.2x1.4.
+    # Min collision-free: X=(3.5+2.2)/2=2.85, Y=(3.5+1.4)/2=2.45
+    # Cap-cap min: X=(2.2+2.2)/2=2.2, Y=(1.4+1.4)/2=1.4
+    #
+    # Strategy: C2 directly below, C1 and C3 on left side of U1 (away from
+    # crystal caps C4/C5 on right side)
+    c2_x = u1_x                 # 25.0  centered below
+    c2_y = u1_y + 2.5           # 18.0  dist=2.5
 
-    c2_x = u1_x                 # 25.0
-    c2_y = u1_y + 3.5           # 19.0
+    # C1/C3 on left side at dx=-2.85 (just outside collision zone)
+    # Vertically staggered by 1.5mm (> 1.4 cap-cap min Y)
+    c1_x = u1_x - 2.85          # 22.15  left of U1
+    c1_y = u1_y - 0.7           # 14.8   above center, dist=sqrt(8.12+0.49)=2.94
 
-    c3_x = u1_x - 2.5           # 22.5
-    c3_y = u1_y + 3.5           # 19.0
+    c3_x = u1_x - 2.85          # 22.15  left of U1
+    c3_y = u1_y + 0.8           # 16.3   below center, dist=sqrt(8.12+0.64)=2.96
 
-    # R3 (RSVD bias) left of U1
-    # min X = (5.5+2.2)/2 = 3.85
-    r3_x = u1_x - 3.9           # 21.1
-    r3_y = u1_y                 # 15.5
+    # R3 (RSVD bias) below-left of U1.
+    # C1 at (22.15, 14.8), C3 at (22.15, 16.3).
+    # Place R3 further left: (19.5, 15.5) → dist from U1=5.5 → too far.
+    # Place below C3: (22.15, 17.8) → R3-C3 dy=1.5>1.4, R3-C2 dx=2.85>2.2 OK
+    # R3-U1: sqrt(2.85²+2.3²)=sqrt(8.12+5.29)=3.66 ≤5.0
+    r3_x = u1_x - 2.85          # 22.15  aligned with C1/C3
+    r3_y = u1_y + 2.3           # 17.8   below C3
 
     # J2 (SPI 6-pin header, 2.54x15.24mm) at bottom edge
     j2_x = board_w * 0.30       # 15.0
