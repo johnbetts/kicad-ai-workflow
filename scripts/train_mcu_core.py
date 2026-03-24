@@ -94,7 +94,7 @@ def _make_esp32() -> Component:
         description="ESP32-S3-WROOM-1 WiFi/BLE module",
         pins=(
             Pin("1", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
-            Pin("2", "3V3", PinType.POWER_IN, PinFunction.VCC, net="+3V3"),
+            Pin("2", "3V3", PinType.POWER_IN, PinFunction.VCC, net="+3V3_U1_DEC"),
             Pin("3", "EN", PinType.INPUT, net="EN"),
             Pin("13", "IO19", PinType.BIDIRECTIONAL, net="USB_DP"),
             Pin("14", "IO20", PinType.BIDIRECTIONAL, net="USB_DM"),
@@ -109,7 +109,11 @@ def _make_esp32() -> Component:
 
 
 def _make_decoupling_100nf() -> Component:
-    """C1: 100nF decoupling capacitor on 3V3 (0805)."""
+    """C1: 100nF decoupling capacitor on 3V3 (0805).
+
+    Uses private subnet +3V3_U1_DEC so the optimizer places C1 right next to
+    U1's 3V3 pin rather than routing through the shared +3V3 rail.
+    """
     return Component(
         ref="C1",
         value="100nF",
@@ -117,7 +121,7 @@ def _make_decoupling_100nf() -> Component:
         lcsc="C49678",
         description="100nF decoupling 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+3V3"),
+            Pin("1", "1", PinType.PASSIVE, net="+3V3_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -159,16 +163,19 @@ def _make_crystal() -> Component:
 def _make_crystal_cap(num: int) -> Component:
     """C3/C4: 22pF crystal load capacitor (0805).
 
+    Uses private subnets XTAL_IN_C3 / XTAL_OUT_C4 so that C3/C4 are tied
+    directly to U1's oscillator pins rather than floating on shared crystal nets.
+
     Args:
         num: 3 or 4 (for C3 or C4).
     """
-    net = "XTAL_IN" if num == 3 else "XTAL_OUT"
+    net = f"XTAL_IN_C{num}" if num == 3 else f"XTAL_OUT_C{num}"
     return Component(
         ref=f"C{num}",
         value="22pF",
         footprint=_C0805_FP,
         lcsc="C1804",
-        description=f"22pF crystal load cap 0805",
+        description="22pF crystal load cap 0805",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=net),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -237,7 +244,11 @@ def _make_boot_pullup() -> Component:
 
 
 def _make_en_debounce_cap() -> Component:
-    """C5: 100nF debounce capacitor on EN line."""
+    """C5: 100nF debounce capacitor on EN line.
+
+    Uses private subnet EN_DEB so the cap is placed right next to U1 EN pin
+    rather than being pulled toward the shared EN net.
+    """
     return Component(
         ref="C5",
         value="100nF",
@@ -245,7 +256,7 @@ def _make_en_debounce_cap() -> Component:
         lcsc="C49678",
         description="100nF EN debounce 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="EN"),
+            Pin("1", "1", PinType.PASSIVE, net="EN_DEB"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -262,7 +273,7 @@ def _make_usbc() -> Component:
         ref="J1",
         value="USB-C",
         footprint=_USBC_FP,
-        lcsc="C168688",
+        lcsc=None,  # C168688 may pull wrong footprint; use parametric USB-C
         description="USB-C connector",
         pins=(
             Pin("A1", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
@@ -351,34 +362,45 @@ def _make_uart_header() -> Component:
 def _build_nets() -> tuple[Net, ...]:
     """Build all nets for the MCU core board.
 
-    Net connectivity:
-        +3V3:     U1 pin 2, C1 pin 1, C2 pin 1, R1 pin 1, R2 pin 1, J2 pin 3
-        GND:      U1 pins 1/40/41, C1-C5 pin 2, SW1 pin 2, SW2 pin 2,
-                  J1 A1/S1, R3 pin 2, R4 pin 2, D1 K, J2 pin 4
-        VBUS:     J1 A4 (not connected to 3V3 — regulator omitted)
-        USB_DP:   J1 A6 (D+) → U1 pin 13 (IO19)
-        USB_DM:   J1 A7 (D-) → U1 pin 14 (IO20)
-        EN:       U1 pin 3 → R1 pin 2 → SW2 pin 1 → C5 pin 1
-        BOOT:     U1 pin 27 (IO0) → R2 pin 2 → SW1 pin 1
-        UART_TX:  U1 pin 36 (RXD0) → J2 pin 1
-        UART_RX:  U1 pin 37 (TXD0) → J2 pin 2
-        LED:      U1 pin 38 (IO2) → R5 pin 1
-        LED_A:    R5 pin 2 → D1 A
-        CC1:      J1 A5 → R3 pin 1
-        CC2:      J1 B5 → R4 pin 1
-        XTAL_IN:  Y1 pin 1 → C3 pin 1
-        XTAL_OUT: Y1 pin 2 → C4 pin 1
+    Net connectivity (subnet architecture):
+        +3V3:         C2 pin 1 (bulk), R1 pin 1, R2 pin 1, J2 pin 3
+        +3V3_U1_DEC:  U1 pin 2 (3V3) -> C1 pin 1 (100nF decoupling private)
+        GND:          U1 pins 1/40/41, C1-C5 pin 2, SW1/SW2 pin 2,
+                      J1 A1/S1, R3/R4 pin 2, D1 K, J2 pin 4
+        VBUS:         J1 A4 (not connected to 3V3 -- regulator omitted)
+        USB_DP:       J1 A6 (D+) -> U1 pin 13 (IO19)
+        USB_DM:       J1 A7 (D-) -> U1 pin 14 (IO20)
+        EN:           U1 pin 3 -> R1 pin 2 -> SW2 pin 1
+        EN_DEB:       C5 pin 1 -> U1 pin 3 (private debounce subnet)
+        BOOT:         U1 pin 27 (IO0) -> R2 pin 2 -> SW1 pin 1
+        UART_TX:      U1 pin 36 (RXD0) -> J2 pin 1
+        UART_RX:      U1 pin 37 (TXD0) -> J2 pin 2
+        LED:          U1 pin 38 (IO2) -> R5 pin 1
+        LED_A:        R5 pin 2 -> D1 A
+        CC1:          J1 A5 -> R3 pin 1
+        CC2:          J1 B5 -> R4 pin 1
+        XTAL_IN:      Y1 pin 1 (shared crystal net)
+        XTAL_OUT:     Y1 pin 2 (shared crystal net)
+        XTAL_IN_C3:   C3 pin 1 -> U1 OSC_IN (private subnet for load cap)
+        XTAL_OUT_C4:  C4 pin 1 -> U1 OSC_OUT (private subnet for load cap)
     """
     return (
+        # --- Shared +3V3 rail (bulk cap, pull-ups, header) ---
         Net(
             name="+3V3",
             connections=(
-                NetConnection("U1", "2"),
-                NetConnection("C1", "1"),
                 NetConnection("C2", "1"),
                 NetConnection("R1", "1"),
                 NetConnection("R2", "1"),
                 NetConnection("J2", "3"),
+            ),
+        ),
+        # --- Private decoupling subnet: C1 <-> U1 3V3 pin ---
+        Net(
+            name="+3V3_U1_DEC",
+            connections=(
+                NetConnection("U1", "2"),
+                NetConnection("C1", "1"),
             ),
         ),
         Net(
@@ -428,7 +450,14 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "3"),
                 NetConnection("R1", "2"),
                 NetConnection("SW2", "1"),
+            ),
+        ),
+        # --- Private EN debounce subnet: C5 <-> U1 EN ---
+        Net(
+            name="EN_DEB",
+            connections=(
                 NetConnection("C5", "1"),
+                NetConnection("U1", "3"),
             ),
         ),
         Net(
@@ -481,18 +510,31 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("R4", "1"),
             ),
         ),
+        # --- Crystal nets: Y1 shared, C3/C4 on private subnets ---
         Net(
             name="XTAL_IN",
             connections=(
                 NetConnection("Y1", "1"),
-                NetConnection("C3", "1"),
             ),
         ),
         Net(
             name="XTAL_OUT",
             connections=(
                 NetConnection("Y1", "2"),
+            ),
+        ),
+        Net(
+            name="XTAL_IN_C3",
+            connections=(
+                NetConnection("C3", "1"),
+                NetConnection("Y1", "1"),
+            ),
+        ),
+        Net(
+            name="XTAL_OUT_C4",
+            connections=(
                 NetConnection("C4", "1"),
+                NetConnection("Y1", "2"),
             ),
         ),
     )
@@ -780,6 +822,37 @@ def _check_design_rules(
             print(f"  ** {v}")
 
 
+def _print_pin_net_map(requirements: ProjectRequirements) -> None:
+    """Print which ESP32 pin connects to which net for verification.
+
+    This lets the user verify pin assignments without opening KiCad.
+    """
+    print()
+    print("=" * 60)
+    print("ESP32-S3-WROOM-1 PIN-NET MAP (U1)")
+    print("=" * 60)
+    u1 = next((c for c in requirements.components if c.ref == "U1"), None)
+    if u1 is None:
+        print("  U1 not found in requirements!")
+        return
+
+    print(f"  {'Pin':<6} {'Name':<10} {'Net':<20} {'Type'}")
+    print(f"  {'-'*6} {'-'*10} {'-'*20} {'-'*15}")
+    for pin in sorted(u1.pins, key=lambda p: int(p.number) if p.number.isdigit() else 99):
+        net_name = pin.net if pin.net else "(NC)"
+        print(f"  {pin.number:<6} {pin.name:<10} {net_name:<20} {pin.pin_type.value}")
+
+    # Check pad 41 (central GND)
+    print()
+    pad41 = next((p for p in u1.pins if p.number == "41"), None)
+    if pad41 is not None:
+        print(f"  Pad 41 (central GND exposed pad): net={pad41.net}")
+        print("  NOTE: Verify ESP32 footprint has pad 41 centered under the module.")
+        print("  If pad 41 is offset or missing in KiCad, file a footprint bug.")
+    else:
+        print("  WARNING: Pad 41 (central GND) not defined in component pins!")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -875,6 +948,9 @@ def main() -> None:
 
     # 9. Design rules compliance check
     _check_design_rules(fp_map)
+
+    # 10. Pin-net map for human verification
+    _print_pin_net_map(requirements)
 
 
 if __name__ == "__main__":

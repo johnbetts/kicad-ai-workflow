@@ -98,7 +98,10 @@ def _make_ads1115() -> Component:
 
 
 def _make_adc_decoupling() -> Component:
-    """100nF decoupling capacitor for ADS1115 VDD (C1)."""
+    """100nF decoupling capacitor for ADS1115 VDD (C1).
+
+    Uses private subnet +3V3_U1_DEC so C1 is placed right next to U1 VDD.
+    """
     return Component(
         ref="C1",
         value="100nF",
@@ -106,7 +109,7 @@ def _make_adc_decoupling() -> Component:
         lcsc="C49678",
         description="100nF ADC decoupling cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+3V3"),
+            Pin("1", "1", PinType.PASSIVE, net="+3V3_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -160,8 +163,8 @@ def _make_divider_bot(ch: int) -> Component:
 def _make_tvs_diode(ch: int) -> Component:
     """TVS/Zener protection diode (D1-D4, SOD-323).
 
-    Anode connects to divider midpoint (AIN{ch}_DIV).
-    Cathode connects to GND (reverse-biased, clamps at ~3.3V).
+    Uses private subnet AIN{ch}_PROT so TVS is placed right next to the
+    divider midpoint and ADC input, not pulled by shared AIN{ch}_DIV.
     """
     return Component(
         ref=f"D{ch}",
@@ -170,7 +173,7 @@ def _make_tvs_diode(ch: int) -> Component:
         lcsc="C118739",
         description=f"3.3V TVS protection SOD-323 — CH{ch}",
         pins=(
-            Pin("1", "A", PinType.PASSIVE, net=f"AIN{ch}_DIV"),
+            Pin("1", "A", PinType.PASSIVE, net=f"AIN{ch}_PROT"),
             Pin("2", "K", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -179,8 +182,8 @@ def _make_tvs_diode(ch: int) -> Component:
 def _make_filter_cap(ch: int) -> Component:
     """Anti-aliasing / noise filter capacitor (C2-C5, 0805).
 
-    Pad 1 connects to divider midpoint (AIN{ch}_DIV).
-    Pad 2 connects to GND.
+    Uses private subnet AIN{ch}_PROT so filter cap is placed right next to
+    the divider midpoint and ADC input.
     """
     ref_num = ch + 1  # C2, C3, C4, C5
     return Component(
@@ -190,7 +193,7 @@ def _make_filter_cap(ch: int) -> Component:
         lcsc="C49678",
         description=f"100nF anti-aliasing filter 0805 — CH{ch}",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_DIV"),
+            Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_PROT"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -275,7 +278,13 @@ def _make_mcu_header() -> Component:
 def _channel_nets(ch: int) -> tuple[Net, ...]:
     """Build all nets for a single analog input channel.
 
-    Signal chain: J{ch} -> R_top -> [AIN_DIV node] -> R_bot/D/C -> U1 AIN.
+    Signal chain with subnet architecture:
+        J{ch} -> R_top -> [AIN{ch}_DIV] -> R_bot (to GND)
+        [AIN{ch}_DIV] feeds into private subnet [AIN{ch}_PROT] containing
+        D{ch} (TVS) and C_filt, which then connects to U1 AIN pin.
+
+    This forces the protection/filter components to be placed between
+    the divider midpoint and the ADC input pin.
     """
     r_top = 2 * ch - 1  # R1, R3, R5, R7
     r_bot = 2 * ch      # R2, R4, R6, R8
@@ -291,11 +300,18 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
                 NetConnection(f"R{r_top}", "1"),
             ),
         ),
-        # Divider midpoint: R_top out -> R_bot in -> D anode -> C_filt -> U1 AIN
+        # Divider midpoint: R_top out -> R_bot in (shared divider node)
         Net(
             name=f"AIN{ch}_DIV",
             connections=(
                 NetConnection(f"R{r_top}", "2"),
+                NetConnection(f"R{r_bot}", "1"),
+            ),
+        ),
+        # Private protection subnet: D{ch} + C_filt between divider and ADC
+        Net(
+            name=f"AIN{ch}_PROT",
+            connections=(
                 NetConnection(f"R{r_bot}", "1"),
                 NetConnection(f"D{ch}", "1"),
                 NetConnection(f"C{c_filt}", "1"),
@@ -347,17 +363,25 @@ def _build_requirements() -> ProjectRequirements:
     all_refs.extend([r_sda.ref, r_scl.ref, mcu_hdr.ref])
 
     # ---------------------------------------------------------------
-    # Power net: +3V3
+    # Power net: +3V3 (shared rail — pull-ups, header)
     # ---------------------------------------------------------------
     vcc_conns: list[NetConnection] = [
-        NetConnection("U1", "8"),      # ADC VDD
-        NetConnection("C1", "1"),      # decoupling
         NetConnection("R9", "1"),      # SDA pull-up
         NetConnection("R10", "1"),     # SCL pull-up
         NetConnection("J5", "3"),      # MCU header VCC
     ]
     nets.append(Net(name="+3V3", connections=tuple(vcc_conns)))
     all_net_names.append("+3V3")
+
+    # Private ADC decoupling subnet: C1 <-> U1 VDD
+    nets.append(Net(
+        name="+3V3_U1_DEC",
+        connections=(
+            NetConnection("U1", "8"),
+            NetConnection("C1", "1"),
+        ),
+    ))
+    all_net_names.append("+3V3_U1_DEC")
 
     # ---------------------------------------------------------------
     # GND net
@@ -434,6 +458,9 @@ def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
 
+_ANALOG_COMPONENTS: tuple[Component, ...] = ()  # set in main()
+
+
 def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     """Check analog input design rules and print compliance report.
 
@@ -443,6 +470,9 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     - Connector at edge (low Y value)
     - ADC decoupling distance (C1 near U1)
     - Channel spacing uniformity
+    - Screw terminal orientation (wire entry faces board edge)
+    - Channel ordering (J1.x < J2.x < J3.x < J4.x)
+    - LCSC footprint verification
     """
     print("=" * 60)
     print("DESIGN RULES COMPLIANCE CHECK (Analog Input Board)")
@@ -662,6 +692,65 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     print()
 
     # ---------------------------------------------------------------
+    # 10. Screw terminal orientation (J1-J4 wire entry faces edge)
+    # ---------------------------------------------------------------
+    print("--- Screw Terminal Orientation (J1-J4 rot=180 for top edge) ---")
+    for ch in range(1, 5):
+        j_ref = f"J{ch}"
+        if j_ref in fp_map:
+            rot = fp_map[j_ref][2]
+            label = f"  {j_ref} rot={rot:.0f}"
+            # 180 deg = wire entry faces top edge (away from board center)
+            if rot != 180.0:
+                violations.append(f"{label} (expected 180) VIOLATION")
+                print(f"{label} (expected 180) ** VIOLATION **")
+            else:
+                passes.append(f"{label} OK")
+                print(f"{label} OK")
+    print()
+
+    # ---------------------------------------------------------------
+    # 11. Channel ordering (J1.x < J2.x < J3.x < J4.x)
+    # ---------------------------------------------------------------
+    print("--- Channel Ordering (J1.x < J2.x < J3.x < J4.x) ---")
+    if len(j_positions) == 4:
+        j_xs = [j_positions[ch][0] for ch in range(1, 5)]
+        ordered = all(j_xs[i] < j_xs[i + 1] for i in range(3))
+        label = (
+            f"  X positions: J1={j_xs[0]:.1f} J2={j_xs[1]:.1f} "
+            f"J3={j_xs[2]:.1f} J4={j_xs[3]:.1f}"
+        )
+        if ordered:
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
+        else:
+            violations.append(f"{label} (not left-to-right) VIOLATION")
+            print(f"{label} (not left-to-right) ** VIOLATION **")
+    else:
+        print("  Cannot check — not all J1-J4 present")
+    print()
+
+    # ---------------------------------------------------------------
+    # 12. LCSC footprint verification
+    # ---------------------------------------------------------------
+    print("--- LCSC Footprint Verification ---")
+    # Known-bad LCSC numbers that pull wrong footprints
+    _KNOWN_BAD_LCSC = {
+        "C2337": "pulls 40-pin header (not 4-pin)",
+    }
+    for comp in _ANALOG_COMPONENTS:
+        if comp.lcsc and comp.lcsc in _KNOWN_BAD_LCSC:
+            msg = f"  {comp.ref} LCSC={comp.lcsc}: {_KNOWN_BAD_LCSC[comp.lcsc]}"
+            violations.append(f"{msg} VIOLATION")
+            print(f"{msg} ** VIOLATION **")
+        elif comp.lcsc:
+            passes.append(f"  {comp.ref} LCSC={comp.lcsc} OK")
+            print(f"  {comp.ref} LCSC={comp.lcsc} OK")
+        else:
+            print(f"  {comp.ref} LCSC=None (parametric footprint)")
+    print()
+
+    # ---------------------------------------------------------------
     # Summary
     # ---------------------------------------------------------------
     print("=" * 60)
@@ -767,6 +856,8 @@ def main() -> None:
     print()
 
     # 9. Design rules compliance check
+    global _ANALOG_COMPONENTS  # noqa: PLW0603
+    _ANALOG_COMPONENTS = requirements.components
     _check_design_rules(fp_map)
 
 

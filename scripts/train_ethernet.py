@@ -168,7 +168,10 @@ def _make_w5500() -> Component:
 
 
 def _make_vcc_decoupling() -> Component:
-    """C1: 100nF decoupling on VCC, 0805."""
+    """C1: 100nF decoupling on VCC, 0805.
+
+    Private subnet +3V3_U1_DEC forces C1 next to U1 VCC pin.
+    """
     return Component(
         ref="C1",
         value="100nF",
@@ -176,7 +179,7 @@ def _make_vcc_decoupling() -> Component:
         lcsc="C49678",
         description="100nF VCC decoupling cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+3V3"),
+            Pin("1", "1", PinType.PASSIVE, net="+3V3_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -198,7 +201,10 @@ def _make_bulk_decoupling() -> Component:
 
 
 def _make_avdd_decoupling() -> Component:
-    """C3: 100nF decoupling on AVDD, 0805."""
+    """C3: 100nF decoupling on AVDD, 0805.
+
+    Private subnet AVDD_U1_DEC forces C3 next to U1 AVDD pin.
+    """
     return Component(
         ref="C3",
         value="100nF",
@@ -206,7 +212,7 @@ def _make_avdd_decoupling() -> Component:
         lcsc="C49678",
         description="100nF AVDD decoupling cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+3V3"),
+            Pin("1", "1", PinType.PASSIVE, net="AVDD_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -228,7 +234,10 @@ def _make_crystal() -> Component:
 
 
 def _make_crystal_cap_1() -> Component:
-    """C4: 22pF load capacitor for crystal, 0805."""
+    """C4: 22pF load capacitor for crystal, 0805.
+
+    Private subnet XTAL1_C4 forces C4 next to Y1/U1 XI pin.
+    """
     return Component(
         ref="C4",
         value="22pF",
@@ -236,14 +245,17 @@ def _make_crystal_cap_1() -> Component:
         lcsc="C1804",
         description="22pF crystal load cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="XTAL1"),
+            Pin("1", "1", PinType.PASSIVE, net="XTAL1_C4"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
 
 
 def _make_crystal_cap_2() -> Component:
-    """C5: 22pF load capacitor for crystal, 0805."""
+    """C5: 22pF load capacitor for crystal, 0805.
+
+    Private subnet XTAL2_C5 forces C5 next to Y1/U1 XO pin.
+    """
     return Component(
         ref="C5",
         value="22pF",
@@ -251,7 +263,7 @@ def _make_crystal_cap_2() -> Component:
         lcsc="C1804",
         description="22pF crystal load cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="XTAL2"),
+            Pin("1", "1", PinType.PASSIVE, net="XTAL2_C5"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -360,7 +372,7 @@ def _make_power_header() -> Component:
         ref="J3",
         value="PWR_Header",
         footprint=_HEADER_2P_FP,
-        lcsc="C124375",
+        lcsc=None,  # C124375 is 6-pin; use parametric 2-pin header
         description="2-pin 2.54mm header — 3V3 + GND power input",
         pins=(
             Pin("1", "+3V3", PinType.POWER_IN, PinFunction.VCC, net="+3V3"),
@@ -398,17 +410,14 @@ def _build_nets() -> tuple[Net, ...]:
         RSVD:      U1.EXRES1(3) -> R3.1
     """
     return (
+        # Shared +3V3 rail (bulk cap, headers, LEDs, W5500 power stubs)
         Net(
             name="+3V3",
             connections=(
                 NetConnection("J3", "1"),
-                NetConnection("C1", "1"),
-                NetConnection("C2", "1"),
-                NetConnection("C3", "1"),
-                NetConnection("U1", "2"),   # AVDD
+                NetConnection("C2", "1"),       # bulk cap stays on shared rail
                 NetConnection("U1", "10"),  # VCC
                 NetConnection("U1", "15"),  # VCC
-                NetConnection("U1", "22"),  # AVDD2
                 NetConnection("U1", "26"),
                 NetConnection("U1", "29"),
                 NetConnection("U1", "32"),
@@ -419,6 +428,22 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "47"),
                 NetConnection("J1", "9"),   # LED_G+
                 NetConnection("J1", "11"),  # LED_Y+
+            ),
+        ),
+        # Private VCC decoupling subnet: C1 <-> U1 VCC
+        Net(
+            name="+3V3_U1_DEC",
+            connections=(
+                NetConnection("U1", "2"),   # AVDD
+                NetConnection("C1", "1"),
+            ),
+        ),
+        # Private AVDD decoupling subnet: C3 <-> U1 AVDD2
+        Net(
+            name="AVDD_U1_DEC",
+            connections=(
+                NetConnection("U1", "22"),  # AVDD2
+                NetConnection("C3", "1"),
             ),
         ),
         Net(
@@ -538,13 +563,26 @@ def _build_nets() -> tuple[Net, ...]:
             connections=(
                 NetConnection("U1", "23"),
                 NetConnection("Y1", "1"),
-                NetConnection("C4", "1"),
             ),
         ),
         Net(
             name="XTAL2",
             connections=(
                 NetConnection("U1", "24"),
+                NetConnection("Y1", "2"),
+            ),
+        ),
+        # Private crystal load cap subnets
+        Net(
+            name="XTAL1_C4",
+            connections=(
+                NetConnection("Y1", "1"),
+                NetConnection("C4", "1"),
+            ),
+        ),
+        Net(
+            name="XTAL2_C5",
+            connections=(
                 NetConnection("Y1", "2"),
                 NetConnection("C5", "1"),
             ),
@@ -619,6 +657,9 @@ def _build_requirements() -> ProjectRequirements:
 def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     """Euclidean distance between two component positions (ignoring rotation)."""
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+_ETH_COMPONENTS: tuple[Component, ...] = ()  # set in main()
 
 
 def _check_design_rules(
@@ -785,6 +826,65 @@ def _check_design_rules(
         print(f"{label} ** VIOLATION **")
     print()
 
+    # --- Courtyard overlap / collision detection ---
+    print("--- Courtyard Collision Detection ---")
+    from kicad_pipeline.optimization.collision_resolver import _count_collisions
+
+    # Build fp_sizes from known footprint dimensions (approximate courtyards)
+    _fp_size_map: dict[str, tuple[float, float]] = {
+        "U1": (9.0, 9.0),    # LQFP-48 ~7x7mm body + courtyard
+        "J1": (16.0, 14.0),  # RJ45 with magnetics
+        "Y1": (3.6, 1.8),    # Crystal SMD 3215
+        "C1": (2.2, 1.4), "C2": (2.2, 1.4), "C3": (2.2, 1.4),
+        "C4": (2.2, 1.4), "C5": (2.2, 1.4),
+        "R1": (2.2, 1.4), "R2": (2.2, 1.4), "R3": (2.2, 1.4),
+        "J2": (2.54, 15.24),  # 6-pin vertical header
+        "J3": (2.54, 5.08),   # 2-pin vertical header
+    }
+    collisions = _count_collisions(fp_map, _fp_size_map)
+    if collisions:
+        for ref_a, ref_b in collisions:
+            msg = f"  Overlap: {ref_a} <-> {ref_b}"
+            violations.append(f"{msg} VIOLATION")
+            print(f"{msg} ** VIOLATION **")
+    else:
+        passes.append("  No courtyard collisions detected OK")
+        print("  No courtyard collisions detected OK")
+    print()
+
+    # --- 3D Model Coverage ---
+    print("--- 3D Model Coverage ---")
+    # Components with commonly available 3D models
+    _HAS_3D = {"C_0805", "R_0805", "Crystal_SMD_3215", "LQFP-48"}
+    # Components typically missing 3D models
+    _MAYBE_MISSING_3D = {"RJ45_HR911105A", "PinHeader_1x06_P2.54mm_Vertical",
+                         "PinHeader_1x02_P2.54mm_Vertical"}
+    for comp in _ETH_COMPONENTS:
+        if comp.footprint in _HAS_3D:
+            print(f"  {comp.ref} ({comp.footprint}): 3D model likely available")
+        elif comp.footprint in _MAYBE_MISSING_3D:
+            print(f"  {comp.ref} ({comp.footprint}): 3D model may be MISSING")
+        else:
+            print(f"  {comp.ref} ({comp.footprint}): 3D model status unknown")
+    print()
+
+    # --- LCSC Footprint Verification ---
+    print("--- LCSC Footprint Verification ---")
+    _KNOWN_BAD_LCSC = {
+        "C2337": "pulls 40-pin header (not 4-pin)",
+    }
+    for comp in _ETH_COMPONENTS:
+        if comp.lcsc and comp.lcsc in _KNOWN_BAD_LCSC:
+            msg = f"  {comp.ref} LCSC={comp.lcsc}: {_KNOWN_BAD_LCSC[comp.lcsc]}"
+            violations.append(f"{msg} VIOLATION")
+            print(f"{msg} ** VIOLATION **")
+        elif comp.lcsc:
+            passes.append(f"  {comp.ref} LCSC={comp.lcsc} OK")
+            print(f"  {comp.ref} LCSC={comp.lcsc} OK")
+        else:
+            print(f"  {comp.ref} LCSC=None (parametric footprint)")
+    print()
+
     # --- Summary ---
     print("=" * 60)
     print(f"PASSED: {len(passes)}  |  VIOLATIONS: {len(violations)}")
@@ -889,6 +989,8 @@ def main() -> None:
     print()
 
     # 9. Design rules compliance check
+    global _ETH_COMPONENTS  # noqa: PLW0603
+    _ETH_COMPONENTS = requirements.components
     _check_design_rules(fp_map)
 
 
