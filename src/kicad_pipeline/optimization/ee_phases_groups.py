@@ -1568,9 +1568,13 @@ def _phase_power_chain_flow(ctx: PlacementContext) -> None:
 
         # Place IC at signal-flow position
         ic_x = zx1 + zone_w * x_fracs[reg_idx]
-        # Vertical: keep current Y or use 40% zone height (learned from reference)
-        _, old_y, _ = ctx.positions[ic_ref]
-        ic_y = _clamp(old_y, zy1 + 3.0, zy2 - 3.0)
+        # Force Y to learned zone fractions (from human reference):
+        #   Buck IC at ~40% zone height, LDO at ~47% zone height.
+        # Previous code kept old_y which was set by _phase_power_group
+        # near the zone bottom — causing ~20mm drift from reference.
+        y_frac = 0.40 if is_buck else 0.47
+        ic_y = zy1 + zone_h * y_frac
+        ic_y = _clamp(ic_y, zy1 + 3.0, zy2 - 3.0)
         # Buck ICs are rotated -90deg for signal flow; LDOs stay at 0
         ic_rot = -90.0 if is_buck else 0.0
 
@@ -1639,30 +1643,63 @@ def _phase_power_chain_flow(ctx: PlacementContext) -> None:
             ctx.power_group_fixed.add(ref)
 
         _log.info(
-            "    3c1b: placed %s (%s) at (%.1f, %.1f, %.0f) with %d passives",
+            "    3c1b: placed %s (%s) at (%.1f, %.1f, %.0f) with %d passives"
+            " (roles: %s)",
             ic_ref,
             "buck" if is_buck else "ldo",
             ic_x, ic_y, ic_rot,
-            sum(1 for r in sc.refs if r != ic_ref and r in ctx.positions),
+            len(placed_roles),
+            ", ".join(sorted(placed_roles)),
         )
 
-    # Place connectors at zone edges (learned: input connector near top, test
-    # points between/after stages)
+    # Place connectors at learned positions from human reference.
+    # Only apply on dedicated power boards (few feature blocks, few
+    # connectors).  On larger multi-group boards, connectors are
+    # handled by _phase_top_edge_connectors and _phase_connector_orientation.
     power_group_refs = _collect_feature_refs(ctx, "power", "supply")
     power_connectors = sorted(
         r for r in power_group_refs
         if r.startswith("J") and r in ctx.positions
     )
-    if power_connectors and all_reg_scs:
-        # First connector (input): near top of zone, aligned with first regulator
+    is_power_focused_board = (
+        len(ctx.requirements.features) <= 2
+        and len(power_connectors) <= 4
+    )
+    if power_connectors and all_reg_scs and is_power_focused_board:
         first_ic_x = zx1 + zone_w * x_fracs[0]
-        if len(power_connectors) >= 1:
-            j_ref = power_connectors[0]
-            if j_ref not in ctx.fixed_refs:
-                _, jy, _ = ctx.positions[j_ref]
-                jy = _clamp(jy, zy1 + 2.0, zy1 + zone_h * 0.20)
-                ctx.positions[j_ref] = (first_ic_x + 7.7, jy, 0.0)
-                ctx.power_group_fixed.add(j_ref)
+        first_ic_y = zy1 + zone_h * 0.40  # buck IC Y
+
+        # Connector placement rules learned from human reference:
+        #   J1 (input): near top of zone, X = first_ic_x + 7.7, y = 15%
+        #   J2 (mid TP): 61% zone width, y = IC_y + 1.7, rot=-90
+        #   J3 (output TP): 88% zone width, 73% height, rot=-90
+        conn_rules: dict[int, tuple[float, float, float, float, float]] = {
+            # index -> (x_frac_or_offset, y_frac, rotation, is_relative_to_ic, ic_dx)
+            0: (0.0, 0.15, 0.0, 1.0, 7.7),
+            1: (0.61, 0.0, -90.0, 0.0, 0.0),
+            2: (0.88, 0.73, -90.0, 0.0, 0.0),
+        }
+        for idx, j_ref in enumerate(power_connectors):
+            if j_ref in ctx.fixed_refs:
+                continue
+            rule = conn_rules.get(idx)
+            if rule is None:
+                continue
+            x_frac, y_frac, rot, is_rel, ic_dx = rule
+            if is_rel > 0.5:
+                jx = first_ic_x + ic_dx
+                jy = zy1 + zone_h * y_frac
+            else:
+                jx = zx1 + zone_w * x_frac
+                jy = (zy1 + zone_h * y_frac
+                      if y_frac > 0.01 else first_ic_y + 1.7)
+            jx = _clamp(jx, zx1 + 1.0, zx2 - 1.0)
+            jy = _clamp(jy, zy1 + 1.0, zy2 - 1.0)
+            ctx.positions[j_ref] = (jx, jy, rot)
+            ctx.power_group_fixed.add(j_ref)
+            # Also add to fixed_refs so _phase_top_edge_connectors
+            # does not override the power-chain connector positions.
+            ctx.fixed_refs.add(j_ref)
 
     _log.info(
         "    3c1b: signal-flow ordered %d regulators across power zone",
@@ -1842,12 +1879,50 @@ def _phase_power_group(ctx: PlacementContext) -> None:
 def _detect_adc_channels(
     ctx: PlacementContext,
 ) -> list[tuple[str, str, list[str]]]:
-    """Detect ADC channel nets (1 IC + 2R + 1D + 1C)."""
+    """Detect ADC channels using functional_grouper subcircuits + net tracing.
+
+    Uses the pre-detected ADC_CHANNEL subcircuits from ctx.subcircuits as the
+    primary source.  For each subcircuit, finds the ADC IC by tracing nets
+    from the channel's passive components to a U* IC.  Returns a list of
+    (ic_ref, ic_pin, passives) tuples compatible with the rest of the phase.
+
+    Falls back to the legacy single-net heuristic (1 IC + 2R + 1D + 1C on
+    one net) when no subcircuit data is available.
+    """
+    from kicad_pipeline.optimization.functional_grouper import SubCircuitType
+
+    channels: list[tuple[str, str, list[str]]] = []
+
+    # --- Primary: use pre-detected ADC_CHANNEL subcircuits ---
+    adc_scs = [sc for sc in ctx.subcircuits
+               if sc.circuit_type == SubCircuitType.ADC_CHANNEL]
+
+    if adc_scs:
+        for sc in adc_scs:
+            passives = [r for r in sc.refs
+                        if r[0] in "RDC" and r in ctx.positions
+                        and not r.startswith("U")]
+            # Find the ADC IC by tracing nets from passives
+            ic_ref: str | None = None
+            ic_pin: str = ""
+            for net in ctx.requirements.nets:
+                net_refs = {c.ref for c in net.connections}
+                passive_in_ch = net_refs & set(passives)
+                ics_in_net = [c for c in net.connections
+                              if c.ref.startswith("U") and c.ref in ctx.positions]
+                if passive_in_ch and ics_in_net:
+                    ic_ref = ics_in_net[0].ref
+                    ic_pin = ics_in_net[0].pin
+                    break
+            if ic_ref:
+                channels.append((ic_ref, ic_pin, passives))
+        return channels
+
+    # --- Fallback: legacy single-net heuristic (1 IC + 2R + 1D + 1C) ---
     net_components: dict[str, list[tuple[str, str]]] = {}
     for net in ctx.requirements.nets:
         net_components[net.name] = [(c.ref, c.pin) for c in net.connections]
 
-    channels: list[tuple[str, str, list[str]]] = []
     for _net_name, conns in net_components.items():
         ic_refs = [(r, p) for r, p in conns if r.startswith("U") and r in ctx.positions]
         passive_refs = [r for r, p in conns
@@ -1858,8 +1933,8 @@ def _detect_adc_channels(
         d_count = sum(1 for r in passive_refs if r.startswith("D"))
         c_count = sum(1 for r in passive_refs if r.startswith("C"))
         if r_count == 2 and d_count == 1 and c_count == 1:
-            ic_ref, ic_pin = ic_refs[0]
-            channels.append((ic_ref, ic_pin, passive_refs))
+            found_ic_ref, found_ic_pin = ic_refs[0]
+            channels.append((found_ic_ref, found_ic_pin, passive_refs))
     return channels
 
 
