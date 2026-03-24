@@ -15,6 +15,15 @@ Power architecture:
     Bootstrap: C3 from U1 BST to U1 SW
     Catch diode: D1 from GND to U1 SW
 
+Subnet architecture (private subnets teach proximity):
+    +5V_C2_DEC:  L1.2, C2.1            — C2 must be right at buck output
+    +5V_C4_DEC:  U2.VIN, C4.1          — C4 must be right at LDO input
+    +3V3_C5_DEC: U2.VOUT, C5.1         — C5 must be right at LDO output
+    BST_U1:      U1.BOOT, C3.1         — C3 must be right at BST pin
+    +24V:        J1.1, C1.1, U1.VIN    — C1 on shared input rail (serves whole rail)
+    +5V:         R1.1, J2.1            — shared 5V rail (test point, FB divider)
+    +3V3:        J3.1                   — shared 3.3V rail (test point)
+
 TPS54331 pinout (SOIC-8):
     Pin 1: BOOT (bootstrap)
     Pin 2: VIN  (input voltage)
@@ -96,7 +105,7 @@ def _make_buck_converter() -> Component:
         lcsc="C9865",
         description="4.5-28V 3A step-down buck converter SOIC-8",
         pins=(
-            Pin("1", "BOOT", PinType.INPUT, net="BST"),
+            Pin("1", "BOOT", PinType.INPUT, net="BST_U1"),
             Pin("2", "VIN", PinType.POWER_IN, PinFunction.VCC, net="+24V"),
             Pin("3", "EN", PinType.INPUT, PinFunction.ENABLE, net="+24V"),
             Pin("4", "SS", PinType.INPUT),  # soft start — unused
@@ -122,7 +131,7 @@ def _make_inductor() -> Component:
         description="10uH 3A power inductor 1210",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="SW"),
-            Pin("2", "2", PinType.PASSIVE, net="+5V"),
+            Pin("2", "2", PinType.PASSIVE, net="+5V_C2_DEC"),
         ),
     )
 
@@ -143,7 +152,11 @@ def _make_input_cap() -> Component:
 
 
 def _make_output_cap() -> Component:
-    """C2: 22uF output capacitor for buck converter, 0805."""
+    """C2: 22uF output capacitor for buck converter, 0805.
+
+    On private subnet +5V_C2_DEC — teaches that C2 must sit right at the
+    buck output (L1 pin 2 / U1 output node), not just anywhere on +5V.
+    """
     return Component(
         ref="C2",
         value="22uF",
@@ -151,14 +164,19 @@ def _make_output_cap() -> Component:
         lcsc="C159842",
         description="22uF 10V ceramic output cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+5V"),
+            Pin("1", "1", PinType.PASSIVE, net="+5V_C2_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
 
 
 def _make_bootstrap_cap() -> Component:
-    """C3: 100nF bootstrap capacitor, 0805."""
+    """C3: 100nF bootstrap capacitor, 0805.
+
+    On private subnet BST_U1 — teaches that C3 must sit right at U1 BST pin.
+    The BST net is already small (only U1.BOOT + C3.1), but using a private
+    subnet makes the proximity requirement explicit in the netlist.
+    """
     return Component(
         ref="C3",
         value="100nF",
@@ -166,7 +184,7 @@ def _make_bootstrap_cap() -> Component:
         lcsc="C49678",
         description="100nF bootstrap cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="BST"),
+            Pin("1", "1", PinType.PASSIVE, net="BST_U1"),
             Pin("2", "2", PinType.PASSIVE, net="SW"),
         ),
     )
@@ -243,15 +261,19 @@ def _make_ldo() -> Component:
         description="3.3V 1A LDO regulator SOT-223",
         pins=(
             Pin("1", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
-            Pin("2", "VOUT", PinType.POWER_OUT, PinFunction.VCC, net="+3V3"),
-            Pin("3", "VIN", PinType.POWER_IN, PinFunction.VCC, net="+5V"),
-            Pin("4", "VOUT_TAB", PinType.POWER_OUT, PinFunction.VCC, net="+3V3"),
+            Pin("2", "VOUT", PinType.POWER_OUT, PinFunction.VCC, net="+3V3_C5_DEC"),
+            Pin("3", "VIN", PinType.POWER_IN, PinFunction.VCC, net="+5V_C4_DEC"),
+            Pin("4", "VOUT_TAB", PinType.POWER_OUT, PinFunction.VCC, net="+3V3_C5_DEC"),
         ),
     )
 
 
 def _make_ldo_input_cap() -> Component:
-    """C4: 10uF input capacitor for LDO, 0805."""
+    """C4: 10uF input capacitor for LDO, 0805.
+
+    On private subnet +5V_C4_DEC — teaches that C4 must sit right at U2 VIN,
+    not just anywhere on the +5V rail.
+    """
     return Component(
         ref="C4",
         value="10uF",
@@ -259,14 +281,18 @@ def _make_ldo_input_cap() -> Component:
         lcsc="C15850",
         description="10uF LDO input cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+5V"),
+            Pin("1", "1", PinType.PASSIVE, net="+5V_C4_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
 
 
 def _make_ldo_output_cap() -> Component:
-    """C5: 22uF output capacitor for LDO, 0805."""
+    """C5: 22uF output capacitor for LDO, 0805.
+
+    On private subnet +3V3_C5_DEC — teaches that C5 must sit right at U2 VOUT,
+    not just anywhere on the +3V3 rail.
+    """
     return Component(
         ref="C5",
         value="22uF",
@@ -274,7 +300,7 @@ def _make_ldo_output_cap() -> Component:
         lcsc="C159842",
         description="22uF LDO output cap 0805",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="+3V3"),
+            Pin("1", "1", PinType.PASSIVE, net="+3V3_C5_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -333,14 +359,18 @@ def _make_3v3_test_header() -> Component:
 def _build_nets() -> tuple[Net, ...]:
     """Build all nets for the power chain.
 
-    Net topology:
-        +24V: J1.1 -> C1.1 -> U1.VIN -> U1.EN
-        GND:  J1.2, C1.2, U1.GND, U1.PAD, D1.A, R2.2, C2.2, C3... (throughout)
-        SW:   U1.PH -> L1.1 -> C3.2 -> D1.K
-        BST:  U1.BOOT -> C3.1
-        +5V:  L1.2 -> C2.1 -> R1.1 -> U2.VIN -> C4.1 -> J2.1
-        FB:   R1.2 -> R2.1 -> U1.VSNS
-        +3V3: U2.VOUT -> U2.VOUT_TAB -> C5.1 -> J3.1
+    Subnet architecture — private subnets encode proximity requirements:
+
+        +24V:       J1.1, C1.1, U1.VIN, U1.EN  (shared input rail, C1 is input decoupling)
+        GND:        all ground pins              (shared ground)
+        SW:         U1.PH, L1.1, C3.2, D1.K    (switch node)
+        BST_U1:     U1.BOOT, C3.1               (bootstrap — C3 right at U1 BST pin)
+        +5V_C2_DEC: L1.2, C2.1                  (buck output node — C2 right at L1/U1 output)
+        +5V:        R1.1, J2.1                   (shared 5V rail — test point & FB divider)
+        +5V_C4_DEC: U2.VIN, C4.1                (LDO input node — C4 right at U2 VIN)
+        FB:         R1.2, R2.1, U1.VSNS         (feedback sense)
+        +3V3_C5_DEC: U2.VOUT, U2.VOUT_TAB, C5.1 (LDO output node — C5 right at U2 VOUT)
+        +3V3:       J3.1                         (shared 3.3V rail — test point)
     """
     return (
         Net(
@@ -379,21 +409,34 @@ def _build_nets() -> tuple[Net, ...]:
             ),
         ),
         Net(
-            name="BST",
+            name="BST_U1",
             connections=(
                 NetConnection("U1", "1"),  # BOOT pin
                 NetConnection("C3", "1"),  # bootstrap cap high side
             ),
         ),
+        # Private subnet: buck output — C2 must be right at L1 output / U1 output
+        Net(
+            name="+5V_C2_DEC",
+            connections=(
+                NetConnection("L1", "2"),   # inductor output
+                NetConnection("C2", "1"),   # output cap
+            ),
+        ),
+        # Shared +5V rail — feedback divider and test point
         Net(
             name="+5V",
             connections=(
-                NetConnection("L1", "2"),
-                NetConnection("C2", "1"),
-                NetConnection("R1", "1"),  # FB top to +5V
-                NetConnection("U2", "3"),  # LDO VIN
-                NetConnection("C4", "1"),
-                NetConnection("J2", "1"),
+                NetConnection("R1", "1"),   # FB top to +5V
+                NetConnection("J2", "1"),   # 5V test point
+            ),
+        ),
+        # Private subnet: LDO input — C4 must be right at U2 VIN
+        Net(
+            name="+5V_C4_DEC",
+            connections=(
+                NetConnection("U2", "3"),   # LDO VIN
+                NetConnection("C4", "1"),   # LDO input cap
             ),
         ),
         Net(
@@ -404,13 +447,20 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "5"),  # VSNS pin
             ),
         ),
+        # Private subnet: LDO output — C5 must be right at U2 VOUT
+        Net(
+            name="+3V3_C5_DEC",
+            connections=(
+                NetConnection("U2", "2"),   # VOUT
+                NetConnection("U2", "4"),   # VOUT tab
+                NetConnection("C5", "1"),   # output cap
+            ),
+        ),
+        # Shared +3V3 rail — test point
         Net(
             name="+3V3",
             connections=(
-                NetConnection("U2", "2"),  # VOUT
-                NetConnection("U2", "4"),  # VOUT tab
-                NetConnection("C5", "1"),
-                NetConnection("J3", "1"),
+                NetConnection("J3", "1"),   # 3.3V test point
             ),
         ),
     )
@@ -712,6 +762,123 @@ def main() -> None:
 
     # 9. Design rules compliance check
     _check_design_rules(fp_map)
+
+    # 10. Analyse human-edited reference layout (if it exists)
+    _analyse_human_layout()
+
+
+# ---------------------------------------------------------------------------
+# Human layout analysis
+# ---------------------------------------------------------------------------
+
+
+def _analyse_human_layout() -> None:
+    """Extract and analyse the human-edited PCB to learn placement patterns.
+
+    Reads output/train_power.kicad_pcb (must exist from a previous run that
+    was then hand-edited in KiCad) and prints signal-flow direction, proximity
+    measurements, and key observations.
+    """
+    pcb_path = _repo / "output" / "train_power.kicad_pcb"
+    if not pcb_path.exists():
+        print("\n(No human-edited PCB found — skipping layout analysis)")
+        return
+
+    from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
+
+    positions = positions_from_pcb_file(pcb_path)
+    if not positions:
+        print("\n(Human PCB has no footprints — skipping layout analysis)")
+        return
+
+    import math
+
+    def dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+
+    print()
+    print("=" * 60)
+    print("HUMAN LAYOUT ANALYSIS (from output/train_power.kicad_pcb)")
+    print("=" * 60)
+    print()
+
+    # Signal flow (X-axis order)
+    flow_order = ["J1", "U1", "L1", "C2", "J2", "U2", "C5", "J3"]
+    available = [r for r in flow_order if r in positions]
+    print("--- Signal Flow (X-axis) ---")
+    for ref in available:
+        x, y, rot = positions[ref]
+        print(f"  {ref:4s}  x={x:6.1f}  y={y:6.1f}  rot={rot:6.1f}")
+    xs = [positions[r][0] for r in available]
+    monotonic = all(xs[i] <= xs[i + 1] for i in range(len(xs) - 1))
+    print(f"  Left-to-right monotonic: {'YES' if monotonic else 'NO'}")
+    print()
+
+    # Proximity pairs
+    print("--- Proximity Measurements ---")
+    pairs = [
+        ("C1", "U1", "Input cap -> buck IC"),
+        ("C3", "U1", "Bootstrap cap -> buck IC"),
+        ("D1", "U1", "Catch diode -> buck IC"),
+        ("L1", "U1", "Inductor -> buck IC"),
+        ("C2", "L1", "Output cap -> inductor output"),
+        ("R1", "R2", "FB divider pair"),
+        ("R1", "U1", "FB top R -> buck IC"),
+        ("C4", "U2", "LDO input cap -> LDO"),
+        ("C5", "U2", "LDO output cap -> LDO"),
+    ]
+    for ref_a, ref_b, desc in pairs:
+        if ref_a in positions and ref_b in positions:
+            d = dist(positions[ref_a], positions[ref_b])
+            print(f"  {ref_a}-{ref_b}: {d:5.1f}mm  ({desc})")
+    print()
+
+    # Power loop compactness
+    loop_refs = ["C1", "U1", "L1", "C2"]
+    if all(r in positions for r in loop_refs):
+        total = sum(
+            dist(positions[loop_refs[i]], positions[loop_refs[i + 1]])
+            for i in range(len(loop_refs) - 1)
+        )
+        print(f"--- Buck Power Loop (C1->U1->L1->C2): {total:.1f}mm total ---")
+        for i in range(len(loop_refs) - 1):
+            d = dist(positions[loop_refs[i]], positions[loop_refs[i + 1]])
+            print(f"  {loop_refs[i]} -> {loop_refs[i+1]}: {d:.1f}mm")
+    print()
+
+    # Connector edge distances (board 50x40)
+    print("--- Connector Edge Distances (board 50x40) ---")
+    for ref in ("J1", "J2", "J3"):
+        if ref in positions:
+            x, y, _ = positions[ref]
+            left = x
+            right = 50.0 - x
+            top = y
+            bottom = 40.0 - y
+            nearest = min(left, right, top, bottom)
+            side = (
+                "left" if nearest == left else
+                "right" if nearest == right else
+                "top" if nearest == top else "bottom"
+            )
+            print(f"  {ref}: nearest edge = {side} @ {nearest:.1f}mm  (x={x:.1f}, y={y:.1f})")
+    print()
+
+    # Key observations
+    print("--- Key Observations ---")
+    if "U1" in positions and "U2" in positions:
+        u1x, u2x = positions["U1"][0], positions["U2"][0]
+        gap = u2x - u1x
+        print(f"  Buck-LDO separation: {gap:.1f}mm (U1 x={u1x:.1f} -> U2 x={u2x:.1f})")
+    if "C2" in positions and "C4" in positions:
+        d = dist(positions["C2"], positions["C4"])
+        print(f"  C2-C4 distance: {d:.1f}mm (buck output cap to LDO input cap)")
+    if "U1" in positions:
+        rot = positions["U1"][2]
+        print(f"  U1 rotation: {rot:.0f}deg (buck IC orientation)")
+    if "U2" in positions:
+        rot = positions["U2"][2]
+        print(f"  U2 rotation: {rot:.0f}deg (LDO orientation)")
 
 
 if __name__ == "__main__":
