@@ -1708,7 +1708,8 @@ def _fp_keepout_sexp(keepout: FootprintKeepout) -> SExpNode:
         ["vias", "not_allowed" if keepout.no_vias else "allowed"],
     ]
     node: list[SExpNode] = [
-        "zone", "", "net 0",
+        "zone", "",
+        ["net", 0],
         rules,
         ["layers", *keepout.layers],
         ["polygon", pts],
