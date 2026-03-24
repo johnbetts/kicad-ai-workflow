@@ -152,6 +152,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
 
     Returns relay_leds data for late-phase use.
     """
+    phases["subnet_placement"](ctx)  # type: ignore[operator]
     phases["relay_rows"](ctx)  # type: ignore[operator]
     phases["relay_connector_align"](ctx)  # type: ignore[operator]
     phases["relay_drivers"](ctx)  # type: ignore[operator]
@@ -235,6 +236,9 @@ def optimize_placement_ee(
         _phase_top_edge_connectors,
         _phase_zone_partitioning,
     )
+    from kicad_pipeline.optimization.subnet_placer import (
+        _phase_subnet_placement,
+    )
 
     ctx = _build_placement_context(requirements, initial_pcb, max_review_passes)
 
@@ -250,6 +254,7 @@ def optimize_placement_ee(
     _log.info("=== Level 3: Intra-Group Refinement ===")
     _relay_leds = _run_level3_phases(
         ctx,
+        subnet_placement=_phase_subnet_placement,
         relay_rows=_phase_relay_rows,
         relay_connector_align=_phase_relay_connector_alignment,
         relay_drivers=_phase_relay_drivers,
