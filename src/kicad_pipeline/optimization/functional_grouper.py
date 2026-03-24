@@ -1037,7 +1037,7 @@ def _detect_voltage_dividers(
     adj: dict[str, set[str]],
     claimed: set[str],
 ) -> list[DetectedSubCircuit]:
-    """Detect voltage dividers: R1 + R2 in series between power and GND."""
+    """Detect voltage dividers: R1 + R2 in series between power/connector and GND."""
     results: list[DetectedSubCircuit] = []
 
     resistors = [c for c in requirements.components
@@ -1065,6 +1065,19 @@ def _detect_voltage_dividers(
                 _is_power_net(n) and not _is_gnd_net(n)
                 for n in r1_nets | nb_nets
             )
+            # Also accept sensor-input dividers: one R connects to a
+            # connector (J*) via a non-power signal net (e.g. AIN_RAW).
+            if not has_power:
+                all_nets = r1_nets | nb_nets
+                for net_name in all_nets:
+                    if _is_power_net(net_name) or _is_gnd_net(net_name):
+                        continue
+                    for ref in net_to_refs.get(net_name, set()):
+                        if _ref_prefix(ref) == "J":
+                            has_power = True
+                            break
+                    if has_power:
+                        break
             has_gnd = any(_is_gnd_net(n) for n in r1_nets | nb_nets)
             shared_signal = (r1_nets & nb_nets) - {
                 n for n in r1_nets & nb_nets if _is_power_net(n)
@@ -1319,14 +1332,19 @@ def _collect_protection_components(
     claimed: set[str],
     adc_refs: list[str],
 ) -> None:
-    """Append TVS/zener protection components on signal nets to *adc_refs*."""
+    """Append TVS/zener and filter-cap components on signal nets to *adc_refs*.
+
+    Collects D/Z (protection diodes) and C (filter capacitors) that sit on
+    the same signal nets as the voltage divider.  This ensures the full
+    channel signal chain (divider + TVS + filter cap) is grouped together.
+    """
     for net_name in divider_nets:
         if _is_power_net(net_name) or _is_gnd_net(net_name):
             continue
         for ref in net_to_refs.get(net_name, set()):
             if ref in claimed or ref in adc_refs:
                 continue
-            if _ref_prefix(ref) in ("D", "Z"):
+            if _ref_prefix(ref) in ("D", "Z", "C"):
                 adc_refs.append(ref)
                 claimed.add(ref)
 
@@ -1645,6 +1663,15 @@ def detect_subcircuits(
     )
     all_subcircuits.extend(dividers)
 
+    # ADC channel detection: runs BEFORE decoupling so filter caps on
+    # protection nets (AIN*_PROT) get claimed as channel members rather
+    # than being misclassified as IC decoupling caps.
+    adc_channels = _detect_adc_channels(
+        requirements, net_to_refs, ref_to_nets, adj,
+        all_subcircuits, claimed,
+    )
+    all_subcircuits.extend(adc_channels)
+
     decoupling = _detect_decoupling_pairs(
         requirements, net_to_refs, ref_to_nets, claimed,
     )
@@ -1653,13 +1680,6 @@ def detect_subcircuits(
     # RF antenna detection (before MCU peripherals so RF module isn't claimed)
     rf_antennas = _detect_rf_antenna(requirements, claimed)
     all_subcircuits.extend(rf_antennas)
-
-    # ADC channel detection (after voltage dividers, before MCU peripherals)
-    adc_channels = _detect_adc_channels(
-        requirements, net_to_refs, ref_to_nets, adj,
-        all_subcircuits, claimed,
-    )
-    all_subcircuits.extend(adc_channels)
 
     # MCU peripheral cluster detection (expanded: TP, I2C pullups, small connectors)
     mcu_peripherals = _detect_mcu_peripherals(

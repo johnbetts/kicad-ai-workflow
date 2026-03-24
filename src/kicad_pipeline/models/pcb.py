@@ -266,6 +266,23 @@ class Footprint3DModel:
 
 
 @dataclass(frozen=True)
+class FootprintKeepout:
+    """A keepout zone embedded inside a footprint.
+
+    Used for footprint-local no-copper areas such as the antenna keepout
+    on ESP32 modules.  Coordinates are relative to the footprint origin.
+    """
+
+    polygon: tuple[Point, ...]
+    layers: tuple[str, ...]
+    no_copper: bool = True
+    no_vias: bool = False
+    no_tracks: bool = False
+    tag: str = ""
+    uuid: str = ""
+
+
+@dataclass(frozen=True)
 class Footprint:
     """A placed footprint on the PCB."""
 
@@ -287,6 +304,8 @@ class Footprint:
     footprint_source: str = ""  # "jlcpcb", "parametric", "parametric-fallback", "parsed"
     mpn: str | None = None
     manufacturer: str | None = None
+    fp_zones: tuple[FootprintKeepout, ...] = ()
+    """Footprint-level keepout zones (e.g. antenna keepout on RF modules)."""
 
 
 @dataclass(frozen=True)

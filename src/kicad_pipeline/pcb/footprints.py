@@ -41,6 +41,7 @@ from kicad_pipeline.models.pcb import (
     FootprintArc,
     FootprintBBox,
     FootprintCircle,
+    FootprintKeepout,
     FootprintLine,
     FootprintText,
     OriginType,
@@ -595,6 +596,31 @@ _ESP32_SIDE_PINS: int = 14
 _ESP32_BOTTOM_PINS: int = 12
 _ESP32_TOP_MARGIN: float = 2.5
 _ESP32_GND_PAD_SIZE: float = 6.7
+
+# ESP32-S3-WROOM-1 pin names (datasheet Table 3-1, top view, 41 pads).
+# Index 0 = pad 1, index 40 = pad 41.
+_ESP32_PIN_NAMES: tuple[str, ...] = (
+    # Left column (pins 1-14): top to bottom
+    "GND", "3V3", "EN", "IO4", "IO5", "IO6", "IO7",
+    "IO15", "IO16", "IO17", "IO18", "IO8", "IO19", "IO20",
+    # Bottom row (pins 15-26): left to right
+    "IO3", "IO46", "IO9", "IO10", "IO11", "IO12",
+    "IO13", "IO14", "IO21", "IO47", "IO48", "IO45",
+    # Right column (pins 27-40): bottom to top
+    "IO0", "IO35", "IO36", "IO37", "IO38", "IO39",
+    "IO40", "IO41", "IO42", "RXD0", "TXD0", "IO2", "IO1", "GND",
+    # Center pad (pin 41)
+    "GND",
+)
+
+# Antenna keepout: top portion of the ESP32 module where no copper/components
+# should be placed.  The antenna extends ~5mm from the top edge of the body.
+_ESP32_ANTENNA_KEEPOUT_DEPTH_MM: float = 5.0
+
+# Vertical offset for the GND pad centre.  The antenna occupies the top ~5mm
+# of the 25.5mm body so the pad field (and GND pad) is shifted south by half
+# the antenna depth to centre it on the active silicon area.
+_ESP32_GND_PAD_Y_OFFSET: float = 2.5
 
 # Crystal oscillator dimensions (mm)
 _CRYSTAL_PAD_W: float = 1.2
@@ -1287,6 +1313,12 @@ def make_esp32_wroom(
       - Right side: 14 pads (pins 27-40), bottom to top
       - Center:     pad 41 (GND exposed pad)
 
+    Each pad carries the functional pin name (e.g. ``"GND"``, ``"IO4"``) so
+    that KiCad displays meaningful labels instead of bare numbers.
+
+    The footprint includes an antenna keepout zone covering the top ~5 mm of
+    the module body (no copper on any layer) and a 3D model reference.
+
     Args:
         ref: Reference designator (e.g. "U3").
         value: Component value string.
@@ -1337,30 +1369,196 @@ def make_esp32_wroom(
             str(27 + i), right_x, col_bot_y - i * pitch, pad_h, pad_w, layer,
         ))
 
-    # Center GND pad (large thermal pad underneath) — pin 41
+    # Center GND pad (large thermal pad underneath) — pin 41.
+    # Offset south by _ESP32_GND_PAD_Y_OFFSET to centre it on the active
+    # silicon area (the antenna occupies the top ~5mm of the module body).
     pad_list.append(Pad(
         number="41",
         pad_type="smd",
         shape="rect",
-        position=Point(0.0, 0.0),
+        position=Point(0.0, _ESP32_GND_PAD_Y_OFFSET),
         size_x=_ESP32_GND_PAD_SIZE,
         size_y=_ESP32_GND_PAD_SIZE,
         layers=(layer, LAYER_F_PASTE if layer == LAYER_F_CU else LAYER_B_PASTE,
                 LAYER_F_MASK if layer == LAYER_F_CU else LAYER_B_MASK),
     ))
 
+    # --- Pin name labels on the fab layer (Bug 1 fix) ---
+    # KiCad pad numbers must stay numeric for netlist matching, so we add
+    # small text labels next to each pad showing the functional pin name.
+    fab_layer = LAYER_F_FAB if layer == LAYER_F_CU else LAYER_B_FAB
+    pin_labels: list[FootprintText] = []
+    _label_size = 0.5
+    _label_offset = 1.6  # mm offset from pad centre toward body interior
+    for i, pad in enumerate(pad_list[:-1]):  # skip pad 41 (GND label not needed)
+        pin_name = _ESP32_PIN_NAMES[i]
+        px, py = pad.position.x, pad.position.y
+        # Shift label inward: left pads -> right, right pads -> left,
+        # bottom pads -> up.
+        if i < n_side:  # left column
+            lx, ly = px + _label_offset, py
+        elif i < n_side + n_bottom:  # bottom row
+            lx, ly = px, py - _label_offset
+        else:  # right column
+            lx, ly = px - _label_offset, py
+        pin_labels.append(FootprintText(
+            text_type="user", text=pin_name,
+            position=Point(lx, ly), layer=fab_layer,
+            effects_size=_label_size,
+        ))
+
+    # --- Antenna keepout zone (footprint-level) ---
+    # Covers the top _ESP32_ANTENNA_KEEPOUT_DEPTH_MM of the module body.
+    # No copper allowed on any layer beneath the antenna.
+    antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+    half_w = body_w / 2.0
+    top_y = -(body_h / 2.0)
+    keepout_bot_y = top_y + antenna_depth
+    keepout_poly = (
+        Point(-half_w, top_y),
+        Point(half_w, top_y),
+        Point(half_w, keepout_bot_y),
+        Point(-half_w, keepout_bot_y),
+    )
+    antenna_keepout = FootprintKeepout(
+        polygon=keepout_poly,
+        layers=(LAYER_F_CU, LAYER_B_CU),
+        no_copper=True,
+        no_vias=True,
+        no_tracks=True,
+        tag="antenna",
+    )
+
     graphics = _courtyard_rect(body_w, body_h)
-    texts = (
+    texts: tuple[FootprintText, ...] = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
         _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
+        *pin_labels,
     )
     lib_id = "RF_Module:ESP32-S3-WROOM-1"
+
+    # 3D model — always include a path even if the file is not present
+    # locally; KiCad will display a placeholder.
     model = _model_for_package(lib_id)
-    models = (model,) if model is not None else ()
+    if model is None:
+        model = Footprint3DModel(
+            path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/"
+            "ESP32-S3-WROOM-1.step",
+        )
+    models = (model,)
+
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=layer, pads=tuple(pad_list), graphics=graphics, texts=texts,
         attr="smd", models=models,
+        fp_zones=(antenna_keepout,),
+    )
+
+
+def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
+    """Add pin name labels, antenna keepout, and 3D model to an ESP32 footprint.
+
+    Works on footprints from any source (JLCPCB cache, parametric generator,
+    or parsed .kicad_mod files).  Idempotent — skips enrichment that already
+    exists.
+
+    Args:
+        fp: An ESP32/WROOM footprint (any origin).
+
+    Returns:
+        Enriched copy of *fp*.
+    """
+    layer = fp.layer
+    fab_layer = LAYER_F_FAB if layer == LAYER_F_CU else LAYER_B_FAB
+
+    # --- Bug 1: Pin name labels on the fab layer ---
+    # Only add if not already present (idempotent).
+    has_pin_labels = any(
+        t.text_type == "user" and t.text in _ESP32_PIN_NAMES
+        for t in fp.texts
+    )
+    extra_texts: list[FootprintText] = []
+    if not has_pin_labels and len(fp.pads) >= 40:
+        # Determine pad field bounding box to decide label offsets.
+        _label_size = 0.5
+        _label_offset = 1.6  # mm inward from pad centre
+        all_x = [p.position.x for p in fp.pads[:40]]
+        min_x, max_x = min(all_x), max(all_x)
+        for idx, pad in enumerate(fp.pads[:40]):
+            if idx >= len(_ESP32_PIN_NAMES):
+                break
+            pin_name = _ESP32_PIN_NAMES[idx]
+            px, py = pad.position.x, pad.position.y
+            # Classify pad side by position relative to centroid.
+            # Left-side pads have small x, right-side have large x,
+            # bottom pads have large y.
+            if abs(px - min_x) < 1.0:  # left column
+                lx, ly = px + _label_offset, py
+            elif abs(px - max_x) < 1.0:  # right column
+                lx, ly = px - _label_offset, py
+            else:  # bottom row
+                lx, ly = px, py - _label_offset
+            extra_texts.append(FootprintText(
+                text_type="user", text=pin_name,
+                position=Point(lx, ly), layer=fab_layer,
+                effects_size=_label_size,
+            ))
+
+    # --- Bug 3: Antenna keepout zone ---
+    has_antenna_keepout = any(
+        fz.tag == "antenna" for fz in fp.fp_zones
+    )
+    extra_zones: list[FootprintKeepout] = []
+    if not has_antenna_keepout:
+        # Estimate body bounds from pad field + margins.
+        body_w = _ESP32_BODY_W
+        body_h = _ESP32_BODY_H
+        antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+        half_w = body_w / 2.0
+        top_y = -(body_h / 2.0)
+        keepout_bot_y = top_y + antenna_depth
+        keepout_poly = (
+            Point(-half_w, top_y),
+            Point(half_w, top_y),
+            Point(half_w, keepout_bot_y),
+            Point(-half_w, keepout_bot_y),
+        )
+        extra_zones.append(FootprintKeepout(
+            polygon=keepout_poly,
+            layers=(LAYER_F_CU, LAYER_B_CU),
+            no_copper=True,
+            no_vias=True,
+            no_tracks=True,
+            tag="antenna",
+        ))
+
+    # --- Bug 4: 3D model ---
+    has_model = len(fp.models) > 0
+    models = fp.models
+    if not has_model:
+        model = _model_for_package("RF_Module:ESP32-S3-WROOM-1", layer)
+        if model is None:
+            model = Footprint3DModel(
+                path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/"
+                "ESP32-S3-WROOM-1.step",
+            )
+        models = (model,)
+
+    # Return enriched copy only if something changed.
+    if not extra_texts and not extra_zones and has_model:
+        return fp
+
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=fp.pads, graphics=fp.graphics,
+        texts=(*fp.texts, *extra_texts),
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+        models=models,
+        datasheet=fp.datasheet, description=fp.description,
+        footprint_source=fp.footprint_source,
+        mpn=fp.mpn, manufacturer=fp.manufacturer,
+        fp_zones=(*fp.fp_zones, *extra_zones),
     )
 
 
@@ -2435,7 +2633,7 @@ def _try_jlcpcb_footprint(
             pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
             lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
             datasheet=fp.datasheet, description=fp.description,
-            footprint_source="jlcpcb",
+            footprint_source="jlcpcb", fp_zones=fp.fp_zones,
         )
         # Relay post-processing: remove F.Fab blob, add Edge.Cuts isolation slot
         if _is_relay_footprint(fp):
@@ -2855,6 +3053,11 @@ def footprint_for_component(
     if lcsc:
         fp = _try_jlcpcb_footprint(lcsc, ref, value, layer, footprint_id=footprint_id)
         if fp is not None:
+            # Enrich ESP32/WROOM footprints from JLCPCB cache with pin
+            # labels, antenna keepout, and 3D model.
+            fid_upper = footprint_id.strip().upper()
+            if "ESP32" in fid_upper or "WROOM" in fid_upper:
+                fp = _enrich_esp32_footprint(fp)
             return fp
 
     fid = footprint_id.strip()
@@ -2878,7 +3081,15 @@ def footprint_for_component(
         attr=fp.attr,
         models=fp.models,
         footprint_source=_source,
+        fp_zones=fp.fp_zones,
     )
+
+    # Enrich ESP32/WROOM footprints with pin labels, antenna keepout, and
+    # 3D model regardless of whether they came from JLCPCB cache or
+    # parametric generator.
+    if "ESP32" in upper or "WROOM" in upper:
+        fp = _enrich_esp32_footprint(fp)
+
     return fp
 
 

@@ -34,6 +34,7 @@ from kicad_pipeline.models.pcb import (
     Footprint,
     FootprintArc,
     FootprintCircle,
+    FootprintKeepout,
     FootprintLine,
     FootprintText,
     Keepout,
@@ -318,6 +319,7 @@ def _apply_nets_to_footprint(
         uuid=fp.uuid or _new_uuid(),
         attr=fp.attr,
         models=fp.models, datasheet=fp.datasheet, description=fp.description,
+        fp_zones=fp.fp_zones,
     )
 
 
@@ -622,6 +624,7 @@ def _build_pre_footprints(
                 pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
                 datasheet=comp.datasheet, description=comp.description,
+                fp_zones=fp.fp_zones,
             )
         if project_name is not None:
             new_lib_id = _footprint_lib_id(comp, project_name=project_name)
@@ -631,6 +634,7 @@ def _build_pre_footprints(
                 pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
                 datasheet=fp.datasheet, description=fp.description,
+                fp_zones=fp.fp_zones,
             )
         pre_footprints.append(fp)
     return pre_footprints
@@ -744,7 +748,7 @@ def _run_placement(
             pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
             lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
             models=fp.models, datasheet=fp.datasheet,
-            description=fp.description,
+            description=fp.description, fp_zones=fp.fp_zones,
         )
         footprints_with_pos.append(fp_placed)
     return footprints_with_pos
@@ -1679,6 +1683,41 @@ def _fp_graphic_sexp(graphic: FootprintLine | FootprintArc | FootprintCircle) ->
     return g
 
 
+def _fp_keepout_sexp(keepout: FootprintKeepout) -> SExpNode:
+    """Serialise a :class:`FootprintKeepout` to a KiCad ``(zone ...)`` node.
+
+    Footprint-level keepout zones use the same ``(zone ...)`` syntax as
+    board-level keepouts but live inside the ``(footprint ...)`` node.
+
+    Args:
+        keepout: Footprint keepout zone to serialise.
+
+    Returns:
+        ``SExpNode`` list.
+    """
+    pts: list[SExpNode] = ["pts"]
+    for pt in keepout.polygon:
+        pts.append(["xy", pt.x, pt.y])
+    # KiCad 9 keepout format requires all five rule entries.
+    rules: list[SExpNode] = [
+        "keepout",
+        ["copperpour", "not_allowed" if keepout.no_copper else "allowed"],
+        ["footprints", "allowed"],
+        ["pads", "allowed"],
+        ["tracks", "not_allowed" if keepout.no_tracks else "allowed"],
+        ["vias", "not_allowed" if keepout.no_vias else "allowed"],
+    ]
+    node: list[SExpNode] = [
+        "zone", "", "net 0",
+        rules,
+        ["layers", *keepout.layers],
+        ["polygon", pts],
+    ]
+    if keepout.uuid:
+        node.append(["uuid", keepout.uuid])
+    return node
+
+
 def _footprint_sexp(fp: Footprint) -> SExpNode:
     """Serialise a :class:`Footprint` to a KiCad ``(footprint ...)`` node.
 
@@ -1717,6 +1756,10 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
 
     for pad in fp.pads:
         node.append(_pad_sexp(pad))
+
+    # Footprint-level keepout zones (e.g. antenna keepout on RF modules)
+    for fz in fp.fp_zones:
+        node.append(_fp_keepout_sexp(fz))
 
     # 3D model references
     for model in fp.models:

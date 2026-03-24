@@ -111,7 +111,7 @@ def resolve_silk_collisions(
                 pads=fp.pads, graphics=fp.graphics, texts=tuple(new_texts),
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
                 models=fp.models, datasheet=fp.datasheet,
-                description=fp.description,
+                description=fp.description, fp_zones=fp.fp_zones,
             )
             # Recompute label position after flip
             new_ly = ref_text.position.x * sin_r + new_y * cos_r
