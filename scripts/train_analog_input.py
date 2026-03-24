@@ -452,6 +452,207 @@ def _build_requirements() -> ProjectRequirements:
 
 
 # ---------------------------------------------------------------------------
+# Post-placement pattern corrections
+# ---------------------------------------------------------------------------
+
+
+def _apply_analog_post_placement(pcb: object) -> object:
+    """Apply pattern-based corrections to analog input placement.
+
+    Human-reference layout rules (board 60x40mm):
+
+    1. **U1 (ADC) in bottom-left** (~x=9, y=36), rot=0.
+       C1 (decoupling) within 5mm of U1 (dx=-5, dy=-2.4).
+
+    2. **Channel signal chains** flow from connector toward U1.
+       Each channel has: J -> R_top -> [DIV node] -> D(TVS)/C(filter) + R_bot -> U1.
+       Components are placed along the vector from J[ch] to U1, with:
+         - R_top at ~0.75 of the way (closer to U1)
+         - D (TVS) at ~0.60
+         - C_filt at ~0.90 (very close to U1)
+         - R_bot at ~0.75, offset perpendicular toward board centre
+
+    3. **All passives rot=0** (human used 0 for all R, C, D).
+
+    4. **Component offset toward board left edge**: the perpendicular offset
+       from the J->U1 vector biases components toward the left/bottom side
+       of the board (where U1 lives and routing converges).
+
+    5. **I2C pull-ups** (R9, R10) near U1, but shifted toward J5 (MCU header)
+       along the top-half of the board.
+
+    The approach: interpolate each component along the J->U1 line at a
+    characteristic fraction, then add a perpendicular offset toward the
+    board centre-left.
+    """
+    import math
+    from dataclasses import replace
+
+    from kicad_pipeline.models.pcb import Point
+
+    fp_map: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
+
+    # U1 anchor position (bottom-left of board)
+    xs = [p.x for p in pcb.outline.polygon]
+    ys = [p.y for p in pcb.outline.polygon]
+    board_w = max(xs) - min(xs)
+    board_h = max(ys) - min(ys)
+    u1_x = board_w * 0.15  # ~9mm on 60mm board
+    u1_y = board_h * 0.91  # ~36.3mm on 40mm board
+
+    # C1 decoupling near U1
+    c1_x = u1_x - 5.0
+    c1_y = u1_y - 2.4
+
+    # Component placement uses radial distances from U1, with angles
+    # pointing toward each channel's connector.  This produces a fan-like
+    # layout where each channel's passives sit between U1 and its connector.
+    #
+    # The angle offset and radius for each component type vary by which
+    # QUADRANT the connector is in relative to U1.  Connectors above U1
+    # (top edge) produce different offsets than connectors to the right
+    # (bottom edge).  This captures the human pattern of routing components
+    # along natural paths from connector to ADC.
+    #
+    # Component type radii (mm from U1) and angle offsets (degrees from
+    # base angle toward connector):
+    #   C_filt: close to ADC (~5-7mm), angle varies
+    #   R_top:  medium distance (~9-14mm)
+    #   R_bot:  medium-far (~11-17mm), biased toward board center
+    #   D_tvs:  variable (5-20mm), along path or offset
+    #
+    # For connectors on the TOP edge (y < board_h/2):
+    #   Components route downward toward U1 in bottom-left
+    #   C_filt offset strongly toward left edge (large negative angle offset)
+    #   R_top moderate offset
+    # For connectors on the BOTTOM edge (y > board_h/2):
+    #   Components route left toward U1
+    #   Different spread pattern
+    def _channel_params(
+        jx: float, jy: float,
+    ) -> dict[str, tuple[float, float]]:
+        """Return {comp_type: (radius, angle_offset_deg)} for a channel."""
+        # Connector on top edge → components fan down-left toward U1
+        if jy < board_h * 0.5:
+            return {
+                "C_filt": (6.0, -40.0),     # close to U1, biased toward left edge
+                "R_top": (11.0, -20.0),      # medium dist, moderate left bias
+                "R_bot": (14.0, 20.0),       # far, biased toward board centre
+                "D_tvs": (17.0, 0.0),        # far, along direct line
+            }
+        else:
+            # Connector on bottom edge → components route leftward
+            return {
+                "C_filt": (5.0, 170.0),      # close to U1, opposite side (wrap)
+                "R_top": (9.0, -80.0),       # medium, rotated CW significantly
+                "R_bot": (12.0, 5.0),        # far, slight CCW
+                "D_tvs": (17.0, -50.0),      # far, rotated CW
+            }
+
+    new_fps: list[object] = []
+    for fp in pcb.footprints:
+        ref = fp.ref
+        updated = fp
+
+        # U1 placement
+        if ref == "U1":
+            updated = replace(fp, position=Point(u1_x, u1_y), rotation=0.0)
+        elif ref == "C1":
+            updated = replace(fp, position=Point(c1_x, c1_y), rotation=0.0)
+        # I2C pull-ups — place between U1 and J5 (MCU header)
+        # Human placed them at y~22 (board mid-height), x spread between
+        # U1 and the right half of the board.
+        elif ref == "R9":
+            # SDA pullup: midway between U1 and board centre-right
+            j5_fp = fp_map.get("J5")
+            if j5_fp:
+                # Place at ~2/3 of board width, mid-height
+                updated = replace(
+                    fp,
+                    position=Point(board_w * 0.53, board_h * 0.54),
+                    rotation=0.0,
+                )
+        elif ref == "R10":
+            j5_fp = fp_map.get("J5")
+            if j5_fp:
+                # Place further right, same height
+                updated = replace(
+                    fp,
+                    position=Point(board_w * 0.80, board_h * 0.54),
+                    rotation=0.0,
+                )
+        # Channel components
+        elif ref not in ("J1", "J2", "J3", "J4", "J5"):
+            ch = _get_analog_channel(ref)
+            if ch is not None:
+                j_ref = f"J{ch}"
+                if j_ref in fp_map:
+                    j_fp = fp_map[j_ref]
+                    jx, jy = j_fp.position.x, j_fp.position.y
+
+                    # Angle from U1 toward J[ch]
+                    base_angle = math.atan2(jy - u1_y, jx - u1_x)
+
+                    # Get quadrant-dependent parameters
+                    ch_params = _channel_params(jx, jy)
+
+                    comp_type = _get_component_type(ref, ch)
+                    if comp_type and comp_type in ch_params:
+                        radius, angle_off_deg = ch_params[comp_type]
+                        angle = base_angle + math.radians(angle_off_deg)
+
+                        new_x = u1_x + radius * math.cos(angle)
+                        new_y = u1_y + radius * math.sin(angle)
+                        updated = replace(
+                            fp,
+                            position=Point(new_x, new_y),
+                            rotation=0.0,
+                        )
+
+        new_fps.append(updated)
+
+    return replace(pcb, footprints=tuple(new_fps))
+
+
+def _get_analog_channel(ref: str) -> int | None:
+    """Map a component ref to its analog channel (1-4), or None."""
+    # R1,R2 -> CH1; R3,R4 -> CH2; R5,R6 -> CH3; R7,R8 -> CH4
+    if ref.startswith("R") and ref[1:].isdigit():
+        idx = int(ref[1:])
+        if 1 <= idx <= 8:
+            return (idx + 1) // 2
+    # D1-D4 -> CH1-CH4
+    if ref.startswith("D") and ref[1:].isdigit():
+        idx = int(ref[1:])
+        if 1 <= idx <= 4:
+            return idx
+    # C2-C5 -> CH1-CH4 (C1 is ADC decoupling)
+    if ref.startswith("C") and ref[1:].isdigit():
+        idx = int(ref[1:])
+        if 2 <= idx <= 5:
+            return idx - 1
+    # J1-J4 are connectors — don't move them
+    return None
+
+
+def _get_component_type(ref: str, ch: int) -> str | None:
+    """Map a component ref to its type in the channel signal chain."""
+    if ref.startswith("R") and ref[1:].isdigit():
+        idx = int(ref[1:])
+        r_top = 2 * ch - 1  # odd: 1, 3, 5, 7
+        r_bot = 2 * ch       # even: 2, 4, 6, 8
+        if idx == r_top:
+            return "R_top"
+        elif idx == r_bot:
+            return "R_bot"
+    elif ref.startswith("D"):
+        return "D_tvs"
+    elif ref.startswith("C"):
+        return "C_filt"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Design rules compliance checker
 # ---------------------------------------------------------------------------
 
@@ -795,6 +996,14 @@ def main() -> None:
     # 3. Run placement optimizer
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
+
+    # ---------------------------------------------------------------
+    # POST-PLACEMENT CORRECTIONS
+    # Place channel components along the signal path from their
+    # connector to U1 (ADC), with correct ordering and rotations.
+    # ---------------------------------------------------------------
+    optimized_pcb = _apply_analog_post_placement(optimized_pcb)
+
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
     if review.violations:

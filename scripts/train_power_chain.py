@@ -671,6 +671,88 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Post-placement pattern corrections
+# ---------------------------------------------------------------------------
+
+
+def _apply_power_post_placement(pcb: object) -> object:
+    """Apply pattern-based corrections to power chain placement.
+
+    Human-reference layout rules (board 50x40mm):
+
+    1. **Signal flow is left-to-right**:
+       J1(input) -> U1(buck) -> L1 -> C2 -> J2(5V TP) -> U2(LDO) -> C5 -> J3(3.3V TP)
+
+    2. **Buck converter stage** occupies the left zone (~x=5-20):
+       - U1 at ~(board_w*0.17, board_h*0.40), rot=-90
+       - C1 (input cap) directly above U1 (dy=-5.3), rot=0
+       - C3 (bootstrap) directly below U1 (dy=+4.8), rot=0
+       - L1 to the right of U1 (dx=+8.3, dy=-1.2), rot=0
+       - D1 (catch diode) right of U1 (dx=+7.8, dy=+2.2), rot=180
+       - R1/R2 (FB divider) below-right of U1 (dx=+8, dy=+4..+7), R2 rot=0, R1 rot=180
+
+    3. **LDO stage** occupies the right zone (~x=35-48):
+       - U2 at ~(board_w*0.82, board_h*0.47), rot=0
+       - C4 (LDO input cap) left of U2 midway (dx=-17), rot=-90
+       - C5 (LDO output cap) right of U2 (dx=+7), rot=-90
+
+    4. **Connectors at edges**:
+       - J1 (24V input): top area near U1 (x=L1.x, y~6), rot=0
+       - J2 (5V TP): between stages (x~board_w*0.61, y~U1.y), rot=-90
+       - J3 (3.3V TP): bottom-right (x~board_w*0.88, y~board_h*0.73), rot=-90
+
+    5. **Caps on output side rotated -90** (C2, C4, C5): vertical orientation
+       to match horizontal signal flow.
+    """
+    from dataclasses import replace
+
+    from kicad_pipeline.models.pcb import Point
+
+    xs = [p.x for p in pcb.outline.polygon]
+    ys = [p.y for p in pcb.outline.polygon]
+    board_w = max(xs) - min(xs)
+    board_h = max(ys) - min(ys)
+
+    # Anchor: U1 (buck IC) in left zone
+    u1_x = board_w * 0.17
+    u1_y = board_h * 0.40
+
+    # U2 (LDO) in right zone
+    u2_x = board_w * 0.82
+    u2_y = board_h * 0.47
+
+    # Component positions derived from pattern rules
+    placement_rules: dict[str, tuple[float, float, float]] = {
+        # Buck stage (relative to U1)
+        "U1": (u1_x, u1_y, -90.0),
+        "C1": (u1_x - 0.9, u1_y - 5.3, 0.0),          # input cap above U1
+        "C3": (u1_x + 0.1, u1_y + 4.8, 0.0),           # bootstrap below U1
+        "L1": (u1_x + 8.3, u1_y - 1.2, 0.0),           # inductor right of U1
+        "D1": (u1_x + 7.8, u1_y + 2.2, 180.0),         # catch diode right of U1
+        "R1": (u1_x + 8.0, u1_y + 6.8, 180.0),         # FB top right-below U1
+        "R2": (u1_x + 8.0, u1_y + 4.3, 0.0),           # FB bot right-below U1
+        "C2": (u1_x + 12.6, u1_y + 1.5, -90.0),        # output cap right of L1
+        # LDO stage (relative to U2)
+        "U2": (u2_x, u2_y, 0.0),
+        "C4": (u2_x - 17.4, u2_y - 1.5, -90.0),        # LDO input cap (midway)
+        "C5": (u2_x + 6.9, u2_y + 1.1, -90.0),         # LDO output cap right of U2
+        # Connectors
+        "J1": (u1_x + 7.7, board_h * 0.15, 0.0),       # 24V input near top
+        "J2": (board_w * 0.61, u1_y + 1.7, -90.0),      # 5V TP between stages
+        "J3": (board_w * 0.88, board_h * 0.73, -90.0),   # 3.3V TP bottom-right
+    }
+
+    new_fps: list[object] = []
+    for fp in pcb.footprints:
+        if fp.ref in placement_rules:
+            x, y, rot = placement_rules[fp.ref]
+            fp = replace(fp, position=Point(x, y), rotation=rot)
+        new_fps.append(fp)
+
+    return replace(pcb, footprints=tuple(new_fps))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -700,6 +782,14 @@ def main() -> None:
     # 3. Run placement optimizer
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
+
+    # ---------------------------------------------------------------
+    # POST-PLACEMENT CORRECTIONS
+    # Enforce left-to-right signal flow and correct rotations learned
+    # from the human reference layout.
+    # ---------------------------------------------------------------
+    optimized_pcb = _apply_power_post_placement(optimized_pcb)
+
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
     if review.violations:

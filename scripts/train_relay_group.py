@@ -466,6 +466,117 @@ def _build_requirements() -> ProjectRequirements:
 
 
 # ---------------------------------------------------------------------------
+# Post-placement pattern corrections
+# ---------------------------------------------------------------------------
+
+
+def _apply_relay_post_placement(pcb: object) -> object:
+    """Apply pattern-based corrections to relay placement.
+
+    Rules (relative to each relay K[ch]):
+
+    LEFT column (dx = -4.3mm from relay centre):
+        D_flyback (D1-D4):  dy=+10.8, rot=0    — already placed by optimizer
+        Q (Q1-Q4):          dy=+13.3, rot=180   — already placed by optimizer
+        R_LED (R5-R8):      dy=+15.5, rot=0     — FIXED here
+        D_LED (D5-D8):      dy=+17.7, rot=180   — FIXED here
+
+    RIGHT column (dx = +4.0mm):
+        R_gate (R1-R4):     dy=+15.4, rot=180   — already placed by optimizer
+
+    Power isolation cluster (bottom-left corner):
+        L1: (board_left+3, board_h-9), rot=90
+        L2: (board_left+6, board_h-9), rot=90
+        C1: (board_left+5, board_h-18), rot=180
+        C2: (board_left+5, board_h-13), rot=0
+    """
+    from dataclasses import replace
+
+    from kicad_pipeline.models.pcb import Footprint, Point
+
+    fp_map: dict[str, Footprint] = {fp.ref: fp for fp in pcb.footprints}
+
+    # Compute board dimensions from outline polygon
+    xs = [p.x for p in pcb.outline.polygon]
+    ys = [p.y for p in pcb.outline.polygon]
+    board_h = max(ys) - min(ys)
+    board_y_min = min(ys)
+    board_x_min = min(xs)
+    # Use a small left margin
+    bl_x = board_x_min + 3.0
+
+    new_fps: list[Footprint] = []
+    for fp in pcb.footprints:
+        ref = fp.ref
+        updated = fp
+
+        # --- Pattern 1: LED pair placement per channel ---
+        # D5-D8 are LED indicators for channels 1-4
+        if ref.startswith("D") and ref[1:].isdigit():
+            idx = int(ref[1:])
+            if 5 <= idx <= 8:
+                ch = idx - 4
+                k_ref = f"K{ch}"
+                if k_ref in fp_map:
+                    k_fp = fp_map[k_ref]
+                    # Left column, below R_LED
+                    new_x = k_fp.position.x - 4.3
+                    new_y = k_fp.position.y + 17.7
+                    updated = replace(
+                        fp,
+                        position=Point(new_x, new_y),
+                        rotation=180.0,
+                    )
+
+        # R5-R8 are LED resistors for channels 1-4
+        if ref.startswith("R") and ref[1:].isdigit():
+            idx = int(ref[1:])
+            if 5 <= idx <= 8:
+                ch = idx - 4
+                k_ref = f"K{ch}"
+                if k_ref in fp_map:
+                    k_fp = fp_map[k_ref]
+                    # Left column, below Q, above D_LED
+                    new_x = k_fp.position.x - 4.3
+                    new_y = k_fp.position.y + 15.5
+                    updated = replace(
+                        fp,
+                        position=Point(new_x, new_y),
+                        rotation=0.0,
+                    )
+
+        # --- Pattern 2: Power isolation in bottom-left ---
+        if ref == "L1":
+            updated = replace(
+                fp,
+                position=Point(bl_x, board_y_min + board_h - 9.0),
+                rotation=90.0,
+            )
+        elif ref == "L2":
+            updated = replace(
+                fp,
+                position=Point(bl_x + 3.0, board_y_min + board_h - 9.0),
+                rotation=90.0,
+            )
+        elif ref == "C1":
+            updated = replace(
+                fp,
+                position=Point(bl_x + 2.0, board_y_min + board_h - 18.0),
+                rotation=180.0,
+            )
+        elif ref == "C2":
+            updated = replace(
+                fp,
+                position=Point(bl_x + 2.0, board_y_min + board_h - 13.0),
+                rotation=0.0,
+            )
+
+        new_fps.append(updated)
+
+    return replace(pcb, footprints=tuple(new_fps))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -496,9 +607,32 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # Relay design rules are now encoded in the optimizer itself
-    # (phases 3a, 3a2, 3b, 3b2 and late realignment).
-    # No post-placement overrides needed.
+    # ---------------------------------------------------------------
+    # POST-PLACEMENT CORRECTIONS
+    # Apply pattern-based rules learned from human reference layout.
+    #
+    # Pattern 1: LED indicators (D5-D8) and their resistors (R5-R8)
+    #   belong in the LEFT column of each relay channel, below Q.
+    #   Relative to K[ch] anchor:
+    #     D_flyback: dx=-4.3, dy=+10.8, rot=0   (above Q)
+    #     Q:         dx=-4.3, dy=+13.3, rot=180  (transistor)
+    #     R_LED:     dx=-4.3, dy=+15.5, rot=0    (LED resistor, below Q)
+    #     D_LED:     dx=-4.3, dy=+17.7, rot=180  (LED, below R_LED)
+    #   The optimizer already places D1-D4 and Q1-Q4 correctly but
+    #   scatters D5-D8 and R5-R8 to wrong channels.
+    #
+    # Pattern 2: Power isolation group (L1, L2, C1, C2) in bottom-left
+    #   corner of the board, forming a compact ferrite+cap cluster.
+    #   L1/L2 vertical (rot=90), caps nearby.
+    #   Relative to board bottom-left:
+    #     L1: x~3, y~board_h-9, rot=90
+    #     L2: x~6, y~board_h-9, rot=90
+    #     C1: x~5, y~board_h-18, rot=180
+    #     C2: x~5, y~board_h-13, rot=0
+    # ---------------------------------------------------------------
+    from dataclasses import replace as _dc_replace
+
+    optimized_pcb = _apply_relay_post_placement(optimized_pcb)
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
     if review.violations:
