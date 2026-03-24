@@ -598,8 +598,12 @@ class TestPlaceSubnetComponents:
         assert "C1" not in placed
         assert ctx.positions["C1"] == original_pos  # type: ignore[union-attr]
 
-    def test_placed_refs_added_to_fixed(self) -> None:
-        """After placement, placed refs are added to fixed_refs."""
+    def test_placed_refs_not_added_to_fixed(self) -> None:
+        """After placement, placed refs are NOT added to fixed_refs.
+
+        Subnet placement should leave refs unlocked so later type-specific
+        phases (relay driver, power chain, etc.) can refine positions.
+        """
         ctx = self._make_ctx()
         connections = [
             SubnetConnection(
@@ -612,7 +616,7 @@ class TestPlaceSubnetComponents:
             ),
         ]
         place_subnet_components(ctx, connections)  # type: ignore[arg-type]
-        assert "C1" in ctx.fixed_refs  # type: ignore[union-attr]
+        assert "C1" not in ctx.fixed_refs  # type: ignore[union-attr]
 
     def test_missing_ic_skipped(self) -> None:
         """Connections referencing missing ICs are skipped gracefully."""
@@ -646,6 +650,27 @@ class TestPlaceSubnetComponents:
         ]
         placed = place_subnet_components(ctx, connections)  # type: ignore[arg-type]
         assert len(placed) == 0
+
+    def test_close_component_not_moved(self) -> None:
+        """Components already within 8mm of IC pin are not disturbed."""
+        ctx = self._make_ctx()
+        # Place C1 close to pin 1 of U1 (west side at board x=37, y=28)
+        ctx.positions["C1"] = (34.0, 28.0, 0.0)  # type: ignore[union-attr]
+
+        connections = [
+            SubnetConnection(
+                passive_ref="C1",
+                passive_pin="1",
+                ic_ref="U1",
+                ic_pin="1",
+                subnet_name="VCC_U1",
+                role="decoupling",
+            ),
+        ]
+        placed = place_subnet_components(ctx, connections)  # type: ignore[arg-type]
+        assert "C1" not in placed
+        # Position should be unchanged
+        assert ctx.positions["C1"] == (34.0, 28.0, 0.0)  # type: ignore[union-attr]
 
     def test_position_clamped_to_board(self) -> None:
         """Placement is clamped to board bounds even if pin is near the edge."""

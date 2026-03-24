@@ -39,6 +39,10 @@ _PASSIVE_PREFIXES = frozenset({"R", "C", "D", "L"})
 # Maximum connections for a net to be considered a subnet
 _MAX_SUBNET_CONNECTIONS = 4
 
+# Minimum distance (mm) from IC pin before subnet placer will move a passive.
+# Components already within this radius are left alone ("do no harm" guard).
+_MOVE_THRESHOLD_MM = 8.0
+
 
 @dataclass(frozen=True)
 class SubnetConnection:
@@ -275,7 +279,7 @@ def compute_pad_facing_position(
     ic_pin_x: float,
     ic_pin_y: float,
     ic_pin_side: str,
-    gap_mm: float = 1.0,
+    gap_mm: float = 3.0,
 ) -> tuple[float, float, float]:
     """Compute position and rotation to place a passive facing an IC pin.
 
@@ -349,19 +353,36 @@ def place_subnet_components(
 
         ic_pin_x, ic_pin_y, ic_pin_side = pin_info
 
+        # Bug 3: Skip components already close to their target IC pin.
+        current_pos = ctx.positions.get(conn.passive_ref)
+        if current_pos is not None:
+            cur_x, cur_y, _cur_rot = current_pos
+            current_dist = math.sqrt(
+                (cur_x - ic_pin_x) ** 2 + (cur_y - ic_pin_y) ** 2,
+            )
+            if current_dist < _MOVE_THRESHOLD_MM:
+                _log.debug(
+                    "Skipping %s: already %.1fmm from %s.%s (threshold %.1f)",
+                    conn.passive_ref, current_dist,
+                    conn.ic_ref, conn.ic_pin, _MOVE_THRESHOLD_MM,
+                )
+                continue
+
         # Get the passive footprint size
         fp_size = ctx.fp_sizes.get(conn.passive_ref)
         if fp_size is None:
             _log.debug("Skipping %s: no footprint size", conn.passive_ref)
             continue
 
-        # Compute the pad-facing position
+        # Compute the pad-facing position with enough gap to clear IC
+        # courtyard.  The pin position is at the IC edge so we need
+        # clearance from the edge, not the pin.
         x, y, rotation = compute_pad_facing_position(
             passive_size=fp_size,
             ic_pin_x=ic_pin_x,
             ic_pin_y=ic_pin_y,
             ic_pin_side=ic_pin_side,
-            gap_mm=1.0,
+            gap_mm=3.0,
         )
 
         # Clamp to board bounds
@@ -377,8 +398,9 @@ def place_subnet_components(
             conn.ic_ref, conn.ic_pin, ic_pin_side, conn.role,
         )
 
-    # Mark placed refs as fixed so later phases don't move them
-    ctx.fixed_refs.update(placed_refs)
+    # Bug 2: Do NOT mark subnet-placed refs as fixed.  Later type-specific
+    # phases (relay driver, power chain, etc.) may have better rules and
+    # should be allowed to refine these positions.
     _log.info(
         "Subnet placement: placed %d/%d passives",
         len(placed_refs), len(connections),

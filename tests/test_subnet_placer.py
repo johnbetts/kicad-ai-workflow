@@ -309,8 +309,9 @@ class TestGenericPhaseWorksForRelay:
         # R1 should have been placed near U1 (was at 5,5)
         r1_x, r1_y, _ = ctx.positions["R1"]
         assert r1_x == pytest.approx(20.0, abs=5.0)
-        # R1 should now be in fixed_refs
-        assert "R1" in ctx.fixed_refs
+        # R1 should NOT be in fixed_refs — subnet placement no longer locks
+        # refs so later type-specific phases can refine positions.
+        assert "R1" not in ctx.fixed_refs
 
 
 class TestGenericPhaseWorksForBuck:
@@ -378,10 +379,11 @@ class TestGenericPhaseWorksForBuck:
         ):
             _phase_subnet_placement(ctx)
 
-        # All passives should have been placed and marked fixed
-        assert "C1" in ctx.fixed_refs
-        assert "L1" in ctx.fixed_refs
-        assert "C2" in ctx.fixed_refs
+        # Passives should NOT be in fixed_refs — subnet placement no longer
+        # locks refs so later type-specific phases can refine positions.
+        assert "C1" not in ctx.fixed_refs
+        assert "L1" not in ctx.fixed_refs
+        assert "C2" not in ctx.fixed_refs
 
         # Passives should be near IC (within reasonable distance)
         for ref in ("C1", "L1", "C2"):

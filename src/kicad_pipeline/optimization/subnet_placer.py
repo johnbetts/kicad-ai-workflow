@@ -50,6 +50,10 @@ _DEFAULT_CHAIN_GAP_MM: float = 2.0
 # Default inter-component gap along a series chain (mm).
 _DEFAULT_SERIES_GAP_MM: float = 1.5
 
+# Minimum distance (mm) from IC pin before subnet placer will move a passive.
+# Components already within this radius are left alone ("do no harm" guard).
+_MOVE_THRESHOLD_MM: float = 8.0
+
 
 def _phase_subnet_placement(ctx: PlacementContext) -> None:
     """Generic subcircuit placement using subnet topology.
@@ -81,6 +85,8 @@ def _phase_subnet_placement(ctx: PlacementContext) -> None:
     assert callable(_resolve_subnets)
     assert callable(_resolve_ic_pin)
     assert callable(_compute_pad_facing)
+
+    import math
 
     from kicad_pipeline.optimization.signal_flow import order_subcircuit_by_flow
 
@@ -127,6 +133,18 @@ def _phase_subnet_placement(ctx: PlacementContext) -> None:
             )
             continue
 
+        # Bug 3: Skip components already close to their target IC pin.
+        cur_x, cur_y, _cur_rot = ctx.positions[passive_ref]
+        current_dist = math.sqrt(
+            (cur_x - ic_x) ** 2 + (cur_y - ic_y) ** 2,
+        )
+        if current_dist < _MOVE_THRESHOLD_MM:
+            _log.debug(
+                "Skipping %s: already %.1fmm from %s.%s (threshold %.1f)",
+                passive_ref, current_dist, ic_ref, ic_pin, _MOVE_THRESHOLD_MM,
+            )
+            continue
+
         # Get passive size
         pw, ph = ctx.fp_sizes.get(passive_ref, (1.6, 0.8))
         passive_size = (pw, ph)
@@ -159,8 +177,9 @@ def _phase_subnet_placement(ctx: PlacementContext) -> None:
         if len(flow_order) >= 2:
             _chain_series_components(ctx, flow_order, placed_refs)
 
-    # Mark all subnet-placed refs as fixed for downstream phases
-    ctx.fixed_refs.update(placed_refs)
+    # Bug 2: Do NOT mark subnet-placed refs as fixed.  Later type-specific
+    # phases (relay driver, power chain, etc.) should be free to refine
+    # these positions with better domain-specific rules.
 
     _log.info(
         "  Subnet placement complete: %d components placed",
