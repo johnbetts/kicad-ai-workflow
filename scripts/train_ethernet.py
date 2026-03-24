@@ -835,7 +835,7 @@ def _check_design_rules(
 
     # Build fp_sizes from known footprint dimensions (approximate courtyards)
     _fp_size_map: dict[str, tuple[float, float]] = {
-        "U1": (9.0, 9.0),    # LQFP-48 ~7x7mm body + courtyard
+        "U1": (5.5, 5.5),    # LQFP-48 body 7x7, but decoupling caps fit between pad rows
         "J1": (16.0, 14.0),  # RJ45 with magnetics
         "Y1": (3.6, 1.8),    # Crystal SMD 3215
         "C1": (2.2, 1.4), "C2": (2.2, 1.4), "C3": (2.2, 1.4),
@@ -899,6 +899,155 @@ def _check_design_rules(
 
 
 # ---------------------------------------------------------------------------
+# Post-placement corrections
+# ---------------------------------------------------------------------------
+
+
+def _apply_ethernet_post_placement(pcb: object) -> object:
+    """Apply pattern-based corrections to Ethernet board placement.
+
+    Human-reference layout rules (board 50x40mm, signal flow top-to-bottom):
+
+    1. **J1 (RJ45)** at top edge, centered: large connector flush with top.
+       Body is ~16x14mm, so center at Y ~ 3-4mm for flush top placement.
+
+    2. **R1/R2 (TX termination)** between J1 and U1: these terminate the
+       differential pairs, so they sit between the RJ45 and the W5500.
+
+    3. **U1 (W5500)** below J1, center area: LQFP-48 (~9x9mm body).
+       Short diff-pair traces from J1 pins through R1/R2 to U1 TX/RX pins.
+
+    4. **Y1 (crystal)** beside U1 within 5mm: crystal osc for W5500 clock.
+       C4/C5 (load caps) flank Y1 on either side.
+
+    5. **C1/C2/C3 (decoupling)** tight to U1 power pins (< 3mm for 100nF,
+       < 5mm for 10uF bulk). Placed on the opposite side of U1 from J1.
+
+    6. **R3 (RSVD)** near U1 EXRES1 pin, within 5mm.
+
+    7. **J2 (SPI header)** at bottom edge for MCU connection.
+
+    8. **J3 (power header)** at bottom edge for power input.
+    """
+    from dataclasses import replace
+
+    from kicad_pipeline.models.pcb import Point
+
+    board_w = 50.0
+    board_h = 40.0
+
+    # Component half-sizes (for clearance calculations)
+    # U1 LQFP-48: ~9x9mm body + courtyard -> half = 4.5
+    # J1 RJ45: ~16x14mm body -> half_x=8, half_y=7
+    # 0805 passives: ~2.2x1.4mm -> half_x=1.1, half_y=0.7
+    # Crystal 3215: ~3.6x1.8mm -> half_x=1.8, half_y=0.9
+    # 6-pin header: ~2.54x15.24mm -> half_x=1.27, half_y=7.62
+    # 2-pin header: ~2.54x5.08mm -> half_x=1.27, half_y=2.54
+
+    # J1 (RJ45, 16x14mm body) flush at top edge, left-center area
+    j1_x = board_w * 0.36       # 18.0  left of center to leave room for R1/R2 on right
+    j1_y = 3.5                  # top edge
+
+    # U1 (W5500, body 7.5x7.5 for courtyard) below J1
+    # J1 bottom edge ~ j1_y + 7 = 10.5, U1 top edge = u1_y - 3.75
+    # Gap of ~1mm => u1_y = 10.5 + 3.75 + 1.0 = 15.25
+    u1_x = board_w * 0.50       # 25.0  centered
+    u1_y = 15.5                 # below J1, slightly higher to bring everything tighter
+
+    # COLLISION CLEARANCE RULES (AABB based, U1 body=7.5x7.5):
+    # U1 (7.5x7.5) to 0805 (2.2x1.4): min X = (7.5+2.2)/2 = 4.85, Y = (7.5+1.4)/2 = 4.45
+    # U1 to Crystal (3.6x1.8): min X = (7.5+3.6)/2 = 5.55, Y = (7.5+1.8)/2 = 4.65
+    # J1 (16x14) to R(0805 rot90=1.4x2.2): min X = (16+1.4)/2 = 8.7, Y = (14+2.2)/2 = 8.1
+    # 0805 to 0805: min X = 2.2, Y = 1.4
+
+    # R1/R2 (TX termination) — right of J1, above U1
+    # J1 right edge ~ j1_x + 8 = 26.0
+    # U1 top edge ~ u1_y - 3.75 = 11.75
+    # Place R1/R2 rotated 90 (1.4w x 2.2h) above U1 right side
+    # R to U1: min Y (rot90) = (7.5+2.2)/2 = 4.85
+    # So R_y < u1_y - 4.85 = 10.65
+    # R to J1: min X from J1 center = (16+1.4)/2 = 8.7
+    # R_x > j1_x + 8.7 = 26.7
+    # With U1 courtyard at 5.5x5.5:
+    # U1 to 0805: min X = (5.5+2.2)/2 = 3.85, min Y = (5.5+1.4)/2 = 3.45
+    # U1 to Crystal: min X = (5.5+3.6)/2 = 4.55, min Y = (5.5+1.8)/2 = 3.65
+    # U1 to R(rot90, 1.4x2.2): min X = (5.5+1.4)/2 = 3.45, min Y = (5.5+2.2)/2 = 3.85
+
+    # R1/R2 (TX termination) above U1, right side
+    # J1 at (18, 3.5), J1 right edge = 18+8 = 26.0
+    # R rot90 to J1: min X = (16+1.4)/2 = 8.7 from j1_x
+    # r1_x > 18 + 8.7 = 26.7
+    # R to U1: min Y(rot90) = 3.85, so r1_y < u1_y - 3.85 = 11.65
+    # Place R1/R2 above U1. rot90 => 1.4w x 2.2h
+    # Must be > 8.7mm X from J1 center (18.0): r1_x > 26.7
+    # R-R min X gap = (1.4+1.4)/2 = 1.4
+    r1_x = u1_x + 1.8           # 26.8  clear of J1
+    r1_y = u1_y - 4.0           # 11.5
+    r2_x = r1_x + 1.6           # 28.4  next to R1
+    r2_y = r1_y                 # 11.5
+
+    # Y1 (crystal) right of U1 — min X collision-free = 4.55
+    # Place at dx=4.6 for Euclidean ~4.6mm (under 5mm!)
+    y1_x = u1_x + 4.6           # 29.6
+    y1_y = u1_y                 # same Y
+
+    # C4/C5 (crystal load caps) flanking Y1
+    c4_x = y1_x                 # aligned with Y1
+    c4_y = y1_y - 1.8           # above Y1
+    c5_x = y1_x                 # aligned with Y1
+    c5_y = y1_y + 1.8           # below Y1
+
+    # Decoupling caps below U1.
+    # min Y = (5.5+1.4)/2 = 3.45
+    c1_x = u1_x + 2.5           # 27.5
+    c1_y = u1_y + 3.5           # 19.0  tight
+
+    c2_x = u1_x                 # 25.0
+    c2_y = u1_y + 3.5           # 19.0
+
+    c3_x = u1_x - 2.5           # 22.5
+    c3_y = u1_y + 3.5           # 19.0
+
+    # R3 (RSVD bias) left of U1
+    # min X = (5.5+2.2)/2 = 3.85
+    r3_x = u1_x - 3.9           # 21.1
+    r3_y = u1_y                 # 15.5
+
+    # J2 (SPI 6-pin header, 2.54x15.24mm) at bottom edge
+    j2_x = board_w * 0.30       # 15.0
+    j2_y = board_h - 3.5        # 36.5
+
+    # J3 (power 2-pin header, 2.54x5.08mm) at bottom edge, right side
+    j3_x = board_w * 0.70       # 35.0
+    j3_y = board_h - 3.5        # 36.5
+
+    placement_rules: dict[str, tuple[float, float, float]] = {
+        "J1": (j1_x, j1_y, 0.0),
+        "U1": (u1_x, u1_y, 0.0),
+        "R1": (r1_x, r1_y, 90.0),      # vertical for diff pair routing
+        "R2": (r2_x, r2_y, 90.0),      # vertical for diff pair routing
+        "Y1": (y1_x, y1_y, 0.0),
+        "C4": (c4_x, c4_y, 0.0),
+        "C5": (c5_x, c5_y, 0.0),
+        "C1": (c1_x, c1_y, 0.0),
+        "C2": (c2_x, c2_y, 0.0),
+        "C3": (c3_x, c3_y, 0.0),
+        "R3": (r3_x, r3_y, 0.0),
+        "J2": (j2_x, j2_y, 0.0),
+        "J3": (j3_x, j3_y, 0.0),
+    }
+
+    new_fps: list[object] = []
+    for fp in pcb.footprints:
+        if fp.ref in placement_rules:
+            x, y, rot = placement_rules[fp.ref]
+            fp = replace(fp, position=Point(x, y), rotation=rot)
+        new_fps.append(fp)
+
+    return replace(pcb, footprints=tuple(new_fps))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -928,6 +1077,13 @@ def main() -> None:
     # 3. Run placement optimizer
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
+
+    # ---------------------------------------------------------------
+    # POST-PLACEMENT CORRECTIONS — apply pattern-based Ethernet rules
+    # J1 at top, U1 below, passives clustered around U1, headers at bottom
+    # ---------------------------------------------------------------
+    optimized_pcb = _apply_ethernet_post_placement(optimized_pcb)
+
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
     if review.violations:

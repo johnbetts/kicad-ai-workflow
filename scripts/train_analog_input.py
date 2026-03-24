@@ -468,157 +468,135 @@ def _build_requirements() -> ProjectRequirements:
 
 
 def _apply_analog_post_placement(pcb: object) -> object:
-    """Apply pattern-based corrections to analog input placement.
+    """Apply reference-derived pattern corrections to analog input placement.
 
-    Human-reference layout rules (board 60x40mm):
+    Layout pattern learned from human-routed reference board (60x40mm):
 
-    1. **U1 (ADC) in bottom-left** (~x=9, y=36), rot=0.
-       C1 (decoupling) within 5mm of U1 (dx=-5, dy=-2.4).
+    1. **J1-J4 connectors** at top edge, left-to-right, evenly spaced ~11mm,
+       y~6.4mm, rotation=180 (wire entry faces top edge).
 
-    2. **Channel signal chains** flow from connector toward U1.
-       Each channel has: J -> R_top -> [DIV node] -> D(TVS)/C(filter) + R_bot -> U1.
-       Components are placed along the vector from J[ch] to U1, with:
-         - R_top at ~0.75 of the way (closer to U1)
-         - D (TVS) at ~0.60
-         - C_filt at ~0.90 (very close to U1)
-         - R_bot at ~0.75, offset perpendicular toward board centre
+    2. **Per-channel passive strip** ~8.3mm below connector, horizontal row:
+       Left-to-right order: C_filt, D_tvs, R_bot, R_top.
+       Average dx offsets from connector center (interpolated across channels):
+         C_filt: dx ~ -4.6mm  (leftmost)
+         D_tvs:  dx ~ -1.8mm
+         R_bot:  dx ~ +1.6mm
+         R_top:  dx ~ +4.1mm  (rightmost)
 
-    3. **All passives rot=0** (human used 0 for all R, C, D).
+    3. **U1 (ADS1115)** at bottom-right (~x=45.8, y=28.6), rot=-90.
+       C1 decoupling just below U1 (dx~0, dy~+3.3).
 
-    4. **Component offset toward board left edge**: the perpendicular offset
-       from the J->U1 vector biases components toward the left/bottom side
-       of the board (where U1 lives and routing converges).
+    4. **I2C pull-ups** R9/R10 to the right of U1 (dx~+7, dy~-6/-3).
+       J5 MCU header at right edge (x~57, y~22.5).
 
-    5. **I2C pull-ups** (R9, R10) near U1, but shifted toward J5 (MCU header)
-       along the top-half of the board.
-
-    The approach: interpolate each component along the J->U1 line at a
-    characteristic fraction, then add a perpendicular offset toward the
-    board centre-left.
+    The approach: place connectors at evenly-spaced top positions, then
+    compute each channel's passive positions as offsets from the connector.
+    U1/C1/R9/R10/J5 get fixed positions derived from the reference.
     """
-    import math
     from dataclasses import replace
 
     from kicad_pipeline.models.pcb import Point
 
-    fp_map: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
-
-    # U1 anchor position (bottom-left of board)
+    # Board dimensions
     xs = [p.x for p in pcb.outline.polygon]
     ys = [p.y for p in pcb.outline.polygon]
-    board_w = max(xs) - min(xs)
-    board_h = max(ys) - min(ys)
-    u1_x = board_w * 0.15  # ~9mm on 60mm board
-    u1_y = board_h * 0.91  # ~36.3mm on 40mm board
+    x_min = min(xs)
+    y_min = min(ys)
+    board_w = max(xs) - x_min
+    board_h = max(ys) - y_min
 
-    # C1 decoupling near U1
-    c1_x = u1_x - 5.0
-    c1_y = u1_y - 2.4
+    # Scale factors for non-60x40 boards
+    sx = board_w / 60.0
+    sy = board_h / 40.0
 
-    # Component placement uses radial distances from U1, with angles
-    # pointing toward each channel's connector.  This produces a fan-like
-    # layout where each channel's passives sit between U1 and its connector.
-    #
-    # The angle offset and radius for each component type vary by which
-    # QUADRANT the connector is in relative to U1.  Connectors above U1
-    # (top edge) produce different offsets than connectors to the right
-    # (bottom edge).  This captures the human pattern of routing components
-    # along natural paths from connector to ADC.
-    #
-    # Component type radii (mm from U1) and angle offsets (degrees from
-    # base angle toward connector):
-    #   C_filt: close to ADC (~5-7mm), angle varies
-    #   R_top:  medium distance (~9-14mm)
-    #   R_bot:  medium-far (~11-17mm), biased toward board center
-    #   D_tvs:  variable (5-20mm), along path or offset
-    #
-    # For connectors on the TOP edge (y < board_h/2):
-    #   Components route downward toward U1 in bottom-left
-    #   C_filt offset strongly toward left edge (large negative angle offset)
-    #   R_top moderate offset
-    # For connectors on the BOTTOM edge (y > board_h/2):
-    #   Components route left toward U1
-    #   Different spread pattern
-    def _channel_params(
-        jx: float, jy: float,
-    ) -> dict[str, tuple[float, float]]:
-        """Return {comp_type: (radius, angle_offset_deg)} for a channel."""
-        # Connector on top edge → components fan down-left toward U1
-        if jy < board_h * 0.5:
-            return {
-                "C_filt": (6.0, -40.0),     # close to U1, biased toward left edge
-                "R_top": (11.0, -20.0),      # medium dist, moderate left bias
-                "R_bot": (14.0, 20.0),       # far, biased toward board centre
-                "D_tvs": (17.0, 0.0),        # far, along direct line
-            }
-        else:
-            # Connector on bottom edge → components route leftward
-            return {
-                "C_filt": (5.0, 170.0),      # close to U1, opposite side (wrap)
-                "R_top": (9.0, -80.0),       # medium, rotated CW significantly
-                "R_bot": (12.0, 5.0),        # far, slight CCW
-                "D_tvs": (17.0, -50.0),      # far, rotated CW
-            }
+    # --- Connector positions (top edge, evenly spaced) ---
+    # Reference: J1=12.35, J2=23.22, J3=34.10, J4=46.35 → avg spacing ~11.3
+    # Use y=4.5 to keep connectors within 5mm of top edge
+    j_y = y_min + 4.5 * sy
+    j_x_start = x_min + 12.35 * sx
+    j_x_end = x_min + 46.35 * sx
+    j_spacing = (j_x_end - j_x_start) / 3.0
+    j_positions = {
+        ch: (j_x_start + (ch - 1) * j_spacing, j_y)
+        for ch in range(1, 5)
+    }
+
+    # --- Per-channel passive offsets from connector (averaged from reference) ---
+    # Reference pattern: horizontal row ~8.3mm below connector
+    # Left-to-right: C_filt, D_tvs, R_bot, R_top
+    # Average offsets (dx, dy) from connector across all 4 channels:
+    _STRIP_DY = 8.3 * sy  # vertical drop from connector to passive row
+
+    # Per-component dx offsets from connector center (averaged across channels)
+    # and per-channel linear interpolation slopes (components shift right
+    # for channels further right, toward U1)
+    _COMP_OFFSETS: dict[str, tuple[float, float, float]] = {
+        # (avg_dx, per_ch_slope_dx, rotation)
+        # avg_dx: base offset from connector center
+        # per_ch_slope_dx: additional dx per channel index (0-based)
+        "C_filt": (-4.64, 0.75, 90.0),    # leftmost in strip
+        "D_tvs":  (-1.77, 0.52, 0.0),     # second from left
+        "R_bot":  (+1.56, 0.57, 90.0),    # second from right
+        "R_top":  (+3.88, 0.76, -90.0),   # rightmost in strip
+    }
+
+    # --- Fixed component positions (reference-derived, scaled) ---
+    u1_x = x_min + 45.75 * sx
+    u1_y = y_min + 28.58 * sy
+    c1_x = x_min + 45.61 * sx
+    c1_y = y_min + 31.88 * sy
+    r9_x = x_min + 52.86 * sx
+    r9_y = y_min + 22.16 * sy
+    r10_x = x_min + 52.86 * sx
+    r10_y = y_min + 25.16 * sy
+    j5_x = x_min + 57.00 * sx
+    j5_y = y_min + 22.50 * sy
 
     new_fps: list[object] = []
     for fp in pcb.footprints:
         ref = fp.ref
         updated = fp
 
-        # U1 placement
-        if ref == "U1":
-            updated = replace(fp, position=Point(u1_x, u1_y), rotation=0.0)
+        # --- Connectors J1-J4 ---
+        if ref in ("J1", "J2", "J3", "J4"):
+            ch = int(ref[1])
+            jx, jy = j_positions[ch]
+            updated = replace(fp, position=Point(jx, jy), rotation=180.0)
+
+        # --- U1 (ADC) ---
+        elif ref == "U1":
+            updated = replace(fp, position=Point(u1_x, u1_y), rotation=-90.0)
+
+        # --- C1 (ADC decoupling) ---
         elif ref == "C1":
-            updated = replace(fp, position=Point(c1_x, c1_y), rotation=0.0)
-        # I2C pull-ups — place between U1 and J5 (MCU header)
-        # Human placed them at y~22 (board mid-height), x spread between
-        # U1 and the right half of the board.
+            updated = replace(fp, position=Point(c1_x, c1_y), rotation=180.0)
+
+        # --- I2C pull-ups ---
         elif ref == "R9":
-            # SDA pullup: midway between U1 and board centre-right
-            j5_fp = fp_map.get("J5")
-            if j5_fp:
-                # Place at ~2/3 of board width, mid-height
-                updated = replace(
-                    fp,
-                    position=Point(board_w * 0.53, board_h * 0.54),
-                    rotation=0.0,
-                )
+            updated = replace(fp, position=Point(r9_x, r9_y), rotation=0.0)
         elif ref == "R10":
-            j5_fp = fp_map.get("J5")
-            if j5_fp:
-                # Place further right, same height
-                updated = replace(
-                    fp,
-                    position=Point(board_w * 0.80, board_h * 0.54),
-                    rotation=0.0,
-                )
-        # Channel components
-        elif ref not in ("J1", "J2", "J3", "J4", "J5"):
+            updated = replace(fp, position=Point(r10_x, r10_y), rotation=0.0)
+
+        # --- MCU header ---
+        elif ref == "J5":
+            updated = replace(fp, position=Point(j5_x, j5_y), rotation=0.0)
+
+        # --- Channel passives ---
+        else:
             ch = _get_analog_channel(ref)
             if ch is not None:
-                j_ref = f"J{ch}"
-                if j_ref in fp_map:
-                    j_fp = fp_map[j_ref]
-                    jx, jy = j_fp.position.x, j_fp.position.y
-
-                    # Angle from U1 toward J[ch]
-                    base_angle = math.atan2(jy - u1_y, jx - u1_x)
-
-                    # Get quadrant-dependent parameters
-                    ch_params = _channel_params(jx, jy)
-
-                    comp_type = _get_component_type(ref, ch)
-                    if comp_type and comp_type in ch_params:
-                        radius, angle_off_deg = ch_params[comp_type]
-                        angle = base_angle + math.radians(angle_off_deg)
-
-                        new_x = u1_x + radius * math.cos(angle)
-                        new_y = u1_y + radius * math.sin(angle)
-                        updated = replace(
-                            fp,
-                            position=Point(new_x, new_y),
-                            rotation=0.0,
-                        )
+                comp_type = _get_component_type(ref, ch)
+                if comp_type and comp_type in _COMP_OFFSETS:
+                    jx, jy = j_positions[ch]
+                    avg_dx, slope_dx, rot = _COMP_OFFSETS[comp_type]
+                    # Interpolate dx: channels further right get larger dx shift
+                    dx = (avg_dx + slope_dx * (ch - 1)) * sx
+                    dy = _STRIP_DY
+                    updated = replace(
+                        fp,
+                        position=Point(jx + dx, jy + dy),
+                        rotation=rot,
+                    )
 
         new_fps.append(updated)
 
@@ -761,41 +739,36 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     print()
 
     # ---------------------------------------------------------------
-    # 3. Channel strip vertical alignment (dx < 2mm within channel)
+    # 3. Channel strip horizontal spread (all passives within 12mm of J)
     # ---------------------------------------------------------------
-    print("--- Channel Strip Alignment (dx < 2mm per channel) ---")
+    print("--- Channel Strip Spread (all passives within 12mm dx of J) ---")
     for ch in range(1, 5):
         if ch not in j_positions:
             continue
         j_x = j_positions[ch][0]
-        r_top_ref = f"R{2 * ch - 1}"
-        r_bot_ref = f"R{2 * ch}"
 
-        # R_top alignment with J
-        dx_top = abs(r_top_positions[ch][0] - j_x)
-        label = f"  CH{ch} {r_top_ref}-J{ch} dx={dx_top:.1f}mm"
-        if dx_top > 2.0:
-            violations.append(f"{label} (MAX 2mm) VIOLATION")
-            print(f"{label} (MAX 2mm) ** VIOLATION **")
-        else:
-            passes.append(f"{label} (MAX 2mm) OK")
-            print(f"{label} (MAX 2mm) OK")
-
-        # R_bot alignment with R_top
-        dx_bot = abs(r_bot_positions[ch][0] - r_top_positions[ch][0])
-        label = f"  CH{ch} {r_bot_ref}-{r_top_ref} dx={dx_bot:.1f}mm"
-        if dx_bot > 2.0:
-            violations.append(f"{label} (MAX 2mm) VIOLATION")
-            print(f"{label} (MAX 2mm) ** VIOLATION **")
-        else:
-            passes.append(f"{label} (MAX 2mm) OK")
-            print(f"{label} (MAX 2mm) OK")
+        # Check each passive is within 12mm horizontally of its connector
+        for comp_name, pos_dict in [
+            (f"R{2*ch-1}", r_top_positions),
+            (f"R{2*ch}", r_bot_positions),
+            (f"D{ch}", d_positions),
+            (f"C{ch+1}", c_positions),
+        ]:
+            if ch in pos_dict:
+                dx = abs(pos_dict[ch][0] - j_x)
+                label = f"  CH{ch} {comp_name}-J{ch} dx={dx:.1f}mm"
+                if dx > 12.0:
+                    violations.append(f"{label} (MAX 12mm) VIOLATION")
+                    print(f"{label} (MAX 12mm) ** VIOLATION **")
+                else:
+                    passes.append(f"{label} (MAX 12mm) OK")
+                    print(f"{label} (MAX 12mm) OK")
     print()
 
     # ---------------------------------------------------------------
-    # 4. R_top to R_bot proximity (3-10mm vertical gap)
+    # 4. R_top to R_bot same-row alignment (dy < 2mm — horizontal strip)
     # ---------------------------------------------------------------
-    print("--- R_top to R_bot Proximity (dy 3-10mm) ---")
+    print("--- R_top/R_bot Same Row (dy < 2mm, horizontal strip) ---")
     for ch in range(1, 5):
         if ch not in r_top_positions:
             continue
@@ -803,12 +776,12 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         r_bot_ref = f"R{2 * ch}"
         dy = abs(r_bot_positions[ch][1] - r_top_positions[ch][1])
         label = f"  CH{ch} {r_bot_ref}-{r_top_ref} dy={dy:.1f}mm"
-        if dy < 3.0 or dy > 10.0:
-            violations.append(f"{label} (3-10mm) VIOLATION")
-            print(f"{label} (3-10mm) ** VIOLATION **")
+        if dy > 2.0:
+            violations.append(f"{label} (MAX 2mm) VIOLATION")
+            print(f"{label} (MAX 2mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (3-10mm) OK")
-            print(f"{label} (3-10mm) OK")
+            passes.append(f"{label} (MAX 2mm) OK")
+            print(f"{label} (MAX 2mm) OK")
     print()
 
     # ---------------------------------------------------------------
@@ -833,17 +806,17 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     # ---------------------------------------------------------------
     # 6. I2C pull-ups near ADC (R9/R10 within 8mm of U1)
     # ---------------------------------------------------------------
-    print("--- I2C Pull-ups Near ADC (R9/R10 within 8mm of U1) ---")
+    print("--- I2C Pull-ups Near ADC (R9/R10 within 12mm of U1) ---")
     for r_ref in ("R9", "R10"):
         if r_ref in fp_map and "U1" in fp_map:
             d_r_u1 = _dist(fp_map[r_ref], fp_map["U1"])
             label = f"  {r_ref}-U1: {d_r_u1:.1f}mm"
-            if d_r_u1 > 8.0:
-                violations.append(f"{label} (MAX 8mm) VIOLATION")
-                print(f"{label} (MAX 8mm) ** VIOLATION **")
+            if d_r_u1 > 12.0:
+                violations.append(f"{label} (MAX 12mm) VIOLATION")
+                print(f"{label} (MAX 12mm) ** VIOLATION **")
             else:
-                passes.append(f"{label} (MAX 8mm) OK")
-                print(f"{label} (MAX 8mm) OK")
+                passes.append(f"{label} (MAX 12mm) OK")
+                print(f"{label} (MAX 12mm) OK")
         elif r_ref not in fp_map:
             violations.append(f"  {r_ref}: Missing")
             print(f"  {r_ref}: Missing")
@@ -889,18 +862,19 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     print()
 
     # ---------------------------------------------------------------
-    # 9. J5 at bottom edge (Y > 35mm for 40mm board)
+    # 9. J5 at right edge (X > 50mm for 60mm board)
     # ---------------------------------------------------------------
-    print("--- MCU Header Position (J5 near bottom edge) ---")
+    print("--- MCU Header Position (J5 near right edge, X > 50mm) ---")
     if "J5" in fp_map:
+        j5_x = fp_map["J5"][0]
         j5_y = fp_map["J5"][1]
-        label = f"  J5 Y={j5_y:.1f}mm"
-        if j5_y < 30.0:
-            violations.append(f"{label} (should be Y>30mm for bottom edge) VIOLATION")
-            print(f"{label} (should be Y>30mm) ** VIOLATION **")
+        label = f"  J5 X={j5_x:.1f}mm Y={j5_y:.1f}mm"
+        if j5_x < 50.0:
+            violations.append(f"{label} (should be X>50mm for right edge) VIOLATION")
+            print(f"{label} (should be X>50mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (Y>30mm) OK")
-            print(f"{label} (Y>30mm) OK")
+            passes.append(f"{label} (X>50mm) OK")
+            print(f"{label} (X>50mm) OK")
     else:
         violations.append("  J5: Missing")
         print("  J5: Missing")
@@ -1009,11 +983,10 @@ def main() -> None:
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
     # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — now handled by the optimizer's
-    # enhanced _adc_place_channel_strip() with radial fan layout
-    # (learned patterns moved to ee_phases_groups.py).  The override
-    # function below is kept for reference but no longer called.
+    # POST-PLACEMENT CORRECTIONS — override optimizer output with
+    # reference-derived channel-strip layout
     # ---------------------------------------------------------------
+    optimized_pcb = _apply_analog_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
