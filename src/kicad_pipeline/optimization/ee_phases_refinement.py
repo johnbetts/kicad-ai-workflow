@@ -706,8 +706,21 @@ def _phase_late_relay_realignment(
     ctx: PlacementContext,
     _relay_leds: dict[str, list[str]],
 ) -> None:
-    """3b-late: Post-collision relay driver re-alignment."""
-    _log.info("  3b-late: Relay driver re-alignment")
+    """3b-late: Post-collision relay driver re-alignment (two-column).
+
+    Re-applies the pad-connectivity-driven two-column layout after collision
+    resolution may have displaced components.
+
+    LEFT column (dx ~ -4.3mm from K.x):
+      D_flyback at dy=+10.8, rot=0
+      Q at dy=+13.3, rot=180
+      R_LED at dy=+15.5, rot=0
+      D_LED at dy=+17.7, rot=180
+
+    RIGHT column (dx ~ +4.0mm from K.x):
+      R_gate at dy=+15.4, rot=180
+    """
+    _log.info("  3b-late: Relay driver re-alignment (two-column)")
     sc_list = list(ctx.subcircuits)
     bounds = ctx.bounds
 
@@ -788,76 +801,72 @@ def _phase_late_relay_realignment(
             & set(ctx.best_positions.keys()),
         )
 
-        # Design-rules placement: Q beside K, D mirrored, R below Q
-        driver_y = ky + kh / 2.0 + 3.0
-        q_x_offset = 4.0
-        d_x_offset = -4.0
-        r_gate_offset_y = 2.7
+        # Two-column layout offsets (relative to K centroid)
+        left_x = kx - 4.3
+        right_x = kx + 4.0
 
-        for q_ref in q_refs:
-            old_x, old_y, old_rot = ctx.best_positions[q_ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx + q_x_offset))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, driver_y))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[q_ref] = (px, py, 0.0)
-
+        # LEFT column: D_flyback (anode facing down toward Q collector)
         for d_ref in d_refs:
-            old_x, old_y, old_rot = ctx.best_positions[d_ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx + d_x_offset))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, driver_y))
+            old_x, old_y, _old_rot = ctx.best_positions[d_ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 10.8))
             if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
                 _relay_realigned += 1
             ctx.best_positions[d_ref] = (px, py, 0.0)
 
+        # LEFT column: Q (collector up toward D, 180 deg)
+        for q_ref in q_refs:
+            old_x, old_y, _old_rot = ctx.best_positions[q_ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 13.3))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[q_ref] = (px, py, 180.0)
+
+        # RIGHT column: R_gate
         for r_ref in r_refs:
-            old_x, old_y, old_rot = ctx.best_positions[r_ref]
-            if q_refs and q_refs[0] in ctx.best_positions:
-                qx, qy, _ = ctx.best_positions[q_refs[0]]
-                px, py = qx, qy + r_gate_offset_y
-            else:
-                px = kx + q_x_offset
-                py = driver_y + r_gate_offset_y
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            old_x, old_y, _old_rot = ctx.best_positions[r_ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.4))
             if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
                 _relay_realigned += 1
             ctx.best_positions[r_ref] = (px, py, 180.0)
 
         # Place other support refs in grid below
         if other_refs:
-            other_y = driver_y + r_gate_offset_y + 3.0
+            other_y = ky + 18.0
             count_other, _, _, _ = _place_grid_below_anchor(
                 other_refs, kx, kw, other_y, 2,
                 bounds, ctx.fp_sizes, ctx.best_positions,
             )
             _relay_realigned += count_other
 
-        # LED pairs: R_LED at kx-1.5, D_LED at kx+1.5
-        led_y = driver_y + r_gate_offset_y + 2.8
+        # LED pairs in LEFT column below Q
         led_r = sorted(r for r in led_members if r.startswith("R"))
         led_d = sorted(r for r in led_members if r.startswith("D"))
         led_other = sorted(
             r for r in led_members
             if not r.startswith("R") and not r.startswith("D")
         )
+        # R_LED: below Q, pad 1 facing up (rot=0)
         for ref in led_r:
-            old_x, old_y, old_rot = ctx.best_positions[ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx - 1.5))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, led_y))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[ref] = (px, py, 180.0)
-        for ref in led_d:
-            old_x, old_y, old_rot = ctx.best_positions[ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, kx + 1.5))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, led_y))
+            old_x, old_y, _old_rot = ctx.best_positions[ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.5))
             if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
                 _relay_realigned += 1
             ctx.best_positions[ref] = (px, py, 0.0)
+        # D_LED: below R_LED, anode facing up (rot=180)
+        for ref in led_d:
+            old_x, old_y, _old_rot = ctx.best_positions[ref]
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 17.7))
+            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
+                _relay_realigned += 1
+            ctx.best_positions[ref] = (px, py, 180.0)
         if led_other:
             count_led, _, _, _ = _place_grid_below_anchor(
-                led_other, kx, kw, led_y + 2.5, 2,
+                led_other, kx, kw, ky + 19.5, 2,
                 bounds, ctx.fp_sizes, ctx.best_positions,
             )
             _relay_realigned += count_led

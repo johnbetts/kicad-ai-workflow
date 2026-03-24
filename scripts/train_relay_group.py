@@ -571,17 +571,20 @@ def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float
 def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     """Check relay driver design rules and print compliance report.
 
-    Rules are RELATIVE positioning checks (from human feedback):
+    Two-column pad-connectivity-driven layout rules:
     - All J at same Y (+/-1mm)
     - All K at same Y (+/-1mm)
     - J-K X alignment (+/-2mm per channel)
     - Equal relay spacing (max 2mm deviation from average)
-    - Q and D_flyback at same Y (+/-2mm per channel)
-    - R_gate directly below Q (dx < 2mm)
+    - D_flyback and Q same X (LEFT column, dx < 1mm)
+    - D_flyback above Q (D.y < Q.y)
+    - R_gate on opposite side from Q (RIGHT column)
+    - R_LED and D_LED same X as Q (LEFT column, dx < 1mm)
+    - R_LED below Q, D_LED below R_LED (vertical signal chain)
     - Power isolation: L1 near C1/C2 (<8mm)
     """
     print("=" * 60)
-    print("DESIGN RULES COMPLIANCE CHECK (Relative Positioning)")
+    print("DESIGN RULES COMPLIANCE CHECK (Two-Column Pad-Connectivity)")
     print("=" * 60)
     print()
 
@@ -595,6 +598,9 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     k_positions: dict[int, tuple[float, float, float]] = {}
     q_positions: dict[int, tuple[float, float, float]] = {}
     d_positions: dict[int, tuple[float, float, float]] = {}  # flyback
+    r_gate_positions: dict[int, tuple[float, float, float]] = {}
+    r_led_positions: dict[int, tuple[float, float, float]] = {}
+    d_led_positions: dict[int, tuple[float, float, float]] = {}
 
     for ch in range(1, 5):
         refs = {
@@ -609,6 +615,9 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         k_positions[ch] = fp_map[refs["K"]]
         q_positions[ch] = fp_map[refs["Q"]]
         d_positions[ch] = fp_map[refs["D"]]
+        r_gate_positions[ch] = fp_map[refs["R"]]
+        r_led_positions[ch] = fp_map[refs["R_LED"]]
+        d_led_positions[ch] = fp_map[refs["D_LED"]]
 
     # ---------------------------------------------------------------
     # 1. All J at same Y (+/-1mm)
@@ -686,74 +695,114 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     print()
 
     # ---------------------------------------------------------------
-    # 5. Q and D_flyback at same Y (+/-2mm per channel)
+    # 5. LEFT column: D_flyback and Q same X (dx < 1mm)
     # ---------------------------------------------------------------
-    print("--- Q-D_flyback Y Alignment (per channel, +/-2mm) ---")
+    print("--- LEFT Column: D_flyback-Q X Alignment (dx < 1mm) ---")
     for ch in range(1, 5):
         if ch not in q_positions or ch not in d_positions:
             continue
-        dy = abs(q_positions[ch][1] - d_positions[ch][1])
-        label = f"  CH{ch} Q{ch}-D{ch} dy={dy:.1f}mm"
-        if dy > 2.0:
-            violations.append(f"{label} (MAX +/-2mm) VIOLATION")
-            print(f"{label} (MAX +/-2mm) ** VIOLATION **")
+        dx = abs(q_positions[ch][0] - d_positions[ch][0])
+        label = f"  CH{ch} Q{ch}-D{ch} dx={dx:.1f}mm"
+        if dx > 1.0:
+            violations.append(f"{label} (MAX 1mm) VIOLATION")
+            print(f"{label} (MAX 1mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX +/-2mm) OK")
-            print(f"{label} (MAX +/-2mm) OK")
+            passes.append(f"{label} (MAX 1mm) OK")
+            print(f"{label} (MAX 1mm) OK")
     print()
 
     # ---------------------------------------------------------------
-    # 6. R_gate directly below Q (dx < 2mm)
+    # 6. D_flyback above Q (D.y < Q.y in KiCad coords)
     # ---------------------------------------------------------------
-    print("--- R_gate Below Q (dx < 2mm) ---")
+    print("--- LEFT Column: D_flyback Above Q (D.y < Q.y) ---")
     for ch in range(1, 5):
-        r_ref = f"R{ch}"
-        q_ref = f"Q{ch}"
-        if r_ref not in fp_map or q_ref not in fp_map:
+        if ch not in q_positions or ch not in d_positions:
             continue
-        r_pos = fp_map[r_ref]
-        q_pos = fp_map[q_ref]
-        dx = abs(r_pos[0] - q_pos[0])
-        label = f"  CH{ch} R{ch}-Q{ch} dx={dx:.1f}mm"
-        if dx > 2.0:
-            violations.append(f"{label} (MAX 2mm) VIOLATION")
-            print(f"{label} (MAX 2mm) ** VIOLATION **")
+        d_y = d_positions[ch][1]
+        q_y = q_positions[ch][1]
+        label = f"  CH{ch} D{ch}.y={d_y:.1f} Q{ch}.y={q_y:.1f}"
+        if d_y >= q_y:
+            violations.append(f"{label} (D must be above Q) VIOLATION")
+            print(f"{label} (D must be above Q) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX 2mm) OK")
-            print(f"{label} (MAX 2mm) OK")
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
     print()
 
     # ---------------------------------------------------------------
-    # 7. LED pair in channel column (+/-3mm from relay X)
+    # 7. R_gate on opposite side from Q (RIGHT column)
     # ---------------------------------------------------------------
-    print("--- LED Pair in Channel Column (+/-3mm from K) ---")
+    print("--- R_gate Opposite Side from Q (R.x > K.x, Q.x < K.x) ---")
     for ch in range(1, 5):
-        d_led_ref = f"D{ch+4}"
-        r_led_ref = f"R{ch+4}"
-        k_ref = f"K{ch}"
-        if d_led_ref not in fp_map or k_ref not in fp_map:
+        if ch not in q_positions or ch not in k_positions or ch not in r_gate_positions:
             continue
-        d_led_dx = abs(fp_map[d_led_ref][0] - fp_map[k_ref][0])
-        label = f"  CH{ch} D{ch+4} dx from K{ch}={d_led_dx:.1f}mm"
-        if d_led_dx > 3.0:
-            violations.append(f"{label} (MAX +/-3mm) VIOLATION")
-            print(f"{label} (MAX +/-3mm) ** VIOLATION **")
+        k_x = k_positions[ch][0]
+        q_x = q_positions[ch][0]
+        r_x = r_gate_positions[ch][0]
+        q_side = "left" if q_x < k_x else "right"
+        r_side = "right" if r_x > k_x else "left"
+        label = (
+            f"  CH{ch} Q{ch} {q_side} (x={q_x:.1f}), "
+            f"R{ch} {r_side} (x={r_x:.1f}), K{ch} x={k_x:.1f}"
+        )
+        if q_side == r_side:
+            violations.append(f"{label} (must be opposite sides) VIOLATION")
+            print(f"{label} (must be opposite sides) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX +/-3mm) OK")
-            print(f"{label} (MAX +/-3mm) OK")
-        if r_led_ref in fp_map:
-            r_led_dx = abs(fp_map[r_led_ref][0] - fp_map[k_ref][0])
-            label = f"  CH{ch} R{ch+4} dx from K{ch}={r_led_dx:.1f}mm"
-            if r_led_dx > 3.0:
-                violations.append(f"{label} (MAX +/-3mm) VIOLATION")
-                print(f"{label} (MAX +/-3mm) ** VIOLATION **")
-            else:
-                passes.append(f"{label} (MAX +/-3mm) OK")
-                print(f"{label} (MAX +/-3mm) OK")
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
     print()
 
     # ---------------------------------------------------------------
-    # 8. Power isolation checks
+    # 8. LED pair same X as Q (LEFT column, dx < 1mm)
+    # ---------------------------------------------------------------
+    print("--- LEFT Column: LED Pair X Alignment with Q (dx < 1mm) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in r_led_positions or ch not in d_led_positions:
+            continue
+        q_x = q_positions[ch][0]
+        r_led_dx = abs(r_led_positions[ch][0] - q_x)
+        d_led_dx = abs(d_led_positions[ch][0] - q_x)
+        label_r = f"  CH{ch} R{ch+4}-Q{ch} dx={r_led_dx:.1f}mm"
+        label_d = f"  CH{ch} D{ch+4}-Q{ch} dx={d_led_dx:.1f}mm"
+        if r_led_dx > 1.0:
+            violations.append(f"{label_r} (MAX 1mm) VIOLATION")
+            print(f"{label_r} (MAX 1mm) ** VIOLATION **")
+        else:
+            passes.append(f"{label_r} (MAX 1mm) OK")
+            print(f"{label_r} (MAX 1mm) OK")
+        if d_led_dx > 1.0:
+            violations.append(f"{label_d} (MAX 1mm) VIOLATION")
+            print(f"{label_d} (MAX 1mm) ** VIOLATION **")
+        else:
+            passes.append(f"{label_d} (MAX 1mm) OK")
+            print(f"{label_d} (MAX 1mm) OK")
+    print()
+
+    # ---------------------------------------------------------------
+    # 9. Vertical signal chain: R_LED below Q, D_LED below R_LED
+    # ---------------------------------------------------------------
+    print("--- LEFT Column: Vertical Chain (Q -> R_LED -> D_LED, Y increasing) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in r_led_positions or ch not in d_led_positions:
+            continue
+        q_y = q_positions[ch][1]
+        r_led_y = r_led_positions[ch][1]
+        d_led_y = d_led_positions[ch][1]
+        label = f"  CH{ch} Q{ch}.y={q_y:.1f} R{ch+4}.y={r_led_y:.1f} D{ch+4}.y={d_led_y:.1f}"
+        if r_led_y <= q_y:
+            violations.append(f"{label} (R_LED must be below Q) VIOLATION")
+            print(f"{label} (R_LED must be below Q) ** VIOLATION **")
+        elif d_led_y <= r_led_y:
+            violations.append(f"{label} (D_LED must be below R_LED) VIOLATION")
+            print(f"{label} (D_LED must be below R_LED) ** VIOLATION **")
+        else:
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
+    print()
+
+    # ---------------------------------------------------------------
+    # 10. Power isolation checks
     # ---------------------------------------------------------------
     print("--- Power Isolation (L1/L2/C1/C2 proximity < 8mm) ---")
     power_refs = ["L1", "L2", "C1", "C2"]

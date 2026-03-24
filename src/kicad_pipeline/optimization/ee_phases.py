@@ -216,15 +216,22 @@ def _phase_relay_connector_alignment(ctx: PlacementContext) -> None:
 
 
 def _phase_relay_drivers(ctx: PlacementContext) -> None:
-    """3b: Relay driver placement — Q+D flanking K, R_gate below Q.
+    """3b: Relay driver placement — pad-connectivity-driven two-column layout.
 
-    Design rules (from relay_driver.md):
-    - Q (transistor) beside relay on coil-pin side, ~4mm offset from K center
-    - D_flyback mirrors Q on opposite side of K center, same Y
-    - R_gate directly below Q (dx~0, dy~+2.7mm)
-    - All at Y = bottom edge of relay + offset
+    Two-column layout relative to relay anchor K:
+
+    LEFT column (dx ~ -4.3mm from K.x) — high-current signal chain:
+      D_flyback at dy=+10.8, rot=0   (anode down toward Q collector)
+      Q transistor at dy=+13.3, rot=180 (collector up toward D, base toward R_gate)
+
+    RIGHT column (dx ~ +4.0mm from K.x) — control:
+      R_gate at dy=+15.4, rot=180  (connects Q base to GPIO)
+
+    The logic: D_flyback anode and Q collector share the COIL net —
+    placing them vertically with pads facing each other minimises trace
+    length.  R_gate on the opposite side creates a routing channel.
     """
-    _log.info("  3b: Relay driver subgroup tightening")
+    _log.info("  3b: Relay driver subgroup tightening (two-column)")
     sc_list = list(ctx.subcircuits)
     bounds = ctx.bounds
 
@@ -235,9 +242,6 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         if anchor not in ctx.positions:
             continue
         kx, ky, _krot = ctx.positions[anchor]
-        kw, kh = ctx.fp_sizes.get(anchor, (18.0, 16.0))
-        if _krot % 180 in (90.0, 270.0):
-            kw, kh = kh, kw
 
         support_members = [
             r for r in sc.refs
@@ -255,8 +259,6 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
 
         # Separate gate resistors from LED resistors:
         # Gate resistor shares a DRIVE net with a Q ref in this subcircuit.
-        # Also look for gate resistors NOT in the subcircuit but connected
-        # to Q via a DRIVE net (subcircuit detection may miss them).
         power_nets = {"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"}
         r_gate_refs: list[str] = []
         r_other_refs: list[str] = []
@@ -298,57 +300,40 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         # LED resistors go to other_refs for generic grid placement
         other_refs.extend(r_other_refs)
 
-        # Driver row: below relay, offset from relay center
-        driver_y = ky + kh / 2.0 + 3.0
-        q_x_offset = 4.0   # Q offset from K center (right side = coil pin side)
-        d_x_offset = -4.0   # D_flyback mirrors Q on left side
+        # Two-column layout offsets (relative to K centroid)
+        left_x = kx - 4.3   # LEFT column: high-current signal chain
+        right_x = kx + 4.0  # RIGHT column: control
 
-        # Place Q transistors beside relay (coil-pin side)
-        for q_ref in q_refs:
-            qw, qh = ctx.fp_sizes.get(q_ref, (2.0, 2.0))
-            px = kx + q_x_offset
-            py = driver_y
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-            ctx.positions[q_ref] = (px, py, 0.0)
-            ctx.relay_support_refs.add(q_ref)
-            _log.info("    Q %s -> (%.1f, %.1f) beside %s", q_ref, px, py, anchor)
-
-        # Place D_flyback mirrored on opposite side from Q, same Y
+        # LEFT column: D_flyback above Q (anode facing down toward Q collector)
         for d_ref in d_refs:
-            dw, dh = ctx.fp_sizes.get(d_ref, (2.0, 2.0))
-            px = kx + d_x_offset
-            py = driver_y
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 10.8))
             ctx.positions[d_ref] = (px, py, 0.0)
             ctx.relay_support_refs.add(d_ref)
-            _log.info("    D %s -> (%.1f, %.1f) mirrored from Q", d_ref, px, py)
+            _log.info("    D %s -> (%.1f, %.1f) LEFT col, rot=0", d_ref, px, py)
 
-        # Place R_gate directly below Q (dx~0, dy~+2.7mm)
-        r_gate_offset_y = 2.7
+        # LEFT column: Q below D_flyback (collector up toward D, 180 deg)
+        for q_ref in q_refs:
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 13.3))
+            ctx.positions[q_ref] = (px, py, 180.0)
+            ctx.relay_support_refs.add(q_ref)
+            _log.info("    Q %s -> (%.1f, %.1f) LEFT col, rot=180", q_ref, px, py)
+
+        # RIGHT column: R_gate (connects Q base to GPIO)
         for r_ref in r_refs:
-            rw, rh = ctx.fp_sizes.get(r_ref, (2.0, 2.0))
-            # R_gate goes below Q — use Q position if available
-            if q_refs and q_refs[0] in ctx.positions:
-                qx, qy, _ = ctx.positions[q_refs[0]]
-                px = qx
-                py = qy + r_gate_offset_y
-            else:
-                px = kx + q_x_offset
-                py = driver_y + r_gate_offset_y
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.4))
             ctx.positions[r_ref] = (px, py, 180.0)
             ctx.relay_support_refs.add(r_ref)
-            _log.info("    R %s -> (%.1f, %.1f) below Q", r_ref, px, py)
+            _log.info("    R %s -> (%.1f, %.1f) RIGHT col, rot=180", r_ref, px, py)
 
         # Place any remaining components in a grid below
         if other_refs:
-            other_y = driver_y + r_gate_offset_y + 3.0
+            other_y = ky + 18.0
             for i, ref in enumerate(other_refs):
                 w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-                px = kx - kw / 4.0 + (i % 2) * (kw / 2.0)
+                px = kx - 4.0 + (i % 2) * 8.0
                 py = other_y + (i // 2) * (h + 0.5)
                 px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
                 py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
@@ -455,12 +440,22 @@ def _find_relay_led_pairs(
 
 
 def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[str]]:
-    """3b2: Relay LED indicator placement — D_LED + R_LED below support grid.
+    """3b2: Relay LED indicator placement — LEFT column below Q.
+
+    Pad-connectivity-driven layout (continuation of two-column pattern):
+
+    LEFT column (dx ~ -4.3mm from K.x):
+      R_LED at dy=+15.5, rot=0    (pad 1 up toward Q collector / COIL net)
+      D_LED at dy=+17.7, rot=180  (anode up toward R_LED pad 2)
+
+    The logic: R_LED pad 1 connects to the COIL net (same as Q collector),
+    so it goes directly below Q.  D_LED anode connects to R_LED pad 2,
+    so it goes directly below R_LED with anode facing up (180 deg).
 
     Returns:
         Tuple of (relay_leds mapping, relay_led_refs set) for use by later phases.
     """
-    _log.info("  3b2: Relay LED indicator placement")
+    _log.info("  3b2: Relay LED indicator placement (two-column)")
     relay_led_refs: set[str] = set()
     bounds = ctx.bounds
 
@@ -469,24 +464,18 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         ctx.requirements, coil_net_to_relay, ctx.relay_support_refs,
     )
 
-    # Place LED pairs below each relay's driver components.
-    # Design rule: LED pair at K.x (+/-1.5mm), below R_gate.
-    # R_LED at (kx - 1.5, led_y), D_LED at (kx + 1.5, led_y)
     for k_ref in sorted(_relay_leds):
         if k_ref not in ctx.positions:
             continue
         kx, ky, _krot = ctx.positions[k_ref]
-        kw, kh = ctx.fp_sizes.get(k_ref, (18.0, 16.0))
-        if _krot % 180 in (90.0, 270.0):
-            kw, kh = kh, kw
 
         led_members = sorted(set(_relay_leds[k_ref]))
         led_members = [r for r in led_members if r in ctx.positions and r not in ctx.fixed_refs]
         if not led_members:
             continue
 
-        # LED row Y: below driver components (Q+D at kh/2+3, R_gate at +2.7, LED at +2.8 more)
-        led_y = ky + kh / 2.0 + 3.0 + 2.7 + 2.8
+        # LEFT column X — same as D_flyback and Q
+        left_x = kx - 4.3
 
         # Separate R_LED and D_LED refs
         r_led_refs = sorted(r for r in led_members if r.startswith("R"))
@@ -496,42 +485,33 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
             if not r.startswith("R") and not r.startswith("D")
         )
 
-        # Place R_LED at kx - 1.5, D_LED at kx + 1.5
-        led_x_offset = 1.5
+        # R_LED: below Q, pad 1 facing up toward COIL net (rot=0)
         for ref in r_led_refs:
-            _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx - led_x_offset
-            py = led_y
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-            ctx.positions[ref] = (px, py, 180.0)
-            ctx.relay_support_refs.add(ref)
-            relay_led_refs.add(ref)
-
-        for ref in d_led_refs:
-            _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx + led_x_offset
-            py = led_y
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.5))
             ctx.positions[ref] = (px, py, 0.0)
             ctx.relay_support_refs.add(ref)
             relay_led_refs.add(ref)
 
-        # Remaining LED-related refs in a row below
+        # D_LED: below R_LED, anode facing up (rot=180)
+        for ref in d_led_refs:
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 17.7))
+            ctx.positions[ref] = (px, py, 180.0)
+            ctx.relay_support_refs.add(ref)
+            relay_led_refs.add(ref)
+
+        # Remaining LED-related refs below
         for i, ref in enumerate(other_led_refs):
-            _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            px = kx - led_x_offset + i * (led_x_offset * 2)
-            py = led_y + 2.5
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x + i * 3.0))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 19.5))
             _, _, rot = ctx.positions[ref]
             ctx.positions[ref] = (px, py, rot)
             ctx.relay_support_refs.add(ref)
             relay_led_refs.add(ref)
 
-        _log.info("    3b2: placed %d LED refs for %s at Y=%.1f",
-                   len(led_members), k_ref, led_y)
+        _log.info("    3b2: placed %d LED refs for %s (left col at x=%.1f)",
+                   len(led_members), k_ref, left_x)
 
     return _relay_leds, relay_led_refs
 
