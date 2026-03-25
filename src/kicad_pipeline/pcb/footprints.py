@@ -518,15 +518,19 @@ _SOT23_VARIANTS: dict[str, tuple[float, float, list[tuple[float, float]]]] = {
 
 # USB-C power/signal pad definitions: (x, y, width, height, name)
 _USBC_PADS: list[tuple[float, float, float, float, str]] = [
-    (-3.5, 2.5, 1.6, 1.6, "A1"),     # GND (A1)
-    (-2.0, 2.5, 0.6, 1.6, "A5"),     # CC1 (A5)
-    (-1.0, 2.5, 0.6, 1.6, "A7"),     # D- (A7)
-    (1.0, 2.5, 0.6, 1.6, "A6"),      # D+ (A6)
-    (2.0, 2.5, 0.6, 1.6, "B5"),      # CC2 (B5)
-    (3.5, 2.5, 1.6, 1.6, "A4"),      # VBUS (A4)
-    (-1.0, -2.5, 0.6, 1.6, "B7"),    # D-_B (B7)
-    (1.0, -2.5, 0.6, 1.6, "B6"),     # D+_B (B6)
-    (0.0, -3.5, 2.0, 1.0, "S1"),     # Shield (S1)
+    # Default orientation: plug opening faces north (negative Y), A-row pads
+    # at the north/plug side, B-row at south, shield tab furthest south.
+    # At rotation 0 with connector at the top board edge, A1 (GND) is closest
+    # to the edge and A4 (VBUS) is also at the plug side.
+    (-3.5, -2.5, 1.6, 1.6, "A1"),    # GND (A1) — plug side (north)
+    (-2.0, -2.5, 0.6, 1.6, "A5"),    # CC1 (A5)
+    (-1.0, -2.5, 0.6, 1.6, "A7"),    # D- (A7)
+    (1.0, -2.5, 0.6, 1.6, "A6"),     # D+ (A6)
+    (2.0, -2.5, 0.6, 1.6, "B5"),     # CC2 (B5)
+    (3.5, -2.5, 1.6, 1.6, "A4"),     # VBUS (A4) — plug side (north)
+    (-1.0, 2.5, 0.6, 1.6, "B7"),     # D-_B (B7) — board-interior side
+    (1.0, 2.5, 0.6, 1.6, "B6"),      # D+_B (B6) — board-interior side
+    (0.0, 3.5, 2.0, 1.0, "S1"),      # Shield (S1) — furthest south (interior)
 ]
 
 # RJ45 HR911105A pin geometry (from KiCad official footprint)
@@ -614,10 +618,21 @@ _ESP32_PIN_NAMES: tuple[str, ...] = (
 )
 
 # Antenna keepout: top portion of the ESP32 module where no copper/components
-# should be placed.  The antenna extends ~5mm from the top edge of the body.
-_ESP32_ANTENNA_KEEPOUT_DEPTH_MM: float = 5.0
+# should be placed.  The zigzag antenna pattern spans ~8mm from the top edge
+# of the module body per the ESP32-S3-WROOM-1 datasheet.
+_ESP32_ANTENNA_KEEPOUT_DEPTH_MM: float = 8.0
 
-# Vertical offset for the GND pad centre.  The antenna occupies the top ~5mm
+# Extension past the module body edge for the antenna keepout.  The antenna
+# PCB trace extends slightly beyond the module body, so the keepout must
+# extend 1.5mm past the body top edge to prevent copper near the antenna.
+_ESP32_ANTENNA_KEEPOUT_EXTENSION_MM: float = 1.5
+
+# Via fence parameters for ground isolation around the antenna keepout.
+_ESP32_VIA_FENCE_PAD_SIZE: float = 0.6    # via pad diameter (mm)
+_ESP32_VIA_FENCE_DRILL: float = 0.3       # via drill diameter (mm)
+_ESP32_VIA_FENCE_SPACING: float = 2.0     # via-to-via spacing along fence (mm)
+
+# Vertical offset for the GND pad centre.  The antenna occupies the top ~8mm
 # of the 25.5mm body so the pad field (and GND pad) is shifted south by half
 # the antenna depth to centre it on the active silicon area.
 _ESP32_GND_PAD_Y_OFFSET: float = 2.5
@@ -1316,8 +1331,10 @@ def make_esp32_wroom(
     Each pad carries the functional pin name (e.g. ``"GND"``, ``"IO4"``) so
     that KiCad displays meaningful labels instead of bare numbers.
 
-    The footprint includes an antenna keepout zone covering the top ~5 mm of
-    the module body (no copper on any layer) and a 3D model reference.
+    The footprint includes an antenna keepout zone covering the top ~8 mm of
+    the module body plus 1.5 mm extension past the body edge (no copper on any
+    layer), a GND via fence around the keepout perimeter, and a 3D model
+    reference.
 
     Args:
         ref: Reference designator (e.g. "U3").
@@ -1408,15 +1425,18 @@ def make_esp32_wroom(
         ))
 
     # --- Antenna keepout zone (footprint-level) ---
-    # Covers the top _ESP32_ANTENNA_KEEPOUT_DEPTH_MM of the module body.
-    # No copper allowed on any layer beneath the antenna.
+    # Covers the top _ESP32_ANTENNA_KEEPOUT_DEPTH_MM of the module body
+    # PLUS _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM past the body edge.
+    # No copper allowed on any layer beneath or near the antenna.
     antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+    antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
     half_w = body_w / 2.0
-    top_y = -(body_h / 2.0)
-    keepout_bot_y = top_y + antenna_depth
+    body_top_y = -(body_h / 2.0)
+    keepout_top_y = body_top_y - antenna_ext  # extend past body edge
+    keepout_bot_y = body_top_y + antenna_depth
     keepout_poly = (
-        Point(-half_w, top_y),
-        Point(half_w, top_y),
+        Point(-half_w, keepout_top_y),
+        Point(half_w, keepout_top_y),
         Point(half_w, keepout_bot_y),
         Point(-half_w, keepout_bot_y),
     )
@@ -1428,6 +1448,66 @@ def make_esp32_wroom(
         no_tracks=True,
         tag="antenna",
     )
+
+    # --- GND via fence around antenna keepout (Issue 2) ---
+    # Place isolation vias in the footprint so they move with the module.
+    # Vias line 3 sides of the keepout: left, right, and bottom (NOT the
+    # module edge side, which is open for antenna radiation).
+    via_size = _ESP32_VIA_FENCE_PAD_SIZE
+    via_drill = _ESP32_VIA_FENCE_DRILL
+    via_spacing = _ESP32_VIA_FENCE_SPACING
+    via_layers = (LAYER_F_CU, LAYER_B_CU)
+    via_pads: list[Pad] = []
+    via_idx = 42  # start numbering after pad 41 (GND thermal)
+
+    # Bottom row of via fence (horizontal, at keepout_bot_y)
+    n_bottom_vias = max(1, int((2 * half_w) / via_spacing) + 1)
+    for i in range(n_bottom_vias):
+        vx = -half_w + i * (2 * half_w) / max(1, n_bottom_vias - 1)
+        via_pads.append(Pad(
+            number=str(via_idx),
+            pad_type="thru_hole",
+            shape="circle",
+            position=Point(vx, keepout_bot_y),
+            size_x=via_size,
+            size_y=via_size,
+            layers=via_layers,
+            drill_diameter=via_drill,
+        ))
+        via_idx += 1
+
+    # Left and right columns of via fence (vertical, from keepout_bot_y
+    # up to keepout_top_y, excluding the module edge end which stays open).
+    fence_height = keepout_bot_y - keepout_top_y
+    n_side_vias = max(1, int(fence_height / via_spacing))
+    for i in range(1, n_side_vias):  # skip bottom row (already placed)
+        vy = keepout_bot_y - i * via_spacing
+        # Left column
+        via_pads.append(Pad(
+            number=str(via_idx),
+            pad_type="thru_hole",
+            shape="circle",
+            position=Point(-half_w, vy),
+            size_x=via_size,
+            size_y=via_size,
+            layers=via_layers,
+            drill_diameter=via_drill,
+        ))
+        via_idx += 1
+        # Right column
+        via_pads.append(Pad(
+            number=str(via_idx),
+            pad_type="thru_hole",
+            shape="circle",
+            position=Point(half_w, vy),
+            size_x=via_size,
+            size_y=via_size,
+            layers=via_layers,
+            drill_diameter=via_drill,
+        ))
+        via_idx += 1
+
+    pad_list.extend(via_pads)
 
     graphics = _courtyard_rect(body_w, body_h)
     texts: tuple[FootprintText, ...] = (
@@ -1509,6 +1589,7 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
         fz.tag == "antenna" for fz in fp.fp_zones
     )
     extra_zones: list[FootprintKeepout] = []
+    extra_pads: list[Pad] = []
     if not has_antenna_keepout:
         # Derive body bounds from actual pad positions rather than assuming
         # body-center origin.  JLCPCB footprints may have a different origin
@@ -1516,6 +1597,7 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
         # are at the antenna end (most negative Y); the body top edge is
         # _ESP32_TOP_MARGIN + pad_h/2 above those pad centres.
         antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+        antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
         half_w = _ESP32_BODY_W / 2.0
 
         # Use actual pad Y positions (excluding pad 41 GND center pad) to
@@ -1530,10 +1612,11 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
             # Fallback: assume body-center origin (parametric model).
             body_top_y = -(_ESP32_BODY_H / 2.0)
 
+        keepout_top_y = body_top_y - antenna_ext  # extend past body edge
         keepout_bot_y = body_top_y + antenna_depth
         keepout_poly = (
-            Point(-half_w, body_top_y),
-            Point(half_w, body_top_y),
+            Point(-half_w, keepout_top_y),
+            Point(half_w, keepout_top_y),
             Point(half_w, keepout_bot_y),
             Point(-half_w, keepout_bot_y),
         )
@@ -1545,6 +1628,59 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
             no_tracks=True,
             tag="antenna",
         ))
+
+        # --- GND via fence around antenna keepout (Issue 2) ---
+        via_size = _ESP32_VIA_FENCE_PAD_SIZE
+        via_drill = _ESP32_VIA_FENCE_DRILL
+        via_spacing = _ESP32_VIA_FENCE_SPACING
+        via_layers = (LAYER_F_CU, LAYER_B_CU)
+        # Number vias starting after pad 41 to avoid conflicts with
+        # _postprocess_esp32_thermal_pad (which merges all pad "41"s).
+        via_idx = 42 + len(fp.pads)  # safe offset beyond existing pads
+
+        # Bottom row (horizontal)
+        n_bottom_vias = max(1, int((2 * half_w) / via_spacing) + 1)
+        for i in range(n_bottom_vias):
+            vx = -half_w + i * (2 * half_w) / max(1, n_bottom_vias - 1)
+            extra_pads.append(Pad(
+                number=str(via_idx),
+                pad_type="thru_hole",
+                shape="circle",
+                position=Point(vx, keepout_bot_y),
+                size_x=via_size,
+                size_y=via_size,
+                layers=via_layers,
+                drill_diameter=via_drill,
+            ))
+            via_idx += 1
+
+        # Left and right columns
+        fence_height = keepout_bot_y - keepout_top_y
+        n_side_vias = max(1, int(fence_height / via_spacing))
+        for i in range(1, n_side_vias):
+            vy = keepout_bot_y - i * via_spacing
+            extra_pads.append(Pad(
+                number=str(via_idx),
+                pad_type="thru_hole",
+                shape="circle",
+                position=Point(-half_w, vy),
+                size_x=via_size,
+                size_y=via_size,
+                layers=via_layers,
+                drill_diameter=via_drill,
+            ))
+            via_idx += 1
+            extra_pads.append(Pad(
+                number=str(via_idx),
+                pad_type="thru_hole",
+                shape="circle",
+                position=Point(half_w, vy),
+                size_x=via_size,
+                size_y=via_size,
+                layers=via_layers,
+                drill_diameter=via_drill,
+            ))
+            via_idx += 1
 
     # --- Bug 4: 3D model ---
     has_model = len(fp.models) > 0
@@ -1559,13 +1695,14 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
         models = (model,)
 
     # Return enriched copy only if something changed.
-    if not extra_texts and not extra_zones and has_model:
+    if not extra_texts and not extra_zones and not extra_pads and has_model:
         return fp
 
+    new_pads = (*fp.pads, *extra_pads) if extra_pads else fp.pads
     return Footprint(
         lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
         position=fp.position, rotation=fp.rotation, layer=fp.layer,
-        pads=fp.pads, graphics=fp.graphics,
+        pads=new_pads, graphics=fp.graphics,
         texts=(*fp.texts, *extra_texts),
         lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
         models=models,
@@ -2640,8 +2777,11 @@ def _postprocess_esp32_thermal_pad(fp: Footprint) -> Footprint:
     min_y = min(p.position.y - p.size_y / 2 for p in p41_pads)
     max_y = max(p.position.y + p.size_y / 2 for p in p41_pads)
 
-    cx = (min_x + max_x) / 2
-    cy = (min_y + max_y) / 2
+    # True centroid: average of all original pad-41 centre positions.
+    # For a symmetric 3x3 grid this equals the BB centre, but using the
+    # average is correct for any grid arrangement.
+    cx = sum(p.position.x for p in p41_pads) / len(p41_pads)
+    cy = sum(p.position.y for p in p41_pads) / len(p41_pads)
     w = max_x - min_x
     h = max_y - min_y
 
