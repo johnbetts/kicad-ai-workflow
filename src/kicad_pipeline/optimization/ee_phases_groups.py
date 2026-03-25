@@ -2005,77 +2005,279 @@ def _shift_channel_start_for_overlaps(
     return ch_x_start, ch_x_end
 
 
+def _find_channel_connector_ref(
+    passives: list[str],
+    ctx: PlacementContext,
+) -> str | None:
+    """Find the connector ref (J*) connected to an ADC channel's passives."""
+    for net in ctx.requirements.nets:
+        j_refs = [c.ref for c in net.connections if c.ref.startswith("J")]
+        r_in_ch = [c.ref for c in net.connections
+                   if c.ref in passives and c.ref.startswith("R")]
+        if j_refs and r_in_ch:
+            return j_refs[0]
+    return None
+
+
+def _find_i2c_pullup_refs(
+    ic_refs: set[str],
+    ctx: PlacementContext,
+    already_claimed: set[str],
+) -> list[str]:
+    """Find I2C pull-up resistors connected to ADC ICs via I2C nets."""
+    pullup_refs: set[str] = set()
+    for net in ctx.requirements.nets:
+        name_upper = net.name.upper()
+        if not any(tag in name_upper for tag in ("I2C", "SCL", "SDA")):
+            continue
+        has_ic = any(c.ref in ic_refs for c in net.connections)
+        if not has_ic:
+            continue
+        for c in net.connections:
+            if (c.ref.startswith("R")
+                    and c.ref in ctx.positions
+                    and c.ref not in already_claimed):
+                pullup_refs.add(c.ref)
+    return sorted(pullup_refs)
+
+
+# Per-component dx offsets for horizontal strip below connector.
+# Learned from human-routed reference board (60x40mm analog input board).
+# Left-to-right order: C_filt, D_tvs, R_bot, R_top.
+# (avg_dx_mm, per_channel_slope_dx, rotation_deg)
+_ADC_STRIP_OFFSETS: dict[str, tuple[float, float, float]] = {
+    "C_filt": (-4.64, 0.75, 90.0),
+    "D_tvs":  (-1.77, 0.52, 0.0),
+    "R_bot":  (+1.56, 0.57, 90.0),
+    "R_top":  (+3.88, 0.76, -90.0),
+}
+
+# Vertical drop from connector to passive row (mm, before scaling).
+_ADC_STRIP_DY_MM: float = 8.3
+
+
+def _adc_assign_passive_role(
+    ref: str, r_refs: list[str],
+) -> str | None:
+    """Map a passive ref to its role in the ADC channel strip.
+
+    R refs are ordered numerically; the lower-numbered is R_top (top of
+    voltage divider), the higher-numbered is R_bot.
+    """
+    if ref.startswith("D"):
+        return "D_tvs"
+    if ref.startswith("C"):
+        return "C_filt"
+    if ref.startswith("R") and ref in r_refs:
+        idx = r_refs.index(ref)
+        if idx == 0:
+            return "R_top"
+        if idx == 1:
+            return "R_bot"
+    return None
+
+
 def _phase_adc_channels(ctx: PlacementContext) -> None:
-    """3c2: ADC channel formation — repeatable channel strips near ADC ICs."""
-    _log.info("  3c2: ADC channel formation")
+    """3c2: ADC channel formation — connector-first horizontal strip layout.
+
+    Layout pattern learned from human-routed reference board:
+
+    1. Place ADC channel connectors at the top edge of the analog zone,
+       evenly spaced left-to-right, rotation=180 (wire entry faces top).
+
+    2. For each channel, place passives in a horizontal strip ~8.3mm below
+       the connector. Left-to-right order: C_filt, D_tvs, R_bot, R_top.
+       Component dx offsets interpolate slightly per channel index.
+
+    3. Place ADC IC(s) below the channel strips, centered horizontally.
+
+    4. Place I2C pull-up resistors near the ADC IC.
+    """
+    _log.info("  3c2: ADC channel formation (connector-first strips)")
 
     adc_channels = _detect_adc_channels(ctx)
+    if not adc_channels:
+        _log.info("    3c2: no ADC channels detected")
+        ctx._adc_channels = []  # type: ignore[attr-defined]
+        ctx._ic_channels = {}  # type: ignore[attr-defined]
+        ctx._r_top_connector_x = {}  # type: ignore[attr-defined]
+        ctx._occupied_x_ranges = []  # type: ignore[attr-defined]
+        ctx._CHANNEL_SPACING_MM = 8.0  # type: ignore[attr-defined]
+        ctx._STRIP_GAP_MM = 1.5  # type: ignore[attr-defined]
+        return
 
     # Group channels by IC
     ic_channels: dict[str, list[tuple[str, list[str]]]] = {}
     for ic_ref, ic_pin, passives in adc_channels:
         ic_channels.setdefault(ic_ref, []).append((ic_pin, passives))
+        ctx.adc_ic_refs.add(ic_ref)
 
-    _r_top_connector_x = _build_r_top_connector_x(ctx)
-
-    def _channel_sort_key(ch: tuple[str, list[str]]) -> float:
-        _pin, _passives = ch
-        for r in sorted(r for r in _passives if r.startswith("R")):
-            if r in _r_top_connector_x:
-                return _r_top_connector_x[r]
-        return float(hash(_pin)) * 1e-6
-
-    for ic_ref in ic_channels:
-        ic_channels[ic_ref].sort(key=_channel_sort_key)
-
-    # Collect all ADC channel passive refs and IC refs
+    # Collect all ADC channel passive refs
     all_adc_passive_refs: set[str] = set()
     for _ic_ref, _ic_pin, passives in adc_channels:
         all_adc_passive_refs.update(passives)
-        ctx.adc_ic_refs.add(_ic_ref)
 
-    # Move ADC ICs to the analog zone
-    _move_adc_ics_to_zone(ctx, ic_channels, _r_top_connector_x)
+    # --- Step 1: Discover channel connectors via net connectivity ---
+    # Build ordered list of (connector_ref, ic_ref, ic_pin, passives)
+    channel_with_connectors: list[tuple[str | None, str, str, list[str]]] = []
+    for ic_ref, ic_pin, passives in adc_channels:
+        j_ref = _find_channel_connector_ref(passives, ctx)
+        channel_with_connectors.append((j_ref, ic_ref, ic_pin, passives))
 
-    def _ic_avg_connector_x(ic: str) -> float:
-        xs = [_r_top_connector_x[r]
-              for _pin, passives in ic_channels.get(ic, [])
-              for r in passives
-              if r.startswith("R") and r in _r_top_connector_x]
-        return sum(xs) / len(xs) if xs else 999.0
+    # Sort channels by connector ref so J1 < J2 < J3 < J4
+    channel_with_connectors.sort(key=lambda t: (t[0] or "Z999",))
 
-    _adc_grid = _build_exclusion_grid(ctx, all_adc_passive_refs)
+    # --- Step 2: Place channel connectors at top edge, evenly spaced ---
+    analog_zone = _find_zone_rect(ctx, "analog")
+    bounds = ctx.bounds
+    az_x1 = analog_zone[0] if analog_zone else bounds[0]
+    az_y1 = analog_zone[1] if analog_zone else bounds[1]
+    az_x2 = analog_zone[2] if analog_zone else bounds[2]
+    az_y2 = analog_zone[3] if analog_zone else bounds[3]
 
-    _CHANNEL_SPACING_MM = 8.0
-    _STRIP_GAP_MM = 1.5
+    zone_w = az_x2 - az_x1
+    zone_h = az_y2 - az_y1
 
-    sorted_ic_refs = sorted(ic_channels.keys(), key=_ic_avg_connector_x)
-    _occupied_x_ranges: list[tuple[float, float]] = []
+    # Scale factors relative to reference 60x40mm board
+    sx = zone_w / 60.0
+    sy = zone_h / 40.0
 
-    for ic_ref in sorted_ic_refs:
-        ch_list = ic_channels[ic_ref]
+    n_channels = len(channel_with_connectors)
+    connector_refs: list[str] = []
+
+    # Reference positions: J1=12.35, J4=46.35 on 60mm board → use 20%-77%
+    if n_channels > 1:
+        j_x_start = az_x1 + 12.35 * sx
+        j_x_end = az_x1 + 46.35 * sx
+        j_spacing = (j_x_end - j_x_start) / (n_channels - 1)
+    else:
+        j_x_start = az_x1 + zone_w * 0.5
+        j_spacing = 0.0
+
+    j_y = az_y1 + 4.5 * sy  # ~4.5mm from top edge (scaled)
+
+    for ch_idx, (j_ref, _ic_ref, _ic_pin, _passives) in enumerate(
+        channel_with_connectors,
+    ):
+        if j_ref is None or j_ref not in ctx.positions:
+            continue
+        j_x = j_x_start + ch_idx * j_spacing
+        j_x_clamped, j_y_clamped = _clamp_to_bounds(j_x, j_y, bounds)
+        ctx.positions[j_ref] = (j_x_clamped, j_y_clamped, 180.0)
+        ctx.fixed_refs.add(j_ref)
+        ctx.adc_channel_refs.add(j_ref)
+        connector_refs.append(j_ref)
+        _log.info(
+            "    3c2: connector %s -> (%.1f, %.1f) rot=180",
+            j_ref, j_x_clamped, j_y_clamped,
+        )
+
+    # --- Step 3: Place passive strips below each connector ---
+    channel_spacing_mm = j_spacing if j_spacing > 0 else 11.0
+    strip_gap_mm = 1.5
+    strip_dy = _ADC_STRIP_DY_MM * sy
+
+    for ch_idx, (j_ref, _ic_ref, _ic_pin, passives) in enumerate(
+        channel_with_connectors,
+    ):
+        if j_ref is None or j_ref not in ctx.positions:
+            continue
+        jx, jy, _jrot = ctx.positions[j_ref]
+
+        r_refs = sorted([r for r in passives if r.startswith("R")])
+
+        for ref in passives:
+            if ref not in ctx.positions or ref in ctx.fixed_refs:
+                continue
+            role = _adc_assign_passive_role(ref, r_refs)
+            if role is None or role not in _ADC_STRIP_OFFSETS:
+                continue
+            avg_dx, slope_dx, rot = _ADC_STRIP_OFFSETS[role]
+            dx = (avg_dx + slope_dx * ch_idx) * sx
+            new_x = jx + dx
+            new_y = jy + strip_dy
+            new_x, new_y = _clamp_to_bounds(new_x, new_y, bounds)
+            ctx.positions[ref] = (new_x, new_y, rot)
+            ctx.adc_channel_refs.add(ref)
+            ctx.fixed_refs.add(ref)
+
+        _log.info(
+            "    3c2: ch%d passives placed as strip below %s",
+            ch_idx, j_ref,
+        )
+
+    # --- Step 4: Place ADC IC(s) below the channel strips, centered ---
+    # Reference: U1 at ~76% Y, ~76% X on 60x40 board
+    ic_y = az_y1 + 28.58 * sy
+    for ic_ref in sorted(ctx.adc_ic_refs):
         if ic_ref not in ctx.positions:
             continue
-        ix, iy, _irot = ctx.positions[ic_ref]
-        _iw, ih = ctx.fp_sizes.get(ic_ref, (5.0, 5.0))
-
-        total_ch_width = (len(ch_list) - 1) * _CHANNEL_SPACING_MM
-        ch_x_start, _ch_x_end = _shift_channel_start_for_overlaps(
-            ix - total_ch_width / 2.0, total_ch_width,
-            _CHANNEL_SPACING_MM, _occupied_x_ranges,
+        ic_x = az_x1 + 45.75 * sx
+        ic_x_clamped, ic_y_clamped = _clamp_to_bounds(ic_x, ic_y, bounds)
+        ctx.positions[ic_ref] = (ic_x_clamped, ic_y_clamped, -90.0)
+        ctx.fixed_refs.add(ic_ref)
+        _log.info(
+            "    3c2: ADC IC %s -> (%.1f, %.1f) rot=-90",
+            ic_ref, ic_x_clamped, ic_y_clamped,
         )
-        _occupied_x_ranges.append((ch_x_start, _ch_x_end))
 
-        for ch_idx, (ic_pin, passives) in enumerate(ch_list):
-            _adc_place_channel_strip(
-                ch_idx, ic_pin, passives,
-                ch_x_start, _CHANNEL_SPACING_MM,
-                iy, ih, _STRIP_GAP_MM, ctx,
-            )
+        # Place decoupling cap(s) near ADC IC
+        # Reference: C1 at dx~0, dy~+3.3 from U1
+        for net in ctx.requirements.nets:
+            ic_in_net = any(c.ref == ic_ref for c in net.connections)
+            if not ic_in_net:
+                continue
+            for c in net.connections:
+                if (c.ref.startswith("C")
+                        and c.ref in ctx.positions
+                        and c.ref not in ctx.adc_channel_refs
+                        and c.ref not in ctx.fixed_refs):
+                    cap_x = ic_x_clamped
+                    cap_y = ic_y_clamped + 3.3 * sy
+                    cap_x, cap_y = _clamp_to_bounds(cap_x, cap_y, bounds)
+                    ctx.positions[c.ref] = (cap_x, cap_y, 180.0)
+                    ctx.adc_channel_refs.add(c.ref)
+                    ctx.fixed_refs.add(c.ref)
+                    _log.info(
+                        "    3c2: ADC decoupling %s -> (%.1f, %.1f)",
+                        c.ref, cap_x, cap_y,
+                    )
+
+    # --- Step 5: Place I2C pull-ups near ADC IC ---
+    i2c_pullups = _find_i2c_pullup_refs(
+        ctx.adc_ic_refs, ctx, ctx.adc_channel_refs | ctx.fixed_refs,
+    )
+    if i2c_pullups and ctx.adc_ic_refs:
+        # Pick the first ADC IC as anchor
+        anchor_ic = sorted(ctx.adc_ic_refs)[0]
+        if anchor_ic in ctx.positions:
+            aix, aiy, _airot = ctx.positions[anchor_ic]
+            # Reference: R9 at dx~+7, dy~-6; R10 at dx~+7, dy~-3 from U1
+            for pidx, pr_ref in enumerate(i2c_pullups):
+                pr_x = aix + 7.0 * sx
+                pr_y = aiy + (-6.0 + pidx * 3.0) * sy
+                pr_x, pr_y = _clamp_to_bounds(pr_x, pr_y, bounds)
+                ctx.positions[pr_ref] = (pr_x, pr_y, 0.0)
+                ctx.adc_channel_refs.add(pr_ref)
+                ctx.fixed_refs.add(pr_ref)
+                _log.info(
+                    "    3c2: I2C pullup %s -> (%.1f, %.1f)",
+                    pr_ref, pr_x, pr_y,
+                )
+
+    _r_top_connector_x = _build_r_top_connector_x(ctx)
+
+    # Build occupied X ranges for downstream phases
+    _occupied_x_ranges: list[tuple[float, float]] = []
+    if connector_refs:
+        min_cx = min(ctx.positions[r][0] for r in connector_refs if r in ctx.positions)
+        max_cx = max(ctx.positions[r][0] for r in connector_refs if r in ctx.positions)
+        _occupied_x_ranges.append((min_cx - 5.0, max_cx + 5.0))
 
     _log.info(
-        "    3c2: %d channels across %d ICs",
-        len(adc_channels), len(ctx.adc_ic_refs),
+        "    3c2: %d channels across %d ICs, %d connectors placed, %d I2C pullups",
+        len(adc_channels), len(ctx.adc_ic_refs), len(connector_refs),
+        len(i2c_pullups),
     )
 
     # Store on ctx for use by _phase_adc_analog_cluster and late phases
@@ -2083,8 +2285,8 @@ def _phase_adc_channels(ctx: PlacementContext) -> None:
     ctx._ic_channels = ic_channels  # type: ignore[attr-defined]
     ctx._r_top_connector_x = _r_top_connector_x  # type: ignore[attr-defined]
     ctx._occupied_x_ranges = _occupied_x_ranges  # type: ignore[attr-defined]
-    ctx._CHANNEL_SPACING_MM = _CHANNEL_SPACING_MM  # type: ignore[attr-defined]
-    ctx._STRIP_GAP_MM = _STRIP_GAP_MM  # type: ignore[attr-defined]
+    ctx._CHANNEL_SPACING_MM = channel_spacing_mm  # type: ignore[attr-defined]
+    ctx._STRIP_GAP_MM = strip_gap_mm  # type: ignore[attr-defined]
 
 
 def _phase_adc_analog_cluster(ctx: PlacementContext) -> None:

@@ -983,10 +983,11 @@ def main() -> None:
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
     # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — override optimizer output with
-    # reference-derived channel-strip layout
+    # POST-PLACEMENT CORRECTIONS — no longer needed; the connector-first
+    # strip layout rules are now encoded in the optimizer itself
+    # (ee_phases_groups.py:_phase_adc_channels).  The original
+    # _apply_analog_post_placement() function is kept below for reference.
     # ---------------------------------------------------------------
-    optimized_pcb = _apply_analog_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
