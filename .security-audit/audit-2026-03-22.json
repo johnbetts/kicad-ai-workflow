@@ -1,0 +1,396 @@
+{
+  "audit_version": "1.0.0",
+  "timestamp": "2026-03-22T23:54:36.433529+00:00",
+  "project_dir": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow",
+  "risk_score": 71,
+  "metadata": {
+    "languages_detected": [
+      "python"
+    ],
+    "total_files_scanned": 260,
+    "total_loc": 98792,
+    "entry_points_found": 11,
+    "entry_points": [
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_board_templates.py",
+        "line": 167,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "def test_detect_template_none_input() -> None:"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_subcircuits.py",
+        "line": 191,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "\"\"\"usb_c_input() returns connector + 2 CC resistors = 3 components.\"\"\""
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_subcircuits.py",
+        "line": 192,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "result = usb_c_input(\"J1\", \"R_CC1\", \"R_CC2\")"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_subcircuits.py",
+        "line": 198,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "result = usb_c_input(\"J1\", \"R_CC1\", \"R_CC2\")"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_subcircuits.py",
+        "line": 210,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "result = usb_c_input(\"J_USB\", \"R5\", \"R6\")"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_sexp.py",
+        "line": 329,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "def test_parse_raises_on_empty_input() -> None:"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/scripts/regenerate_smd0603.py",
+        "line": 118,
+        "type": "entry_point",
+        "pattern": "if\\s+__name__\\s*==\\s*[\"\\']__main__",
+        "content": "if __name__ == \"__main__\":"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/scripts/generate_adc_schematic.py",
+        "line": 372,
+        "type": "entry_point",
+        "pattern": "if\\s+__name__\\s*==\\s*[\"\\']__main__",
+        "content": "if __name__ == \"__main__\":"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/schematic/subcircuits.py",
+        "line": 1030,
+        "type": "entry_point",
+        "pattern": "input\\(",
+        "content": "def usb_c_input("
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/cli/main.py",
+        "line": 498,
+        "type": "entry_point",
+        "pattern": "if\\s+__name__\\s*==\\s*[\"\\']__main__",
+        "content": "if __name__ == \"__main__\":"
+      },
+      {
+        "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/cli/main.py",
+        "line": 12,
+        "type": "entry_point",
+        "pattern": "argparse\\.ArgumentParser\\(",
+        "content": "parser = argparse.ArgumentParser("
+      }
+    ],
+    "raw_findings_count": 25
+  },
+  "summary": {
+    "total_findings": 7,
+    "severity_counts": {
+      "high": 6,
+      "medium": 1
+    },
+    "confirmed": 0,
+    "likely": 7,
+    "unlikely": 18,
+    "false_positive": 0,
+    "auto_fixable": 6,
+    "needs_review": 1
+  },
+  "findings": [
+    {
+      "id": "test_placement_visual.py:41:code_execution",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/integration/test_placement_visual.py",
+      "line": 41,
+      "column": 4,
+      "language": "python",
+      "vuln_type": "code_execution",
+      "category": "Remote Code Execution",
+      "severity": "High",
+      "cwe": "CWE-94",
+      "cvss_score": 8.9,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Changed",
+        "confidentiality": "High",
+        "integrity": "High",
+        "availability": "High",
+        "base_score": 8.9,
+        "severity_label": "High"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "An attacker could execute arbitrary commands on the server by exploiting code_execution in test_placement_visual.py:41. The vulnerable code (exec(compile(source, str(build_path), \"exec\"), mod.__dict__)) accepts input that reaches a command execution sink without proper sanitization.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/integration/test_placement_visual.py:41",
+      "proof_of_concept": "An attacker could send input containing shell metacharacters (e.g., ; id or $(whoami)) to the parameter that reaches test_placement_visual.py:41 to execute arbitrary commands.",
+      "line_content": "exec(compile(source, str(build_path), \"exec\"), mod.__dict__)",
+      "source": "Unknown source",
+      "sink": "code_execution at test_placement_visual.py:41",
+      "sanitization_present": false,
+      "sanitization_description": "No sanitization detected",
+      "fix": {
+        "action": "ASK",
+        "before": "exec(compile(source, str(build_path), \"exec\"), mod.__dict__)",
+        "after": "# TODO: Fix code_execution \u2014 Avoid eval/exec; use safe alternatives (AST, JSON.parse, etc.)",
+        "explanation": "Avoid eval/exec; use safe alternatives (AST, JSON.parse, etc.)",
+        "regression_test": "def test_code_execution_fixed():\n    # Verify the code_execution vulnerability is fixed\n    # Add specific test for /Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/integration/test_placement_visual.py:41\n    pass  # TODO: implement regression test\n",
+        "priority": 0
+      }
+    },
+    {
+      "id": "design_state.py:86:sql_injection",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/design_state.py",
+      "line": 86,
+      "column": 8,
+      "language": "python",
+      "vuln_type": "sql_injection",
+      "category": "SQL Injection",
+      "severity": "High",
+      "cwe": "CWE-89",
+      "cvss_score": 7.4,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Unchanged",
+        "confidentiality": "High",
+        "integrity": "High",
+        "availability": "None",
+        "base_score": 7.4,
+        "severity_label": "High"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "An attacker could extract, modify, or delete database contents by injecting SQL through design_state.py:86. The code constructs a SQL query using string interpolation/concatenation instead of parameterized queries.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/design_state.py:86",
+      "proof_of_concept": "An attacker could send a request with a payload like ' OR '1'='1' -- in a parameter that reaches design_state.py:86 to extract unauthorized data from the database.",
+      "line_content": "f\"**Updated**: {_now_stamp()}\",",
+      "source": "Unknown source",
+      "sink": "sql_injection at design_state.py:86",
+      "sanitization_present": false,
+      "sanitization_description": "No sanitization detected",
+      "fix": {
+        "action": "AUTO_FIX",
+        "before": "f\"**Updated**: {_now_stamp()}\",",
+        "after": "cursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))",
+        "explanation": "Use parameterized queries to prevent SQL injection. The database driver handles escaping, making it impossible to inject SQL through parameters.",
+        "regression_test": "def test_sql_injection_prevented():\n    # Attempt SQL injection payload\n    malicious_input = \"' OR '1'='1' --\"\n    # Verify the query uses parameterized execution\n    # and the payload is treated as a literal string value\n    result = query_function(malicious_input)\n    assert result is None or len(result) == 0\n",
+        "priority": 1
+      }
+    },
+    {
+      "id": "agents_cmd.py:201:sql_injection",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/cli/agents_cmd.py",
+      "line": 201,
+      "column": 18,
+      "language": "python",
+      "vuln_type": "sql_injection",
+      "category": "SQL Injection",
+      "severity": "High",
+      "cwe": "CWE-89",
+      "cvss_score": 7.4,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Unchanged",
+        "confidentiality": "High",
+        "integrity": "High",
+        "availability": "None",
+        "base_score": 7.4,
+        "severity_label": "High"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "An attacker could extract, modify, or delete database contents by injecting SQL through agents_cmd.py:201. The code constructs a SQL query using string interpolation/concatenation instead of parameterized queries.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/cli/agents_cmd.py:201",
+      "proof_of_concept": "An attacker could send a request with a payload like ' OR '1'='1' -- in a parameter that reaches agents_cmd.py:201 to extract unauthorized data from the database.",
+      "line_content": "print(f\"  Updated: {status.updated_at}\")",
+      "source": "Unknown source",
+      "sink": "sql_injection at agents_cmd.py:201",
+      "sanitization_present": false,
+      "sanitization_description": "No sanitization detected",
+      "fix": {
+        "action": "AUTO_FIX",
+        "before": "print(f\"  Updated: {status.updated_at}\")",
+        "after": "cursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))",
+        "explanation": "Use parameterized queries to prevent SQL injection. The database driver handles escaping, making it impossible to inject SQL through parameters.",
+        "regression_test": "def test_sql_injection_prevented():\n    # Attempt SQL injection payload\n    malicious_input = \"' OR '1'='1' --\"\n    # Verify the query uses parameterized execution\n    # and the payload is treated as a literal string value\n    result = query_function(malicious_input)\n    assert result is None or len(result) == 0\n",
+        "priority": 1
+      }
+    },
+    {
+      "id": "agents_cmd.py:295:sql_injection",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/cli/agents_cmd.py",
+      "line": 295,
+      "column": 10,
+      "language": "python",
+      "vuln_type": "sql_injection",
+      "category": "SQL Injection",
+      "severity": "High",
+      "cwe": "CWE-89",
+      "cvss_score": 7.4,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Unchanged",
+        "confidentiality": "High",
+        "integrity": "High",
+        "availability": "None",
+        "base_score": 7.4,
+        "severity_label": "High"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "An attacker could extract, modify, or delete database contents by injecting SQL through agents_cmd.py:295. The code constructs a SQL query using string interpolation/concatenation instead of parameterized queries.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/cli/agents_cmd.py:295",
+      "proof_of_concept": "An attacker could send a request with a payload like ' OR '1'='1' -- in a parameter that reaches agents_cmd.py:295 to extract unauthorized data from the database.",
+      "line_content": "print(f\"Pipeline version updated: {version.git_hash[:8]}\")",
+      "source": "Unknown source",
+      "sink": "sql_injection at agents_cmd.py:295",
+      "sanitization_present": false,
+      "sanitization_description": "No sanitization detected",
+      "fix": {
+        "action": "AUTO_FIX",
+        "before": "print(f\"Pipeline version updated: {version.git_hash[:8]}\")",
+        "after": "cursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))",
+        "explanation": "Use parameterized queries to prevent SQL injection. The database driver handles escaping, making it impossible to inject SQL through parameters.",
+        "regression_test": "def test_sql_injection_prevented():\n    # Attempt SQL injection payload\n    malicious_input = \"' OR '1'='1' --\"\n    # Verify the query uses parameterized execution\n    # and the payload is treated as a literal string value\n    result = query_function(malicious_input)\n    assert result is None or len(result) == 0\n",
+        "priority": 1
+      }
+    },
+    {
+      "id": "jlcpcb_db.py:260:sql_injection",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/parts/jlcpcb_db.py",
+      "line": 260,
+      "column": 14,
+      "language": "python",
+      "vuln_type": "sql_injection",
+      "category": "SQL Injection",
+      "severity": "High",
+      "cwe": "CWE-89",
+      "cvss_score": 7.4,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Unchanged",
+        "confidentiality": "High",
+        "integrity": "High",
+        "availability": "None",
+        "base_score": 7.4,
+        "severity_label": "High"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "An attacker could extract, modify, or delete database contents by injecting SQL through jlcpcb_db.py:260. The code constructs a SQL query using string interpolation/concatenation instead of parameterized queries.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/parts/jlcpcb_db.py:260",
+      "proof_of_concept": "An attacker could send a request with a payload like ' OR '1'='1' -- in a parameter that reaches jlcpcb_db.py:260 to extract unauthorized data from the database.",
+      "line_content": "sql = f\"SELECT {_SELECT_COLS} FROM parts WHERE parts MATCH ?\"",
+      "source": "Unknown source",
+      "sink": "sql_injection at jlcpcb_db.py:260",
+      "sanitization_present": false,
+      "sanitization_description": "No sanitization detected",
+      "fix": {
+        "action": "AUTO_FIX",
+        "before": "sql = f\"SELECT {_SELECT_COLS} FROM parts WHERE parts MATCH ?\"",
+        "after": "cursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))",
+        "explanation": "Use parameterized queries to prevent SQL injection. The database driver handles escaping, making it impossible to inject SQL through parameters.",
+        "regression_test": "def test_sql_injection_prevented():\n    # Attempt SQL injection payload\n    malicious_input = \"' OR '1'='1' --\"\n    # Verify the query uses parameterized execution\n    # and the payload is treated as a literal string value\n    result = query_function(malicious_input)\n    assert result is None or len(result) == 0\n",
+        "priority": 1
+      }
+    },
+    {
+      "id": "jlcpcb_db.py:292:sql_injection",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/parts/jlcpcb_db.py",
+      "line": 292,
+      "column": 12,
+      "language": "python",
+      "vuln_type": "sql_injection",
+      "category": "SQL Injection",
+      "severity": "High",
+      "cwe": "CWE-89",
+      "cvss_score": 7.4,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Unchanged",
+        "confidentiality": "High",
+        "integrity": "High",
+        "availability": "None",
+        "base_score": 7.4,
+        "severity_label": "High"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "An attacker could extract, modify, or delete database contents by injecting SQL through jlcpcb_db.py:292. The code constructs a SQL query using string interpolation/concatenation instead of parameterized queries.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/src/kicad_pipeline/parts/jlcpcb_db.py:292",
+      "proof_of_concept": "An attacker could send a request with a payload like ' OR '1'='1' -- in a parameter that reaches jlcpcb_db.py:292 to extract unauthorized data from the database.",
+      "line_content": "f\"SELECT {_SELECT_COLS} FROM parts \"",
+      "source": "Unknown source",
+      "sink": "sql_injection at jlcpcb_db.py:292",
+      "sanitization_present": false,
+      "sanitization_description": "No sanitization detected",
+      "fix": {
+        "action": "AUTO_FIX",
+        "before": "f\"SELECT {_SELECT_COLS} FROM parts \"",
+        "after": "cursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))",
+        "explanation": "Use parameterized queries to prevent SQL injection. The database driver handles escaping, making it impossible to inject SQL through parameters.",
+        "regression_test": "def test_sql_injection_prevented():\n    # Attempt SQL injection payload\n    malicious_input = \"' OR '1'='1' --\"\n    # Verify the query uses parameterized execution\n    # and the payload is treated as a literal string value\n    result = query_function(malicious_input)\n    assert result is None or len(result) == 0\n",
+        "priority": 1
+      }
+    },
+    {
+      "id": "test_sexp.py:262:timing_attack",
+      "file": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_sexp.py",
+      "line": 262,
+      "column": 50,
+      "language": "python",
+      "vuln_type": "timing_attack",
+      "category": "Weak Cryptography",
+      "severity": "Medium",
+      "cwe": "CWE-208",
+      "cvss_score": 4.7,
+      "cvss_vector": {
+        "attack_vector": "Network",
+        "attack_complexity": "High",
+        "privileges_required": "None",
+        "user_interaction": "None",
+        "scope": "Unchanged",
+        "confidentiality": "Low",
+        "integrity": "Low",
+        "availability": "None",
+        "base_score": 4.7,
+        "severity_label": "Medium"
+      },
+      "reachability": "LIKELY",
+      "exploit_scenario": "A security vulnerability (timing_attack) exists at test_sexp.py:262. Potential timing attack vulnerability. Exploitation could lead to Weak Cryptography. Note: some sanitization was detected (assertion), but it may be insufficient or bypassable.",
+      "code_path": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_sexp.py:329 -> /Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_sexp.py:262",
+      "proof_of_concept": "The vulnerability at test_sexp.py:262 (timing_attack) could be exploited by crafting input that reaches the vulnerable code path without adequate sanitization.",
+      "line_content": "if isinstance(n, list) and n and n[0] == keyword:",
+      "source": "Entry point at test_sexp.py:329 (def test_parse_raises_on_empty_input() -> None:)",
+      "sink": "timing_attack at test_sexp.py:262",
+      "sanitization_present": true,
+      "sanitization_description": "assertion",
+      "fix": {
+        "action": "AUTO_FIX",
+        "before": "if isinstance(n, list) and n and n[0] == keyword:",
+        "after": "# TODO: Fix timing_attack \u2014 Use hmac.compare_digest() or crypto.timingSafeEqual() for constant-time comparison",
+        "explanation": "Use hmac.compare_digest() or crypto.timingSafeEqual() for constant-time comparison",
+        "regression_test": "def test_timing_attack_fixed():\n    # Verify the timing_attack vulnerability is fixed\n    # Add specific test for /Users/johnbetts/Dropbox/Source/kicad-ai-workflow/tests/test_sexp.py:262\n    pass  # TODO: implement regression test\n",
+        "priority": 10
+      }
+    }
+  ]
+}
