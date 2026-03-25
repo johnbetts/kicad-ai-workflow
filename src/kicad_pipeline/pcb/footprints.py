@@ -1510,16 +1510,30 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
     )
     extra_zones: list[FootprintKeepout] = []
     if not has_antenna_keepout:
-        # Estimate body bounds from pad field + margins.
-        body_w = _ESP32_BODY_W
-        body_h = _ESP32_BODY_H
+        # Derive body bounds from actual pad positions rather than assuming
+        # body-center origin.  JLCPCB footprints may have a different origin
+        # than our parametric model (which uses body centre).  Pins 1 and 40
+        # are at the antenna end (most negative Y); the body top edge is
+        # _ESP32_TOP_MARGIN + pad_h/2 above those pad centres.
         antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
-        half_w = body_w / 2.0
-        top_y = -(body_h / 2.0)
-        keepout_bot_y = top_y + antenna_depth
+        half_w = _ESP32_BODY_W / 2.0
+
+        # Use actual pad Y positions (excluding pad 41 GND center pad) to
+        # find the antenna-end pad row.
+        signal_pads = [p for p in fp.pads if p.number != "41"]
+        if signal_pads:
+            top_pad_y = min(p.position.y for p in signal_pads)
+            # Body top edge is the known top margin above the first pad row.
+            top_margin = _ESP32_TOP_MARGIN + _ESP32_PAD_H / 2.0  # 3.1 mm
+            body_top_y = top_pad_y - top_margin
+        else:
+            # Fallback: assume body-center origin (parametric model).
+            body_top_y = -(_ESP32_BODY_H / 2.0)
+
+        keepout_bot_y = body_top_y + antenna_depth
         keepout_poly = (
-            Point(-half_w, top_y),
-            Point(half_w, top_y),
+            Point(-half_w, body_top_y),
+            Point(half_w, body_top_y),
             Point(half_w, keepout_bot_y),
             Point(-half_w, keepout_bot_y),
         )

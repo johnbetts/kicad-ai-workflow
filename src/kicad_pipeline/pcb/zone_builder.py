@@ -6,6 +6,7 @@ Handles GND copper pours, GND stitching vias, and RF via fences.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from typing import TYPE_CHECKING
 
@@ -85,6 +86,38 @@ def make_gnd_zones(
     return (front, back)
 
 
+def _rotate_pad_to_board(
+    fp_x: float,
+    fp_y: float,
+    pad_x: float,
+    pad_y: float,
+    rotation_deg: float,
+) -> tuple[float, float]:
+    """Transform a pad's footprint-local position to board coordinates.
+
+    Applies footprint rotation around the footprint origin, then translates
+    to the footprint's board position.
+
+    Args:
+        fp_x: Footprint X position on the board.
+        fp_y: Footprint Y position on the board.
+        pad_x: Pad X in footprint-local coordinates.
+        pad_y: Pad Y in footprint-local coordinates.
+        rotation_deg: Footprint rotation in degrees (CW positive).
+
+    Returns:
+        ``(board_x, board_y)`` of the pad centre.
+    """
+    if rotation_deg == 0.0:
+        return fp_x + pad_x, fp_y + pad_y
+    angle = math.radians(rotation_deg)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    rx = pad_x * cos_a - pad_y * sin_a
+    ry = pad_x * sin_a + pad_y * cos_a
+    return fp_x + rx, fp_y + ry
+
+
 def _build_fp_bboxes(
     footprints: tuple[Footprint, ...],
     clearance: float,
@@ -95,9 +128,16 @@ def _build_fp_bboxes(
         pad_xs = [fp.position.x]
         pad_ys = [fp.position.y]
         for pad in fp.pads:
-            px, py = fp.position.x + pad.position.x, fp.position.y + pad.position.y
-            pad_xs.extend([px - pad.size_x / 2, px + pad.size_x / 2])
-            pad_ys.extend([py - pad.size_y / 2, py + pad.size_y / 2])
+            bx, by = _rotate_pad_to_board(
+                fp.position.x, fp.position.y,
+                pad.position.x, pad.position.y,
+                fp.rotation,
+            )
+            # Use max of size_x, size_y as half-extent since the pad itself
+            # may also be rotated; the AABB must cover the worst case.
+            half_s = max(pad.size_x, pad.size_y) / 2.0
+            pad_xs.extend([bx - half_s, bx + half_s])
+            pad_ys.extend([by - half_s, by + half_s])
         bboxes.append((
             min(pad_xs) - clearance, min(pad_ys) - clearance,
             max(pad_xs) + clearance, max(pad_ys) + clearance,
@@ -280,24 +320,37 @@ def _is_rf_keepout(ko: Keepout) -> bool:
 def _build_rf_fp_boxes(
     footprints: tuple[Footprint, ...],
 ) -> list[tuple[float, float, float, float]]:
-    """Build footprint bounding boxes with 0.5mm margin for RF via avoidance."""
+    """Build footprint bounding boxes with 0.5mm margin for RF via avoidance.
+
+    Accounts for footprint rotation when computing pad board positions.
+    Uses ``max(size_x, size_y)`` as the pad half-extent so the AABB is
+    correct regardless of pad rotation.
+    """
+    margin = 0.5
     fp_boxes: list[tuple[float, float, float, float]] = []
     for fp in footprints:
-        pad_xs = (
-            [fp.position.x + p.position.x for p in fp.pads]
-            if fp.pads else [fp.position.x]
-        )
-        pad_ys = (
-            [fp.position.y + p.position.y for p in fp.pads]
-            if fp.pads else [fp.position.y]
-        )
-        half_sx = [p.size_x / 2.0 for p in fp.pads] if fp.pads else [0.0]
-        half_sy = [p.size_y / 2.0 for p in fp.pads] if fp.pads else [0.0]
-        min_x = min(px - hs for px, hs in zip(pad_xs, half_sx, strict=False)) - 0.5
-        max_x = max(px + hs for px, hs in zip(pad_xs, half_sx, strict=False)) + 0.5
-        min_y = min(py - hs for py, hs in zip(pad_ys, half_sy, strict=False)) - 0.5
-        max_y = max(py + hs for py, hs in zip(pad_ys, half_sy, strict=False)) + 0.5
-        fp_boxes.append((min_x, min_y, max_x, max_y))
+        if not fp.pads:
+            fp_boxes.append((
+                fp.position.x - margin, fp.position.y - margin,
+                fp.position.x + margin, fp.position.y + margin,
+            ))
+            continue
+
+        xs: list[float] = []
+        ys: list[float] = []
+        for pad in fp.pads:
+            bx, by = _rotate_pad_to_board(
+                fp.position.x, fp.position.y,
+                pad.position.x, pad.position.y,
+                fp.rotation,
+            )
+            half_s = max(pad.size_x, pad.size_y) / 2.0
+            xs.extend([bx - half_s, bx + half_s])
+            ys.extend([by - half_s, by + half_s])
+        fp_boxes.append((
+            min(xs) - margin, min(ys) - margin,
+            max(xs) + margin, max(ys) + margin,
+        ))
     return fp_boxes
 
 

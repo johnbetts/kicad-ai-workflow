@@ -150,15 +150,37 @@ def make_antenna_keepout(
     """
     if rf_position is not None:
         cx, cy, rot = rf_position
-        # ESP32-S3-WROOM-1: antenna extends from one end of the module.
-        # Module half-length ~12.75mm.  Place keepout at antenna end.
+        # ESP32-S3-WROOM-1: antenna is at the top of the module body
+        # (negative Y in footprint-local coordinates).  The keepout must
+        # cover the antenna area, which extends from the module top edge
+        # inward by ``height`` mm.
+        #
+        # rf_position gives the *footprint origin* on the board, which is
+        # NOT necessarily the body centre (JLCPCB footprints use a
+        # different origin than our parametric model).  We compute the
+        # antenna-centre offset from the footprint origin using known
+        # module geometry:
+        #   body_top_from_origin = -(pad1_y + top_margin)
+        #   antenna_centre_from_origin = body_top_from_origin + height / 2
+        # For the parametric model (origin at body centre):
+        #   body_top = -12.75, antenna centre = -12.75 + height/2
+        # For JLCPCB (origin ~0.76mm below body centre):
+        #   pad1_y ~ -8.89, top_margin ~ 3.1mm
+        #   body_top = -11.99, antenna centre = -11.99 + height/2
+        #
+        # To avoid hard-coding a specific origin offset, we use the module
+        # half-height (12.75mm) minus half the keepout height as the offset
+        # from body centre, which is correct for the parametric model and
+        # close enough for JLCPCB (within ~0.76mm).
         import math as _m
-        antenna_offset = 8.0  # mm from module centre toward antenna end
+        # Distance from module body centre to the centre of the antenna
+        # keepout zone, measured toward the antenna end.
+        module_half_h = RF_MODULE_BODY_HEIGHT_MM / 2.0  # 12.75 mm
+        antenna_offset = module_half_h - height / 2.0
         # Antenna is at the "top" of the module (negative Y in local coords).
         # Rotation rotates the antenna direction.
         angle_rad = _m.radians(rot)
         # In unrotated position, antenna points in -Y direction.
-        # At 180 deg, antenna points in +Y direction.
         dx = -antenna_offset * _m.sin(angle_rad)
         dy = -antenna_offset * _m.cos(angle_rad)
         ax = cx + dx
