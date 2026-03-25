@@ -1425,15 +1425,35 @@ def make_esp32_wroom(
         ))
 
     # --- Antenna keepout zone (footprint-level) ---
-    # Covers the top _ESP32_ANTENNA_KEEPOUT_DEPTH_MM of the module body
-    # PLUS _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM past the body edge.
-    # No copper allowed on any layer beneath or near the antenna.
+    # The antenna is at the end of the module WITHOUT pins.
+    # Detect which end by checking pad Y positions.
     antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
     antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
     half_w = body_w / 2.0
-    body_top_y = -(body_h / 2.0)
-    keepout_top_y = body_top_y - antenna_ext  # extend past body edge
-    keepout_bot_y = body_top_y + antenna_depth
+    half_h = body_h / 2.0
+
+    # Find which end has no pads — that's the antenna end
+    signal_pad_ys = [p.position.y for p in pad_list if p.number not in ("41",) and not p.number.startswith("V")]
+    if signal_pad_ys:
+        min_pad_y = min(signal_pad_ys)
+        max_pad_y = max(signal_pad_ys)
+        # If pads extend further toward -Y, antenna is at +Y end (and vice versa)
+        dist_to_neg = abs(min_pad_y - (-half_h))
+        dist_to_pos = abs(max_pad_y - half_h)
+        antenna_at_positive_y = dist_to_pos > dist_to_neg  # larger gap = antenna end
+    else:
+        antenna_at_positive_y = False  # default: antenna at -Y
+
+    if antenna_at_positive_y:
+        # Antenna at +Y end (JLCPCB footprint layout)
+        body_antenna_edge = half_h
+        keepout_top_y = body_antenna_edge - antenna_depth  # inside body
+        keepout_bot_y = body_antenna_edge + antenna_ext    # past body edge
+    else:
+        # Antenna at -Y end (parametric layout)
+        body_antenna_edge = -half_h
+        keepout_top_y = body_antenna_edge - antenna_ext    # past body edge
+        keepout_bot_y = body_antenna_edge + antenna_depth  # inside body
     keepout_poly = (
         Point(-half_w, keepout_top_y),
         Point(half_w, keepout_top_y),
@@ -1600,20 +1620,33 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
         antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
         half_w = _ESP32_BODY_W / 2.0
 
-        # Use actual pad Y positions (excluding pad 41 GND center pad) to
-        # find the antenna-end pad row.
-        signal_pads = [p for p in fp.pads if p.number != "41"]
-        if signal_pads:
-            top_pad_y = min(p.position.y for p in signal_pads)
-            # Body top edge is the known top margin above the first pad row.
-            top_margin = _ESP32_TOP_MARGIN + _ESP32_PAD_H / 2.0  # 3.1 mm
-            body_top_y = top_pad_y - top_margin
-        else:
-            # Fallback: assume body-center origin (parametric model).
-            body_top_y = -(_ESP32_BODY_H / 2.0)
+        # Detect antenna end using pin numbering: the ESP32 top row
+        # (pins 15-26) is at the antenna end. Pin 1 is at the opposite end.
+        signal_pads = [p for p in fp.pads if p.number != "41" and not p.number.startswith("V")]
+        pin1 = [p for p in signal_pads if p.number == "1"]
+        top_row = [p for p in signal_pads if p.number in {str(i) for i in range(15, 27)}]
 
-        keepout_top_y = body_top_y - antenna_ext  # extend past body edge
-        keepout_bot_y = body_top_y + antenna_depth
+        if pin1 and top_row:
+            # Antenna is at the top-row end (opposite from pin 1)
+            top_row_y = top_row[0].position.y
+            pin1_y = pin1[0].position.y
+            half_h = _ESP32_BODY_H / 2.0
+            margin = abs(top_row_y - pin1_y) / 2.0  # half the pad span
+
+            if top_row_y > pin1_y:
+                # Antenna at +Y end
+                antenna_edge_y = top_row_y + (half_h - margin)
+            else:
+                # Antenna at -Y end
+                antenna_edge_y = top_row_y - (half_h - margin)
+
+            keepout_top_y = antenna_edge_y - antenna_depth
+            keepout_bot_y = antenna_edge_y + antenna_ext
+        else:
+            # Fallback: antenna at -Y
+            antenna_edge_y = -(_ESP32_BODY_H / 2.0)
+            keepout_top_y = antenna_edge_y - antenna_ext
+            keepout_bot_y = antenna_edge_y + antenna_depth
         keepout_poly = (
             Point(-half_w, keepout_top_y),
             Point(half_w, keepout_top_y),
