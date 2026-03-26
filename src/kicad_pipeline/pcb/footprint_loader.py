@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from kicad_pipeline.models.pcb import (
     Footprint,
+    Footprint3DModel,
     FootprintArc,
     FootprintCircle,
     FootprintLine,
@@ -335,6 +336,46 @@ def _parse_texts_with_overrides(
     return texts
 
 
+def _parse_xyz(node: list[_SNode], tag: str) -> tuple[float, float, float]:
+    """Parse ``(tag (xyz X Y Z))`` → ``(x, y, z)``."""
+    child = _find_node(node, tag)
+    if child is None:
+        return (0.0, 0.0, 0.0)
+    xyz = _find_node(child, "xyz")
+    if xyz is not None and len(xyz) >= 4:
+        return (_to_float(xyz[1]), _to_float(xyz[2]), _to_float(xyz[3]))
+    return (0.0, 0.0, 0.0)
+
+
+def _parse_models(tree: list[_SNode]) -> tuple[Footprint3DModel, ...]:
+    """Parse all ``(model ...)`` entries from a footprint S-expression tree.
+
+    Only keeps models that use KiCad environment variable paths (``${...}``)
+    which KiCad resolves at runtime.  Skips models with absolute local paths
+    to cache directories (e.g. easyeda2kicad ``.wrl`` refs) since those files
+    are typically empty stubs.
+    """
+    models: list[Footprint3DModel] = []
+    for model_node in _find_nodes(tree, "model"):
+        if len(model_node) < 2 or not isinstance(model_node[1], str):
+            continue
+        model_path = model_node[1]
+        # Only keep models with KiCad variable paths — local cache .wrl
+        # files from easyeda2kicad are usually empty stubs.
+        if not model_path.startswith("${"):
+            continue
+        offset = _parse_xyz(model_node, "offset")
+        scale = _parse_xyz(model_node, "scale")
+        rotate = _parse_xyz(model_node, "rotate")
+        # Default scale to (1,1,1) if all zeros
+        if scale == (0.0, 0.0, 0.0):
+            scale = (1.0, 1.0, 1.0)
+        models.append(Footprint3DModel(
+            path=model_path, offset=offset, scale=scale, rotate=rotate,
+        ))
+    return tuple(models)
+
+
 def load_kicad_mod(
     path: Path,
     ref: str,
@@ -368,10 +409,11 @@ def load_kicad_mod(
     pads = [_parse_pad(pad_node) for pad_node in _find_nodes(tree, "pad")]
     graphics = _parse_graphics(tree)
     texts = _parse_texts_with_overrides(tree, {"reference": ref, "value": value})
+    models = _parse_models(tree)
 
     _log.info(
-        "Loaded .kicad_mod: %s → %d pads, %d graphics, %d texts",
-        path.name, len(pads), len(graphics), len(texts),
+        "Loaded .kicad_mod: %s → %d pads, %d graphics, %d texts, %d models",
+        path.name, len(pads), len(graphics), len(texts), len(models),
     )
 
     return Footprint(
@@ -386,4 +428,5 @@ def load_kicad_mod(
         texts=tuple(texts),
         lcsc=lcsc,
         attr=attr,
+        models=models,
     )

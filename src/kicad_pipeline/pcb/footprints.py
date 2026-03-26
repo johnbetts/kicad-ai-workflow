@@ -2930,16 +2930,31 @@ def _try_jlcpcb_footprint(
                 )
                 _log.info("Added thermal pad %d to QFN footprint %s", pin_count + 1, ref)
 
-        # JLCPCB .kicad_mod files rarely include 3D model references.
-        # Both KiCad standard 3D models and JLCPCB footprints use body-center
-        # as origin — so no offset is needed (use default 0,0,0).
-        # If the cached footprint already has a model with a pre-computed
-        # offset, that is preserved above (fp.models is non-empty).
+        # JLCPCB .kicad_mod files may include 3D model references with
+        # pre-computed offsets — these are preserved above (fp.models non-empty).
+        # If no model is present, look up by package type.  JLCPCB cached
+        # footprints typically have body-centered pads, so strip the
+        # parametric offset that _model_terminal_block/etc. add (they assume
+        # pin-1-at-origin pad layout).
         if not fp.models:
             model = _model_for_package(footprint_id, layer)
             if model is None:
                 model = _model_for_package(fp.lib_id, layer)
             if model is not None:
+                # JLCPCB footprints use body-center origin — zero the offset
+                # since the model is also body-centered.
+                pad_xs = [p.position.x for p in fp.pads]
+                if pad_xs:
+                    pad_center_x = (min(pad_xs) + max(pad_xs)) / 2.0
+                    # If pads are roughly centered (center < 1mm from origin)
+                    # then the footprint uses body-center origin — zero offset
+                    if abs(pad_center_x) < 1.0 and model.offset != (0.0, 0.0, 0.0):
+                        model = Footprint3DModel(
+                            path=model.path,
+                            offset=(0.0, 0.0, 0.0),
+                            scale=model.scale,
+                            rotate=model.rotate,
+                        )
                 fp = Footprint(
                     lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
                     position=fp.position, rotation=fp.rotation, layer=fp.layer,

@@ -8,12 +8,12 @@ Usage::
 
     python scripts/train_relay_group.py
 
-Relay pinout reference (Songle SRD-05VDC-SL-C, standard SPDT):
-    Pin 1: Coil+  (connects to +5V_RELAY)
-    Pin 2: NC     (Normally Closed contact)
-    Pin 3: NO     (Normally Open contact)
-    Pin 4: Coil-  (connects to Q collector / flyback diode anode)
-    Pin 5: COM    (Common contact)
+Relay pinout reference (KiCad Relay_SPDT_SANYOU_SRD_Series_Form_C footprint):
+    Pad 1: COM    (Common contact)
+    Pad 2: Coil-  (connects to Q collector / flyback diode anode)
+    Pad 3: NO     (Normally Open contact)
+    Pad 4: NC     (Normally Closed contact)
+    Pad 5: Coil+  (connects to +5V_RELAY)
 
 Power architecture:
     +5V_LOGIC --[L1 ferrite]--> +5V_RELAY --[relay coils]
@@ -102,12 +102,13 @@ _RELAY_PWR_C1_DY_MM = 7.5        # C1 Y = board_h - 7.5 = 47.5mm (above the row)
 def _make_relay(ch: int) -> Component:
     """SRD-05VDC-SL-C SPDT relay.
 
-    Songle SRD-05VDC-SL-C pinout:
-        Pin 1: Coil+  → +5V_RELAY
-        Pin 2: NC     → RELAY_NC{ch}
-        Pin 3: NO     → RELAY_NO{ch}
-        Pin 4: Coil-  → RELAY_COIL{ch} (Q collector / D anode)
-        Pin 5: COM    → RELAY_COM{ch}
+    KiCad footprint ``Relay_SPDT_SANYOU_SRD_Series_Form_C`` pad semantics
+    (matches physical pad positions on the PCB footprint):
+        Pad 1: COM    → RELAY_COM{ch}   (contact, 3mm pad at origin)
+        Pad 2: Coil-  → RELAY_COIL{ch}  (coil, 2.5mm pad — Q collector / D anode)
+        Pad 3: NO     → RELAY_NO{ch}    (contact, 3mm pad)
+        Pad 4: NC     → RELAY_NC{ch}    (contact, 3mm pad)
+        Pad 5: Coil+  → +5V_RELAY       (coil, 2.5mm pad)
     """
     return Component(
         ref=f"K{ch}",
@@ -116,11 +117,11 @@ def _make_relay(ch: int) -> Component:
         lcsc="C35449",
         description="5V SPDT relay",
         pins=(
-            Pin("1", "COIL+", PinType.PASSIVE, net="+5V_RELAY"),
-            Pin("2", "NC", PinType.PASSIVE, net=f"RELAY_NC{ch}"),
+            Pin("1", "COM", PinType.PASSIVE, net=f"RELAY_COM{ch}"),
+            Pin("2", "COIL-", PinType.PASSIVE, net=f"RELAY_COIL{ch}"),
             Pin("3", "NO", PinType.PASSIVE, net=f"RELAY_NO{ch}"),
-            Pin("4", "COIL-", PinType.PASSIVE, net=f"RELAY_COIL{ch}"),
-            Pin("5", "COM", PinType.PASSIVE, net=f"RELAY_COM{ch}"),
+            Pin("4", "NC", PinType.PASSIVE, net=f"RELAY_NC{ch}"),
+            Pin("5", "COIL+", PinType.PASSIVE, net="+5V_RELAY"),
         ),
     )
 
@@ -150,8 +151,8 @@ def _make_transistor(ch: int) -> Component:
 def _make_flyback_diode(ch: int) -> Component:
     """1N4148 flyback diode across relay coil.
 
-    Anode → RELAY_COIL (K pin 4 / Q collector)
-    Cathode → +5V_RELAY (K pin 1)
+    Anode → RELAY_COIL (K pad 2 / Q collector)
+    Cathode → +5V_RELAY (K pad 5)
     """
     return Component(
         ref=f"D{ch}",
@@ -331,13 +332,13 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
 
     SOT-23 BJT pin convention: pin 1=B, pin 2=C, pin 3=E.
 
-    Net connectivity for Songle SRD-05VDC-SL-C:
-        RELAY_COIL: Q collector (pin 2) → K pin 4 (coil-) → D_flyback anode (pin 1)
+    Net connectivity (KiCad footprint pad numbering):
+        RELAY_COIL: Q collector (pin 2) → K pad 2 (coil-) → D_flyback anode (pin 1)
                     → R_LED pad 1 (LED indicator taps off collector node)
-        +5V_RELAY:  K pin 1 (coil+), D_flyback cathode (pin 2)
-        RELAY_COM:  K pin 5 → J pin 1
-        RELAY_NO:   K pin 3 → J pin 2
-        RELAY_NC:   K pin 2 → J pin 3
+        +5V_RELAY:  K pad 5 (coil+), D_flyback cathode (pin 2)
+        RELAY_COM:  K pad 1 → J pin 1
+        RELAY_NO:   K pad 3 → J pin 2
+        RELAY_NC:   K pad 4 → J pin 3
         LED_A:      R_LED pad 2 → D_LED anode (pin 1)
     """
     return (
