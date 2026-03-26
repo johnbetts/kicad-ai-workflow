@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1353,6 +1353,16 @@ def _post_placement_assembly(
     """Run post-placement steps: keepouts, zones, silkscreen, routing, assembly."""
     _create_post_placement_keepouts(ctx, footprints_with_pos)
 
+    # Stamp group metadata from FeatureBlock requirements onto footprints.
+    group_map: dict[str, str] = {}
+    for feat in requirements.features:
+        for ref in feat.components:
+            group_map[ref] = feat.name
+    footprints_with_pos = [
+        replace(fp, group=group_map[fp.ref]) if fp.ref in group_map and not fp.group else fp
+        for fp in footprints_with_pos
+    ]
+
     netclasses = classify_nets(nets)
     _build_gnd_zones(ctx, skip_inner_zones)
 
@@ -1659,6 +1669,11 @@ def _fp_optional_properties(fp: Footprint) -> list[list[SExpNode]]:
         props.append(_hidden_property_sexp("MPN", fp.mpn, fab))
     if fp.manufacturer:
         props.append(_hidden_property_sexp("Manufacturer", fp.manufacturer, fab))
+    # Emit group/subgroup metadata as KiCad properties.
+    if fp.group:
+        props.append(_hidden_property_sexp("Group", fp.group, fab))
+    if fp.subgroup:
+        props.append(_hidden_property_sexp("Subgroup", fp.subgroup, fab))
     # Emit custom properties (placement constraints, etc.)
     for prop_name, prop_value in fp.custom_properties:
         props.append(_hidden_property_sexp(prop_name, prop_value, fab))

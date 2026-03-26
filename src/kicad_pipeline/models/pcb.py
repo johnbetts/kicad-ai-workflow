@@ -345,6 +345,10 @@ class Footprint:
     """Footprint-level keepout zones (e.g. antenna keepout on RF modules)."""
     custom_properties: tuple[tuple[str, str], ...] = ()
     """Arbitrary (name, value) pairs written as KiCad ``property`` entries."""
+    group: str = ""
+    """FeatureBlock name (e.g. ``"MCU Core"``)."""
+    subgroup: str = ""
+    """Subcircuit type (e.g. ``"relay_driver_ch1"``)."""
 
 
 @dataclass(frozen=True)
