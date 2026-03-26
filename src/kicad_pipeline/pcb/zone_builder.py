@@ -437,7 +437,27 @@ def make_rf_via_fence(
             continue
 
         pts = list(ko.polygon)
-        fp_boxes = _build_rf_fp_boxes(footprints)
+
+        # Exclude RF module footprints whose pad bbox overlaps the keepout.
+        # The via fence runs along the keepout perimeter, and the RF module's
+        # large pad extent would otherwise block the inner-edge via row
+        # (the row at the processor-antenna boundary).
+        ko_xs = [p.x for p in pts]
+        ko_ys = [p.y for p in pts]
+        ko_min_x, ko_max_x = min(ko_xs), max(ko_xs)
+        ko_min_y, ko_max_y = min(ko_ys), max(ko_ys)
+        rf_fp_boxes = _build_rf_fp_boxes(footprints)
+        non_rf_fps: list[Footprint] = []
+        for idx, fp in enumerate(footprints):
+            # Check if this footprint's pad bbox overlaps the keepout bbox.
+            # If it does, it's the RF module — exclude it from via filtering.
+            if idx < len(rf_fp_boxes):
+                bx0, by0, bx1, by1 = rf_fp_boxes[idx]
+                if (bx0 < ko_max_x and bx1 > ko_min_x
+                        and by0 < ko_max_y and by1 > ko_min_y):
+                    continue
+            non_rf_fps.append(fp)
+        fp_boxes = _build_rf_fp_boxes(tuple(non_rf_fps))
 
         cx = sum(p.x for p in pts) / len(pts)
         cy = sum(p.y for p in pts) / len(pts)

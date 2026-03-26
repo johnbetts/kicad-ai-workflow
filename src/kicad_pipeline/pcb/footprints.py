@@ -261,7 +261,11 @@ def _model_switch(
                 "SW_SPST_EVQPE1.step"
             )
         else:
-            path = f"{KICAD_3DMODEL_VAR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
+            # SMD pad geometry (e.g. make_tact_switch) — use SMD model + 90° rotation
+            return Footprint3DModel(
+                path=f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step",
+                rotate=(0.0, 0.0, 90.0),
+            )
         return Footprint3DModel(path=path)
     return None
 

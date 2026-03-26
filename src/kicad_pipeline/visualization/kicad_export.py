@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -81,6 +82,7 @@ def export_pcb_image(
     if svg_path is not None:
         if pcb is not None:
             _inject_ratsnest_into_svg(svg_path, pcb)
+        _inject_keepouts_into_svg(svg_path, pcb_path)
         png_path = _convert_svg_to_png(svg_path, output_path, width)
         if png_path is not None:
             logger.info("Hi-fi export (SVG→PNG) written to %s", png_path)
@@ -383,6 +385,120 @@ def _inject_ratsnest_into_svg(svg_path: Path, pcb: PCBDesign) -> None:
     if line_count > 0:
         tree.write(str(svg_path), xml_declaration=True, encoding="unicode")
         logger.info("Injected %d ratsnest lines into SVG", line_count)
+
+
+# ---------------------------------------------------------------------------
+# Keepout zone SVG injection
+# ---------------------------------------------------------------------------
+
+_KEEPOUT_FILL = "#ff2222"
+_KEEPOUT_FILL_OPACITY = "0.18"
+_KEEPOUT_STROKE = "#ff4444"
+_KEEPOUT_STROKE_WIDTH = "0.25"
+_KEEPOUT_STROKE_OPACITY = "0.6"
+
+
+def _parse_keepout_zones(pcb_path: Path) -> list[list[tuple[float, float]]]:
+    """Parse keepout zone polygons from a .kicad_pcb file.
+
+    Finds all ``(zone ...)`` blocks that contain a ``(keepout ...)`` child,
+    extracts the ``(polygon (pts (xy ...) ...))`` points, and returns them
+    as a list of polygon point lists.
+    """
+    text = pcb_path.read_text(encoding="utf-8")
+    polygons: list[list[tuple[float, float]]] = []
+
+    # Find top-level (zone blocks by matching balanced parens
+    zone_starts = [m.start() for m in re.finditer(r"^\s+\(zone\b", text, re.MULTILINE)]
+    for start in zone_starts:
+        # Extract the full zone block by balancing parentheses
+        depth = 0
+        end = start
+        for i in range(start, min(start + 5000, len(text))):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        block = text[start:end]
+
+        # Only process zones with a keepout child
+        if "(keepout" not in block:
+            continue
+
+        # Extract polygon points: (polygon (pts (xy X Y) (xy X Y) ...))
+        # Use balanced-paren search for (pts ...) to avoid regex greediness issues
+        pts_start = block.find("(pts")
+        if pts_start < 0:
+            continue
+        # Find the matching closing paren for (pts ...)
+        pts_depth = 0
+        pts_end = pts_start
+        for pi in range(pts_start, len(block)):
+            if block[pi] == "(":
+                pts_depth += 1
+            elif block[pi] == ")":
+                pts_depth -= 1
+                if pts_depth == 0:
+                    pts_end = pi + 1
+                    break
+        pts_block = block[pts_start:pts_end]
+
+        xy_matches = re.findall(r"\(xy\s+([-\d.]+)\s+([-\d.]+)\)", pts_block)
+        if len(xy_matches) >= 3:
+            points = [(float(x), float(y)) for x, y in xy_matches]
+            polygons.append(points)
+
+    return polygons
+
+
+def _inject_keepouts_into_svg(svg_path: Path, pcb_path: Path) -> None:
+    """Inject keepout zone polygons as semi-transparent red overlays into an SVG.
+
+    Parses keepout zones from the PCB file and adds them as SVG polygon
+    elements. The SVG viewBox uses the same mm coordinates as the PCB,
+    so no coordinate transform is needed beyond what kicad-cli already set up.
+
+    Args:
+        svg_path: Path to the SVG file to modify in place.
+        pcb_path: Path to the .kicad_pcb file to read keepouts from.
+    """
+    keepouts = _parse_keepout_zones(pcb_path)
+    if not keepouts:
+        return
+
+    ET.register_namespace("", _SVG_NS)
+    try:
+        tree = ET.parse(str(svg_path))
+    except ET.ParseError:
+        logger.warning("Failed to parse SVG for keepout injection")
+        return
+
+    root = tree.getroot()
+    viewbox = root.get("viewBox")
+    if not viewbox:
+        logger.debug("SVG has no viewBox — skipping keepout injection")
+        return
+
+    # Build keepout group
+    keepout_group = ET.SubElement(root, f"{{{_SVG_NS}}}g")
+    keepout_group.set("id", "keepout-zones")
+
+    for points in keepouts:
+        pts_str = " ".join(f"{x:.4f},{y:.4f}" for x, y in points)
+        polygon = ET.SubElement(keepout_group, f"{{{_SVG_NS}}}polygon")
+        polygon.set("points", pts_str)
+        polygon.set("fill", _KEEPOUT_FILL)
+        polygon.set("fill-opacity", _KEEPOUT_FILL_OPACITY)
+        polygon.set("stroke", _KEEPOUT_STROKE)
+        polygon.set("stroke-width", _KEEPOUT_STROKE_WIDTH)
+        polygon.set("stroke-opacity", _KEEPOUT_STROKE_OPACITY)
+        polygon.set("stroke-dasharray", "0.5,0.3")
+
+    tree.write(str(svg_path), xml_declaration=True, encoding="unicode")
+    logger.info("Injected %d keepout zone overlays into SVG", len(keepouts))
 
 
 def _cleanup_temp_svg(svg_path: Path) -> None:
