@@ -642,14 +642,24 @@ _ESP32_PIN_NAMES: tuple[str, ...] = (
 _ESP32_ANTENNA_KEEPOUT_DEPTH_MM: float = 8.0
 
 # Extension past the module body edge for the antenna keepout.  The antenna
-# PCB trace extends slightly beyond the module body, so the keepout must
-# extend 1.5mm past the body top edge to prevent copper near the antenna.
-_ESP32_ANTENNA_KEEPOUT_EXTENSION_MM: float = 1.5
+# radiates beyond the module body and copper in that zone degrades RF
+# performance.  3.5mm per ESP32-S3-WROOM-1 datasheet recommended layout.
+_ESP32_ANTENNA_KEEPOUT_EXTENSION_MM: float = 3.5
 
 # Via fence parameters for ground isolation around the antenna keepout.
 _ESP32_VIA_FENCE_PAD_SIZE: float = 0.6    # via pad diameter (mm)
 _ESP32_VIA_FENCE_DRILL: float = 0.3       # via drill diameter (mm)
 _ESP32_VIA_FENCE_SPACING: float = 2.0     # via-to-via spacing along fence (mm)
+
+# Perimeter via stitching: GND vias around the entire module shield perimeter.
+_ESP32_PERIMETER_VIA_OFFSET: float = 0.8  # mm outward from shield edge
+
+# Pad 41 thermal via array: 3x3 grid of GND vias under the exposed pad.
+_ESP32_THERMAL_VIA_GRID: int = 3          # NxN grid
+_ESP32_THERMAL_VIA_SPACING: float = 1.2   # mm between via centres
+
+# Notch margin: clearance between keepout polygon edge and nearest edge pad.
+_ESP32_KEEPOUT_PAD_CLEARANCE: float = 1.0  # mm
 
 # Vertical offset for the GND pad centre.  The antenna occupies the top ~8mm
 # of the 25.5mm body so the pad field (and GND pad) is shifted south by half
@@ -1450,45 +1460,112 @@ def _esp32_make_pin_labels(
     return labels
 
 
+def _esp32_detect_antenna_side(
+    pad_list: list[Pad],
+    half_h: float,
+) -> bool:
+    """Return True if antenna is at positive-Y end, False for negative-Y.
+
+    Detection: the antenna occupies the end of the module body furthest
+    from the pad field.  Falls back to pin numbering if pad field is
+    symmetric.
+    """
+    signal_pad_ys = [
+        p.position.y for p in pad_list
+        if p.number not in (_ESP32_THERMAL_PAD_NUMBER,) and not p.number.startswith("V")
+    ]
+    if not signal_pad_ys:
+        return False
+
+    min_pad_y, max_pad_y = min(signal_pad_ys), max(signal_pad_ys)
+    dist_to_neg = abs(min_pad_y - (-half_h))
+    dist_to_pos = abs(max_pad_y - half_h)
+    if abs(dist_to_pos - dist_to_neg) > 0.5:
+        return dist_to_pos > dist_to_neg
+
+    # Symmetric — use pin numbering as tiebreaker (pins 15-26 are antenna side).
+    ant_pins = [p for p in pad_list if p.number in {str(i) for i in range(15, 27)}]
+    pin1 = [p for p in pad_list if p.number == "1"]
+    if ant_pins and pin1:
+        return ant_pins[0].position.y > pin1[0].position.y
+    return False
+
+
 def _esp32_make_antenna_keepout(
     pad_list: list[Pad],
     body_w: float,
     body_h: float,
 ) -> FootprintKeepout:
-    """Derive antenna-end keepout zone from actual pad positions."""
+    """Derive antenna-end keepout zone with notches to avoid castellated pads.
+
+    The keepout is a 6-point (or 8-point) polygon that is full module width
+    at the antenna tip but narrows at the pad-field boundary so it does not
+    overlap the outermost row of castellated edge pads.
+    """
     antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
     antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
     half_w = body_w / 2.0
     half_h = body_h / 2.0
+    pad_clr = _ESP32_KEEPOUT_PAD_CLEARANCE
 
-    signal_pad_ys = [
-        p.position.y for p in pad_list
-        if p.number not in (_ESP32_THERMAL_PAD_NUMBER,) and not p.number.startswith("V")
-    ]
-    if signal_pad_ys:
-        min_pad_y, max_pad_y = min(signal_pad_ys), max(signal_pad_ys)
-        dist_to_neg = abs(min_pad_y - (-half_h))
-        dist_to_pos = abs(max_pad_y - half_h)
-        antenna_at_positive_y = dist_to_pos > dist_to_neg
-    else:
-        antenna_at_positive_y = False
+    antenna_at_positive_y = _esp32_detect_antenna_side(pad_list, half_h)
+
+    # Find the X extent of left/right edge pads that intrude into the
+    # antenna zone.  We need to notch around them.
+    left_pads_x: list[float] = []
+    right_pads_x: list[float] = []
+    for p in pad_list:
+        if p.number == _ESP32_THERMAL_PAD_NUMBER or p.number.startswith("V"):
+            continue
+        # Classify as left-edge or right-edge pad
+        if p.position.x < -half_w * 0.3:
+            left_pads_x.append(p.position.x + p.size_x / 2.0)   # right edge of pad
+        elif p.position.x > half_w * 0.3:
+            right_pads_x.append(p.position.x - p.size_x / 2.0)  # left edge of pad
+
+    # Notch inset: inner X boundary of the notch (just outside the pads)
+    notch_left_x = max(left_pads_x) + pad_clr if left_pads_x else -half_w + 2.0
+    notch_right_x = min(right_pads_x) - pad_clr if right_pads_x else half_w - 2.0
 
     if antenna_at_positive_y:
         body_antenna_edge = half_h
-        keepout_top_y = body_antenna_edge - antenna_depth
-        keepout_bot_y = body_antenna_edge + antenna_ext
+        # Keepout starts at pad-field boundary, extends past module edge
+        notch_y = body_antenna_edge - antenna_depth  # pad-field boundary
+        tip_y = body_antenna_edge + antenna_ext       # past module edge
+
+        # 8-point polygon: notched at pad boundary, full width at tip
+        # Walk clockwise from bottom-left notch corner
+        keepout_poly = (
+            Point(notch_left_x, notch_y),     # bottom-left (notched)
+            Point(notch_left_x, notch_y + 1.0),  # step out to full width
+            Point(-half_w, notch_y + 1.0),    # full width left
+            Point(-half_w, tip_y),            # top-left
+            Point(half_w, tip_y),             # top-right
+            Point(half_w, notch_y + 1.0),     # full width right
+            Point(notch_right_x, notch_y + 1.0),  # step in from full width
+            Point(notch_right_x, notch_y),    # bottom-right (notched)
+        )
     else:
         body_antenna_edge = -half_h
-        keepout_top_y = body_antenna_edge - antenna_ext
-        keepout_bot_y = body_antenna_edge + antenna_depth
+        notch_y = body_antenna_edge + antenna_depth  # pad-field boundary
+        tip_y = body_antenna_edge - antenna_ext       # past module edge
 
-    keepout_poly = (
-        Point(-half_w, keepout_top_y), Point(half_w, keepout_top_y),
-        Point(half_w, keepout_bot_y), Point(-half_w, keepout_bot_y),
-    )
+        # 8-point polygon: notched at pad boundary, full width at tip
+        # Walk clockwise from top-left notch corner
+        keepout_poly = (
+            Point(notch_left_x, notch_y),         # top-left (notched)
+            Point(notch_right_x, notch_y),        # top-right (notched)
+            Point(notch_right_x, notch_y - 1.0),  # step in from full width
+            Point(half_w, notch_y - 1.0),          # full width right
+            Point(half_w, tip_y),                  # bottom-right
+            Point(-half_w, tip_y),                 # bottom-left
+            Point(-half_w, notch_y - 1.0),         # full width left
+            Point(notch_left_x, notch_y - 1.0),   # step out to full width
+        )
+
     return FootprintKeepout(
         polygon=keepout_poly, layers=(LAYER_F_CU, LAYER_B_CU),
-        no_copper=True, no_vias=True, no_tracks=True, tag="antenna",
+        no_copper=True, no_vias=False, no_tracks=True, tag="antenna",
     )
 
 
@@ -1533,6 +1610,155 @@ def _esp32_make_via_fence(
     return via_pads
 
 
+def _esp32_make_perimeter_vias(
+    pad_list: list[Pad],
+    body_w: float,
+    body_h: float,
+    via_idx_start: int,
+) -> list[Pad]:
+    """Generate GND stitching vias around the entire ESP32 module shield perimeter.
+
+    Places vias on all 4 sides of the module body rectangle, offset outward
+    by ``_ESP32_PERIMETER_VIA_OFFSET``.  Skips any position that would overlap
+    an existing footprint pad.
+
+    Args:
+        pad_list: All existing footprint pads (to check for overlap).
+        body_w: Module body width in mm.
+        body_h: Module body height in mm.
+        via_idx_start: Starting pad number for generated vias.
+
+    Returns:
+        List of through-hole GND via pads.
+    """
+    via_size = _ESP32_VIA_FENCE_PAD_SIZE
+    via_drill = _ESP32_VIA_FENCE_DRILL
+    via_spacing = _ESP32_VIA_FENCE_SPACING
+    offset = _ESP32_PERIMETER_VIA_OFFSET
+    via_layers = (LAYER_F_CU, LAYER_B_CU)
+    half_w = body_w / 2.0
+    half_h = body_h / 2.0
+
+    # Collect existing pad bounding boxes for overlap checking.
+    pad_rects: list[tuple[float, float, float, float]] = []
+    for p in pad_list:
+        pad_rects.append((
+            p.position.x - p.size_x / 2.0 - 0.15,
+            p.position.y - p.size_y / 2.0 - 0.15,
+            p.position.x + p.size_x / 2.0 + 0.15,
+            p.position.y + p.size_y / 2.0 + 0.15,
+        ))
+
+    def _overlaps_pad(vx: float, vy: float) -> bool:
+        vr = via_size / 2.0
+        for x0, y0, x1, y1 in pad_rects:
+            if not (vx + vr < x0 or vx - vr > x1 or vy + vr < y0 or vy - vr > y1):
+                return True
+        return False
+
+    candidates: list[tuple[float, float]] = []
+
+    # Top edge (negative Y): left to right
+    top_y = -half_h - offset
+    n_top = max(2, int(body_w / via_spacing) + 1)
+    for i in range(n_top):
+        vx = -half_w + i * body_w / max(1, n_top - 1)
+        candidates.append((vx, top_y))
+
+    # Bottom edge (positive Y): left to right
+    bot_y = half_h + offset
+    n_bot = max(2, int(body_w / via_spacing) + 1)
+    for i in range(n_bot):
+        vx = -half_w + i * body_w / max(1, n_bot - 1)
+        candidates.append((vx, bot_y))
+
+    # Left edge (negative X): top to bottom (skip corners already covered)
+    left_x = -half_w - offset
+    n_left = max(2, int(body_h / via_spacing) + 1)
+    for i in range(1, n_left - 1):
+        vy = -half_h + i * body_h / max(1, n_left - 1)
+        candidates.append((left_x, vy))
+
+    # Right edge (positive X): top to bottom (skip corners)
+    right_x = half_w + offset
+    n_right = max(2, int(body_h / via_spacing) + 1)
+    for i in range(1, n_right - 1):
+        vy = -half_h + i * body_h / max(1, n_right - 1)
+        candidates.append((right_x, vy))
+
+    via_pads: list[Pad] = []
+    via_idx = via_idx_start
+    for vx, vy in candidates:
+        if _overlaps_pad(vx, vy):
+            continue
+        via_pads.append(Pad(
+            number=str(via_idx), pad_type="thru_hole", shape="circle",
+            position=Point(vx, vy), size_x=via_size, size_y=via_size,
+            layers=via_layers, drill_diameter=via_drill,
+        ))
+        via_idx += 1
+
+    return via_pads
+
+
+def _esp32_make_thermal_vias(
+    pad_list: list[Pad],
+    via_idx_start: int,
+) -> list[Pad]:
+    """Generate a 3x3 grid of GND thermal vias under pad 41 (centre exposed pad).
+
+    The vias provide thermal relief through to the back copper pour and
+    improve ground connectivity for the module.
+
+    Args:
+        pad_list: All existing footprint pads (to find pad 41 position/size).
+        via_idx_start: Starting pad number for generated vias.
+
+    Returns:
+        List of through-hole GND via pads.
+    """
+    via_size = _ESP32_VIA_FENCE_PAD_SIZE
+    via_drill = _ESP32_VIA_FENCE_DRILL
+    via_spacing = _ESP32_THERMAL_VIA_SPACING
+    grid_n = _ESP32_THERMAL_VIA_GRID
+    via_layers = (LAYER_F_CU, LAYER_B_CU)
+
+    # Find pad 41
+    p41 = next(
+        (p for p in pad_list if p.number == _ESP32_THERMAL_PAD_NUMBER),
+        None,
+    )
+    if p41 is None:
+        return []
+
+    cx, cy = p41.position.x, p41.position.y
+    # Grid span: (grid_n - 1) * spacing.  Must fit inside pad 41.
+    grid_span = (grid_n - 1) * via_spacing
+    pad_min_dim = min(p41.size_x, p41.size_y)
+    if grid_span + via_size > pad_min_dim:
+        _log.warning(
+            "thermal via grid %.1fmm exceeds pad 41 (%.1fmm) — skipping",
+            grid_span + via_size, pad_min_dim,
+        )
+        return []
+
+    via_pads: list[Pad] = []
+    via_idx = via_idx_start
+    half_grid = grid_span / 2.0
+    for row in range(grid_n):
+        for col in range(grid_n):
+            vx = cx - half_grid + col * via_spacing
+            vy = cy - half_grid + row * via_spacing
+            via_pads.append(Pad(
+                number=str(via_idx), pad_type="thru_hole", shape="circle",
+                position=Point(vx, vy), size_x=via_size, size_y=via_size,
+                layers=via_layers, drill_diameter=via_drill,
+            ))
+            via_idx += 1
+
+    return via_pads
+
+
 def _esp32_make_3d_model(lib_id: str) -> Footprint3DModel:
     """Return a 3D model for the ESP32-S3-WROOM-1, falling back to a built-in path."""
     model = _model_for_package(lib_id)
@@ -1560,10 +1786,11 @@ def make_esp32_wroom(
     Each pad carries the functional pin name (e.g. ``"GND"``, ``"IO4"``) so
     that KiCad displays meaningful labels instead of bare numbers.
 
-    The footprint includes an antenna keepout zone covering the top ~8 mm of
-    the module body plus 1.5 mm extension past the body edge (no copper on any
-    layer), a GND via fence around the keepout perimeter, and a 3D model
-    reference.
+    The footprint includes a notched antenna keepout zone covering the top ~8 mm
+    of the module body plus 3.5 mm extension past the body edge (no copper, no
+    tracks; GND stitching vias allowed), a GND via fence around the keepout
+    perimeter, perimeter GND stitching vias on all 4 sides of the shield, a
+    3x3 thermal via array under pad 41, and a 3D model reference.
 
     Args:
         ref: Reference designator (e.g. "U3").
@@ -1582,14 +1809,25 @@ def make_esp32_wroom(
     pin_labels = _esp32_make_pin_labels(pad_list, _ESP32_SIDE_PINS, _ESP32_BOTTOM_PINS, fab_layer)
     antenna_keepout = _esp32_make_antenna_keepout(pad_list, body_w, body_h)
 
-    # Compute keepout bounds to position via fence consistently
+    # Compute keepout bounds to position antenna via fence consistently
     half_h = body_h / 2.0
     ant_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
     ant_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
     keepout_top_y = -half_h - ant_ext
     keepout_bot_y = -half_h + ant_depth
-    via_pads = _esp32_make_via_fence(body_w / 2.0, keepout_top_y, keepout_bot_y, via_idx_start=42)
+    via_idx = 42
+    via_pads = _esp32_make_via_fence(body_w / 2.0, keepout_top_y, keepout_bot_y, via_idx_start=via_idx)
+    via_idx += len(via_pads)
     pad_list.extend(via_pads)
+
+    # Perimeter GND stitching vias around all 4 sides of the module shield
+    perimeter_vias = _esp32_make_perimeter_vias(pad_list, body_w, body_h, via_idx_start=via_idx)
+    via_idx += len(perimeter_vias)
+    pad_list.extend(perimeter_vias)
+
+    # Thermal via array under pad 41
+    thermal_vias = _esp32_make_thermal_vias(pad_list, via_idx_start=via_idx)
+    pad_list.extend(thermal_vias)
 
     graphics = _courtyard_rect(body_w, body_h)
     texts: tuple[FootprintText, ...] = (
@@ -1635,70 +1873,53 @@ def _esp32_enrich_pin_labels(fp: Footprint, fab_layer: str) -> list[FootprintTex
 
 
 def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout], list[Pad]]:
-    """Return antenna keepout zone and via-fence pads for *fp* if not already present.
+    """Return antenna keepout, via-fence, perimeter vias, and thermal vias for *fp*.
 
-    Uses the same distance-based antenna-side detection as
-    :func:`_esp32_make_antenna_keepout`: the antenna occupies the end of the
-    module body furthest from the pad field (pins 1-40 span the lower ~22mm,
-    leaving ~3mm of bare PCB at the antenna end at negative-Y in the default
-    orientation).  This approach works correctly regardless of which external
-    footprint source was loaded.
+    Uses the shared ``_esp32_make_antenna_keepout`` (notched polygon that avoids
+    castellated edge pads), ``_esp32_make_perimeter_vias`` (GND stitching around
+    all 4 sides), and ``_esp32_make_thermal_vias`` (3x3 grid under pad 41).
+
+    Idempotent: returns empty lists if the footprint already has an antenna
+    keepout zone.
     """
     if any(fz.tag == "antenna" for fz in fp.fp_zones):
         return [], []
 
-    antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
-    antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
-    half_w = _ESP32_BODY_W / 2.0
-    half_h = _ESP32_BODY_H / 2.0
+    body_w = _ESP32_BODY_W
+    body_h = _ESP32_BODY_H
+    half_w = body_w / 2.0
+    half_h = body_h / 2.0
 
-    # Determine which end of the module body has no pads (= antenna end).
-    # Primary: distance-based (antenna end is furthest from pad field).
-    # Fallback: pin numbering (pins 15-26 are on the antenna side).
-    signal_pad_ys = [
-        p.position.y for p in fp.pads
-        if p.number != _ESP32_THERMAL_PAD_NUMBER and not p.number.startswith("V")
-    ]
-    if signal_pad_ys:
-        min_pad_y, max_pad_y = min(signal_pad_ys), max(signal_pad_ys)
-        dist_to_neg = abs(min_pad_y - (-half_h))
-        dist_to_pos = abs(max_pad_y - half_h)
-        if abs(dist_to_pos - dist_to_neg) > 0.5:
-            antenna_at_positive_y = dist_to_pos > dist_to_neg
-        else:
-            # Symmetric footprint — use pin numbering as tiebreaker.
-            # Pins 15-26 are on the antenna side of the ESP32-S3-WROOM.
-            ant_pins = [p for p in fp.pads if p.number in {str(i) for i in range(15, 27)}]
-            pin1 = [p for p in fp.pads if p.number == "1"]
-            if ant_pins and pin1:
-                antenna_at_positive_y = ant_pins[0].position.y > pin1[0].position.y
-            else:
-                antenna_at_positive_y = False
-    else:
-        antenna_at_positive_y = False
+    # Build the notched keepout polygon
+    pad_list = list(fp.pads)
+    zone = _esp32_make_antenna_keepout(pad_list, body_w, body_h)
 
+    # Antenna via fence
+    antenna_at_positive_y = _esp32_detect_antenna_side(pad_list, half_h)
+    ant_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
+    ant_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
     if antenna_at_positive_y:
-        body_antenna_edge = half_h
-        keepout_top_y = body_antenna_edge - antenna_depth
-        keepout_bot_y = body_antenna_edge + antenna_ext
+        keepout_top_y = half_h - ant_depth
+        keepout_bot_y = half_h + ant_ext
     else:
-        body_antenna_edge = -half_h
-        keepout_top_y = body_antenna_edge - antenna_ext
-        keepout_bot_y = body_antenna_edge + antenna_depth
+        keepout_top_y = -half_h - ant_ext
+        keepout_bot_y = -half_h + ant_depth
 
-    keepout_poly = (
-        Point(-half_w, keepout_top_y), Point(half_w, keepout_top_y),
-        Point(half_w, keepout_bot_y), Point(-half_w, keepout_bot_y),
-    )
-    zone = FootprintKeepout(
-        polygon=keepout_poly, layers=(LAYER_F_CU, LAYER_B_CU),
-        no_copper=True, no_vias=True, no_tracks=True, tag="antenna",
-    )
-    via_pads = _esp32_make_via_fence(
-        half_w, keepout_top_y, keepout_bot_y,
-        via_idx_start=42 + len(fp.pads),
-    )
-    return [zone], via_pads
+    via_idx = 42 + len(fp.pads)
+    fence_vias = _esp32_make_via_fence(half_w, keepout_top_y, keepout_bot_y, via_idx_start=via_idx)
+    via_idx += len(fence_vias)
+
+    # Perimeter GND stitching vias
+    all_pads = pad_list + fence_vias
+    perimeter_vias = _esp32_make_perimeter_vias(all_pads, body_w, body_h, via_idx_start=via_idx)
+    via_idx += len(perimeter_vias)
+
+    # Thermal vias under pad 41
+    all_pads_full = all_pads + perimeter_vias
+    thermal_vias = _esp32_make_thermal_vias(all_pads_full, via_idx_start=via_idx)
+
+    all_vias = fence_vias + perimeter_vias + thermal_vias
+    return [zone], all_vias
 
 
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
