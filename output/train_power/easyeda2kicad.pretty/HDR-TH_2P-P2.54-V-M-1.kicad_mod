@@ -63,27 +63,7 @@
       (hide yes)
     )
   )
-  (property "PlacementGroup" "buck_stage"
-    (at 0 0 0)
-    (layer "F.Fab")
-    (effects
-      (font
-        (size 1.0 1.0)
-      )
-      (hide yes)
-    )
-  )
   (property "PlacementNear" "C2"
-    (at 0 0 0)
-    (layer "F.Fab")
-    (effects
-      (font
-        (size 1.0 1.0)
-      )
-      (hide yes)
-    )
-  )
-  (property "PlacementOrder" "6"
     (at 0 0 0)
     (layer "F.Fab")
     (effects

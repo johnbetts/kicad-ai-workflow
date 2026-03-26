@@ -85,7 +85,15 @@ def _infer_ordering_from_subcircuit(
     """
     from kicad_pipeline.optimization.functional_grouper import SubCircuitType
 
-    refs_to_order: list[str] = [r for r in sc.refs if r not in explicit_refs_in_group]
+    # Connectors (J*) attach from the board edge. Their positions are set by
+    # dedicated edge-placement phases (_phase_power_chain_flow, _phase_top_edge_connectors).
+    # Including J* in subcircuit ordering chains causes the constraint guard to
+    # force connectors to extreme left/right positions that conflict with
+    # signal-flow placement, so we exclude them here.
+    refs_to_order: list[str] = [
+        r for r in sc.refs
+        if r not in explicit_refs_in_group and not r.startswith("J")
+    ]
     if not refs_to_order:
         return None
 
@@ -228,7 +236,16 @@ def resolve_constraints(
         if len(entries) < 2:
             continue  # need at least two refs to form a chain
         sorted_entries = sorted(entries, key=lambda t: t[0])
-        refs_in_order = tuple(ref for _, ref in sorted_entries)
+        # Exclude connectors (J*) from explicit ordering chains. Connectors attach
+        # from the board edge and their X position is determined by dedicated
+        # edge-placement phases (power chain flow, top-edge connectors). Including
+        # J* in ordering chains forces connectors to extreme left/right positions
+        # that conflict with signal-flow placement on power-focused boards.
+        refs_in_order = tuple(
+            ref for _, ref in sorted_entries if not ref.startswith("J")
+        )
+        if len(refs_in_order) < 2:
+            continue
         ordering_list.append(OrderingChain(group=group_name, refs=refs_in_order))
         explicit_ordering_groups.add(group_name)
 

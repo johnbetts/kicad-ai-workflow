@@ -1103,16 +1103,18 @@ def _eth_place_rj45_connectors(
     placed_eth: set[str],
     zone_rect: tuple[float, float, float, float],
 ) -> None:
-    """Place RJ45 connectors at the top board edge.
+    """Place RJ45 connectors at the LEFT board edge, vertically centered.
 
-    RJ45 connectors are panel-mounted and belong flush with the top edge of
-    the board.  Rotation=0 means the mating face points toward the top edge
-    (y_min).  Origin is placed so that the top of the body is within 2 mm of
-    the board edge and pads stay inside the board.
+    Signal flow is left→right: J1 (RJ45) sits at the left edge with its
+    mating face pointing outward (left).  Rotation=90 is used so the port
+    faces x_min.  After a 90° rotation the effective width becomes h and
+    the effective height becomes w.  Origin is adjusted so all pads stay
+    inside the board.
     """
     bounds = ctx.bounds
-    ezx1, _ezy1, ezx2, _ezy2 = zone_rect
+    _ezx1, ezy1, _ezx2, ezy2 = zone_rect
     from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+    zone_cy = (ezy1 + ezy2) / 2.0
     for ref in eth_connectors:
         if ref not in ctx.positions or ref in ctx.fixed_refs:
             continue
@@ -1122,29 +1124,29 @@ def _eth_place_rj45_connectors(
                 fp_match = fp
                 break
         w, h = ctx.fp_sizes.get(ref, (19.6, 15.4))
-        cent_x = eth_anchor_x
-        # Place at top edge: centroid h/2 below top boundary
-        cent_y = bounds[1] + h / 2.0 + 1.0
+        # After 90° rotation: effective dims are (h_body → x-axis, w_body → y-axis)
+        rot_w, rot_h = h, w
+        cent_x = bounds[0] + rot_w / 2.0 + 1.0
+        cent_y = _clamp(zone_cy, ezy1 + rot_h / 2.0 + 1.0, ezy2 - rot_h / 2.0 - 1.0)
         if fp_match is not None:
-            # Use rotation=0 (connector faces top).  Adjust origin so pads
-            # don't fall outside the board.
-            trial_origin_x = eth_anchor_x
-            trial_origin_y = bounds[1] + 3.0
-            _, pad_min_y, _, _ = pad_extent_in_board_space(
-                fp_match, trial_origin_x, trial_origin_y, 0.0,
+            # Rotation=90: connector port faces left (x_min). Adjust origin so
+            # pads don't fall outside the board.
+            trial_origin_x = bounds[0] + 3.0
+            trial_origin_y = zone_cy
+            pad_min_x, _, _, _ = pad_extent_in_board_space(
+                fp_match, trial_origin_x, trial_origin_y, 90.0,
             )
             edge_margin = 1.0
-            if pad_min_y < bounds[1] + edge_margin:
-                trial_origin_y += (bounds[1] + edge_margin - pad_min_y)
+            if pad_min_x < bounds[0] + edge_margin:
+                trial_origin_x += (bounds[0] + edge_margin - pad_min_x)
             cent_x, cent_y = origin_to_centroid(
-                fp_match, trial_origin_x, trial_origin_y, 0.0,
+                fp_match, trial_origin_x, trial_origin_y, 90.0,
             )
-        px = _clamp(cent_x, ezx1 + w / 2.0, ezx2 - w / 2.0)
-        py = cent_y
-        ctx.positions[ref] = (px, py, 0.0)
+            cent_y = _clamp(cent_y, ezy1 + rot_h / 2.0 + 1.0, ezy2 - rot_h / 2.0 - 1.0)
+        ctx.positions[ref] = (cent_x, cent_y, 90.0)
         ctx.ethernet_fixed.add(ref)
         placed_eth.add(ref)
-        _log.info("    %s (RJ45) -> top edge (%.1f, %.1f)", ref, px, py)
+        _log.info("    %s (RJ45) -> left edge (%.1f, %.1f) rot=90", ref, cent_x, cent_y)
 
 
 def _eth_fix_crystal_cap_overlaps(
@@ -1901,7 +1903,6 @@ def _place_power_chain_ic(
 def _place_power_connectors(
     ctx: PlacementContext,
     all_reg_scs: list[object],
-    x_fracs: list[float],
     zone_bounds: tuple[float, float, float, float],
 ) -> None:
     """Place power-group connectors at learned reference-board positions.
@@ -1924,14 +1925,23 @@ def _place_power_connectors(
     if not (power_connectors and all_reg_scs and is_power_focused_board):
         return
 
-    first_ic_x = zx1 + zone_w * x_fracs[0]
-    first_ic_y = zy1 + zone_h * 0.40
+    # On a dedicated power board the signal-flow phase has authority over
+    # connector positions.  Clear any fixed status set by the earlier
+    # constraint-placement phase (which only enforced ordering, not absolute
+    # positions) so we can place connectors at their correct signal-flow spots.
+    for j_ref in power_connectors:
+        ctx.fixed_refs.discard(j_ref)
 
-    # index -> (x_frac_or_offset, y_frac, rotation, is_relative_to_ic, ic_dx)
-    conn_rules: dict[int, tuple[float, float, float, float, float]] = {
-        0: (0.0, 0.15, 0.0, 1.0, 7.7),
-        1: (0.61, 0.0, -90.0, 0.0, 0.0),
-        2: (0.88, 0.73, -90.0, 0.0, 0.0),
+    # index -> (x_frac, y_frac, rotation)
+    # All positions are zone-relative fractions for left→right signal flow.
+    # Fractions learned from the human reference board (board 60x40mm, zone 2.5-57.5):
+    #   J1 (input 24V):  x≈25%, y≈10%, rot=180  → top-left area
+    #   J2 (mid test):   x≈51%, y≈40%, rot=-90  → center, between stages
+    #   J3 (output):     x≈75%, y≈70%, rot=-90  → lower-right
+    conn_rules: dict[int, tuple[float, float, float]] = {
+        0: (0.25, 0.10, 180.0),
+        1: (0.51, 0.40, -90.0),
+        2: (0.75, 0.70, -90.0),
     }
     for idx, j_ref in enumerate(power_connectors):
         if j_ref in ctx.fixed_refs:
@@ -1939,13 +1949,9 @@ def _place_power_connectors(
         rule = conn_rules.get(idx)
         if rule is None:
             continue
-        x_frac, y_frac, rot, is_rel, ic_dx = rule
-        if is_rel > 0.5:
-            jx = first_ic_x + ic_dx
-            jy = zy1 + zone_h * y_frac
-        else:
-            jx = zx1 + zone_w * x_frac
-            jy = zy1 + zone_h * y_frac if y_frac > 0.01 else first_ic_y + 1.7
+        x_frac, y_frac, rot = rule
+        jx = zx1 + zone_w * x_frac
+        jy = zy1 + zone_h * y_frac
         clamped_x = _clamp(jx, zx1 + 1.0, zx2 - 1.0)
         clamped_y = _clamp(jy, zy1 + 1.0, zy2 - 1.0)
         # Respect placement constraints (proximity, ordering)
@@ -2000,7 +2006,7 @@ def _phase_power_chain_flow(ctx: PlacementContext) -> None:
     for reg_idx, sc in enumerate(all_reg_scs):
         _place_power_chain_ic(sc, reg_idx, x_fracs, zone_bounds, ctx)
 
-    _place_power_connectors(ctx, all_reg_scs, x_fracs, zone_bounds)
+    _place_power_connectors(ctx, all_reg_scs, zone_bounds)
 
     _log.info(
         "    3c1b: signal-flow ordered %d regulators across power zone",
@@ -2956,19 +2962,24 @@ def _phase_mcu_group(ctx: PlacementContext) -> None:
 def _eth_force_place_main_ic(
     ctx: PlacementContext,
     eth_main_ic: str,
-    eth_anchor_x: float,
-    eth_anchor_y: float,
+    ic_anchor_x: float,
+    ic_anchor_y: float,
     eth_grid: object,
     placed_eth: set[str],
     eth_zone_rect: tuple[float, float, float, float],
 ) -> tuple[float, float, float, float]:
-    """Force-place the main ethernet IC. Returns (ic_cx, ic_cy, ic_w, ic_h)."""
+    """Force-place the main ethernet IC to the right of the RJ45 connector.
+
+    The IC is placed at *ic_anchor_x* (derived from the connector's right pad
+    extent) and *ic_anchor_y* (vertical center of the ethernet zone), which
+    implements the left→right signal-flow layout: J1→U1→headers.
+
+    Returns (ic_cx, ic_cy, ic_w, ic_h).
+    """
     ezx1, ezy1, ezx2, ezy2 = eth_zone_rect
     ic_w, ic_h = ctx.fp_sizes.get(eth_main_ic, (10.0, 10.0))
-    ic_cx = _clamp(eth_anchor_x, ezx1 + ic_w / 2.0 + 1.0, ezx2 - ic_w / 2.0 - 1.0)
-    ic_cy = _clamp(
-        eth_anchor_y + ic_h / 2.0, ezy1 + ic_h / 2.0 + 1.0, ezy2 - ic_h / 2.0 - 5.0,
-    )
+    ic_cx = _clamp(ic_anchor_x + ic_w / 2.0, ezx1 + ic_w / 2.0 + 1.0, ezx2 - ic_w / 2.0 - 1.0)
+    ic_cy = _clamp(ic_anchor_y, ezy1 + ic_h / 2.0 + 1.0, ezy2 - ic_h / 2.0 - 1.0)
     if eth_main_ic in ctx.positions and eth_main_ic not in ctx.fixed_refs:
         ctx.positions[eth_main_ic] = (ic_cx, ic_cy, 0.0)
         eth_grid.place(ic_cx, ic_cy, ic_w, ic_h)  # type: ignore[union-attr]
@@ -2997,25 +3008,25 @@ def _eth_register_connectors(
         eth_grid.place(eth_anchor_x, board_min_y + jh / 2.0 + 1.0, jw, jh)  # type: ignore[union-attr]
 
 
-def _eth_connector_pad_bottom(
+def _eth_connector_pad_right(
     ctx: PlacementContext,
     eth_connectors: list[str],
     placed_eth: set[str],
     gap_mm: float = 2.0,
 ) -> float:
-    """Return the lowest pad-extent Y of placed RJ45 connectors plus *gap_mm*.
+    """Return the rightmost pad-extent X of placed RJ45 connectors plus *gap_mm*.
 
     Uses the actual pad extent in board space (accounting for through-hole
     offsets) rather than the courtyard size, so the IC anchor is placed
-    immediately below the connector's real pad footprint — not an over-
-    estimate based on the courtyard envelope.
+    immediately to the right of the connector's real pad footprint — not an
+    over-estimate based on the courtyard envelope.
 
-    Falls back to the centroid-Y + courtyard-half + gap if the footprint
-    is not found in initial_pcb.
+    Falls back to centroid-X + courtyard-half + gap if the footprint is not
+    found in initial_pcb.
     """
     from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
 
-    max_pad_y: float = ctx.bounds[1]
+    max_pad_x: float = ctx.bounds[0]
     for jref in eth_connectors:
         if jref not in placed_eth:
             continue
@@ -3023,17 +3034,16 @@ def _eth_connector_pad_bottom(
         if pos is None:
             continue
         jx, jy, jrot = pos
-        # Find the actual footprint to use pad geometry
         fp_match = next(
             (fp for fp in ctx.initial_pcb.footprints if fp.ref == jref), None,
         )
         if fp_match is not None:
-            _, _, _, pad_y1 = pad_extent_in_board_space(fp_match, jx, jy, jrot)
-            max_pad_y = max(max_pad_y, pad_y1)
+            _, _, pad_x1, _ = pad_extent_in_board_space(fp_match, jx, jy, jrot)
+            max_pad_x = max(max_pad_x, pad_x1)
         else:
-            _, jh = ctx.fp_sizes.get(jref, (19.6, 15.4))
-            max_pad_y = max(max_pad_y, jy + jh / 2.0)
-    return max_pad_y + gap_mm
+            jw, _ = ctx.fp_sizes.get(jref, (19.6, 15.4))
+            max_pad_x = max(max_pad_x, jx + jw / 2.0)
+    return max_pad_x + gap_mm
 
 
 def _eth_place_column(
@@ -3117,37 +3127,44 @@ def _eth_place_headers_bottom(
     placed_eth: set[str],
     zone_rect: tuple[float, float, float, float],
 ) -> None:
-    """Place small interface headers (SPI, power) along the bottom board edge.
+    """Place small interface headers (SPI, power) at the RIGHT board edge.
 
-    Headers are spaced evenly within the ethernet zone's x-range, placed
-    near the bottom edge (board_max_y - h/2 - 1mm).
+    In the left→right signal-flow layout (J1→U1→headers) the SPI/power
+    headers terminate the chain at the right edge.  Headers are stacked
+    vertically near x_max, centered within the ethernet zone's y-range.
     """
     bounds = ctx.bounds
-    ezx1, _ezy1, ezx2, ezy2 = zone_rect
+    _ezx1, ezy1, ezx2, ezy2 = zone_rect
     unplaced = [r for r in eth_headers
                 if r in ctx.positions and r not in ctx.fixed_refs and r not in placed_eth]
     if not unplaced:
         return
-    total_w = sum(ctx.fp_sizes.get(r, (2.54, 5.08))[0] for r in unplaced)
-    gap = 3.0
-    avail_w = ezx2 - ezx1
-    if total_w + gap * (len(unplaced) - 1) > avail_w:
-        gap = max(1.0, (avail_w - total_w) / max(len(unplaced) - 1, 1))
-    cx = ezx1 + (avail_w - (total_w + gap * (len(unplaced) - 1))) / 2.0
+    total_h = sum(ctx.fp_sizes.get(r, (2.54, 5.08))[1] for r in unplaced)
+    gap = 2.0
+    avail_h = ezy2 - ezy1
+    if total_h + gap * (len(unplaced) - 1) > avail_h:
+        gap = max(1.0, (avail_h - total_h) / max(len(unplaced) - 1, 1))
+    cy = ezy1 + (avail_h - (total_h + gap * (len(unplaced) - 1))) / 2.0
     for ref in unplaced:
         w, h = ctx.fp_sizes.get(ref, (2.54, 5.08))
-        x = _clamp(cx + w / 2.0, ezx1 + w / 2.0 + 1.0, ezx2 - w / 2.0 - 1.0)
-        y = _clamp(bounds[3] - h / 2.0 - 1.0, _ezy1 + h / 2.0 + 1.0, ezy2 - h / 2.0 - 1.0)
+        x = _clamp(bounds[2] - w / 2.0 - 1.0, _ezx1 + w / 2.0 + 1.0, ezx2 - w / 2.0 - 1.0)
+        y = _clamp(cy + h / 2.0, ezy1 + h / 2.0 + 1.0, ezy2 - h / 2.0 - 1.0)
         ctx.positions[ref] = (x, y, 0.0)
         eth_grid.place(x, y, w, h)  # type: ignore[union-attr]
         ctx.ethernet_fixed.add(ref)
         placed_eth.add(ref)
-        _log.info("    %s (header) -> bottom edge (%.1f, %.1f)", ref, x, y)
-        cx += w + gap
+        _log.info("    %s (header) -> right edge (%.1f, %.1f)", ref, x, y)
+        cy += h + gap
 
 
 def _phase_ethernet_group(ctx: PlacementContext) -> None:
-    """3c4: Ethernet group organization — vertical signal-chain column."""
+    """3c4: Ethernet group organization — horizontal left→right signal-chain.
+
+    Layout follows the reference board signal flow:
+        J1 (RJ45, left edge) → U1 (W5500, centre-right) → J2/J3 (headers, right edge)
+
+    Crystal and decoupling caps cluster below U1 (centre of board height).
+    """
     _log.info("  3c4: Ethernet group organization")
 
     eth_group_refs = _collect_feature_refs(ctx, "ethernet")
@@ -3157,8 +3174,8 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
     eth_zone_rect = _find_zone_rect(ctx, "ethernet")
     by_prefix = _classify_refs_by_prefix(eth_group_refs, ctx, "U", "J")
     eth_ics = by_prefix["U"]
-    # Split J refs into large panel connectors (RJ45/SH*, width > 10mm → top
-    # edge) vs. small headers (SPI/power, width ≤ 10mm → bottom edge).
+    # Split J refs into large panel connectors (RJ45/SH*, width > 10mm → left
+    # edge) vs. small headers (SPI/power, width ≤ 10mm → right edge).
     all_j_refs = by_prefix["J"]
     eth_connectors = [r for r in all_j_refs
                       if ctx.fp_sizes.get(r, (0.0, 0.0))[0] > 10.0]
@@ -3179,37 +3196,38 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
         eth_group_refs, eth_net_refs, crystal_refs, poe_ic, ctx,
     )
 
+    # eth_anchor_x is the horizontal zone midpoint — used as fallback anchor
+    # for signal-chain caps and PoE IC placement.
     eth_anchor_x = (ezx1 + ezx2) / 2.0
+    # Vertical centre of the zone — all components are centred here on the Y axis.
+    zone_cy = (ezy1 + ezy2) / 2.0
     placed_eth: set[str] = set()
 
-    # Place RJ45 connectors FIRST so we can derive the IC anchor from their
-    # actual pad extent rather than from a courtyard-size estimate.
-    # Courtyard sizes over-estimate through-hole connectors because the
-    # courtyard encloses the entire body including the mating face that hangs
-    # over the board edge; using the real pad extent gives a tighter (and
-    # physically correct) gap between the connector pads and the IC.
+    # Step 1: Place RJ45 at the LEFT board edge (port faces left, rot=90).
+    # This is done FIRST so we can derive the IC anchor from the connector's
+    # actual right-side pad extent rather than a courtyard over-estimate.
     _eth_place_rj45_connectors(
         ctx, eth_connectors, eth_anchor_x, eth_grid, placed_eth, eth_zone_rect,
     )
-    # IC anchor: 5 mm below the lowest RJ45 pad, derived from actual geometry.
-    # 2mm was too tight — JLCPCB footprint courtyards extend beyond pads.
-    ic_anchor_y = _eth_connector_pad_bottom(ctx, eth_connectors, placed_eth, gap_mm=5.0)
-    # Fallback if no connectors were placed (boards without RJ45).
+
+    # Step 2: IC anchor X = right pad extent of the RJ45 + 5 mm clearance.
+    # IC anchor Y = vertical centre of the ethernet zone.
+    ic_anchor_x = _eth_connector_pad_right(ctx, eth_connectors, placed_eth, gap_mm=5.0)
+    # Fallback when no RJ45 was placed (e.g. boards without a connector).
     if not eth_connectors or not any(r in placed_eth for r in eth_connectors):
-        max_conn_h = max(
-            (ctx.fp_sizes.get(r, (0.0, 15.4))[1] for r in eth_connectors),
-            default=15.4,
+        max_conn_w = max(
+            (ctx.fp_sizes.get(r, (19.6, 0.0))[0] for r in eth_connectors),
+            default=19.6,
         )
-        ic_anchor_y = ctx.bounds[1] + max_conn_h + 2.0
+        ic_anchor_x = ctx.bounds[0] + max_conn_w + 5.0
 
     ic_cx, ic_cy, ic_w, ic_h = _eth_force_place_main_ic(
-        ctx, eth_main_ic, eth_anchor_x, ic_anchor_y,
+        ctx, eth_main_ic, ic_anchor_x, zone_cy,
         eth_grid, placed_eth, eth_zone_rect,
     )
 
-    # Place small interface headers (SPI/power) at the bottom edge BEFORE the
-    # decoupling caps column so that the caps column sees the headers as occupied
-    # grid cells and avoids them (prevents C1/J2-style courtyard collisions).
+    # Step 3: Place small interface headers (SPI/power) at the RIGHT edge
+    # BEFORE the decoupling caps column so the caps column avoids them.
     _eth_place_headers_bottom(ctx, eth_headers, eth_grid, placed_eth, eth_zone_rect)
 
     col1_bottom = _eth_place_signal_chain(
