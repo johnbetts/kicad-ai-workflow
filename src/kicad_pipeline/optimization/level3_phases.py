@@ -474,8 +474,12 @@ def _pull_mcu_peripherals(
             dy = (ay - ry) / current_dist
             target_x = ax - dx * ideal_dist
             target_y = ay - dy * ideal_dist
-            target_x = max(min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, target_x))
-            target_y = max(min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, target_y))
+            target_x = max(
+                min_x + BOARD_EDGE_MARGIN_MM, min(max_x - BOARD_EDGE_MARGIN_MM, target_x)
+            )
+            target_y = max(
+                min_y + BOARD_EDGE_MARGIN_MM, min(max_y - BOARD_EDGE_MARGIN_MM, target_y)
+            )
 
             move_grid = _PlacementGrid(bounds)
             for other_ref, (ox, oy, _orot) in positions.items():
@@ -497,7 +501,11 @@ def _nearest_edge_and_rotation(
     bounds: tuple[float, float, float, float],
     is_wide: bool,
 ) -> tuple[str, float]:
-    """Return (edge_name, rotation) for the nearest board edge."""
+    """Return (edge_name, rotation) for the nearest board edge.
+
+    Rotation values are for generic connectors (pin headers, USB, etc.).
+    Screw terminals use a different convention — see _orient_connectors.
+    """
     min_x, min_y, max_x, max_y = bounds
     distances = {
         "top": cy - min_y,
@@ -507,7 +515,7 @@ def _nearest_edge_and_rotation(
     }
     target_edge = min(distances, key=lambda k: distances[k])
     edge_rotations: dict[str, tuple[float, float]] = {
-        # (wide_rot, narrow_rot)
+        # (wide_rot, narrow_rot) — for generic connectors
         "top": (90.0, 0.0),
         "bottom": (270.0, 0.0),
         "left": (0.0, 270.0),
@@ -515,6 +523,20 @@ def _nearest_edge_and_rotation(
     }
     wide_rot, narrow_rot = edge_rotations[target_edge]
     return target_edge, wide_rot if is_wide else narrow_rot
+
+
+# Rotation to use for screw terminals (wire entry at local +y) at each board edge.
+# At rotation R, local +y maps in the direction that faces the board edge.
+#   top edge:    rot=180 → local +y faces -y world (toward min_y = top)
+#   bottom edge: rot=0   → local +y faces +y world (toward max_y = bottom)
+#   left edge:   rot=90  → local +y faces -x world (toward min_x = left)
+#   right edge:  rot=270 → local +y faces +x world (toward max_x = right)
+_SCREW_TERMINAL_EDGE_ROTATION: dict[str, float] = {
+    "top": 180.0,
+    "bottom": 0.0,
+    "left": 90.0,
+    "right": 270.0,
+}
 
 
 def _shift_origin_to_edge(
@@ -557,6 +579,21 @@ def _clamp_origin_to_board(
     return origin_x, origin_y
 
 
+def _is_screw_terminal_fp(fp: object) -> bool:
+    """Return True if *fp* is a screw/cage-clamp terminal block.
+
+    Screw terminals (TerminalBlock, WJ*, CONN-TH with cage clamp) have their
+    wire entry at local +y in the footprint coordinate system, which requires
+    a different rotation convention than pin headers.
+    """
+    lib = (getattr(fp, "lib_id", None) or "").upper()
+    val = (getattr(fp, "value", None) or "").upper()
+    return any(kw in lib or kw in val for kw in (
+        "TERMINALBLOCK", "TERMINAL_BLOCK", "WJ", "CONN-TH", "TB_",
+        "SCREW_TERM", "SCREWTERM", "CAGE_CLAMP",
+    ))
+
+
 def _orient_connectors(
     positions: dict[str, tuple[float, float, float]],
     fp_sizes: dict[str, tuple[float, float]],
@@ -569,11 +606,14 @@ def _orient_connectors(
     Uses pin_map.origin_to_centroid() and pad_extent_in_board_space() to
     correctly handle asymmetric footprints (connectors with pin-1 origin).
 
-    Screw terminal rotation conventions (mating face outward):
-    - Top edge: rot=90 deg (pads run vertically, screws accessible from top)
-    - Bottom edge: rot=270 deg (screws accessible from bottom)
-    - Left edge: rot=0 deg (screws accessible from left)
-    - Right edge: rot=180 deg (screws accessible from right)
+    Screw terminal rotation conventions (wire entry at local +y, facing outward):
+    - Top edge: rot=180  (local +y → world -y → faces top board edge)
+    - Bottom edge: rot=0 (local +y → world +y → faces bottom board edge)
+    - Left edge:  rot=90 (local +y → world -x → faces left board edge)
+    - Right edge: rot=270 (local +y → world +x → faces right board edge)
+
+    Pin headers and other generic connectors use a separate rotation table
+    from _nearest_edge_and_rotation().
     """
     from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
 
@@ -594,6 +634,10 @@ def _orient_connectors(
 
         is_wide = w > h * 1.5
         target_edge, new_rot = _nearest_edge_and_rotation(cx, cy, bounds, is_wide)
+
+        # Screw terminals have wire entry at local +y — use the dedicated table.
+        if _is_screw_terminal_fp(fp):
+            new_rot = _SCREW_TERMINAL_EDGE_ROTATION[target_edge]
 
         origin_x, origin_y = centroid_to_origin(fp, cx, cy, new_rot)
         pad_ext = pad_extent_in_board_space(fp, origin_x, origin_y, new_rot)
@@ -845,9 +889,8 @@ def _pin_connectors_by_function(
         current_edge_dist = min(
             cx - min_x, max_x - cx, cy - min_y, max_y - cy,
         )
-        if current_edge_dist <= 5.0:
-            if _nearest_edge(cx, cy, bounds) == target_edge:
-                continue
+        if current_edge_dist <= 5.0 and _nearest_edge(cx, cy, bounds) == target_edge:
+            continue
 
         edge_grid = _PlacementGrid(bounds)
         for other_ref, (ox, oy, _orot) in positions.items():

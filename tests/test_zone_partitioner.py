@@ -142,7 +142,7 @@ def test_partition_board_edge_affinity() -> None:
     zone_dict = {z.name: z for z in zones}
     assert zone_dict["power"].edge_affinity == "top"
     assert zone_dict["relay"].edge_affinity == "right"
-    assert zone_dict["ethernet"].edge_affinity == "bottom"
+    assert zone_dict["ethernet"].edge_affinity == "top"
     assert zone_dict["display"].edge_affinity == "left"
 
 

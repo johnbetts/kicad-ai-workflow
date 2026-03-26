@@ -364,14 +364,39 @@ def render_placement(
     )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
+    _draw_placement_axes(
+        ax, pcb, requirements, ref_color, use_groups, group_map,
+        domain_map, show_ratsnest, score, title,
+    )
+    fig.tight_layout()
 
+    out = Path(output_path)
+    fig.savefig(str(out), dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Placement render saved: %s", out)
+    return out
+
+
+def _draw_placement_axes(
+    ax: object,
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+    ref_color: dict[str, str],
+    use_groups: bool,
+    group_map: dict[str, str] | None,
+    domain_map: dict[str, VoltageDomain] | None,
+    show_ratsnest: bool,
+    score: QualityScore | None,
+    title: str | None,
+) -> None:
+    """Populate a matplotlib Axes with board outline, footprints, legend, and overlays."""
     # Board outline
     outline = pcb.outline
     if outline and outline.polygon:
         xs = [p.x for p in outline.polygon]
         ys = [p.y for p in outline.polygon]
-        ax.plot(xs, ys, "k-", linewidth=2)
-        ax.fill(xs, ys, alpha=0.05, color="green")
+        ax.plot(xs, ys, "k-", linewidth=2)  # type: ignore[attr-defined]
+        ax.fill(xs, ys, alpha=0.05, color="green")  # type: ignore[attr-defined]
 
     _draw_footprints(ax, pcb, ref_color)
 
@@ -385,35 +410,28 @@ def render_placement(
         requirements, use_groups, group_map, domain_map,
     )
     if legend_patches:
-        ax.legend(handles=legend_patches, loc="upper left", fontsize=7)
+        ax.legend(handles=legend_patches, loc="upper left", fontsize=7)  # type: ignore[attr-defined]
 
-    # Score overlay
     if score is not None:
-        ax.text(
+        ax.text(  # type: ignore[attr-defined]
             0.99, 0.01,
             f"Score: {score.overall_score:.3f} ({score.grade})",
-            transform=ax.transAxes, ha="right", va="bottom",
+            transform=ax.transAxes,  # type: ignore[attr-defined]
+            ha="right", va="bottom",
             fontsize=10, fontweight="bold",
             bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.8},
         )
 
-    ax.set_aspect("equal")
-    ax.invert_yaxis()  # KiCad Y-down
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
+    ax.set_aspect("equal")  # type: ignore[attr-defined]
+    ax.invert_yaxis()  # type: ignore[attr-defined]
+    ax.set_xlabel("X (mm)")  # type: ignore[attr-defined]
+    ax.set_ylabel("Y (mm)")  # type: ignore[attr-defined]
 
     if title is None:
         name = requirements.project.name or "PCB"
         title = f"{name} -- Placement ({len(pcb.footprints)} components)"
-    ax.set_title(title)
-    ax.grid(True, alpha=0.15)
-    fig.tight_layout()
-
-    out = Path(output_path)
-    fig.savefig(str(out), dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("Placement render saved: %s", out)
-    return out
+    ax.set_title(title)  # type: ignore[attr-defined]
+    ax.grid(True, alpha=0.15)  # type: ignore[attr-defined]
 
 
 def render_zones(

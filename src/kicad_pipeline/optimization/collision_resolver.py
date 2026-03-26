@@ -294,6 +294,74 @@ def _clamp_to_group(
     return fx, fy
 
 
+def _group_rect(
+    grp: GroupBoundingBox,
+    pos: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    """Return current bounding rect of group members with expansion margin."""
+    gmin_x = float("inf")
+    gmin_y = float("inf")
+    gmax_x = float("-inf")
+    gmax_y = float("-inf")
+    for r in grp.refs:
+        if r not in pos:
+            continue
+        rx, ry, _rot = pos[r]
+        w, h = fp_sizes.get(r, DEFAULT_FP_SIZE_MM)
+        gmin_x = min(gmin_x, rx - w / 2)
+        gmin_y = min(gmin_y, ry - h / 2)
+        gmax_x = max(gmax_x, rx + w / 2)
+        gmax_y = max(gmax_y, ry + h / 2)
+    margin = COLLISION_GROUP_EXPANSION_MM
+    return (gmin_x - margin, gmin_y - margin, gmax_x + margin, gmax_y + margin)
+
+
+def _run_collision_pass(
+    result: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    fixed_refs: set[str],
+    group_bboxes: list[GroupBoundingBox] | None,
+    pass_num: int,
+) -> int:
+    """Execute one collision-resolution pass; return number of components moved."""
+    current_collisions = _count_collisions(result, fp_sizes)
+    if not current_collisions:
+        return 0
+
+    sorted_refs = _get_movable_colliding_refs(current_collisions, fixed_refs, fp_sizes)
+
+    def _group_rect_fn(
+        grp: GroupBoundingBox,
+        pos: dict[str, tuple[float, float, float]],
+    ) -> tuple[float, float, float, float]:
+        return _group_rect(grp, pos, fp_sizes)
+
+    moved = 0
+    for ref in sorted_refs:
+        if ref in fixed_refs:
+            continue
+        rx, ry, rot = result[ref]
+        w, h = _rotation_aware_size(ref, result, fp_sizes)
+        if not _ref_has_collision(ref, rx, ry, w, h, result, fp_sizes):
+            continue
+        grid = _build_exclusion_grid(ref, result, fp_sizes, bounds)
+        target_x, target_y = _compute_large_ic_push(ref, rx, ry, w, h, result, fp_sizes)
+        fx, fy = grid.find_free_pos(target_x, target_y, w, h)
+        fx, fy = _clamp_to_group(ref, fx, fy, w, h, result, fp_sizes,
+                                 group_bboxes, grid, _group_rect_fn)
+        result[ref] = (fx, fy, rot)
+        moved += 1
+
+    remaining = len(_count_collisions(result, fp_sizes))
+    _log.info(
+        "  Collision resolution pass %d: relocated %d, %d remaining",
+        pass_num + 1, moved, remaining,
+    )
+    return moved
+
+
 def _resolve_collisions(
     positions: dict[str, tuple[float, float, float]],
     fp_sizes: dict[str, tuple[float, float]],
@@ -320,71 +388,11 @@ def _resolve_collisions(
 
     _log.info("  Collision resolution: %d initial collisions", len(collisions))
 
-    # Build current group rect lookup (re-computed from positions each pass)
-    def _group_rect(
-        grp: GroupBoundingBox,
-        pos: dict[str, tuple[float, float, float]],
-    ) -> tuple[float, float, float, float]:
-        """Current bounding rect of group members in absolute coords."""
-        gmin_x = float("inf")
-        gmin_y = float("inf")
-        gmax_x = float("-inf")
-        gmax_y = float("-inf")
-        for r in grp.refs:
-            if r not in pos:
-                continue
-            rx, ry, _rot = pos[r]
-            w, h = fp_sizes.get(r, DEFAULT_FP_SIZE_MM)
-            gmin_x = min(gmin_x, rx - w / 2)
-            gmin_y = min(gmin_y, ry - h / 2)
-            gmax_x = max(gmax_x, rx + w / 2)
-            gmax_y = max(gmax_y, ry + h / 2)
-        margin = COLLISION_GROUP_EXPANSION_MM
-        return (gmin_x - margin, gmin_y - margin,
-                gmax_x + margin, gmax_y + margin)
-
-    # Iteratively relocate colliding components
     for _pass in range(COLLISION_MAX_PASSES):
-        current_collisions = _count_collisions(result, fp_sizes)
-        if not current_collisions:
+        if not _count_collisions(result, fp_sizes):
             break
-
-        sorted_refs = _get_movable_colliding_refs(
-            current_collisions, fixed_refs, fp_sizes,
-        )
-
-        moved = 0
-        for ref in sorted_refs:
-            if ref in fixed_refs:
-                continue
-            rx, ry, rot = result[ref]
-            w, h = _rotation_aware_size(ref, result, fp_sizes)
-
-            if not _ref_has_collision(ref, rx, ry, w, h, result, fp_sizes):
-                continue
-
-            grid = _build_exclusion_grid(ref, result, fp_sizes, bounds)
-
-            target_x, target_y = _compute_large_ic_push(
-                ref, rx, ry, w, h, result, fp_sizes,
-            )
-
-            fx, fy = grid.find_free_pos(target_x, target_y, w, h)
-
-            fx, fy = _clamp_to_group(
-                ref, fx, fy, w, h, result, fp_sizes,
-                group_bboxes, grid, _group_rect,
-            )
-
-            result[ref] = (fx, fy, rot)
-            moved += 1
-
-        remaining = len(_count_collisions(result, fp_sizes))
-        _log.info(
-            "  Collision resolution pass %d: relocated %d, %d remaining",
-            _pass + 1, moved, remaining,
-        )
-        if remaining == 0:
+        _run_collision_pass(result, fp_sizes, bounds, fixed_refs, group_bboxes, _pass)
+        if not _count_collisions(result, fp_sizes):
             break
 
     return result

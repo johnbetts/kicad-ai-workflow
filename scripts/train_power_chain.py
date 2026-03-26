@@ -43,16 +43,15 @@ AMS1117-3.3 pinout (SOT-223):
 from __future__ import annotations
 
 import math
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Ensure the package is importable when running from the repo root.
 _repo = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_repo / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from kicad_pipeline.models.requirements import (
+from _train_common import (  # noqa: E402
     Component,
     FeatureBlock,
     MechanicalConstraints,
@@ -63,11 +62,14 @@ from kicad_pipeline.models.requirements import (
     PinType,
     ProjectInfo,
     ProjectRequirements,
+    build_group_map,
+    build_pcb,
+    compute_fast_placement_score,
+    optimize_placement_ee,
+    print_component_positions,
+    write_and_compare_pcb,
+    write_project_file,
 )
-from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
-from kicad_pipeline.optimization.scoring import compute_fast_placement_score
-from kicad_pipeline.pcb.builder import build_pcb, write_pcb
-from kicad_pipeline.project_file import write_project_file
 
 # ---------------------------------------------------------------------------
 # Footprint constants
@@ -81,6 +83,48 @@ _R0805_FP = "R_0805"
 _SOD323_FP = "SOD-323"
 _SCREW_TERM_2P_FP = "TerminalBlock_5.08mm_2P"
 _HEADER_2P_FP = "PinHeader_1x02_P2.54mm_Vertical"
+
+# ---------------------------------------------------------------------------
+# Board and design rule constants
+# ---------------------------------------------------------------------------
+
+_BOARD_WIDTH_MM = 65.0
+_BOARD_HEIGHT_MM = 45.0
+
+# Design rule thresholds (mm)
+_BUCK_5MM_MAX = 5.0
+_BUCK_3MM_MAX = 3.0
+_LDO_DECOUP_MAX_MM = 3.0
+_FB_PAIR_MAX_MM = 4.0
+_EDGE_MARGIN_MM = 8.0
+
+# Post-placement geometry constants (mm)
+_BUCK_U1_X_MM = 14.0
+_BUCK_U1_Y_FRAC = 0.45
+_LDO_U2_X_FRAC = 0.72
+_LDO_U2_Y_FRAC = 0.45
+_PWR_C1_DY_MM = 2.5
+_PWR_C3_DY_MM = 2.5
+_PWR_D1_DX_MM = 1.5
+_PWR_D1_DY_MM = 2.5
+_PWR_L1_DX_MM = 4.0
+_PWR_C2_DX_MM = 4.0
+_PWR_C2_DY_MM = 2.5
+_PWR_R2_DX_MM = 3.2
+_PWR_R2_DY_MM = 2.5
+_PWR_R1_DX_MM = 3.2
+_PWR_R1_DY_MM = 3.6
+_PWR_C4_DX_MM = 2.0
+_PWR_C4_DY_MM = 2.2
+_PWR_C5_DX_MM = 2.0
+_PWR_C5_DY_MM = 2.2
+_PWR_C6_DX_MM = 2.0
+_PWR_C6_DY_MM = 2.2
+_PWR_J1_X_MM = 5.5
+_PWR_J1_Y_FRAC = 0.15
+_PWR_J2_X_FRAC = 0.52
+_PWR_J3_X_FRAC = 0.88
+_PWR_J3_Y_FRAC = 0.73
 
 # ---------------------------------------------------------------------------
 # Component definitions
@@ -106,6 +150,8 @@ def _make_buck_converter() -> Component:
         footprint=_SOIC8_FP,
         lcsc="C9865",
         description="4.5-28V 3A step-down buck converter SOIC-8",
+        placement_group="buck_stage",
+        placement_order=3,
         pins=(
             Pin("1", "BOOT", PinType.INPUT, net="BST_U1"),
             Pin("2", "VIN", PinType.POWER_IN, PinFunction.VCC, net="+24V"),
@@ -131,6 +177,8 @@ def _make_inductor() -> Component:
         footprint=_IND_1210_FP,
         lcsc="C96950",
         description="10uH 3A power inductor 1210",
+        placement_group="buck_stage",
+        placement_order=4,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="SW"),
             Pin("2", "2", PinType.PASSIVE, net="+5V_C2_DEC"),
@@ -146,6 +194,10 @@ def _make_input_cap() -> Component:
         footprint=_C0805_FP,
         lcsc="C15850",
         description="10uF 25V ceramic input cap 0805",
+        placement_group="buck_stage",
+        placement_order=2,
+        placement_near="U1:VIN",
+        placement_near_max_mm=5.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+24V"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -165,6 +217,8 @@ def _make_output_cap() -> Component:
         footprint=_C0805_FP,
         lcsc="C159842",
         description="22uF 10V ceramic output cap 0805",
+        placement_group="buck_stage",
+        placement_order=5,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+5V_C2_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -185,6 +239,8 @@ def _make_bootstrap_cap() -> Component:
         footprint=_C0805_FP,
         lcsc="C49678",
         description="100nF bootstrap cap 0805",
+        placement_near="U1:BOOT",
+        placement_near_max_mm=5.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="BST_U1"),
             Pin("2", "2", PinType.PASSIVE, net="SW"),
@@ -203,6 +259,8 @@ def _make_fb_top_resistor() -> Component:
         footprint=_R0805_FP,
         lcsc="C17407",
         description="100K feedback top resistor 0805",
+        placement_near="U1:VSNS",
+        placement_near_max_mm=8.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+5V"),
             Pin("2", "2", PinType.PASSIVE, net="FB"),
@@ -221,6 +279,8 @@ def _make_fb_bottom_resistor() -> Component:
         footprint=_R0805_FP,
         lcsc="C17390",
         description="33K feedback bottom resistor 0805",
+        placement_near="U1:VSNS",
+        placement_near_max_mm=8.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="FB"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -239,6 +299,8 @@ def _make_catch_diode() -> Component:
         footprint=_SOD323_FP,
         lcsc="C123899",
         description="1A 40V Schottky diode SOD-323",
+        placement_near="U1:PH",
+        placement_near_max_mm=5.0,
         pins=(
             Pin("1", "A", PinType.PASSIVE, net="GND"),
             Pin("2", "K", PinType.PASSIVE, net="SW"),
@@ -261,6 +323,8 @@ def _make_ldo() -> Component:
         footprint=_SOT223_FP,
         lcsc="C6186",
         description="3.3V 1A LDO regulator SOT-223",
+        placement_group="ldo_stage",
+        placement_order=2,
         pins=(
             Pin("1", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
             Pin("2", "VOUT", PinType.POWER_OUT, PinFunction.VCC, net="+3V3_C5_DEC"),
@@ -282,6 +346,10 @@ def _make_ldo_input_cap() -> Component:
         footprint=_C0805_FP,
         lcsc="C15850",
         description="10uF LDO input cap 0805",
+        placement_group="ldo_stage",
+        placement_order=1,
+        placement_near="U2:VIN",
+        placement_near_max_mm=5.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+5V_C4_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -301,6 +369,10 @@ def _make_ldo_output_cap() -> Component:
         footprint=_C0805_FP,
         lcsc="C159842",
         description="22uF LDO output cap 0805",
+        placement_group="ldo_stage",
+        placement_order=3,
+        placement_near="U2:VOUT",
+        placement_near_max_mm=5.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3_C5_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -321,6 +393,8 @@ def _make_ldo_hf_bypass_cap() -> Component:
         footprint=_C0805_FP,
         lcsc="C49678",
         description="100nF HF bypass cap for LDO output 0805",
+        placement_near="U2:VOUT",
+        placement_near_max_mm=5.0,
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3_C5_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -340,6 +414,8 @@ def _make_input_connector() -> Component:
         footprint=_SCREW_TERM_2P_FP,
         lcsc="C8269",
         description="2-pin 5.08mm screw terminal — 24V input",
+        placement_group="buck_stage",
+        placement_order=1,
         pins=(
             Pin("1", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
             Pin("2", "+24V", PinType.POWER_IN, PinFunction.VCC, net="+24V"),
@@ -355,6 +431,10 @@ def _make_5v_test_header() -> Component:
         footprint=_HEADER_2P_FP,
         lcsc="C124375",
         description="2-pin 2.54mm header — 5V test point",
+        placement_group="buck_stage",
+        placement_order=6,
+        placement_near="C2",
+        placement_near_max_mm=10.0,
         pins=(
             Pin("1", "+5V", PinType.PASSIVE, PinFunction.VCC, net="+5V"),
             Pin("2", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
@@ -375,6 +455,10 @@ def _make_3v3_test_header() -> Component:
         footprint=_HEADER_2P_FP,
         lcsc="C124375",
         description="2-pin 2.54mm header — 3.3V test point",
+        placement_group="ldo_stage",
+        placement_order=4,
+        placement_near="C5",
+        placement_near_max_mm=10.0,
         pins=(
             Pin("1", "+3V3", PinType.PASSIVE, PinFunction.VCC, net="+3V3_C5_DEC"),
             Pin("2", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
@@ -542,7 +626,9 @@ def _build_requirements() -> ProjectRequirements:
         features=(power_feature,),
         components=components,
         nets=nets,
-        mechanical=MechanicalConstraints(board_width_mm=50, board_height_mm=40),
+        mechanical=MechanicalConstraints(
+            board_width_mm=_BOARD_WIDTH_MM, board_height_mm=_BOARD_HEIGHT_MM,
+        ),
     )
 
 
@@ -588,23 +674,23 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         print("  Cannot run design rules check.")
         return
 
-    board_width = 50.0
+    board_width = _BOARD_WIDTH_MM
 
     # --- Buck converter proximity checks ---
     print("--- Buck Converter (U1) Proximity ---")
 
     checks_5mm = [
-        ("C1", "U1", 5.0, "Input cap to buck IC"),
-        ("L1", "U1", 5.0, "Inductor to buck IC"),
-        ("R1", "U1", 5.0, "FB top resistor to buck IC"),
-        ("R2", "U1", 5.0, "FB bottom resistor to buck IC"),
+        ("C1", "U1", _BUCK_5MM_MAX, "Input cap to buck IC"),
+        ("L1", "U1", _BUCK_5MM_MAX, "Inductor to buck IC"),
+        ("R1", "U1", _BUCK_5MM_MAX, "FB top resistor to buck IC"),
+        ("R2", "U1", _BUCK_5MM_MAX, "FB bottom resistor to buck IC"),
     ]
     checks_3mm = [
-        ("C3", "U1", 3.0, "Bootstrap cap to buck IC"),
-        ("D1", "U1", 3.0, "Catch diode to buck IC"),
+        ("C3", "U1", _BUCK_3MM_MAX, "Bootstrap cap to buck IC"),
+        ("D1", "U1", _BUCK_3MM_MAX, "Catch diode to buck IC"),
     ]
     checks_inductor = [
-        ("C2", "L1", 5.0, "Output cap to inductor"),
+        ("C2", "L1", _BUCK_5MM_MAX, "Output cap to inductor"),
     ]
 
     for ref_a, ref_b, max_d, desc in checks_5mm + checks_3mm + checks_inductor:
@@ -621,8 +707,8 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     # --- LDO proximity checks ---
     print("--- LDO (U2) Proximity ---")
     ldo_checks = [
-        ("C4", "U2", 3.0, "LDO input cap"),
-        ("C5", "U2", 3.0, "LDO output cap"),
+        ("C4", "U2", _LDO_DECOUP_MAX_MM, "LDO input cap"),
+        ("C5", "U2", _LDO_DECOUP_MAX_MM, "LDO output cap"),
     ]
     for ref_a, ref_b, max_d, desc in ldo_checks:
         d = _dist(fp_map[ref_a], fp_map[ref_b])
@@ -639,12 +725,12 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     print("--- Feedback Divider (R1-R2 proximity) ---")
     d_fb = _dist(fp_map["R1"], fp_map["R2"])
     label = f"  R1-R2: {d_fb:.1f}mm"
-    if d_fb > 4.0:
-        violations.append(f"{label} (MAX 4mm) VIOLATION")
-        print(f"{label} (MAX 4mm) ** VIOLATION **")
+    if d_fb > _FB_PAIR_MAX_MM:
+        violations.append(f"{label} (MAX {_FB_PAIR_MAX_MM}mm) VIOLATION")
+        print(f"{label} (MAX {_FB_PAIR_MAX_MM}mm) ** VIOLATION **")
     else:
-        passes.append(f"{label} (MAX 4mm) OK")
-        print(f"{label} (MAX 4mm) OK")
+        passes.append(f"{label} (MAX {_FB_PAIR_MAX_MM}mm) OK")
+        print(f"{label} (MAX {_FB_PAIR_MAX_MM}mm) OK")
     print()
 
     # --- Signal flow direction ---
@@ -665,7 +751,7 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
 
     # --- Connector edge placement ---
     print("--- Connector Edge Placement ---")
-    edge_margin = 8.0
+    edge_margin = _EDGE_MARGIN_MM
 
     j1_label = f"  J1 X={j1_x:.1f}mm (left edge, max {edge_margin}mm)"
     if j1_x <= edge_margin:
@@ -738,12 +824,12 @@ def _apply_power_post_placement(pcb: object) -> object:
     board_h = max(ys) - min(ys)
 
     # Anchor: U1 (buck IC) in left zone — moved right so J1 can be at left edge
-    u1_x = 14.0
-    u1_y = board_h * 0.45  # 18.0
+    u1_x = _BUCK_U1_X_MM
+    u1_y = board_h * _BUCK_U1_Y_FRAC  # 18.0
 
     # U2 (LDO) in right zone
-    u2_x = board_w * 0.72  # 36.0
-    u2_y = board_h * 0.45  # 18.0
+    u2_x = board_w * _LDO_U2_X_FRAC   # 36.0
+    u2_y = board_h * _LDO_U2_Y_FRAC   # 18.0
 
     # Component sizes (from estimate_footprint_size):
     #   U1 SOIC-8:   3.8 x 3.0    U2 SOT-223:  7.0 x 4.0
@@ -759,22 +845,22 @@ def _apply_power_post_placement(pcb: object) -> object:
     placement_rules: dict[str, tuple[float, float, float]] = {
         # Buck stage — U1 at center-left, components tight around it
         "U1": (u1_x, u1_y, -90.0),
-        "C1": (u1_x, u1_y - 2.5, 0.0),              # input cap above U1 (dist=2.5)
-        "C3": (u1_x, u1_y + 2.5, 0.0),              # bootstrap below U1 (dist=2.5)
-        "D1": (u1_x - 1.5, u1_y + 2.5, 180.0),      # catch diode below-left (dist=2.9≤3)
-        "L1": (u1_x + 4.0, u1_y, 0.0),              # inductor right of U1 (dist=4.0)
-        "C2": (u1_x + 4.0, u1_y + 2.5, -90.0),      # output cap below L1 (C2-L1=2.5)
-        "R2": (u1_x + 3.2, u1_y - 2.5, 0.0),        # FB bot resistor (dist from U1=4.1)
-        "R1": (u1_x + 3.2, u1_y - 3.6, 180.0),      # FB top resistor (dist from U1=4.8)
+        "C1": (u1_x, u1_y - _PWR_C1_DY_MM, 0.0),                         # input cap above U1
+        "C3": (u1_x, u1_y + _PWR_C3_DY_MM, 0.0),                         # bootstrap below U1
+        "D1": (u1_x - _PWR_D1_DX_MM, u1_y + _PWR_D1_DY_MM, 180.0),      # catch diode below-left
+        "L1": (u1_x + _PWR_L1_DX_MM, u1_y, 0.0),                        # inductor right of U1
+        "C2": (u1_x + _PWR_C2_DX_MM, u1_y + _PWR_C2_DY_MM, -90.0),      # output cap below L1
+        "R2": (u1_x + _PWR_R2_DX_MM, u1_y - _PWR_R2_DY_MM, 0.0),        # FB bot resistor
+        "R1": (u1_x + _PWR_R1_DX_MM, u1_y - _PWR_R1_DY_MM, 180.0),      # FB top resistor
         # LDO stage — U2 in right zone, caps tight on input/output sides
         "U2": (u2_x, u2_y, 0.0),
-        "C4": (u2_x - 2.0, u2_y - 2.2, -90.0),      # LDO input cap (dist=2.9≤3)
-        "C5": (u2_x + 2.0, u2_y + 2.2, -90.0),      # LDO output cap (dist=2.9≤3)
-        "C6": (u2_x + 2.0, u2_y - 2.2, -90.0),      # HF bypass cap (dist=2.9≤3)
+        "C4": (u2_x - _PWR_C4_DX_MM, u2_y - _PWR_C4_DY_MM, -90.0),      # LDO input cap
+        "C5": (u2_x + _PWR_C5_DX_MM, u2_y + _PWR_C5_DY_MM, -90.0),      # LDO output cap
+        "C6": (u2_x + _PWR_C6_DX_MM, u2_y - _PWR_C6_DY_MM, -90.0),      # HF bypass cap
         # Connectors at edges — J1 at left, J3 at right
-        "J1": (5.5, board_h * 0.15, 0.0),            # 24V input at left edge (x=5.5≤8)
-        "J2": (board_w * 0.52, u2_y, -90.0),         # 5V TP between stages
-        "J3": (board_w * 0.88, board_h * 0.73, -90.0),  # 3.3V TP bottom-right
+        "J1": (_PWR_J1_X_MM, board_h * _PWR_J1_Y_FRAC, 0.0),            # 24V input at left edge
+        "J2": (board_w * _PWR_J2_X_FRAC, u2_y, -90.0),                   # 5V TP between stages
+        "J3": (board_w * _PWR_J3_X_FRAC, board_h * _PWR_J3_Y_FRAC, -90.0),  # 3.3V TP bottom-right
     }
 
     new_fps: list[object] = []
@@ -794,8 +880,8 @@ def _apply_power_post_placement(pcb: object) -> object:
 
 def main() -> None:
     """Build power chain board, optimize, render, and report."""
-    output_dir = _repo / "output"
-    output_dir.mkdir(exist_ok=True)
+    output_dir = _repo / "output" / "train_power"
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_png = output_dir / "train_power_placement.png"
 
     print("=== Power Chain Training Board ===")
@@ -805,7 +891,7 @@ def main() -> None:
     requirements = _build_requirements()
     print(f"Components: {len(requirements.components)}")
     print(f"Nets:       {len(requirements.nets)}")
-    print(f"Board:      50 x 40 mm")
+    print("Board:      50 x 40 mm")
     print()
 
     # 2. Build PCB (no routing)
@@ -819,11 +905,14 @@ def main() -> None:
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
     # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — apply pattern-based placement rules
-    # learned from human reference to ensure C4/C5/C6 are near U2 and
-    # signal flow is left-to-right.
+    # POST-PLACEMENT CORRECTIONS — disabled. The optimizer's
+    # _phase_power_chain_flow handles signal-flow ordering using
+    # _BUCK_PASSIVE_OFFSETS / _LDO_PASSIVE_OFFSETS which have
+    # correct clearances (no component overlaps).  The manual
+    # override positions below had R1/R2 at 1.1mm center-to-center
+    # (need ≥2.5mm) and C3/D1 at 1.5mm (need ≥2.4mm).
     # ---------------------------------------------------------------
-    optimized_pcb = _apply_power_post_placement(optimized_pcb)
+    # optimized_pcb = _apply_power_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
@@ -845,10 +934,7 @@ def main() -> None:
 
     # 5. Render placement PNG
     print(f"Rendering placement to {output_png} ...")
-    group_map: dict[str, str] = {}
-    for feat in requirements.features:
-        for ref in feat.components:
-            group_map[ref] = feat.name
+    group_map = build_group_map(requirements)
 
     from kicad_pipeline.visualization.placement_render import render_placement
 
@@ -863,55 +949,9 @@ def main() -> None:
     print(f"  Saved: {output_png}")
     print()
 
-    # 6. Write KiCad PCB file
+    # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_power.kicad_pcb"
-
-    # Preserve existing PCB if it exists (may be human-edited reference)
-    ref_dir = output_dir / "training_reference_boards"
-    ref_dir.mkdir(exist_ok=True)
-    if pcb_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = ref_dir / f"train_power_{timestamp}.kicad_pcb"
-        shutil.copy2(pcb_path, backup)
-        print(f"  Backed up existing PCB to {backup}")
-
-    print(f"Writing KiCad PCB to {pcb_path} ...")
-    write_pcb(optimized_pcb, pcb_path, fill_zones=False)
-    print(f"  KiCad PCB: {pcb_path}")
-
-    # Compare against most recent reference if it exists
-    ref_files = sorted(ref_dir.glob("train_power*.kicad_pcb"))
-    if ref_files:
-        latest_ref = ref_files[-1]
-        print(f"\n  Comparing against reference: {latest_ref.name}")
-        from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
-
-        ref_positions = positions_from_pcb_file(latest_ref)
-        gen_positions = positions_from_pcb_file(pcb_path)
-
-        print(
-            f"  {'Ref':<8} {'Gen X':>7} {'Ref X':>7} {'dX':>6}"
-            f" {'Gen Y':>7} {'Ref Y':>7} {'dY':>6} {'Dist':>6}"
-        )
-        total_drift = 0.0
-        count = 0
-        for ref in sorted(set(gen_positions) & set(ref_positions)):
-            if ref.startswith("H"):
-                continue
-            gx, gy, _gr = gen_positions[ref]
-            rx, ry, _rr = ref_positions[ref]
-            dist = math.sqrt((gx - rx) ** 2 + (gy - ry) ** 2)
-            total_drift += dist
-            count += 1
-            marker = "***" if dist > 3 else ""
-            print(
-                f"  {ref:<8} {gx:>7.1f} {rx:>7.1f} {gx - rx:>+6.1f}"
-                f" {gy:>7.1f} {ry:>7.1f} {gy - ry:>+6.1f}"
-                f" {dist:>6.1f} {marker}"
-            )
-        if count:
-            print(f"  Average drift from reference: {total_drift / count:.1f}mm")
-    print()
+    write_and_compare_pcb(optimized_pcb, pcb_path)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_power", output_dir)
@@ -919,17 +959,7 @@ def main() -> None:
     print()
 
     # 8. Print component positions
-    print("Component positions:")
-    print(f"  {'Ref':<6} {'X':>8} {'Y':>8} {'Rot':>6}")
-    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*6}")
-    fp_map: dict[str, tuple[float, float, float]] = {}
-    for fp in sorted(optimized_pcb.footprints, key=lambda f: f.ref):
-        print(
-            f"  {fp.ref:<6} {fp.position.x:>8.2f} "
-            f"{fp.position.y:>8.2f} {fp.rotation:>6.1f}"
-        )
-        fp_map[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
-    print()
+    fp_map = print_component_positions(optimized_pcb)
 
     # 9. Design rules compliance check
     _check_design_rules(fp_map)
@@ -950,7 +980,7 @@ def _analyse_human_layout() -> None:
     was then hand-edited in KiCad) and prints signal-flow direction, proximity
     measurements, and key observations.
     """
-    pcb_path = _repo / "output" / "train_power.kicad_pcb"
+    pcb_path = _repo / "output" / "train_power" / "train_power.kicad_pcb"
     if not pcb_path.exists():
         print("\n(No human-edited PCB found — skipping layout analysis)")
         return
@@ -962,7 +992,6 @@ def _analyse_human_layout() -> None:
         print("\n(Human PCB has no footprints — skipping layout analysis)")
         return
 
-    import math
 
     def dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
         return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)

@@ -29,17 +29,15 @@ DFM note — creepage isolation:
 
 from __future__ import annotations
 
-import math
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Ensure the package is importable when running from the repo root.
 _repo = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_repo / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from kicad_pipeline.models.requirements import (
+from _train_common import (  # noqa: E402
     Component,
     FeatureBlock,
     MechanicalConstraints,
@@ -50,11 +48,14 @@ from kicad_pipeline.models.requirements import (
     PinType,
     ProjectInfo,
     ProjectRequirements,
+    build_group_map,
+    build_pcb,
+    compute_fast_placement_score,
+    optimize_placement_ee,
+    print_component_positions,
+    write_and_compare_pcb,
+    write_project_file,
 )
-from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
-from kicad_pipeline.optimization.scoring import compute_fast_placement_score
-from kicad_pipeline.pcb.builder import build_pcb, write_pcb
-from kicad_pipeline.project_file import write_project_file
 
 # ---------------------------------------------------------------------------
 # Component definitions
@@ -69,6 +70,33 @@ _SCREW_TERM_FP = "TerminalBlock_5.08mm_3P"
 _FERRITE_FP = "R_0805"  # Ferrite bead in 0805 package
 _CAP_ELEC_FP = "C_0805"  # 100uF MLCC in 0805 (BUG-R04 fix)
 _CAP_0805_FP = "C_0805"  # 10uF ceramic
+
+# ---------------------------------------------------------------------------
+# Board and design rule constants
+# ---------------------------------------------------------------------------
+
+_BOARD_WIDTH_MM = 100.0
+_BOARD_HEIGHT_MM = 60.0
+
+# Post-placement geometry constants (mm)
+_RELAY_LED_LEFT_DX_MM = 4.3
+_RELAY_R_LED_DY_MM = 16.8
+_RELAY_D_LED_DY_MM = 19.1
+_RELAY_LEFT_MARGIN_MM = 3.0
+
+# Power isolation cluster — placed clear of CH1 driver column (x≥5.85) and H4 keepout (x≤5.1)
+# All offsets are from board_x_min (left edge).
+# Layout: L1(10,52) L2(13,52) in a row, C2(16.5,52) beside them, C1(15.5,47.5) above C2.
+# L0805 at rot=90: world bbox +/-1.02 (X) x -1.87..+1.94 (Y)
+# C_0805 courtyard: +/-1.25 (X) x +/-0.875 (Y)
+# C0805 silk: +/-2.06 (X) x +/-1.0 (Y)
+# Verified no courtyard/silk overlaps between any pair.
+_RELAY_PWR_L1_X_MM = 10.0        # L1 absolute X from board left
+_RELAY_PWR_L2_X_MM = 13.0        # L2 absolute X from board left
+_RELAY_PWR_C1_X_MM = 15.5        # C1 absolute X from board left
+_RELAY_PWR_C2_X_MM = 16.5        # C2 absolute X from board left
+_RELAY_PWR_BOTTOM_OFFSET_MM = 3.0  # L1/L2/C2 Y = board_h - offset = 52mm
+_RELAY_PWR_C1_DY_MM = 7.5        # C1 Y = board_h - 7.5 = 47.5mm (above the row)
 
 
 def _make_relay(ch: int) -> Component:
@@ -461,7 +489,9 @@ def _build_requirements() -> ProjectRequirements:
         features=(relay_feature,),
         components=tuple(components),
         nets=tuple(nets),
-        mechanical=MechanicalConstraints(board_width_mm=90, board_height_mm=55),
+        mechanical=MechanicalConstraints(
+            board_width_mm=_BOARD_WIDTH_MM, board_height_mm=_BOARD_HEIGHT_MM
+        ),
     )
 
 
@@ -476,19 +506,19 @@ def _apply_relay_post_placement(pcb: object) -> object:
     Rules (relative to each relay K[ch]):
 
     LEFT column (dx = -4.3mm from relay centre):
-        D_flyback (D1-D4):  dy=+10.8, rot=0    — already placed by optimizer
-        Q (Q1-Q4):          dy=+13.3, rot=180   — already placed by optimizer
-        R_LED (R5-R8):      dy=+15.5, rot=0     — FIXED here
-        D_LED (D5-D8):      dy=+17.7, rot=180   — FIXED here
+        D_flyback (D1-D4):  dy=+11.5, rot=0    — already placed by optimizer
+        Q (Q1-Q4):          dy=+14.1, rot=180   — already placed by optimizer
+        R_LED (R5-R8):      dy=+16.8, rot=0     — FIXED here
+        D_LED (D5-D8):      dy=+19.1, rot=180   — FIXED here
 
     RIGHT column (dx = +4.0mm):
         R_gate (R1-R4):     dy=+15.4, rot=180   — already placed by optimizer
 
-    Power isolation cluster (bottom-left corner):
-        L1: (board_left+3, board_h-9), rot=90
-        L2: (board_left+6, board_h-9), rot=90
-        C1: (board_left+5, board_h-18), rot=180
-        C2: (board_left+5, board_h-13), rot=0
+    Power isolation cluster (clear of H4 keepout and CH1 driver column):
+        L1: (board_left+10.0, board_h-3.0), rot=90
+        L2: (board_left+13.0, board_h-3.0), rot=90
+        C1: (board_left+15.5, board_h-7.5), rot=180   [above the L/C2 row]
+        C2: (board_left+16.5, board_h-3.0), rot=0
     """
     from dataclasses import replace
 
@@ -503,7 +533,7 @@ def _apply_relay_post_placement(pcb: object) -> object:
     board_y_min = min(ys)
     board_x_min = min(xs)
     # Use a small left margin
-    bl_x = board_x_min + 3.0
+    board_x_min + _RELAY_LEFT_MARGIN_MM
 
     new_fps: list[Footprint] = []
     for fp in pcb.footprints:
@@ -520,8 +550,8 @@ def _apply_relay_post_placement(pcb: object) -> object:
                 if k_ref in fp_map:
                     k_fp = fp_map[k_ref]
                     # Left column, below R_LED
-                    new_x = k_fp.position.x - 4.3
-                    new_y = k_fp.position.y + 17.7
+                    new_x = k_fp.position.x - _RELAY_LED_LEFT_DX_MM
+                    new_y = k_fp.position.y + _RELAY_D_LED_DY_MM
                     updated = replace(
                         fp,
                         position=Point(new_x, new_y),
@@ -537,39 +567,45 @@ def _apply_relay_post_placement(pcb: object) -> object:
                 if k_ref in fp_map:
                     k_fp = fp_map[k_ref]
                     # Left column, below Q, above D_LED
-                    new_x = k_fp.position.x - 4.3
-                    new_y = k_fp.position.y + 15.5
+                    new_x = k_fp.position.x - _RELAY_LED_LEFT_DX_MM
+                    new_y = k_fp.position.y + _RELAY_R_LED_DY_MM
                     updated = replace(
                         fp,
                         position=Point(new_x, new_y),
                         rotation=0.0,
                     )
 
-        # --- Pattern 2: Power isolation in bottom-left corner ---
-        # Pushed further toward bottom edge to avoid overlap with channel 1
-        # Q1/R5 components.  Board bottom edge is at board_y_min + board_h.
+        # --- Pattern 2: Power isolation cluster ---
+        # Placed clear of H4 mounting hole (keepout to x≈5.1) and CH1 driver column (left
+        # edge ≈5.85mm).  L1/L2 rot=90 in a horizontal row at y=52; C1 above the row at
+        # y=47.5 to stay clear of C2's wide silk footprint; C2 beside L2 in the row.
+        # All X offsets are absolute from board_x_min (not from bl_x).
+        row_y = board_y_min + board_h - _RELAY_PWR_BOTTOM_OFFSET_MM
         if ref == "L1":
             updated = replace(
                 fp,
-                position=Point(bl_x, board_y_min + board_h - 4.0),
+                position=Point(board_x_min + _RELAY_PWR_L1_X_MM, row_y),
                 rotation=90.0,
             )
         elif ref == "L2":
             updated = replace(
                 fp,
-                position=Point(bl_x + 3.0, board_y_min + board_h - 4.0),
+                position=Point(board_x_min + _RELAY_PWR_L2_X_MM, row_y),
                 rotation=90.0,
             )
         elif ref == "C1":
             updated = replace(
                 fp,
-                position=Point(bl_x + 1.5, board_y_min + board_h - 10.0),
+                position=Point(
+                    board_x_min + _RELAY_PWR_C1_X_MM,
+                    board_y_min + board_h - _RELAY_PWR_C1_DY_MM,
+                ),
                 rotation=180.0,
             )
         elif ref == "C2":
             updated = replace(
                 fp,
-                position=Point(bl_x + 1.5, board_y_min + board_h - 7.0),
+                position=Point(board_x_min + _RELAY_PWR_C2_X_MM, row_y),
                 rotation=0.0,
             )
 
@@ -585,8 +621,8 @@ def _apply_relay_post_placement(pcb: object) -> object:
 
 def main() -> None:
     """Build relay board, optimize, render, and report."""
-    output_dir = _repo / "output"
-    output_dir.mkdir(exist_ok=True)
+    output_dir = _repo / "output" / "train_relay"
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_png = output_dir / "train_relay_placement.png"
 
     print("=== Relay Group Training Board ===")
@@ -596,7 +632,7 @@ def main() -> None:
     requirements = _build_requirements()
     print(f"Components: {len(requirements.components)}")
     print(f"Nets:       {len(requirements.nets)}")
-    print(f"Board:      80 x 50 mm")
+    print("Board:      80 x 50 mm")
     print()
 
     # 2. Build PCB (no routing)
@@ -616,23 +652,21 @@ def main() -> None:
     # Pattern 1: LED indicators (D5-D8) and their resistors (R5-R8)
     #   belong in the LEFT column of each relay channel, below Q.
     #   Relative to K[ch] anchor:
-    #     D_flyback: dx=-4.3, dy=+10.8, rot=0   (above Q)
-    #     Q:         dx=-4.3, dy=+13.3, rot=180  (transistor)
-    #     R_LED:     dx=-4.3, dy=+15.5, rot=0    (LED resistor, below Q)
-    #     D_LED:     dx=-4.3, dy=+17.7, rot=180  (LED, below R_LED)
+    #     D_flyback: dx=-4.3, dy=+11.5, rot=0   (above Q)
+    #     Q:         dx=-4.3, dy=+14.1, rot=180  (transistor)
+    #     R_LED:     dx=-4.3, dy=+16.8, rot=0    (LED resistor, below Q)
+    #     D_LED:     dx=-4.3, dy=+19.1, rot=180  (LED, below R_LED)
     #   The optimizer already places D1-D4 and Q1-Q4 correctly but
     #   scatters D5-D8 and R5-R8 to wrong channels.
     #
-    # Pattern 2: Power isolation group (L1, L2, C1, C2) in bottom-left
-    #   corner of the board, forming a compact ferrite+cap cluster.
-    #   L1/L2 vertical (rot=90), caps nearby.
-    #   Relative to board bottom-left:
-    #     L1: x~3, y~board_h-9, rot=90
-    #     L2: x~6, y~board_h-9, rot=90
-    #     C1: x~5, y~board_h-18, rot=180
-    #     C2: x~5, y~board_h-13, rot=0
+    # Pattern 2: Power isolation group (L1, L2, C1, C2) clear of H4 keepout
+    #   (extends to x≈5.1mm) and CH1 driver column (left edge ≈5.85mm).
+    #   L1/L2 rot=90 in a row at y=52; C1 above at y=47.5; C2 beside L2 at y=52.
+    #     L1: x~10, y~52, rot=90
+    #     L2: x~13, y~52, rot=90
+    #     C1: x~15.5, y~47.5, rot=180  [upper]
+    #     C2: x~16.5, y~52, rot=0
     # ---------------------------------------------------------------
-    from dataclasses import replace as _dc_replace
 
     optimized_pcb = _apply_relay_post_placement(optimized_pcb)
     print(f"  Review grade: {review.grade}")
@@ -660,10 +694,7 @@ def main() -> None:
     # at (cx, cy) with ha="center", va="center".
     print(f"Rendering placement to {output_png} ...")
     # Build group_map: ref -> feature block name
-    group_map: dict[str, str] = {}
-    for feat in requirements.features:
-        for ref in feat.components:
-            group_map[ref] = feat.name
+    group_map = build_group_map(requirements)
 
     from kicad_pipeline.visualization.placement_render import render_placement
 
@@ -678,55 +709,9 @@ def main() -> None:
     print(f"  Saved: {output_png}")
     print()
 
-    # 6. Write KiCad PCB file
+    # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_relay.kicad_pcb"
-
-    # Preserve existing PCB if it exists (may be human-edited reference)
-    ref_dir = output_dir / "training_reference_boards"
-    ref_dir.mkdir(exist_ok=True)
-    if pcb_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = ref_dir / f"train_relay_{timestamp}.kicad_pcb"
-        shutil.copy2(pcb_path, backup)
-        print(f"  Backed up existing PCB to {backup}")
-
-    print(f"Writing KiCad PCB to {pcb_path} ...")
-    write_pcb(optimized_pcb, pcb_path, fill_zones=False)
-    print(f"  KiCad PCB: {pcb_path}")
-
-    # Compare against most recent reference if it exists
-    ref_files = sorted(ref_dir.glob("train_relay*.kicad_pcb"))
-    if ref_files:
-        latest_ref = ref_files[-1]
-        print(f"\n  Comparing against reference: {latest_ref.name}")
-        from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
-
-        ref_positions = positions_from_pcb_file(latest_ref)
-        gen_positions = positions_from_pcb_file(pcb_path)
-
-        print(
-            f"  {'Ref':<8} {'Gen X':>7} {'Ref X':>7} {'dX':>6}"
-            f" {'Gen Y':>7} {'Ref Y':>7} {'dY':>6} {'Dist':>6}"
-        )
-        total_drift = 0.0
-        count = 0
-        for ref in sorted(set(gen_positions) & set(ref_positions)):
-            if ref.startswith("H"):
-                continue
-            gx, gy, _gr = gen_positions[ref]
-            rx, ry, _rr = ref_positions[ref]
-            dist = math.sqrt((gx - rx) ** 2 + (gy - ry) ** 2)
-            total_drift += dist
-            count += 1
-            marker = "***" if dist > 3 else ""
-            print(
-                f"  {ref:<8} {gx:>7.1f} {rx:>7.1f} {gx - rx:>+6.1f}"
-                f" {gy:>7.1f} {ry:>7.1f} {gy - ry:>+6.1f}"
-                f" {dist:>6.1f} {marker}"
-            )
-        if count:
-            print(f"  Average drift from reference: {total_drift / count:.1f}mm")
-    print()
+    write_and_compare_pcb(optimized_pcb, pcb_path)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_relay", output_dir)
@@ -734,14 +719,7 @@ def main() -> None:
     print()
 
     # 8. Print component positions
-    print("Component positions:")
-    print(f"  {'Ref':<6} {'X':>8} {'Y':>8} {'Rot':>6}")
-    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*6}")
-    fp_map: dict[str, tuple[float, float, float]] = {}
-    for fp in sorted(optimized_pcb.footprints, key=lambda f: f.ref):
-        print(f"  {fp.ref:<6} {fp.position.x:>8.2f} {fp.position.y:>8.2f} {fp.rotation:>6.1f}")
-        fp_map[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
-    print()
+    fp_map = print_component_positions(optimized_pcb)
 
     # 9. Design rules compliance check
     _check_design_rules(fp_map)
@@ -750,6 +728,305 @@ def main() -> None:
 def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     """Euclidean distance between two component positions (ignoring rotation)."""
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+_Pos = tuple[float, float, float]
+_PosMap = dict[str, _Pos]
+_PerChannel = dict[int, _Pos]
+
+
+def _relay_collect_positions(
+    fp_map: _PosMap,
+    violations: list[str],
+) -> tuple[
+    _PerChannel, _PerChannel, _PerChannel, _PerChannel,
+    _PerChannel, _PerChannel, _PerChannel,
+]:
+    """Collect per-channel component positions; record missing-component violations."""
+    j_positions: _PerChannel = {}
+    k_positions: _PerChannel = {}
+    q_positions: _PerChannel = {}
+    d_positions: _PerChannel = {}
+    r_gate_positions: _PerChannel = {}
+    r_led_positions: _PerChannel = {}
+    d_led_positions: _PerChannel = {}
+
+    for ch in range(1, 5):
+        refs = {
+            "J": f"J{ch}", "K": f"K{ch}", "Q": f"Q{ch}", "R": f"R{ch}",
+            "D": f"D{ch}", "D_LED": f"D{ch+4}", "R_LED": f"R{ch+4}",
+        }
+        missing = [v for v in refs.values() if v not in fp_map]
+        if missing:
+            violations.append(f"  CH{ch}: Missing components: {missing}")
+            continue
+        j_positions[ch] = fp_map[refs["J"]]
+        k_positions[ch] = fp_map[refs["K"]]
+        q_positions[ch] = fp_map[refs["Q"]]
+        d_positions[ch] = fp_map[refs["D"]]
+        r_gate_positions[ch] = fp_map[refs["R"]]
+        r_led_positions[ch] = fp_map[refs["R_LED"]]
+        d_led_positions[ch] = fp_map[refs["D_LED"]]
+
+    return (
+        j_positions, k_positions, q_positions, d_positions,
+        r_gate_positions, r_led_positions, d_led_positions,
+    )
+
+
+def _relay_check_terminal_row_alignment(
+    j_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 1: All J at same Y (+/-1mm)."""
+    print("--- Terminal Row Alignment (all J same Y, +/-1mm) ---")
+    if len(j_positions) >= 2:
+        j_ys = [pos[1] for pos in j_positions.values()]
+        j_y_avg = sum(j_ys) / len(j_ys)
+        for ch, pos in sorted(j_positions.items()):
+            dev = abs(pos[1] - j_y_avg)
+            label = f"  J{ch} Y={pos[1]:.1f}mm (avg={j_y_avg:.1f}, dev={dev:.1f}mm)"
+            if dev > 1.0:
+                violations.append(f"{label} VIOLATION")
+                print(f"{label} ** VIOLATION **")
+            else:
+                passes.append(f"{label} OK")
+                print(f"{label} OK")
+    print()
+
+
+def _relay_check_relay_row_alignment(
+    k_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 2: All K at same Y (+/-1mm)."""
+    print("--- Relay Row Alignment (all K same Y, +/-1mm) ---")
+    if len(k_positions) >= 2:
+        k_ys = [pos[1] for pos in k_positions.values()]
+        k_y_avg = sum(k_ys) / len(k_ys)
+        for ch, pos in sorted(k_positions.items()):
+            dev = abs(pos[1] - k_y_avg)
+            label = f"  K{ch} Y={pos[1]:.1f}mm (avg={k_y_avg:.1f}, dev={dev:.1f}mm)"
+            if dev > 1.0:
+                violations.append(f"{label} VIOLATION")
+                print(f"{label} ** VIOLATION **")
+            else:
+                passes.append(f"{label} OK")
+                print(f"{label} OK")
+    print()
+
+
+def _relay_check_jk_x_alignment(
+    j_positions: _PerChannel,
+    k_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 3: J-K X alignment (+/-2mm per channel)."""
+    print("--- J-K X Alignment (per channel, +/-2mm) ---")
+    for ch in range(1, 5):
+        if ch not in j_positions or ch not in k_positions:
+            continue
+        dx = abs(j_positions[ch][0] - k_positions[ch][0])
+        label = f"  CH{ch} J{ch}-K{ch} dx={dx:.1f}mm"
+        if dx > 2.0:
+            violations.append(f"{label} (MAX +/-2mm) VIOLATION")
+            print(f"{label} (MAX +/-2mm) ** VIOLATION **")
+        else:
+            passes.append(f"{label} (MAX +/-2mm) OK")
+            print(f"{label} (MAX +/-2mm) OK")
+    print()
+
+
+def _relay_check_spacing_uniformity(
+    k_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 4: Equal relay spacing (max 2mm deviation from average)."""
+    print("--- Relay Spacing Uniformity (max 2mm deviation) ---")
+    if len(k_positions) >= 2:
+        k_xs = [k_positions[ch][0] for ch in sorted(k_positions)]
+        spacings = [k_xs[i + 1] - k_xs[i] for i in range(len(k_xs) - 1)]
+        if spacings:
+            avg_spacing = sum(spacings) / len(spacings)
+            max_dev = max(abs(s - avg_spacing) for s in spacings)
+            label = (
+                f"  Spacings: {[f'{s:.1f}' for s in spacings]}, "
+                f"avg={avg_spacing:.1f}mm, max_dev={max_dev:.1f}mm"
+            )
+            if max_dev > 2.0:
+                violations.append(f"{label} VIOLATION")
+                print(f"{label} ** VIOLATION **")
+            else:
+                passes.append(f"{label} OK")
+                print(f"{label} OK")
+    print()
+
+
+def _relay_check_flyback_x_alignment(
+    q_positions: _PerChannel,
+    d_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 5: LEFT column — D_flyback and Q same X (dx < 1mm)."""
+    print("--- LEFT Column: D_flyback-Q X Alignment (dx < 1mm) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in d_positions:
+            continue
+        dx = abs(q_positions[ch][0] - d_positions[ch][0])
+        label = f"  CH{ch} Q{ch}-D{ch} dx={dx:.1f}mm"
+        if dx > 1.0:
+            violations.append(f"{label} (MAX 1mm) VIOLATION")
+            print(f"{label} (MAX 1mm) ** VIOLATION **")
+        else:
+            passes.append(f"{label} (MAX 1mm) OK")
+            print(f"{label} (MAX 1mm) OK")
+    print()
+
+
+def _relay_check_flyback_above_q(
+    q_positions: _PerChannel,
+    d_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 6: D_flyback above Q (D.y < Q.y in KiCad coords)."""
+    print("--- LEFT Column: D_flyback Above Q (D.y < Q.y) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in d_positions:
+            continue
+        d_y = d_positions[ch][1]
+        q_y = q_positions[ch][1]
+        label = f"  CH{ch} D{ch}.y={d_y:.1f} Q{ch}.y={q_y:.1f}"
+        if d_y >= q_y:
+            violations.append(f"{label} (D must be above Q) VIOLATION")
+            print(f"{label} (D must be above Q) ** VIOLATION **")
+        else:
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
+    print()
+
+
+def _relay_check_rgate_opposite_side(
+    q_positions: _PerChannel,
+    k_positions: _PerChannel,
+    r_gate_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 7: R_gate on opposite side from Q (RIGHT column)."""
+    print("--- R_gate Opposite Side from Q (R.x > K.x, Q.x < K.x) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in k_positions or ch not in r_gate_positions:
+            continue
+        k_x = k_positions[ch][0]
+        q_x = q_positions[ch][0]
+        r_x = r_gate_positions[ch][0]
+        q_side = "left" if q_x < k_x else "right"
+        r_side = "right" if r_x > k_x else "left"
+        label = (
+            f"  CH{ch} Q{ch} {q_side} (x={q_x:.1f}), "
+            f"R{ch} {r_side} (x={r_x:.1f}), K{ch} x={k_x:.1f}"
+        )
+        if q_side == r_side:
+            violations.append(f"{label} (must be opposite sides) VIOLATION")
+            print(f"{label} (must be opposite sides) ** VIOLATION **")
+        else:
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
+    print()
+
+
+def _relay_check_led_pair_x_alignment(
+    q_positions: _PerChannel,
+    r_led_positions: _PerChannel,
+    d_led_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 8: LED pair same X as Q (LEFT column, dx < 1mm)."""
+    print("--- LEFT Column: LED Pair X Alignment with Q (dx < 1mm) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in r_led_positions or ch not in d_led_positions:
+            continue
+        q_x = q_positions[ch][0]
+        r_led_dx = abs(r_led_positions[ch][0] - q_x)
+        d_led_dx = abs(d_led_positions[ch][0] - q_x)
+        label_r = f"  CH{ch} R{ch+4}-Q{ch} dx={r_led_dx:.1f}mm"
+        label_d = f"  CH{ch} D{ch+4}-Q{ch} dx={d_led_dx:.1f}mm"
+        if r_led_dx > 1.0:
+            violations.append(f"{label_r} (MAX 1mm) VIOLATION")
+            print(f"{label_r} (MAX 1mm) ** VIOLATION **")
+        else:
+            passes.append(f"{label_r} (MAX 1mm) OK")
+            print(f"{label_r} (MAX 1mm) OK")
+        if d_led_dx > 1.0:
+            violations.append(f"{label_d} (MAX 1mm) VIOLATION")
+            print(f"{label_d} (MAX 1mm) ** VIOLATION **")
+        else:
+            passes.append(f"{label_d} (MAX 1mm) OK")
+            print(f"{label_d} (MAX 1mm) OK")
+    print()
+
+
+def _relay_check_vertical_chain(
+    q_positions: _PerChannel,
+    r_led_positions: _PerChannel,
+    d_led_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 9: Vertical signal chain — R_LED below Q, D_LED below R_LED."""
+    print("--- LEFT Column: Vertical Chain (Q -> R_LED -> D_LED, Y increasing) ---")
+    for ch in range(1, 5):
+        if ch not in q_positions or ch not in r_led_positions or ch not in d_led_positions:
+            continue
+        q_y = q_positions[ch][1]
+        r_led_y = r_led_positions[ch][1]
+        d_led_y = d_led_positions[ch][1]
+        label = f"  CH{ch} Q{ch}.y={q_y:.1f} R{ch+4}.y={r_led_y:.1f} D{ch+4}.y={d_led_y:.1f}"
+        if r_led_y <= q_y:
+            violations.append(f"{label} (R_LED must be below Q) VIOLATION")
+            print(f"{label} (R_LED must be below Q) ** VIOLATION **")
+        elif d_led_y <= r_led_y:
+            violations.append(f"{label} (D_LED must be below R_LED) VIOLATION")
+            print(f"{label} (D_LED must be below R_LED) ** VIOLATION **")
+        else:
+            passes.append(f"{label} OK")
+            print(f"{label} OK")
+    print()
+
+
+def _relay_check_power_isolation(
+    fp_map: _PosMap,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 10: Power isolation — L1 near C1/C2 (<8mm)."""
+    print("--- Power Isolation (L1/L2/C1/C2 proximity < 8mm) ---")
+    power_refs = ["L1", "L2", "C1", "C2"]
+    power_missing = [r for r in power_refs if r not in fp_map]
+    if power_missing:
+        violations.append(f"  Power isolation: Missing components: {power_missing}")
+        print(f"  Power isolation: Missing components: {power_missing}")
+    else:
+        l1 = fp_map["L1"]
+        c1 = fp_map["C1"]
+        c2 = fp_map["C2"]
+        for cap_ref, cap_pos in [("C1", c1), ("C2", c2)]:
+            d = _dist(l1, cap_pos)
+            label = f"  L1-{cap_ref}: {d:.1f}mm"
+            if d > 8.0:
+                violations.append(f"{label} (MAX 8mm) VIOLATION")
+                print(f"{label} (MAX 8mm) ** VIOLATION **")
+            else:
+                passes.append(f"{label} (MAX 8mm) OK")
+                print(f"{label} (MAX 8mm) OK")
+    print()
 
 
 def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
@@ -775,243 +1052,26 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
     violations: list[str] = []
     passes: list[str] = []
 
-    # ---------------------------------------------------------------
-    # Collect per-channel positions
-    # ---------------------------------------------------------------
-    j_positions: dict[int, tuple[float, float, float]] = {}
-    k_positions: dict[int, tuple[float, float, float]] = {}
-    q_positions: dict[int, tuple[float, float, float]] = {}
-    d_positions: dict[int, tuple[float, float, float]] = {}  # flyback
-    r_gate_positions: dict[int, tuple[float, float, float]] = {}
-    r_led_positions: dict[int, tuple[float, float, float]] = {}
-    d_led_positions: dict[int, tuple[float, float, float]] = {}
+    (
+        j_positions, k_positions, q_positions, d_positions,
+        r_gate_positions, r_led_positions, d_led_positions,
+    ) = _relay_collect_positions(fp_map, violations)
 
-    for ch in range(1, 5):
-        refs = {
-            "J": f"J{ch}", "K": f"K{ch}", "Q": f"Q{ch}", "R": f"R{ch}",
-            "D": f"D{ch}", "D_LED": f"D{ch+4}", "R_LED": f"R{ch+4}",
-        }
-        missing = [v for v in refs.values() if v not in fp_map]
-        if missing:
-            violations.append(f"  CH{ch}: Missing components: {missing}")
-            continue
-        j_positions[ch] = fp_map[refs["J"]]
-        k_positions[ch] = fp_map[refs["K"]]
-        q_positions[ch] = fp_map[refs["Q"]]
-        d_positions[ch] = fp_map[refs["D"]]
-        r_gate_positions[ch] = fp_map[refs["R"]]
-        r_led_positions[ch] = fp_map[refs["R_LED"]]
-        d_led_positions[ch] = fp_map[refs["D_LED"]]
+    _relay_check_terminal_row_alignment(j_positions, violations, passes)
+    _relay_check_relay_row_alignment(k_positions, violations, passes)
+    _relay_check_jk_x_alignment(j_positions, k_positions, violations, passes)
+    _relay_check_spacing_uniformity(k_positions, violations, passes)
+    _relay_check_flyback_x_alignment(q_positions, d_positions, violations, passes)
+    _relay_check_flyback_above_q(q_positions, d_positions, violations, passes)
+    _relay_check_rgate_opposite_side(
+        q_positions, k_positions, r_gate_positions, violations, passes
+    )
+    _relay_check_led_pair_x_alignment(
+        q_positions, r_led_positions, d_led_positions, violations, passes
+    )
+    _relay_check_vertical_chain(q_positions, r_led_positions, d_led_positions, violations, passes)
+    _relay_check_power_isolation(fp_map, violations, passes)
 
-    # ---------------------------------------------------------------
-    # 1. All J at same Y (+/-1mm)
-    # ---------------------------------------------------------------
-    print("--- Terminal Row Alignment (all J same Y, +/-1mm) ---")
-    if len(j_positions) >= 2:
-        j_ys = [pos[1] for pos in j_positions.values()]
-        j_y_avg = sum(j_ys) / len(j_ys)
-        for ch, pos in sorted(j_positions.items()):
-            dev = abs(pos[1] - j_y_avg)
-            label = f"  J{ch} Y={pos[1]:.1f}mm (avg={j_y_avg:.1f}, dev={dev:.1f}mm)"
-            if dev > 1.0:
-                violations.append(f"{label} VIOLATION")
-                print(f"{label} ** VIOLATION **")
-            else:
-                passes.append(f"{label} OK")
-                print(f"{label} OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 2. All K at same Y (+/-1mm)
-    # ---------------------------------------------------------------
-    print("--- Relay Row Alignment (all K same Y, +/-1mm) ---")
-    if len(k_positions) >= 2:
-        k_ys = [pos[1] for pos in k_positions.values()]
-        k_y_avg = sum(k_ys) / len(k_ys)
-        for ch, pos in sorted(k_positions.items()):
-            dev = abs(pos[1] - k_y_avg)
-            label = f"  K{ch} Y={pos[1]:.1f}mm (avg={k_y_avg:.1f}, dev={dev:.1f}mm)"
-            if dev > 1.0:
-                violations.append(f"{label} VIOLATION")
-                print(f"{label} ** VIOLATION **")
-            else:
-                passes.append(f"{label} OK")
-                print(f"{label} OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 3. J-K X alignment (+/-2mm per channel)
-    # ---------------------------------------------------------------
-    print("--- J-K X Alignment (per channel, +/-2mm) ---")
-    for ch in range(1, 5):
-        if ch not in j_positions or ch not in k_positions:
-            continue
-        dx = abs(j_positions[ch][0] - k_positions[ch][0])
-        label = f"  CH{ch} J{ch}-K{ch} dx={dx:.1f}mm"
-        if dx > 2.0:
-            violations.append(f"{label} (MAX +/-2mm) VIOLATION")
-            print(f"{label} (MAX +/-2mm) ** VIOLATION **")
-        else:
-            passes.append(f"{label} (MAX +/-2mm) OK")
-            print(f"{label} (MAX +/-2mm) OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 4. Equal relay spacing (max 2mm deviation from average)
-    # ---------------------------------------------------------------
-    print("--- Relay Spacing Uniformity (max 2mm deviation) ---")
-    if len(k_positions) >= 2:
-        k_xs = [k_positions[ch][0] for ch in sorted(k_positions)]
-        spacings = [k_xs[i + 1] - k_xs[i] for i in range(len(k_xs) - 1)]
-        if spacings:
-            avg_spacing = sum(spacings) / len(spacings)
-            max_dev = max(abs(s - avg_spacing) for s in spacings)
-            label = (
-                f"  Spacings: {[f'{s:.1f}' for s in spacings]}, "
-                f"avg={avg_spacing:.1f}mm, max_dev={max_dev:.1f}mm"
-            )
-            if max_dev > 2.0:
-                violations.append(f"{label} VIOLATION")
-                print(f"{label} ** VIOLATION **")
-            else:
-                passes.append(f"{label} OK")
-                print(f"{label} OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 5. LEFT column: D_flyback and Q same X (dx < 1mm)
-    # ---------------------------------------------------------------
-    print("--- LEFT Column: D_flyback-Q X Alignment (dx < 1mm) ---")
-    for ch in range(1, 5):
-        if ch not in q_positions or ch not in d_positions:
-            continue
-        dx = abs(q_positions[ch][0] - d_positions[ch][0])
-        label = f"  CH{ch} Q{ch}-D{ch} dx={dx:.1f}mm"
-        if dx > 1.0:
-            violations.append(f"{label} (MAX 1mm) VIOLATION")
-            print(f"{label} (MAX 1mm) ** VIOLATION **")
-        else:
-            passes.append(f"{label} (MAX 1mm) OK")
-            print(f"{label} (MAX 1mm) OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 6. D_flyback above Q (D.y < Q.y in KiCad coords)
-    # ---------------------------------------------------------------
-    print("--- LEFT Column: D_flyback Above Q (D.y < Q.y) ---")
-    for ch in range(1, 5):
-        if ch not in q_positions or ch not in d_positions:
-            continue
-        d_y = d_positions[ch][1]
-        q_y = q_positions[ch][1]
-        label = f"  CH{ch} D{ch}.y={d_y:.1f} Q{ch}.y={q_y:.1f}"
-        if d_y >= q_y:
-            violations.append(f"{label} (D must be above Q) VIOLATION")
-            print(f"{label} (D must be above Q) ** VIOLATION **")
-        else:
-            passes.append(f"{label} OK")
-            print(f"{label} OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 7. R_gate on opposite side from Q (RIGHT column)
-    # ---------------------------------------------------------------
-    print("--- R_gate Opposite Side from Q (R.x > K.x, Q.x < K.x) ---")
-    for ch in range(1, 5):
-        if ch not in q_positions or ch not in k_positions or ch not in r_gate_positions:
-            continue
-        k_x = k_positions[ch][0]
-        q_x = q_positions[ch][0]
-        r_x = r_gate_positions[ch][0]
-        q_side = "left" if q_x < k_x else "right"
-        r_side = "right" if r_x > k_x else "left"
-        label = (
-            f"  CH{ch} Q{ch} {q_side} (x={q_x:.1f}), "
-            f"R{ch} {r_side} (x={r_x:.1f}), K{ch} x={k_x:.1f}"
-        )
-        if q_side == r_side:
-            violations.append(f"{label} (must be opposite sides) VIOLATION")
-            print(f"{label} (must be opposite sides) ** VIOLATION **")
-        else:
-            passes.append(f"{label} OK")
-            print(f"{label} OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 8. LED pair same X as Q (LEFT column, dx < 1mm)
-    # ---------------------------------------------------------------
-    print("--- LEFT Column: LED Pair X Alignment with Q (dx < 1mm) ---")
-    for ch in range(1, 5):
-        if ch not in q_positions or ch not in r_led_positions or ch not in d_led_positions:
-            continue
-        q_x = q_positions[ch][0]
-        r_led_dx = abs(r_led_positions[ch][0] - q_x)
-        d_led_dx = abs(d_led_positions[ch][0] - q_x)
-        label_r = f"  CH{ch} R{ch+4}-Q{ch} dx={r_led_dx:.1f}mm"
-        label_d = f"  CH{ch} D{ch+4}-Q{ch} dx={d_led_dx:.1f}mm"
-        if r_led_dx > 1.0:
-            violations.append(f"{label_r} (MAX 1mm) VIOLATION")
-            print(f"{label_r} (MAX 1mm) ** VIOLATION **")
-        else:
-            passes.append(f"{label_r} (MAX 1mm) OK")
-            print(f"{label_r} (MAX 1mm) OK")
-        if d_led_dx > 1.0:
-            violations.append(f"{label_d} (MAX 1mm) VIOLATION")
-            print(f"{label_d} (MAX 1mm) ** VIOLATION **")
-        else:
-            passes.append(f"{label_d} (MAX 1mm) OK")
-            print(f"{label_d} (MAX 1mm) OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 9. Vertical signal chain: R_LED below Q, D_LED below R_LED
-    # ---------------------------------------------------------------
-    print("--- LEFT Column: Vertical Chain (Q -> R_LED -> D_LED, Y increasing) ---")
-    for ch in range(1, 5):
-        if ch not in q_positions or ch not in r_led_positions or ch not in d_led_positions:
-            continue
-        q_y = q_positions[ch][1]
-        r_led_y = r_led_positions[ch][1]
-        d_led_y = d_led_positions[ch][1]
-        label = f"  CH{ch} Q{ch}.y={q_y:.1f} R{ch+4}.y={r_led_y:.1f} D{ch+4}.y={d_led_y:.1f}"
-        if r_led_y <= q_y:
-            violations.append(f"{label} (R_LED must be below Q) VIOLATION")
-            print(f"{label} (R_LED must be below Q) ** VIOLATION **")
-        elif d_led_y <= r_led_y:
-            violations.append(f"{label} (D_LED must be below R_LED) VIOLATION")
-            print(f"{label} (D_LED must be below R_LED) ** VIOLATION **")
-        else:
-            passes.append(f"{label} OK")
-            print(f"{label} OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # 10. Power isolation checks
-    # ---------------------------------------------------------------
-    print("--- Power Isolation (L1/L2/C1/C2 proximity < 8mm) ---")
-    power_refs = ["L1", "L2", "C1", "C2"]
-    power_missing = [r for r in power_refs if r not in fp_map]
-    if power_missing:
-        violations.append(f"  Power isolation: Missing components: {power_missing}")
-        print(f"  Power isolation: Missing components: {power_missing}")
-    else:
-        l1 = fp_map["L1"]
-        c1 = fp_map["C1"]
-        c2 = fp_map["C2"]
-        for cap_ref, cap_pos in [("C1", c1), ("C2", c2)]:
-            d = _dist(l1, cap_pos)
-            label = f"  L1-{cap_ref}: {d:.1f}mm"
-            if d > 8.0:
-                violations.append(f"{label} (MAX 8mm) VIOLATION")
-                print(f"{label} (MAX 8mm) ** VIOLATION **")
-            else:
-                passes.append(f"{label} (MAX 8mm) OK")
-                print(f"{label} (MAX 8mm) OK")
-    print()
-
-    # ---------------------------------------------------------------
-    # Summary
-    # ---------------------------------------------------------------
     print("=" * 60)
     print(f"PASSED: {len(passes)}  |  VIOLATIONS: {len(violations)}")
     print("=" * 60)

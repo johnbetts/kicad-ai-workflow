@@ -29,17 +29,15 @@ Per-channel signal chain:
 
 from __future__ import annotations
 
-import math
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Ensure the package is importable when running from the repo root.
 _repo = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_repo / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from kicad_pipeline.models.requirements import (
+from _train_common import (  # noqa: E402
     Component,
     FeatureBlock,
     MechanicalConstraints,
@@ -50,11 +48,14 @@ from kicad_pipeline.models.requirements import (
     PinType,
     ProjectInfo,
     ProjectRequirements,
+    build_group_map,
+    build_pcb,
+    compute_fast_placement_score,
+    optimize_placement_ee,
+    print_component_positions,
+    write_and_compare_pcb,
+    write_project_file,
 )
-from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
-from kicad_pipeline.optimization.scoring import compute_fast_placement_score
-from kicad_pipeline.pcb.builder import build_pcb, write_pcb
-from kicad_pipeline.project_file import write_project_file
 
 # ---------------------------------------------------------------------------
 # Footprint identifiers
@@ -66,6 +67,41 @@ _C0805_FP = "C_0805"
 _SOD323_FP = "SOD-323"
 _SCREW_TERM_2P_FP = "TerminalBlock_5.08mm_2P"
 _PIN_HEADER_4P_FP = "PinHeader_1x04"
+
+# ---------------------------------------------------------------------------
+# Board and design rule constants
+# ---------------------------------------------------------------------------
+
+_BOARD_WIDTH_MM = 70.0
+_BOARD_HEIGHT_MM = 50.0
+
+# Design rule thresholds (mm)
+_CONNECTOR_ROW_ALIGN_TOL_MM = 1.0
+_CONNECTOR_EDGE_MAX_MM = 5.0
+_CHANNEL_STRIP_SPREAD_MAX_MM = 12.0
+_R_PAIR_ROW_DY_MAX_MM = 2.0
+_ADC_DECOUP_MAX_MM = 5.0
+_I2C_PULLUP_MAX_MM = 12.0
+_CHANNEL_SPACING_DEV_MAX_MM = 2.0
+_PROTECTION_CLUSTER_DY_MAX_MM = 2.0
+_MCU_HEADER_MIN_X_MM = 50.0
+
+
+# Post-placement geometry constants (mm)
+_ANALOG_REF_J1_X_MM = 12.35
+_ANALOG_REF_J4_X_MM = 46.35
+_ANALOG_J_Y_MM = 4.5
+_ANALOG_STRIP_DY_MM = 8.3
+_ANALOG_U1_X_MM = 45.75
+_ANALOG_U1_Y_MM = 28.58
+_ANALOG_C1_X_MM = 45.61
+_ANALOG_C1_Y_MM = 31.88
+_ANALOG_R9_X_MM = 52.86
+_ANALOG_R9_Y_MM = 22.16
+_ANALOG_R10_X_MM = 52.86
+_ANALOG_R10_Y_MM = 25.16
+_ANALOG_J5_X_MM = 57.00
+_ANALOG_J5_Y_MM = 22.50
 
 # ---------------------------------------------------------------------------
 # ADS1115 ADC
@@ -302,8 +338,8 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
     c_filt = ch + 1     # C2, C3, C4, C5
     # Channel-to-pin mapping avoids trace crossing with L-R connector order:
     # CH1->pin5(AIN1), CH2->pin4(AIN0), CH3->pin6(AIN2), CH4->pin7(AIN3)
-    _CH_TO_PIN = {1: "5", 2: "4", 3: "6", 4: "7"}
-    ain_pin = _CH_TO_PIN[ch]
+    ch_to_pin = {1: "5", 2: "4", 3: "6", 4: "7"}
+    ain_pin = ch_to_pin[ch]
 
     return (
         # Raw input from connector to divider top
@@ -458,13 +494,40 @@ def _build_requirements() -> ProjectRequirements:
         features=(analog_feature,),
         components=tuple(components),
         nets=tuple(nets),
-        mechanical=MechanicalConstraints(board_width_mm=60, board_height_mm=40),
+        mechanical=MechanicalConstraints(
+            board_width_mm=_BOARD_WIDTH_MM, board_height_mm=_BOARD_HEIGHT_MM
+        ),
     )
 
 
 # ---------------------------------------------------------------------------
 # Post-placement pattern corrections
 # ---------------------------------------------------------------------------
+
+
+def _place_channel_passive(
+    fp: object,
+    j_positions: dict[int, tuple[float, float]],
+    comp_offsets: dict[str, tuple[float, float, float]],
+    sx: float,
+    strip_dy: float,
+) -> object:
+    """Return *fp* repositioned per-channel passive strip, or unchanged if not applicable."""
+    from dataclasses import replace
+
+    from kicad_pipeline.models.pcb import Point
+
+    ref = fp.ref  # type: ignore[union-attr]
+    ch = _get_analog_channel(ref)
+    if ch is None:
+        return fp
+    comp_type = _get_component_type(ref, ch)
+    if not comp_type or comp_type not in comp_offsets:
+        return fp
+    jx, jy = j_positions[ch]
+    avg_dx, slope_dx, rot = comp_offsets[comp_type]
+    dx = (avg_dx + slope_dx * (ch - 1)) * sx
+    return replace(fp, position=Point(jx + dx, jy + strip_dy), rotation=rot)
 
 
 def _apply_analog_post_placement(pcb: object) -> object:
@@ -506,15 +569,15 @@ def _apply_analog_post_placement(pcb: object) -> object:
     board_h = max(ys) - y_min
 
     # Scale factors for non-60x40 boards
-    sx = board_w / 60.0
-    sy = board_h / 40.0
+    sx = board_w / _BOARD_WIDTH_MM
+    sy = board_h / _BOARD_HEIGHT_MM
 
     # --- Connector positions (top edge, evenly spaced) ---
     # Reference: J1=12.35, J2=23.22, J3=34.10, J4=46.35 → avg spacing ~11.3
     # Use y=4.5 to keep connectors within 5mm of top edge
-    j_y = y_min + 4.5 * sy
-    j_x_start = x_min + 12.35 * sx
-    j_x_end = x_min + 46.35 * sx
+    j_y = y_min + _ANALOG_J_Y_MM * sy
+    j_x_start = x_min + _ANALOG_REF_J1_X_MM * sx
+    j_x_end = x_min + _ANALOG_REF_J4_X_MM * sx
     j_spacing = (j_x_end - j_x_start) / 3.0
     j_positions = {
         ch: (j_x_start + (ch - 1) * j_spacing, j_y)
@@ -525,12 +588,12 @@ def _apply_analog_post_placement(pcb: object) -> object:
     # Reference pattern: horizontal row ~8.3mm below connector
     # Left-to-right: C_filt, D_tvs, R_bot, R_top
     # Average offsets (dx, dy) from connector across all 4 channels:
-    _STRIP_DY = 8.3 * sy  # vertical drop from connector to passive row
+    strip_dy = _ANALOG_STRIP_DY_MM * sy  # vertical drop from connector to passive row
 
     # Per-component dx offsets from connector center (averaged across channels)
     # and per-channel linear interpolation slopes (components shift right
     # for channels further right, toward U1)
-    _COMP_OFFSETS: dict[str, tuple[float, float, float]] = {
+    comp_offsets: dict[str, tuple[float, float, float]] = {
         # (avg_dx, per_ch_slope_dx, rotation)
         # avg_dx: base offset from connector center
         # per_ch_slope_dx: additional dx per channel index (0-based)
@@ -541,16 +604,16 @@ def _apply_analog_post_placement(pcb: object) -> object:
     }
 
     # --- Fixed component positions (reference-derived, scaled) ---
-    u1_x = x_min + 45.75 * sx
-    u1_y = y_min + 28.58 * sy
-    c1_x = x_min + 45.61 * sx
-    c1_y = y_min + 31.88 * sy
-    r9_x = x_min + 52.86 * sx
-    r9_y = y_min + 22.16 * sy
-    r10_x = x_min + 52.86 * sx
-    r10_y = y_min + 25.16 * sy
-    j5_x = x_min + 57.00 * sx
-    j5_y = y_min + 22.50 * sy
+    u1_x = x_min + _ANALOG_U1_X_MM * sx
+    u1_y = y_min + _ANALOG_U1_Y_MM * sy
+    c1_x = x_min + _ANALOG_C1_X_MM * sx
+    c1_y = y_min + _ANALOG_C1_Y_MM * sy
+    r9_x = x_min + _ANALOG_R9_X_MM * sx
+    r9_y = y_min + _ANALOG_R9_Y_MM * sy
+    r10_x = x_min + _ANALOG_R10_X_MM * sx
+    r10_y = y_min + _ANALOG_R10_Y_MM * sy
+    j5_x = x_min + _ANALOG_J5_X_MM * sx
+    j5_y = y_min + _ANALOG_J5_Y_MM * sy
 
     new_fps: list[object] = []
     for fp in pcb.footprints:
@@ -583,20 +646,7 @@ def _apply_analog_post_placement(pcb: object) -> object:
 
         # --- Channel passives ---
         else:
-            ch = _get_analog_channel(ref)
-            if ch is not None:
-                comp_type = _get_component_type(ref, ch)
-                if comp_type and comp_type in _COMP_OFFSETS:
-                    jx, jy = j_positions[ch]
-                    avg_dx, slope_dx, rot = _COMP_OFFSETS[comp_type]
-                    # Interpolate dx: channels further right get larger dx shift
-                    dx = (avg_dx + slope_dx * (ch - 1)) * sx
-                    dy = _STRIP_DY
-                    updated = replace(
-                        fp,
-                        position=Point(jx + dx, jy + dy),
-                        rotation=rot,
-                    )
+            updated = _place_channel_passive(fp, j_positions, comp_offsets, sx, strip_dy)
 
         new_fps.append(updated)
 
@@ -654,35 +704,21 @@ def _dist(a: tuple[float, float, float], b: tuple[float, float, float]) -> float
 _ANALOG_COMPONENTS: tuple[Component, ...] = ()  # set in main()
 
 
-def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
-    """Check analog input design rules and print compliance report.
+_Pos = tuple[float, float, float]
+_PosMap = dict[str, _Pos]
+_PerChannel = dict[int, _Pos]
 
-    Rules are RELATIVE positioning checks:
-    - Channel strip alignment (all components in vertical line per channel)
-    - R_top to R_bot proximity (vertical pair)
-    - Connector at edge (low Y value)
-    - ADC decoupling distance (C1 near U1)
-    - Channel spacing uniformity
-    - Screw terminal orientation (wire entry faces board edge)
-    - Channel ordering (J1.x < J2.x < J3.x < J4.x)
-    - LCSC footprint verification
-    """
-    print("=" * 60)
-    print("DESIGN RULES COMPLIANCE CHECK (Analog Input Board)")
-    print("=" * 60)
-    print()
 
-    violations: list[str] = []
-    passes: list[str] = []
-
-    # ---------------------------------------------------------------
-    # Collect per-channel positions
-    # ---------------------------------------------------------------
-    j_positions: dict[int, tuple[float, float, float]] = {}
-    r_top_positions: dict[int, tuple[float, float, float]] = {}
-    r_bot_positions: dict[int, tuple[float, float, float]] = {}
-    d_positions: dict[int, tuple[float, float, float]] = {}
-    c_positions: dict[int, tuple[float, float, float]] = {}
+def _analog_collect_positions(
+    fp_map: _PosMap,
+    violations: list[str],
+) -> tuple[_PerChannel, _PerChannel, _PerChannel, _PerChannel, _PerChannel]:
+    """Collect per-channel component positions; record missing-component violations."""
+    j_positions: _PerChannel = {}
+    r_top_positions: _PerChannel = {}
+    r_bot_positions: _PerChannel = {}
+    d_positions: _PerChannel = {}
+    c_positions: _PerChannel = {}
 
     for ch in range(1, 5):
         r_top_ref = f"R{2 * ch - 1}"
@@ -706,9 +742,15 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         d_positions[ch] = fp_map[d_ref]
         c_positions[ch] = fp_map[c_ref]
 
-    # ---------------------------------------------------------------
-    # 1. All connectors J1-J4 at same Y (+/-1mm)
-    # ---------------------------------------------------------------
+    return j_positions, r_top_positions, r_bot_positions, d_positions, c_positions
+
+
+def _analog_check_connector_row_alignment(
+    j_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 1: All connectors J1-J4 at same Y (+/-1mm)."""
     print("--- Connector Row Alignment (all J same Y, +/-1mm) ---")
     if len(j_positions) >= 2:
         j_ys = [pos[1] for pos in j_positions.values()]
@@ -716,7 +758,7 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         for ch, pos in sorted(j_positions.items()):
             dev = abs(pos[1] - j_y_avg)
             label = f"  J{ch} Y={pos[1]:.1f}mm (avg={j_y_avg:.1f}, dev={dev:.1f}mm)"
-            if dev > 1.0:
+            if dev > _CONNECTOR_ROW_ALIGN_TOL_MM:
                 violations.append(f"{label} VIOLATION")
                 print(f"{label} ** VIOLATION **")
             else:
@@ -724,30 +766,41 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
                 print(f"{label} OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 2. Connectors at board edge (Y < 5mm from top)
-    # ---------------------------------------------------------------
+
+def _analog_check_connector_edge_proximity(
+    j_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 2: Connectors at board edge (Y < 5mm from top)."""
     print("--- Connector Edge Proximity (Y < 5mm from top edge) ---")
     for ch, pos in sorted(j_positions.items()):
         label = f"  J{ch} Y={pos[1]:.1f}mm"
-        if pos[1] > 5.0:
-            violations.append(f"{label} (MAX 5mm from top) VIOLATION")
-            print(f"{label} (MAX 5mm from top) ** VIOLATION **")
+        if pos[1] > _CONNECTOR_EDGE_MAX_MM:
+            violations.append(f"{label} (MAX {_CONNECTOR_EDGE_MAX_MM}mm from top) VIOLATION")
+            print(f"{label} (MAX {_CONNECTOR_EDGE_MAX_MM}mm from top) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX 5mm from top) OK")
-            print(f"{label} (MAX 5mm from top) OK")
+            passes.append(f"{label} (MAX {_CONNECTOR_EDGE_MAX_MM}mm from top) OK")
+            print(f"{label} (MAX {_CONNECTOR_EDGE_MAX_MM}mm from top) OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 3. Channel strip horizontal spread (all passives within 12mm of J)
-    # ---------------------------------------------------------------
+
+def _analog_check_channel_strip_spread(
+    j_positions: _PerChannel,
+    r_top_positions: _PerChannel,
+    r_bot_positions: _PerChannel,
+    d_positions: _PerChannel,
+    c_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 3: Channel strip horizontal spread (all passives within 12mm of J)."""
     print("--- Channel Strip Spread (all passives within 12mm dx of J) ---")
     for ch in range(1, 5):
         if ch not in j_positions:
             continue
         j_x = j_positions[ch][0]
 
-        # Check each passive is within 12mm horizontally of its connector
         for comp_name, pos_dict in [
             (f"R{2*ch-1}", r_top_positions),
             (f"R{2*ch}", r_bot_positions),
@@ -757,17 +810,22 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
             if ch in pos_dict:
                 dx = abs(pos_dict[ch][0] - j_x)
                 label = f"  CH{ch} {comp_name}-J{ch} dx={dx:.1f}mm"
-                if dx > 12.0:
-                    violations.append(f"{label} (MAX 12mm) VIOLATION")
-                    print(f"{label} (MAX 12mm) ** VIOLATION **")
+                if dx > _CHANNEL_STRIP_SPREAD_MAX_MM:
+                    violations.append(f"{label} (MAX {_CHANNEL_STRIP_SPREAD_MAX_MM}mm) VIOLATION")
+                    print(f"{label} (MAX {_CHANNEL_STRIP_SPREAD_MAX_MM}mm) ** VIOLATION **")
                 else:
-                    passes.append(f"{label} (MAX 12mm) OK")
-                    print(f"{label} (MAX 12mm) OK")
+                    passes.append(f"{label} (MAX {_CHANNEL_STRIP_SPREAD_MAX_MM}mm) OK")
+                    print(f"{label} (MAX {_CHANNEL_STRIP_SPREAD_MAX_MM}mm) OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 4. R_top to R_bot same-row alignment (dy < 2mm — horizontal strip)
-    # ---------------------------------------------------------------
+
+def _analog_check_r_pair_row_alignment(
+    r_top_positions: _PerChannel,
+    r_bot_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 4: R_top to R_bot same-row alignment (dy < 2mm — horizontal strip)."""
     print("--- R_top/R_bot Same Row (dy < 2mm, horizontal strip) ---")
     for ch in range(1, 5):
         if ch not in r_top_positions:
@@ -776,55 +834,67 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         r_bot_ref = f"R{2 * ch}"
         dy = abs(r_bot_positions[ch][1] - r_top_positions[ch][1])
         label = f"  CH{ch} {r_bot_ref}-{r_top_ref} dy={dy:.1f}mm"
-        if dy > 2.0:
-            violations.append(f"{label} (MAX 2mm) VIOLATION")
-            print(f"{label} (MAX 2mm) ** VIOLATION **")
+        if dy > _R_PAIR_ROW_DY_MAX_MM:
+            violations.append(f"{label} (MAX {_R_PAIR_ROW_DY_MAX_MM}mm) VIOLATION")
+            print(f"{label} (MAX {_R_PAIR_ROW_DY_MAX_MM}mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX 2mm) OK")
-            print(f"{label} (MAX 2mm) OK")
+            passes.append(f"{label} (MAX {_R_PAIR_ROW_DY_MAX_MM}mm) OK")
+            print(f"{label} (MAX {_R_PAIR_ROW_DY_MAX_MM}mm) OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 5. ADC decoupling distance (C1 within 5mm of U1)
-    # ---------------------------------------------------------------
+
+def _analog_check_adc_decoupling(
+    fp_map: _PosMap,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 5: ADC decoupling distance (C1 within 5mm of U1)."""
     print("--- ADC Decoupling (C1 within 5mm of U1) ---")
     if "C1" in fp_map and "U1" in fp_map:
         d_c1_u1 = _dist(fp_map["C1"], fp_map["U1"])
         label = f"  C1-U1: {d_c1_u1:.1f}mm"
-        if d_c1_u1 > 5.0:
-            violations.append(f"{label} (MAX 5mm) VIOLATION")
-            print(f"{label} (MAX 5mm) ** VIOLATION **")
+        if d_c1_u1 > _ADC_DECOUP_MAX_MM:
+            violations.append(f"{label} (MAX {_ADC_DECOUP_MAX_MM}mm) VIOLATION")
+            print(f"{label} (MAX {_ADC_DECOUP_MAX_MM}mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX 5mm) OK")
-            print(f"{label} (MAX 5mm) OK")
+            passes.append(f"{label} (MAX {_ADC_DECOUP_MAX_MM}mm) OK")
+            print(f"{label} (MAX {_ADC_DECOUP_MAX_MM}mm) OK")
     else:
         missing = [r for r in ("C1", "U1") if r not in fp_map]
         violations.append(f"  ADC decoupling: Missing components: {missing}")
         print(f"  Missing: {missing}")
     print()
 
-    # ---------------------------------------------------------------
-    # 6. I2C pull-ups near ADC (R9/R10 within 8mm of U1)
-    # ---------------------------------------------------------------
+
+def _analog_check_i2c_pullups(
+    fp_map: _PosMap,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 6: I2C pull-ups near ADC (R9/R10 within 12mm of U1)."""
     print("--- I2C Pull-ups Near ADC (R9/R10 within 12mm of U1) ---")
     for r_ref in ("R9", "R10"):
         if r_ref in fp_map and "U1" in fp_map:
             d_r_u1 = _dist(fp_map[r_ref], fp_map["U1"])
             label = f"  {r_ref}-U1: {d_r_u1:.1f}mm"
-            if d_r_u1 > 12.0:
-                violations.append(f"{label} (MAX 12mm) VIOLATION")
-                print(f"{label} (MAX 12mm) ** VIOLATION **")
+            if d_r_u1 > _I2C_PULLUP_MAX_MM:
+                violations.append(f"{label} (MAX {_I2C_PULLUP_MAX_MM}mm) VIOLATION")
+                print(f"{label} (MAX {_I2C_PULLUP_MAX_MM}mm) ** VIOLATION **")
             else:
-                passes.append(f"{label} (MAX 12mm) OK")
-                print(f"{label} (MAX 12mm) OK")
+                passes.append(f"{label} (MAX {_I2C_PULLUP_MAX_MM}mm) OK")
+                print(f"{label} (MAX {_I2C_PULLUP_MAX_MM}mm) OK")
         elif r_ref not in fp_map:
             violations.append(f"  {r_ref}: Missing")
             print(f"  {r_ref}: Missing")
     print()
 
-    # ---------------------------------------------------------------
-    # 7. Channel spacing uniformity (max 2mm deviation from average)
-    # ---------------------------------------------------------------
+
+def _analog_check_channel_spacing(
+    j_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 7: Channel spacing uniformity (max 2mm deviation from average)."""
     print("--- Channel Spacing Uniformity (max 2mm deviation) ---")
     if len(j_positions) >= 2:
         j_xs = [j_positions[ch][0] for ch in sorted(j_positions)]
@@ -836,7 +906,7 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
                 f"  Spacings: {[f'{s:.1f}' for s in spacings]}, "
                 f"avg={avg_spacing:.1f}mm, max_dev={max_dev:.1f}mm"
             )
-            if max_dev > 2.0:
+            if max_dev > _CHANNEL_SPACING_DEV_MAX_MM:
                 violations.append(f"{label} VIOLATION")
                 print(f"{label} ** VIOLATION **")
             else:
@@ -844,45 +914,60 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
                 print(f"{label} OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 8. Protection cluster alignment (D and C_filt at same Y +/-2mm)
-    # ---------------------------------------------------------------
+
+def _analog_check_protection_cluster_alignment(
+    d_positions: _PerChannel,
+    c_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 8: Protection cluster alignment (D and C_filt at same Y +/-2mm)."""
     print("--- Protection Cluster Alignment (D/C same Y +/-2mm) ---")
     for ch in range(1, 5):
         if ch not in d_positions or ch not in c_positions:
             continue
         dy = abs(d_positions[ch][1] - c_positions[ch][1])
         label = f"  CH{ch} D{ch}-C{ch+1} dy={dy:.1f}mm"
-        if dy > 2.0:
-            violations.append(f"{label} (MAX +/-2mm) VIOLATION")
-            print(f"{label} (MAX +/-2mm) ** VIOLATION **")
+        if dy > _PROTECTION_CLUSTER_DY_MAX_MM:
+            violations.append(f"{label} (MAX +/-{_PROTECTION_CLUSTER_DY_MAX_MM}mm) VIOLATION")
+            print(f"{label} (MAX +/-{_PROTECTION_CLUSTER_DY_MAX_MM}mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (MAX +/-2mm) OK")
-            print(f"{label} (MAX +/-2mm) OK")
+            passes.append(f"{label} (MAX +/-{_PROTECTION_CLUSTER_DY_MAX_MM}mm) OK")
+            print(f"{label} (MAX +/-{_PROTECTION_CLUSTER_DY_MAX_MM}mm) OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 9. J5 at right edge (X > 50mm for 60mm board)
-    # ---------------------------------------------------------------
-    print("--- MCU Header Position (J5 near right edge, X > 50mm) ---")
+
+def _analog_check_mcu_header_position(
+    fp_map: _PosMap,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 9: J5 at right edge (X > 50mm for 60mm board)."""
+    print(f"--- MCU Header Position (J5 near right edge, X > {_MCU_HEADER_MIN_X_MM}mm) ---")
     if "J5" in fp_map:
         j5_x = fp_map["J5"][0]
         j5_y = fp_map["J5"][1]
         label = f"  J5 X={j5_x:.1f}mm Y={j5_y:.1f}mm"
-        if j5_x < 50.0:
-            violations.append(f"{label} (should be X>50mm for right edge) VIOLATION")
-            print(f"{label} (should be X>50mm) ** VIOLATION **")
+        if j5_x < _MCU_HEADER_MIN_X_MM:
+            violations.append(
+                f"{label} (should be X>{_MCU_HEADER_MIN_X_MM}mm for right edge) VIOLATION"
+            )
+            print(f"{label} (should be X>{_MCU_HEADER_MIN_X_MM}mm) ** VIOLATION **")
         else:
-            passes.append(f"{label} (X>50mm) OK")
-            print(f"{label} (X>50mm) OK")
+            passes.append(f"{label} (X>{_MCU_HEADER_MIN_X_MM}mm) OK")
+            print(f"{label} (X>{_MCU_HEADER_MIN_X_MM}mm) OK")
     else:
         violations.append("  J5: Missing")
         print("  J5: Missing")
     print()
 
-    # ---------------------------------------------------------------
-    # 10. Screw terminal orientation (J1-J4 wire entry faces edge)
-    # ---------------------------------------------------------------
+
+def _analog_check_screw_terminal_orientation(
+    fp_map: _PosMap,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 10: Screw terminal orientation (J1-J4 wire entry faces edge, rot=180)."""
     print("--- Screw Terminal Orientation (J1-J4 rot=180 for top edge) ---")
     for ch in range(1, 5):
         j_ref = f"J{ch}"
@@ -898,9 +983,13 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
                 print(f"{label} OK")
     print()
 
-    # ---------------------------------------------------------------
-    # 11. Channel ordering (J1.x < J2.x < J3.x < J4.x)
-    # ---------------------------------------------------------------
+
+def _analog_check_channel_ordering(
+    j_positions: _PerChannel,
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 11: Channel ordering (J1.x < J2.x < J3.x < J4.x)."""
     print("--- Channel Ordering (J1.x < J2.x < J3.x < J4.x) ---")
     if len(j_positions) == 4:
         j_xs = [j_positions[ch][0] for ch in range(1, 5)]
@@ -919,17 +1008,20 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         print("  Cannot check — not all J1-J4 present")
     print()
 
-    # ---------------------------------------------------------------
-    # 12. LCSC footprint verification
-    # ---------------------------------------------------------------
+
+def _analog_check_lcsc_footprints(
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Rule 12: LCSC footprint verification."""
     print("--- LCSC Footprint Verification ---")
     # Known-bad LCSC numbers that pull wrong footprints
-    _KNOWN_BAD_LCSC = {
+    known_bad_lcsc = {
         "C2337": "pulls 40-pin header (not 4-pin)",
     }
     for comp in _ANALOG_COMPONENTS:
-        if comp.lcsc and comp.lcsc in _KNOWN_BAD_LCSC:
-            msg = f"  {comp.ref} LCSC={comp.lcsc}: {_KNOWN_BAD_LCSC[comp.lcsc]}"
+        if comp.lcsc and comp.lcsc in known_bad_lcsc:
+            msg = f"  {comp.ref} LCSC={comp.lcsc}: {known_bad_lcsc[comp.lcsc]}"
             violations.append(f"{msg} VIOLATION")
             print(f"{msg} ** VIOLATION **")
         elif comp.lcsc:
@@ -939,9 +1031,48 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
             print(f"  {comp.ref} LCSC=None (parametric footprint)")
     print()
 
-    # ---------------------------------------------------------------
-    # Summary
-    # ---------------------------------------------------------------
+
+def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
+    """Check analog input design rules and print compliance report.
+
+    Rules are RELATIVE positioning checks:
+    - Channel strip alignment (all components in vertical line per channel)
+    - R_top to R_bot proximity (vertical pair)
+    - Connector at edge (low Y value)
+    - ADC decoupling distance (C1 near U1)
+    - Channel spacing uniformity
+    - Screw terminal orientation (wire entry faces board edge)
+    - Channel ordering (J1.x < J2.x < J3.x < J4.x)
+    - LCSC footprint verification
+    """
+    print("=" * 60)
+    print("DESIGN RULES COMPLIANCE CHECK (Analog Input Board)")
+    print("=" * 60)
+    print()
+
+    violations: list[str] = []
+    passes: list[str] = []
+
+    j_positions, r_top_positions, r_bot_positions, d_positions, c_positions = (
+        _analog_collect_positions(fp_map, violations)
+    )
+
+    _analog_check_connector_row_alignment(j_positions, violations, passes)
+    _analog_check_connector_edge_proximity(j_positions, violations, passes)
+    _analog_check_channel_strip_spread(
+        j_positions, r_top_positions, r_bot_positions, d_positions, c_positions,
+        violations, passes,
+    )
+    _analog_check_r_pair_row_alignment(r_top_positions, r_bot_positions, violations, passes)
+    _analog_check_adc_decoupling(fp_map, violations, passes)
+    _analog_check_i2c_pullups(fp_map, violations, passes)
+    _analog_check_channel_spacing(j_positions, violations, passes)
+    _analog_check_protection_cluster_alignment(d_positions, c_positions, violations, passes)
+    _analog_check_mcu_header_position(fp_map, violations, passes)
+    _analog_check_screw_terminal_orientation(fp_map, violations, passes)
+    _analog_check_channel_ordering(j_positions, violations, passes)
+    _analog_check_lcsc_footprints(violations, passes)
+
     print("=" * 60)
     print(f"PASSED: {len(passes)}  |  VIOLATIONS: {len(violations)}")
     print("=" * 60)
@@ -958,8 +1089,8 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
 
 def main() -> None:
     """Build analog input board, optimize, render, and report."""
-    output_dir = _repo / "output"
-    output_dir.mkdir(exist_ok=True)
+    output_dir = _repo / "output" / "train_analog_input"
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_png = output_dir / "train_analog_input_placement.png"
 
     print("=== Analog Input / ADC Channel Training Board ===")
@@ -969,7 +1100,7 @@ def main() -> None:
     requirements = _build_requirements()
     print(f"Components: {len(requirements.components)}")
     print(f"Nets:       {len(requirements.nets)}")
-    print(f"Board:      60 x 40 mm")
+    print("Board:      60 x 40 mm")
     print()
 
     # 2. Build PCB (no routing)
@@ -1009,10 +1140,7 @@ def main() -> None:
 
     # 5. Render placement PNG
     print(f"Rendering placement to {output_png} ...")
-    group_map: dict[str, str] = {}
-    for feat in requirements.features:
-        for ref in feat.components:
-            group_map[ref] = feat.name
+    group_map = build_group_map(requirements)
 
     from kicad_pipeline.visualization.placement_render import render_placement
 
@@ -1027,55 +1155,9 @@ def main() -> None:
     print(f"  Saved: {output_png}")
     print()
 
-    # 6. Write KiCad PCB file
+    # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_analog_input.kicad_pcb"
-
-    # Preserve existing PCB if it exists (may be human-edited reference)
-    ref_dir = output_dir / "training_reference_boards"
-    ref_dir.mkdir(exist_ok=True)
-    if pcb_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = ref_dir / f"train_analog_input_{timestamp}.kicad_pcb"
-        shutil.copy2(pcb_path, backup)
-        print(f"  Backed up existing PCB to {backup}")
-
-    print(f"Writing KiCad PCB to {pcb_path} ...")
-    write_pcb(optimized_pcb, pcb_path, fill_zones=False)
-    print(f"  KiCad PCB: {pcb_path}")
-
-    # Compare against most recent reference if it exists
-    ref_files = sorted(ref_dir.glob("train_analog_input*.kicad_pcb"))
-    if ref_files:
-        latest_ref = ref_files[-1]
-        print(f"\n  Comparing against reference: {latest_ref.name}")
-        from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
-
-        ref_positions = positions_from_pcb_file(latest_ref)
-        gen_positions = positions_from_pcb_file(pcb_path)
-
-        print(
-            f"  {'Ref':<8} {'Gen X':>7} {'Ref X':>7} {'dX':>6}"
-            f" {'Gen Y':>7} {'Ref Y':>7} {'dY':>6} {'Dist':>6}"
-        )
-        total_drift = 0.0
-        count = 0
-        for ref in sorted(set(gen_positions) & set(ref_positions)):
-            if ref.startswith("H"):
-                continue
-            gx, gy, _gr = gen_positions[ref]
-            rx, ry, _rr = ref_positions[ref]
-            dist = math.sqrt((gx - rx) ** 2 + (gy - ry) ** 2)
-            total_drift += dist
-            count += 1
-            marker = "***" if dist > 3 else ""
-            print(
-                f"  {ref:<8} {gx:>7.1f} {rx:>7.1f} {gx - rx:>+6.1f}"
-                f" {gy:>7.1f} {ry:>7.1f} {gy - ry:>+6.1f}"
-                f" {dist:>6.1f} {marker}"
-            )
-        if count:
-            print(f"  Average drift from reference: {total_drift / count:.1f}mm")
-    print()
+    write_and_compare_pcb(optimized_pcb, pcb_path)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_analog_input", output_dir)
@@ -1083,20 +1165,10 @@ def main() -> None:
     print()
 
     # 8. Print component positions
-    print("Component positions:")
-    print(f"  {'Ref':<6} {'X':>8} {'Y':>8} {'Rot':>6}")
-    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*6}")
-    fp_map: dict[str, tuple[float, float, float]] = {}
-    for fp in sorted(optimized_pcb.footprints, key=lambda f: f.ref):
-        print(
-            f"  {fp.ref:<6} {fp.position.x:>8.2f} "
-            f"{fp.position.y:>8.2f} {fp.rotation:>6.1f}"
-        )
-        fp_map[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
-    print()
+    fp_map = print_component_positions(optimized_pcb)
 
     # 9. Design rules compliance check
-    global _ANALOG_COMPONENTS  # noqa: PLW0603
+    global _ANALOG_COMPONENTS
     _ANALOG_COMPONENTS = requirements.components
     _check_design_rules(fp_map)
 

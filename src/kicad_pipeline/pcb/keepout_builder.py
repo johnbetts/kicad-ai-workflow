@@ -123,6 +123,42 @@ def make_mounting_hole_keepouts(
     return tuple(keepouts)
 
 
+def _antenna_origin_from_rf_position(
+    rf_position: tuple[float, float, float],
+    width: float,
+    height: float,
+    board_width: float,
+    board_height: float,
+) -> tuple[float, float]:
+    """Compute the top-left corner of the antenna keepout from RF module position.
+
+    Uses the module half-height to locate the antenna end, then rotates and
+    clamps the result to the board bounds.
+
+    ``rf_position`` is ``(cx, cy, rotation_deg)`` of the footprint origin.
+    """
+    import math as _m
+    cx, cy, rot = rf_position
+    # ESP32-S3-WROOM-1: antenna is at the top of the module body
+    # (negative Y in footprint-local coordinates). We use the module
+    # half-height (12.75mm) minus half the keepout height as the offset
+    # from body centre.
+    module_half_h = RF_MODULE_BODY_HEIGHT_MM / 2.0  # 12.75 mm
+    antenna_offset = module_half_h - height / 2.0
+    angle_rad = _m.radians(rot)
+    # In unrotated position, antenna points in -Y direction.
+    dx = -antenna_offset * _m.sin(angle_rad)
+    dy = -antenna_offset * _m.cos(angle_rad)
+    ax = cx + dx
+    ay = cy + dy
+    x0 = ax - width / 2.0
+    y0 = ay - height / 2.0
+    # Clamp to board bounds
+    x0 = max(0.0, min(x0, board_width - width))
+    y0 = max(0.0, min(y0, board_height - height))
+    return x0, y0
+
+
 def make_antenna_keepout(
     board_width: float,
     width: float,
@@ -149,58 +185,34 @@ def make_antenna_keepout(
         A :class:`Keepout` covering the antenna area.
     """
     if rf_position is not None:
-        cx, cy, rot = rf_position
-        # ESP32-S3-WROOM-1: antenna is at the top of the module body
-        # (negative Y in footprint-local coordinates).  The keepout must
-        # cover the antenna area, which extends from the module top edge
-        # inward by ``height`` mm.
-        #
-        # rf_position gives the *footprint origin* on the board, which is
-        # NOT necessarily the body centre (JLCPCB footprints use a
-        # different origin than our parametric model).  We compute the
-        # antenna-centre offset from the footprint origin using known
-        # module geometry:
-        #   body_top_from_origin = -(pad1_y + top_margin)
-        #   antenna_centre_from_origin = body_top_from_origin + height / 2
-        # For the parametric model (origin at body centre):
-        #   body_top = -12.75, antenna centre = -12.75 + height/2
-        # For JLCPCB (origin ~0.76mm below body centre):
-        #   pad1_y ~ -8.89, top_margin ~ 3.1mm
-        #   body_top = -11.99, antenna centre = -11.99 + height/2
-        #
-        # To avoid hard-coding a specific origin offset, we use the module
-        # half-height (12.75mm) minus half the keepout height as the offset
-        # from body centre, which is correct for the parametric model and
-        # close enough for JLCPCB (within ~0.76mm).
-        import math as _m
-        # Distance from module body centre to the centre of the antenna
-        # keepout zone, measured toward the antenna end.
-        module_half_h = RF_MODULE_BODY_HEIGHT_MM / 2.0  # 12.75 mm
-        antenna_offset = module_half_h - height / 2.0
-        # Antenna is at the "top" of the module (negative Y in local coords).
-        # Rotation rotates the antenna direction.
-        angle_rad = _m.radians(rot)
-        # In unrotated position, antenna points in -Y direction.
-        dx = -antenna_offset * _m.sin(angle_rad)
-        dy = -antenna_offset * _m.cos(angle_rad)
-        ax = cx + dx
-        ay = cy + dy
-        x0 = ax - width / 2.0
-        y0 = ay - height / 2.0
-        # Clamp to board bounds
-        x0 = max(0.0, min(x0, board_width - width))
-        y0 = max(0.0, min(y0, board_height - height))
+        x0, y0 = _antenna_origin_from_rf_position(
+            rf_position, width, height, board_width, board_height,
+        )
     else:
         # Fallback: top-right corner
         x0 = board_width - width
         y0 = 0.0
 
+    # Extend the keepout to the nearest board edge on the antenna side.
+    # The antenna needs clear copper all the way to the board edge.
+    # Determine which edge is closest to the keepout center.
+    keepout_center_y = y0 + height / 2.0
+    dist_to_top = keepout_center_y
+    dist_to_bottom = board_height - keepout_center_y
+    if dist_to_bottom <= dist_to_top:
+        # Antenna faces bottom edge — extend keepout to board bottom
+        y_bottom = board_height
+    else:
+        # Antenna faces top edge — extend keepout to board top
+        y0 = 0.0
+        y_bottom = y0 + height
+
     # Do NOT explicitly close -- KiCad auto-closes polygons for keepouts.
     polygon = (
         Point(x=x0, y=y0),
         Point(x=x0 + width, y=y0),
-        Point(x=x0 + width, y=y0 + height),
-        Point(x=x0, y=y0 + height),
+        Point(x=x0 + width, y=y_bottom),
+        Point(x=x0, y=y_bottom),
     )
     # Keepout on all copper layers for proper isolation
     layers: list[str] = [LAYER_F_CU, LAYER_B_CU]

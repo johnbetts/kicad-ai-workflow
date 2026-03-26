@@ -217,7 +217,7 @@ def test_find_capacitor_not_found_exotic_package() -> None:
 def test_find_ldo_not_found() -> None:
     """find_ldo returns None for unavailable voltage."""
     db = ComponentDB()
-    part = db.find_ldo(99.9)  # No 99.9V LDO in basic parts
+    db.find_ldo(99.9)  # No 99.9V LDO in basic parts
     # May or may not find; if found, should be far from target
     # The key point is it doesn't crash
 

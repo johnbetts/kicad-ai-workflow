@@ -459,7 +459,7 @@ def _collect_mcu_bus_nets(
     """
     from kicad_pipeline.models.requirements import PinFunction
 
-    _FUNCTION_TO_BUS: dict[PinFunction, tuple[str, str]] = {
+    function_to_bus: dict[PinFunction, tuple[str, str]] = {
         PinFunction.I2C_SDA: ("i2c", "sda"),
         PinFunction.I2C_SCL: ("i2c", "scl"),
         PinFunction.SPI_CLK: ("spi", "clk"),
@@ -477,7 +477,7 @@ def _collect_mcu_bus_nets(
         for pin in comp.pins:
             if not pin.function or not pin.net:
                 continue
-            mapping = _FUNCTION_TO_BUS.get(pin.function)
+            mapping = function_to_bus.get(pin.function)
             if mapping:
                 bus_dicts[mapping[0]][mapping[1]] = pin.net
 

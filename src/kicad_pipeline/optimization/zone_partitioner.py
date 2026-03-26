@@ -94,7 +94,7 @@ def _edge_affinity_for_zone(zone_name: str) -> str | None:
     affinities: dict[str, str] = {
         "power": "top",
         "relay": "right",
-        "ethernet": "bottom",
+        "ethernet": "top",
         "display": "left",
     }
     return affinities.get(zone_name)

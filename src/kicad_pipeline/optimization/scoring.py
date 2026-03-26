@@ -28,20 +28,23 @@ _WEIGHT_PLACEMENT: float = 0.20
 _WEIGHT_SIGNAL_INTEGRITY: float = 0.15
 _WEIGHT_THERMAL: float = 0.10
 
-# Fast-path sub-dimension weights (EE-aligned, v3 — 13 dimensions)
-_FAST_WEIGHT_COLLISION: float = 0.15
-_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.05
-_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.15
-_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.10
-_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.10
-_FAST_WEIGHT_MCU_PERIPHERAL: float = 0.10
-_FAST_WEIGHT_RF_EDGE: float = 0.05
-_FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.05
-_FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.05
-_FAST_WEIGHT_GROUP_COHESION: float = 0.05
-_FAST_WEIGHT_SUBGROUP_COHESION: float = 0.05
-_FAST_WEIGHT_GROUP_ISOLATION: float = 0.05
-_FAST_WEIGHT_PAD_FACING: float = 0.05
+# Fast-path sub-dimension weights (EE-aligned, v4 — 14 dimensions)
+# Each original weight is scaled by 0.9 to make room for constraint compliance (0.10).
+# Original weights summed to 1.0; new 13 x 0.9 + 0.10 = 1.00 exactly.
+_FAST_WEIGHT_COLLISION: float = 0.135
+_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.045
+_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.135
+_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.09
+_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.09
+_FAST_WEIGHT_MCU_PERIPHERAL: float = 0.09
+_FAST_WEIGHT_RF_EDGE: float = 0.045
+_FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.045
+_FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.045
+_FAST_WEIGHT_GROUP_COHESION: float = 0.045
+_FAST_WEIGHT_SUBGROUP_COHESION: float = 0.045
+_FAST_WEIGHT_GROUP_ISOLATION: float = 0.045
+_FAST_WEIGHT_PAD_FACING: float = 0.045
+_FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.10
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -1017,11 +1020,74 @@ def _score_pad_facing(
     return (_clamp01(sum(scores) / len(scores)), tuple(issues[:10]))
 
 
+def _score_constraint_compliance(
+    positions: dict[str, tuple[float, float]],
+    requirements: ProjectRequirements | None,
+) -> tuple[float, list[str]]:
+    """Score constraint compliance. Returns (score, issues).
+
+    Checks proximity and ordering constraints resolved from requirements.
+    Returns 1.0 if there are no constraints or requirements is None.
+    """
+    if requirements is None:
+        return 1.0, []
+    try:
+        from kicad_pipeline.optimization.constraint_resolver import resolve_constraints
+
+        constraints = resolve_constraints(requirements)
+    except Exception:
+        return 1.0, []
+
+    if not constraints.proximity and not constraints.ordering and not constraints.groups:
+        return 1.0, []
+
+    total = len(constraints.proximity) + len(constraints.ordering) + len(constraints.groups)
+    violations = 0
+    issues: list[str] = []
+
+    # Check proximity constraints
+    for prox in constraints.proximity:
+        if prox.ref not in positions or prox.target_ref not in positions:
+            continue
+        rx, ry = positions[prox.ref]
+        tx, ty = positions[prox.target_ref]
+        dist = math.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
+        if dist > prox.max_distance_mm:
+            violations += 1
+            issues.append(
+                f"{prox.ref} {dist:.0f}mm from {prox.target_ref} "
+                f"(max {prox.max_distance_mm:.0f})"
+            )
+
+    # Check ordering constraints
+    for chain in constraints.ordering:
+        present = [r for r in chain.refs if r in positions]
+        if len(present) < 2:
+            continue
+        xs = [positions[r][0] for r in present]
+        ys = [positions[r][1] for r in present]
+        use_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+        vals = [positions[r][0 if use_x else 1] for r in present]
+        out_of_order = sum(
+            1 for i in range(len(vals) - 1) if vals[i] > vals[i + 1] + 1.0
+        )
+        if out_of_order > 0:
+            violations += 1
+            issues.append(
+                f"Chain '{chain.group}' has {out_of_order} ordering violation(s)"
+            )
+
+    if total == 0:
+        return 1.0, []
+    score = max(0.0, 1.0 - violations / total)
+    return score, issues[:5]
+
+
 def _gather_placement_subdimensions(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
 ) -> dict[str, tuple[float, tuple[str, ...]]]:
-    """Compute all 13 placement sub-dimension scores.
+    """Compute all 14 placement sub-dimension scores.
 
     Returns a dict mapping dimension name to ``(score, issues)`` pairs.
     """
@@ -1037,6 +1103,8 @@ def _gather_placement_subdimensions(
     subgroup_score, subgroup_issues = _score_subgroup_cohesion(pcb, requirements)
     grp_isolation_score, grp_isolation_issues = _score_group_isolation(pcb, requirements)
     pad_facing_score, pad_facing_issues = _score_pad_facing(pcb, requirements)
+    pos_2d = _fp_position_dict(pcb)
+    constraint_score, constraint_issues = _score_constraint_compliance(pos_2d, requirements)
 
     return {
         "collision": (collision_score, tuple(collision_issues[:5])),
@@ -1051,6 +1119,7 @@ def _gather_placement_subdimensions(
         "subgroup": (subgroup_score, tuple(subgroup_issues[:5])),
         "grp_isolation": (grp_isolation_score, tuple(grp_isolation_issues[:5])),
         "pad_facing": (pad_facing_score, tuple(pad_facing_issues[:5])),
+        "constraint_compliance": (constraint_score, tuple(constraint_issues[:5])),
     }
 
 
@@ -1070,6 +1139,7 @@ def _build_fast_breakdown(
         ("subgroup", "Subgroup Cohesion", _FAST_WEIGHT_SUBGROUP_COHESION),
         ("grp_isolation", "Group Isolation", _FAST_WEIGHT_GROUP_ISOLATION),
         ("pad_facing", "Pad Facing", _FAST_WEIGHT_PAD_FACING),
+        ("constraint_compliance", "Constraint Compliance", _FAST_WEIGHT_CONSTRAINT_COMPLIANCE),
     )
     return tuple(
         ScoreDetail(
@@ -1088,7 +1158,7 @@ def compute_fast_placement_score(
 ) -> QualityScore:
     """Compute a placement-focused quality score without full validation.
 
-    Evaluates 13 EE-aligned placement sub-dimensions and returns a composite
+    Evaluates 14 EE-aligned placement sub-dimensions and returns a composite
     :class:`QualityScore`.
 
     Args:
@@ -1100,7 +1170,7 @@ def compute_fast_placement_score(
     """
     dims = _gather_placement_subdimensions(pcb, requirements)
 
-    # Weighted placement composite (13 dimensions)
+    # Weighted placement composite (14 dimensions)
     placement_score = (
         _FAST_WEIGHT_COLLISION * dims["collision"][0]
         + _FAST_WEIGHT_SUBCIRCUIT_COHESION * dims["cohesion"][0]
@@ -1115,6 +1185,7 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_SUBGROUP_COHESION * dims["subgroup"][0]
         + _FAST_WEIGHT_GROUP_ISOLATION * dims["grp_isolation"][0]
         + _FAST_WEIGHT_PAD_FACING * dims["pad_facing"][0]
+        + _FAST_WEIGHT_CONSTRAINT_COMPLIANCE * dims["constraint_compliance"][0]
     )
 
     manufacturing_score = _clamp01(0.5 + 0.5 * dims["collision"][0])

@@ -71,6 +71,10 @@ class Component:
     mpn: str | None = None
     manufacturer: str | None = None
     pins: tuple[Pin, ...] = ()
+    placement_group: str | None = None  # e.g. "buck_input_stage"
+    placement_near: str | None = None  # e.g. "U1:VIN" (ref:pin format)
+    placement_order: int | None = None  # sequence within group (lower = earlier)
+    placement_near_max_mm: float | None = None  # max distance for placement_near
 
     def get_pin(self, number: str) -> Pin | None:
         """Return pin by number, or None if not found."""

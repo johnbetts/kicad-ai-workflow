@@ -82,6 +82,7 @@ class PlacementRule(enum.Enum):
     COMPONENT_OFF_BOARD = "component_off_board"
     ZONE_OVERFLOW = "zone_overflow"
     GROUP_CONTAMINATION = "group_contamination"
+    CONSTRAINT_COMPLIANCE = "constraint_compliance"
 
 
 # ---------------------------------------------------------------------------
@@ -583,11 +584,9 @@ def _check_thermal_adjacency(
         val_desc = f"{comp.value} {comp.description or ''}".upper()
         prefix = _ref_prefix(comp.ref)
         # Only large thermal sources: relays, power ICs, power inductors
-        if prefix == "K":
-            power_refs.append(comp.ref)
-        elif prefix == "U" and any(kw in val_desc for kw in power_keywords):
-            power_refs.append(comp.ref)
-        elif prefix == "L" and "INDUCTOR" in val_desc and "FERRITE" not in val_desc:
+        if (prefix == "K"
+                or (prefix == "U" and any(kw in val_desc for kw in power_keywords))
+                or (prefix == "L" and "INDUCTOR" in val_desc and "FERRITE" not in val_desc)):
             power_refs.append(comp.ref)
         if any(kw in val_desc for kw in sensitive_keywords):
             sensitive_refs.append(comp.ref)
@@ -1184,6 +1183,33 @@ def _compute_grade(violations: tuple[PlacementViolation, ...]) -> str:
     return "F"
 
 
+def _check_constraint_compliance(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> list[PlacementViolation]:
+    """Check placement constraint compliance using the constraint auditor."""
+    try:
+        from kicad_pipeline.validation.constraint_auditor import (
+            audit_placement_constraints,
+        )
+        audit_violations = audit_placement_constraints(pcb, requirements)
+    except Exception:
+        return []
+
+    violations: list[PlacementViolation] = []
+    for av in audit_violations:
+        violations.append(PlacementViolation(
+            rule=PlacementRule.CONSTRAINT_COMPLIANCE,
+            severity=av.severity,
+            refs=av.refs,
+            message=av.message,
+            current_value=av.measured_value,
+            threshold=av.threshold,
+            suggested_position=None,
+        ))
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1267,6 +1293,9 @@ def review_placement(
     )
     all_violations.extend(
         _check_group_contamination(pcb, requirements)
+    )
+    all_violations.extend(
+        _check_constraint_compliance(pcb, requirements)
     )
 
     violations = tuple(all_violations)

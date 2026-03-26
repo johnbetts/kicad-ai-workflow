@@ -169,8 +169,8 @@ def test_estimate_cost_empty_bom() -> None:
 
 def test_generate_gerber_zip_returns_bytes() -> None:
     """generate_gerber_zip returns valid zip bytes."""
-    import zipfile
     import io
+    import zipfile
 
     from kicad_pipeline.production.packager import generate_gerber_zip
 

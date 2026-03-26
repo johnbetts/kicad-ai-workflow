@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,10 +28,6 @@ from kicad_pipeline.pcb.footprint_agent import (
     audit_board,
     create_footprint,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -129,12 +124,14 @@ class TestCreateFootprint:
         assert fp.manufacturer is None
 
     def test_raises_footprint_error_on_failure(self) -> None:
-        with patch(
-            "kicad_pipeline.pcb.footprint_agent.footprint_for_component",
-            side_effect=ValueError("bad footprint"),
+        with (
+            patch(
+                "kicad_pipeline.pcb.footprint_agent.footprint_for_component",
+                side_effect=ValueError("bad footprint"),
+            ),
+            pytest.raises(FootprintError, match="Failed to create footprint"),
         ):
-            with pytest.raises(FootprintError, match="Failed to create footprint"):
-                create_footprint(ref="X1", value="bad", fp_id="INVALID_PACKAGE")
+            create_footprint(ref="X1", value="bad", fp_id="INVALID_PACKAGE")
 
     def test_has_3d_model(self) -> None:
         fp = create_footprint(ref="R1", value="10k", fp_id="R_0805")

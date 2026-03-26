@@ -1,0 +1,6 @@
+board	commit	grade	collisions	violations	status	description
+relay_group	3613627	baseline	    Collisions: 1.000 (w=0.14)|PASSED: 39  |  VIOLATIONS: 0|	keep	baseline
+power_chain	3613627	baseline	    Collisions: 0.950 (w=0.14)|PASSED: 1  |  VIOLATIONS: 12|	keep	baseline
+mcu_core	3613627	baseline	    Collisions: 1.000 (w=0.14)|PASSED: 9  |  VIOLATIONS: 6|	keep	baseline
+analog_input	3613627	baseline	    Collisions: 1.000 (w=0.14)|PASSED: 50  |  VIOLATIONS: 16|	keep	baseline
+ethernet	3613627	baseline	    Collisions: 0.950 (w=0.14)|PASSED: 22  |  VIOLATIONS: 5|	keep	baseline

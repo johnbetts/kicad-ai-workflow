@@ -25,22 +25,20 @@ Key pin assignments:
     Pin 37 (TXD0) — UART TX
     Pin 38 (IO2)  — Status LED via R5 + D1
 
-Board: 45mm x 35mm, single FeatureBlock "MCU Core".
+Board: 70mm x 50mm, single FeatureBlock "MCU Core".
 """
 
 from __future__ import annotations
 
-import math
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Ensure the package is importable when running from the repo root.
 _repo = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_repo / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from kicad_pipeline.models.requirements import (
+from _train_common import (  # noqa: E402
     Component,
     FeatureBlock,
     MechanicalConstraints,
@@ -51,11 +49,14 @@ from kicad_pipeline.models.requirements import (
     PinType,
     ProjectInfo,
     ProjectRequirements,
+    build_group_map,
+    build_pcb,
+    compute_fast_placement_score,
+    optimize_placement_ee,
+    print_component_positions,
+    write_and_compare_pcb,
+    write_project_file,
 )
-from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
-from kicad_pipeline.optimization.scoring import compute_fast_placement_score
-from kicad_pipeline.pcb.builder import build_pcb, write_pcb
-from kicad_pipeline.project_file import write_project_file
 
 # ---------------------------------------------------------------------------
 # Footprint identifiers
@@ -68,6 +69,27 @@ _LED0805_FP = "LED_0805"
 _USBC_FP = "USB-C"
 _SW_FP = "SW_Push_4.5x4.5mm"
 _HEADER_FP = "PinHeader_1x04_P2.54mm"
+
+# ---------------------------------------------------------------------------
+# Board and design rule constants
+# ---------------------------------------------------------------------------
+
+_BOARD_WIDTH_MM = 70.0
+_BOARD_HEIGHT_MM = 50.0
+
+# Design rule thresholds (mm)
+_DECOUP_TO_U1_MAX_MM = 15.0
+_USBC_EDGE_MAX_MM = 5.0
+_CC_TO_J1_MAX_MM = 8.0
+_UART_EDGE_MAX_MM = 6.0
+_ANTENNA_EDGE_MAX_MM = 5.0
+_ANTENNA_HALF_BODY_MM = 12.75
+_PULLUP_TO_U1_MAX_MM = 18.0
+_BUTTON_EDGE_MAX_MM = 10.0
+_LED_PAIR_MAX_MM = 8.0
+_LED_TO_MCU_MAX_MM = 20.0
+_EN_DEBOUNCE_TO_R1_MAX_MM = 8.0
+_EN_DEBOUNCE_TO_SW2_MAX_MM = 10.0
 
 # ---------------------------------------------------------------------------
 # Component definitions
@@ -517,7 +539,7 @@ def _build_requirements() -> ProjectRequirements:
     """Assemble full MCU core ProjectRequirements.
 
     Single FeatureBlock "MCU Core" containing all components.
-    Board size: 45mm x 35mm.
+    Board size: 70mm x 50mm.
     """
     components = (
         _make_esp32(),
@@ -557,7 +579,7 @@ def _build_requirements() -> ProjectRequirements:
         features=(mcu_feature,),
         components=components,
         nets=nets,
-        mechanical=MechanicalConstraints(board_width_mm=45, board_height_mm=35),
+        mechanical=MechanicalConstraints(board_width_mm=70, board_height_mm=50),
     )
 
 
@@ -599,8 +621,8 @@ def _nearest_edge_name(
 
 def _check_design_rules(
     fp_map: dict[str, tuple[float, float, float]],
-    board_w: float = 45.0,
-    board_h: float = 35.0,
+    board_w: float = _BOARD_WIDTH_MM,
+    board_h: float = _BOARD_HEIGHT_MM,
 ) -> None:
     """Check MCU core design rules and print compliance report.
 
@@ -673,8 +695,8 @@ def _check_design_rules(
     # 1. Decoupling cap proximity to U1
     # ---------------------------------------------------------------
     print("--- Decoupling Cap Proximity (C1/C2 within 3mm of U1) ---")
-    _check_dist("C1", "U1", 15.0, "HF decoupling (C1)")
-    _check_dist("C2", "U1", 15.0, "Bulk decoupling (C2)")
+    _check_dist("C1", "U1", _DECOUP_TO_U1_MAX_MM, "HF decoupling (C1)")
+    _check_dist("C2", "U1", _DECOUP_TO_U1_MAX_MM, "Bulk decoupling (C2)")
     print()
 
     # Crystal check removed — WROOM-1 has internal crystal; Y1/C3/C4 removed
@@ -683,17 +705,17 @@ def _check_design_rules(
     # 3. USB-C at board edge
     # ---------------------------------------------------------------
     print("--- USB-C Edge Placement (J1 < 2mm from edge) ---")
-    _check_edge("J1", 5.0, "USB-C connector")
+    _check_edge("J1", _USBC_EDGE_MAX_MM, "USB-C connector")
     # CC resistors near J1
-    _check_dist("R3", "J1", 8.0, "CC1 resistor (R3)")
-    _check_dist("R4", "J1", 8.0, "CC2 resistor (R4)")
+    _check_dist("R3", "J1", _CC_TO_J1_MAX_MM, "CC1 resistor (R3)")
+    _check_dist("R4", "J1", _CC_TO_J1_MAX_MM, "CC2 resistor (R4)")
     print()
 
     # ---------------------------------------------------------------
     # 4. UART header at board edge
     # ---------------------------------------------------------------
     print("--- UART Header Edge Placement (J2 < 3mm from edge) ---")
-    _check_edge("J2", 6.0, "UART header")
+    _check_edge("J2", _UART_EDGE_MAX_MM, "UART header")
     print()
 
     # ---------------------------------------------------------------
@@ -711,7 +733,7 @@ def _check_design_rules(
         # At rot=90, antenna end is at x + 12.75mm (facing right).
         # At rot=180, antenna end is at y + 12.75mm (facing bottom).
         # At rot=270, antenna end is at x - 12.75mm (facing left).
-        antenna_offset = 12.75  # half body height
+        antenna_offset = _ANTENNA_HALF_BODY_MM
         import math
 
         rad = math.radians(u1_rot)
@@ -723,9 +745,9 @@ def _check_design_rules(
         ant_edge = min(ant_x, board_w - ant_x, ant_y, board_h - ant_y)
         label = (
             f"  Antenna tip at ({ant_x:.1f}, {ant_y:.1f}), "
-            f"{ant_edge:.1f}mm from nearest edge (max 5mm)"
+            f"{ant_edge:.1f}mm from nearest edge (max {_ANTENNA_EDGE_MAX_MM}mm)"
         )
-        if ant_edge > 5.0:
+        if ant_edge > _ANTENNA_EDGE_MAX_MM:
             violations.append(f"{label} VIOLATION")
             print(f"{label} ** VIOLATION **")
         else:
@@ -740,32 +762,32 @@ def _check_design_rules(
     # 6. Pull-up resistor proximity
     # ---------------------------------------------------------------
     print("--- Pull-up Proximity (R1/R2 within 5mm of U1) ---")
-    _check_dist("R1", "U1", 18.0, "EN pull-up (R1)")
-    _check_dist("R2", "U1", 18.0, "BOOT pull-up (R2)")
+    _check_dist("R1", "U1", _PULLUP_TO_U1_MAX_MM, "EN pull-up (R1)")
+    _check_dist("R2", "U1", _PULLUP_TO_U1_MAX_MM, "BOOT pull-up (R2)")
     print()
 
     # ---------------------------------------------------------------
     # 7. Boot/Reset buttons accessible (near edge)
     # ---------------------------------------------------------------
     print("--- Button Accessibility (SW1/SW2 < 8mm from edge) ---")
-    _check_edge("SW1", 10.0, "BOOT button")
-    _check_edge("SW2", 10.0, "RESET button")
+    _check_edge("SW1", _BUTTON_EDGE_MAX_MM, "BOOT button")
+    _check_edge("SW2", _BUTTON_EDGE_MAX_MM, "RESET button")
     print()
 
     # ---------------------------------------------------------------
     # 8. LED + resistor proximity
     # ---------------------------------------------------------------
     print("--- LED Proximity (R5/D1 near each other, < 5mm) ---")
-    _check_dist("R5", "D1", 8.0, "LED pair (R5-D1)")
-    _check_dist("R5", "U1", 20.0, "LED resistor to MCU (R5-U1)")
+    _check_dist("R5", "D1", _LED_PAIR_MAX_MM, "LED pair (R5-D1)")
+    _check_dist("R5", "U1", _LED_TO_MCU_MAX_MM, "LED resistor to MCU (R5-U1)")
     print()
 
     # ---------------------------------------------------------------
     # 9. EN debounce cap near R1/SW2
     # ---------------------------------------------------------------
     print("--- EN Debounce (C5 near R1 and SW2) ---")
-    _check_dist("C5", "R1", 8.0, "EN debounce cap (C5-R1)")
-    _check_dist("C5", "SW2", 10.0, "EN debounce cap (C5-SW2)")
+    _check_dist("C5", "R1", _EN_DEBOUNCE_TO_R1_MAX_MM, "EN debounce cap (C5-R1)")
+    _check_dist("C5", "SW2", _EN_DEBOUNCE_TO_SW2_MAX_MM, "EN debounce cap (C5-SW2)")
     print()
 
     # ---------------------------------------------------------------
@@ -818,8 +840,8 @@ def _print_pin_net_map(requirements: ProjectRequirements) -> None:
 
 def main() -> None:
     """Build MCU core board, optimize, render, and report."""
-    output_dir = _repo / "output"
-    output_dir.mkdir(exist_ok=True)
+    output_dir = _repo / "output" / "train_mcu_core"
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_png = output_dir / "train_mcu_core_placement.png"
 
     print("=== MCU Core Training Board ===")
@@ -829,7 +851,7 @@ def main() -> None:
     requirements = _build_requirements()
     print(f"Components: {len(requirements.components)}")
     print(f"Nets:       {len(requirements.nets)}")
-    print(f"Board:      45 x 35 mm")
+    print("Board:      70 x 50 mm")
     print()
 
     # 2. Build PCB (no routing)
@@ -842,62 +864,9 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # ------------------------------------------------------------------
-    # Post-placement corrections: apply reference-guided positions.
-    #
-    # The EE optimizer doesn't know about our reference board layout.
-    # We apply targeted corrections informed by the reference positions
-    # and electrical design rules.  The reference layout has:
-    #   - U1 (ESP32) at right side, antenna toward top edge
-    #   - J1 (USB-C) at top edge, left of U1
-    #   - C1 (HF decoupling) directly above U1 near 3V3 pin
-    #   - R3/R4 (CC resistors) near J1
-    #   - SW1/SW2 (buttons) at left edge, grouped together
-    #   - D1/R5 (LED pair) at left-center, near MCU IO2
-    #   - J2 (UART header) at bottom edge
-    #   - C5 (EN debounce) near SW2 and R1
-    #   - R1/R2 (pull-ups) near MCU EN/BOOT pins
-    # ------------------------------------------------------------------
-    from dataclasses import replace as _dc_replace
-    from kicad_pipeline.models.pcb import Point
-
-    # Reference-guided target positions (from the human-edited reference
-    # board at output/training_reference_boards/train_mcu_core.kicad_pcb).
-    # Components not in the reference (Y1, C3, C4) are ignored.
-    # Positions are tuned to minimise drift from the human-edited
-    # reference board while simultaneously satisfying every design-
-    # rule distance constraint.  Components with no feasible reference
-    # match (R3 — CC1 must be near J1 but ref placed it far away) are
-    # positioned for electrical correctness and accepted as outliers.
-    _REF_POSITIONS: dict[str, tuple[float, float, float]] = {
-        # ref: (x, y, rotation)
-        "U1": (31.0, 19.0, 180.0),   # ESP32 right side, antenna toward bottom edge
-        "C1": (32.8, 5.0, 0.0),      # HF decoupling above U1 near 3V3 pin
-        "C2": (20.5, 12.3, 0.0),     # Bulk decoupling, near U1
-        "C5": (10.7, 22.5, 0.0),     # EN debounce between R1 and SW2
-        "J1": (14.1, 2.5, 0.0),      # USB-C at top edge
-        "J2": (12.7, 33.0, 180.0),   # UART at bottom edge
-        "R1": (15.7, 23.6, 0.0),     # EN pull-up, within 18mm of U1
-        "R2": (16.5, 12.0, 180.0),   # BOOT pull-up, near U1
-        "R3": (11.0, 8.0, 90.0),     # CC1 resistor near J1 (USB-C)
-        "R4": (22.0, 2.5, 0.0),      # CC2 resistor near J1 (USB-C)
-        "R5": (13.8, 20.0, 0.0),     # LED resistor (exact reference match)
-        "D1": (8.9, 20.2, 0.0),      # Status LED (exact reference match)
-        "SW1": (4.5, 20.5, 0.0),     # BOOT button at left edge
-        "SW2": (4.5, 15.0, 0.0),     # RESET button at left edge, near SW1
-    }
-
-    new_fps: list[object] = []
-    for fp in optimized_pcb.footprints:
-        if fp.ref in _REF_POSITIONS:
-            tx, ty, trot = _REF_POSITIONS[fp.ref]
-            fp = _dc_replace(
-                fp,
-                position=Point(x=tx, y=ty),
-                rotation=trot,
-            )
-        new_fps.append(fp)
-    optimized_pcb = _dc_replace(optimized_pcb, footprints=tuple(new_fps))
+    # Post-placement overrides REMOVED — optimizer must produce correct layout.
+    # Reference positions (from human-edited board) are used for SCORING only,
+    # not for overriding the optimizer.  See docs/design_rules/mcu_core.md.
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
@@ -919,10 +888,7 @@ def main() -> None:
 
     # 5. Render placement PNG
     print(f"Rendering placement to {output_png} ...")
-    group_map: dict[str, str] = {}
-    for feat in requirements.features:
-        for ref in feat.components:
-            group_map[ref] = feat.name
+    group_map = build_group_map(requirements)
 
     from kicad_pipeline.visualization.placement_render import render_placement
 
@@ -937,55 +903,9 @@ def main() -> None:
     print(f"  Saved: {output_png}")
     print()
 
-    # 6. Write KiCad PCB file
+    # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_mcu_core.kicad_pcb"
-
-    # Preserve existing PCB if it exists (may be human-edited reference)
-    ref_dir = output_dir / "training_reference_boards"
-    ref_dir.mkdir(exist_ok=True)
-    if pcb_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = ref_dir / f"train_mcu_core_{timestamp}.kicad_pcb"
-        shutil.copy2(pcb_path, backup)
-        print(f"  Backed up existing PCB to {backup}")
-
-    print(f"Writing KiCad PCB to {pcb_path} ...")
-    write_pcb(optimized_pcb, pcb_path, fill_zones=False)
-    print(f"  KiCad PCB: {pcb_path}")
-
-    # Compare against most recent reference if it exists
-    ref_files = sorted(ref_dir.glob("train_mcu_core*.kicad_pcb"))
-    if ref_files:
-        latest_ref = ref_files[-1]
-        print(f"\n  Comparing against reference: {latest_ref.name}")
-        from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
-
-        ref_positions = positions_from_pcb_file(latest_ref)
-        gen_positions = positions_from_pcb_file(pcb_path)
-
-        print(
-            f"  {'Ref':<8} {'Gen X':>7} {'Ref X':>7} {'dX':>6}"
-            f" {'Gen Y':>7} {'Ref Y':>7} {'dY':>6} {'Dist':>6}"
-        )
-        total_drift = 0.0
-        count = 0
-        for ref in sorted(set(gen_positions) & set(ref_positions)):
-            if ref.startswith("H"):
-                continue
-            gx, gy, _gr = gen_positions[ref]
-            rx, ry, _rr = ref_positions[ref]
-            dist = math.sqrt((gx - rx) ** 2 + (gy - ry) ** 2)
-            total_drift += dist
-            count += 1
-            marker = "***" if dist > 3 else ""
-            print(
-                f"  {ref:<8} {gx:>7.1f} {rx:>7.1f} {gx - rx:>+6.1f}"
-                f" {gy:>7.1f} {ry:>7.1f} {gy - ry:>+6.1f}"
-                f" {dist:>6.1f} {marker}"
-            )
-        if count:
-            print(f"  Average drift from reference: {total_drift / count:.1f}mm")
-    print()
+    write_and_compare_pcb(optimized_pcb, pcb_path)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_mcu_core", output_dir)
@@ -993,17 +913,7 @@ def main() -> None:
     print()
 
     # 8. Print component positions
-    print("Component positions:")
-    print(f"  {'Ref':<6} {'X':>8} {'Y':>8} {'Rot':>6}")
-    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*6}")
-    fp_map: dict[str, tuple[float, float, float]] = {}
-    for fp in sorted(optimized_pcb.footprints, key=lambda f: f.ref):
-        print(
-            f"  {fp.ref:<6} {fp.position.x:>8.2f} "
-            f"{fp.position.y:>8.2f} {fp.rotation:>6.1f}"
-        )
-        fp_map[fp.ref] = (fp.position.x, fp.position.y, fp.rotation)
-    print()
+    fp_map = print_component_positions(optimized_pcb)
 
     # 9. Design rules compliance check
     _check_design_rules(fp_map)

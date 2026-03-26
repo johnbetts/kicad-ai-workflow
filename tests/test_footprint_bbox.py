@@ -7,9 +7,9 @@ import math
 import pytest
 
 from kicad_pipeline.models.pcb import (
-    FootprintBBox,
     Footprint,
     Footprint3DModel,
+    FootprintBBox,
     OriginType,
     Pad,
     Point,
@@ -40,7 +40,10 @@ _COLLISION_POS_Y: float = 10.0
 # ---------------------------------------------------------------------------
 
 
-def _make_pad(number: str, x: float, y: float, sx: float = _DEFAULT_PAD_SX, sy: float = _DEFAULT_PAD_SY) -> Pad:
+def _make_pad(
+    number: str, x: float, y: float,
+    sx: float = _DEFAULT_PAD_SX, sy: float = _DEFAULT_PAD_SY,
+) -> Pad:
     """Create a minimal Pad for testing."""
     return Pad(
         number=number,

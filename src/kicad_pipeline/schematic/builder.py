@@ -184,6 +184,11 @@ def _power_lib_symbol_sexp(lib_id: str, net_name: str) -> SExpNode:
 
     # Fallback: minimal definition if KiCad library not available
     log.warning("Power symbol %r not found in KiCad library; using fallback", net_name)
+    return _power_lib_symbol_fallback(lib_id, net_name, short)
+
+
+def _power_lib_symbol_fallback(lib_id: str, net_name: str, short: str) -> SExpNode:
+    """Build a minimal fallback power symbol when the KiCad library is unavailable."""
     is_gnd = net_name in _GND_NETS
 
     _stroke_default: SExpNode = ["stroke", ["width", 0], ["type", "default"]]
@@ -968,29 +973,13 @@ def build_schematic(
     # ------------------------------------------------------------------
     # Step 3: Compute symbol extents for overlap-free placement
     # ------------------------------------------------------------------
-    symbol_extents: dict[str, SymbolExtent] = {}
-    for comp in requirements.components:
-        sym = comp_lib_sym[comp.ref]
-        symbol_extents[comp.ref] = compute_symbol_extent(sym, comp.ref, comp.value)
+    symbol_extents = _compute_symbol_extents(requirements, comp_lib_sym)
 
     # ------------------------------------------------------------------
     # Step 4: Compute positions (extent-aware spacing)
     # ------------------------------------------------------------------
-    all_refs = [c.ref for c in requirements.components]
-    pin_count_map = {c.ref: len(c.pins) for c in requirements.components}
     paper = _select_page_size(requirements)
-    adjacency = _build_signal_adjacency(requirements)
-
-    if compact:
-        positions = layout_compact(
-            all_refs, pin_count_map=pin_count_map, adjacency=adjacency,
-            symbol_extents=symbol_extents,
-        )
-    else:
-        positions = layout_schematic(
-            all_refs, feature_map, pin_count_map=pin_count_map, paper=paper,
-            adjacency=adjacency, symbol_extents=symbol_extents,
-        )
+    positions = _compute_positions(requirements, feature_map, symbol_extents, paper, compact)
 
     symbols_list = _create_symbol_instances(
         requirements, comp_lib_sym, positions, project_name,
@@ -1014,6 +1003,72 @@ def build_schematic(
         len(power_syms), len(no_connects),
     )
 
+    return _assemble_schematic(
+        lib_symbols_list=lib_symbols_list,
+        symbols_list=symbols_list,
+        power_syms=power_syms,
+        all_wires=all_wires,
+        all_junctions=all_junctions,
+        no_connects=no_connects,
+        all_local_labels=all_local_labels,
+        all_global_labels=all_global_labels,
+        paper=paper,
+        requirements=requirements,
+    )
+
+
+def _compute_symbol_extents(
+    requirements: ProjectRequirements,
+    comp_lib_sym: dict[str, LibSymbol],
+) -> dict[str, SymbolExtent]:
+    """Step 3: Compute symbol extents for overlap-free placement."""
+    return {
+        comp.ref: compute_symbol_extent(comp_lib_sym[comp.ref], comp.ref, comp.value)
+        for comp in requirements.components
+    }
+
+
+def _compute_positions(
+    requirements: ProjectRequirements,
+    feature_map: dict[str, str],
+    symbol_extents: dict[str, SymbolExtent],
+    paper: str,
+    compact: bool,
+) -> dict[str, Point]:
+    """Step 4: Compute component positions using zone-based or compact layout."""
+    all_refs = [c.ref for c in requirements.components]
+    pin_count_map = {c.ref: len(c.pins) for c in requirements.components}
+    adjacency = _build_signal_adjacency(requirements)
+    if compact:
+        return layout_compact(
+            all_refs,
+            pin_count_map=pin_count_map,
+            adjacency=adjacency,
+            symbol_extents=symbol_extents,
+        )
+    return layout_schematic(
+        all_refs,
+        feature_map,
+        pin_count_map=pin_count_map,
+        paper=paper,
+        adjacency=adjacency,
+        symbol_extents=symbol_extents,
+    )
+
+
+def _assemble_schematic(
+    lib_symbols_list: list[LibSymbol],
+    symbols_list: list[SymbolInstance],
+    power_syms: list[PowerSymbol],
+    all_wires: list[Wire],
+    all_junctions: list[Junction],
+    no_connects: list[NoConnect],
+    all_local_labels: list[Label],
+    all_global_labels: list[GlobalLabel],
+    paper: str,
+    requirements: ProjectRequirements,
+) -> Schematic:
+    """Step 9: Assemble and return the complete Schematic dataclass."""
     return Schematic(
         lib_symbols=tuple(lib_symbols_list),
         symbols=tuple(symbols_list),
@@ -1547,6 +1602,36 @@ def _sheet_instances_section(
     return node
 
 
+def _append_schematic_body(
+    root: list[SExpNode],
+    schematic: Schematic,
+    project_name: str,
+    sym_path: str,
+) -> None:
+    """Append symbol instances, wires, junctions, labels, and sheets to *root*."""
+    for inst in schematic.symbols:
+        root.append(_symbol_instance_sexp(inst, project_name=project_name, sheet_path=sym_path))
+    for ps in schematic.power_symbols:
+        root.append(_power_symbol_sexp(ps, project_name=project_name, sheet_path=sym_path))
+
+    for wire in schematic.wires:
+        root.append(_wire_sexp(wire))
+    for j in schematic.junctions:
+        root.append(_junction_sexp(j))
+    for nc in schematic.no_connects:
+        root.append(["no_connect", ["at", nc.position.x, nc.position.y], ["uuid", nc.uuid]])
+
+    for label in schematic.labels:
+        root.append(_label_sexp(label))
+    for gl in schematic.global_labels:
+        root.append(_global_label_sexp(gl))
+    for hl in schematic.hierarchical_labels:
+        root.append(_hierarchical_label_sexp(hl))
+
+    for sheet in schematic.sheets:
+        root.append(_sheet_sexp(sheet))
+
+
 def schematic_to_sexp(
     schematic: Schematic,
     project_name: str = "kicad-ai",
@@ -1603,32 +1688,8 @@ def schematic_to_sexp(
     # lib_symbols section
     root.append(_lib_symbols_section(schematic))
 
-    # Symbol instances (regular + power)
     sym_path = instance_path if instance_path else f"/{root_uuid}"
-    for inst in schematic.symbols:
-        root.append(_symbol_instance_sexp(inst, project_name=project_name, sheet_path=sym_path))
-    for ps in schematic.power_symbols:
-        root.append(_power_symbol_sexp(ps, project_name=project_name, sheet_path=sym_path))
-
-    # Wires, junctions, no-connects
-    for wire in schematic.wires:
-        root.append(_wire_sexp(wire))
-    for j in schematic.junctions:
-        root.append(_junction_sexp(j))
-    for nc in schematic.no_connects:
-        root.append(["no_connect", ["at", nc.position.x, nc.position.y], ["uuid", nc.uuid]])
-
-    # Labels
-    for label in schematic.labels:
-        root.append(_label_sexp(label))
-    for gl in schematic.global_labels:
-        root.append(_global_label_sexp(gl))
-    for hl in schematic.hierarchical_labels:
-        root.append(_hierarchical_label_sexp(hl))
-
-    # Sheet symbols (hierarchical sub-sheets)
-    for sheet in schematic.sheets:
-        root.append(_sheet_sexp(sheet))
+    _append_schematic_body(root, schematic, project_name, sym_path)
 
     # KiCad 9 canonical sheet_instances section
     root.append(_sheet_instances_section(schematic, instance_path, root_uuid))

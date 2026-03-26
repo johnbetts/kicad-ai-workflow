@@ -275,50 +275,13 @@ def export_for_jlcpcb(
     drill_dir = gerber_dir  # JLCPCB expects drills alongside gerbers.
 
     if kicad_cli:
-        # Export gerbers via kicad-cli.
-        gerber_cmd = [
-            kicad_cli, "pcb", "export", "gerbers",
-            "--output", str(gerber_dir) + "/",
-            str(pcb_path),
-        ]
-        try:
-            result = subprocess.run(
-                gerber_cmd, capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode != 0:
-                errors.append(f"Gerber export failed: {result.stderr[:300]}")
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            errors.append(f"Gerber export error: {exc}")
-
-        # Export drill files.
-        drill_cmd = [
-            kicad_cli, "pcb", "export", "drill",
-            "--output", str(drill_dir) + "/",
-            "--format", "excellon",
-            "--excellon-units", "mm",
-            str(pcb_path),
-        ]
-        try:
-            result = subprocess.run(
-                drill_cmd, capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode != 0:
-                errors.append(f"Drill export failed: {result.stderr[:300]}")
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            errors.append(f"Drill export error: {exc}")
+        _run_kicad_cli_exports(kicad_cli, pcb_path, gerber_dir, drill_dir, errors)
     else:
         errors.append(
             "kicad-cli not found — using internal pipeline for gerber/drill"
         )
 
-    # Create zip of gerber + drill files.
-    zip_path: Path | None = None
-    gerber_files = list(gerber_dir.glob("*"))
-    if gerber_files:
-        zip_path = output_dir / f"{name}_gerbers.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in gerber_files:
-                zf.write(f, f.name)
+    zip_path = _zip_gerber_files(gerber_dir, output_dir, name)
 
     # BOM and CPL use the internal pipeline (kicad-cli doesn't generate these).
     bom_path: Path | None = None
@@ -332,3 +295,50 @@ def export_for_jlcpcb(
         cpl_path=cpl_path,
         errors=tuple(errors),
     )
+
+
+def _run_kicad_cli_exports(
+    kicad_cli: str,
+    pcb_path: Path,
+    gerber_dir: Path,
+    drill_dir: Path,
+    errors: list[str],
+) -> None:
+    """Run kicad-cli gerber and drill export commands, appending errors in place."""
+    gerber_cmd = [
+        kicad_cli, "pcb", "export", "gerbers",
+        "--output", str(gerber_dir) + "/",
+        str(pcb_path),
+    ]
+    try:
+        result = subprocess.run(gerber_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            errors.append(f"Gerber export failed: {result.stderr[:300]}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        errors.append(f"Gerber export error: {exc}")
+
+    drill_cmd = [
+        kicad_cli, "pcb", "export", "drill",
+        "--output", str(drill_dir) + "/",
+        "--format", "excellon",
+        "--excellon-units", "mm",
+        str(pcb_path),
+    ]
+    try:
+        result = subprocess.run(drill_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            errors.append(f"Drill export failed: {result.stderr[:300]}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        errors.append(f"Drill export error: {exc}")
+
+
+def _zip_gerber_files(gerber_dir: Path, output_dir: Path, name: str) -> Path | None:
+    """Zip all files in *gerber_dir* into an output archive; return path or None."""
+    gerber_files = list(gerber_dir.glob("*"))
+    if not gerber_files:
+        return None
+    zip_path = output_dir / f"{name}_gerbers.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in gerber_files:
+            zf.write(f, f.name)
+    return zip_path

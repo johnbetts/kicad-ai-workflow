@@ -1,0 +1,683 @@
+{
+    "$schema": "https://schemas.kicad.org/erc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-03-04T11:29:28-0600",
+    "kicad_version": "9.0.7",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "/af0c130d-c81c-4ddb-b0eb-8ecba4dbaea8",
+            "violations": [
+                {
+                    "description": "Input Power pin not driven by any Output Power pins",
+                    "items": [
+                        {
+                            "description": "Symbol #PWR007 Pin 1 [Power input, Line]",
+                            "pos": {
+                                "x": 0.3937,
+                                "y": 0.2794
+                            },
+                            "uuid": "02bec526-c1e5-4c88-9b13-eab049152f90"
+                        }
+                    ],
+                    "severity": "error",
+                    "type": "power_pin_not_driven"
+                },
+                {
+                    "description": "Pins of type Power output and Power output are connected",
+                    "items": [
+                        {
+                            "description": "Symbol J5 Pin 2 [5V, Power output, Line]",
+                            "pos": {
+                                "x": 1.651,
+                                "y": 0.9525
+                            },
+                            "uuid": "dd1ed53a-4dc4-400f-999b-4cee3d9fa7e0"
+                        },
+                        {
+                            "description": "Symbol J5 Pin 4 [5V, Power output, Line]",
+                            "pos": {
+                                "x": 1.651,
+                                "y": 0.9779
+                            },
+                            "uuid": "0f6e6c90-fc29-4389-93cd-33ed9c8a56d7"
+                        }
+                    ],
+                    "severity": "error",
+                    "type": "pin_to_pin"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol J1 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.2794
+                            },
+                            "uuid": "e1935311-c64b-4ee8-8bf4-6706fde6ccec"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol J1 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.2794
+                            },
+                            "uuid": "e1935311-c64b-4ee8-8bf4-6706fde6ccec"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol J2 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.4826
+                            },
+                            "uuid": "d7c95ca4-5668-4b4a-8622-c0a4278b9f23"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol J2 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.4826
+                            },
+                            "uuid": "d7c95ca4-5668-4b4a-8622-c0a4278b9f23"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R1 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.2794
+                            },
+                            "uuid": "34f1aa39-7a5f-44e6-95fa-b6f70074fa30"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R1 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.2794
+                            },
+                            "uuid": "34f1aa39-7a5f-44e6-95fa-b6f70074fa30"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R3 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.4826
+                            },
+                            "uuid": "912dfe3e-b07f-4922-aeee-e54bf14b003a"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R3 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.4826
+                            },
+                            "uuid": "912dfe3e-b07f-4922-aeee-e54bf14b003a"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol J3 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.6858
+                            },
+                            "uuid": "a9bb4bf2-1a93-4118-a35b-c7bc4cd16c53"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol J3 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.6858
+                            },
+                            "uuid": "a9bb4bf2-1a93-4118-a35b-c7bc4cd16c53"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R2 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.2794
+                            },
+                            "uuid": "a07aa0ee-0e11-436a-b60d-53546bb19c4c"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R2 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.2794
+                            },
+                            "uuid": "a07aa0ee-0e11-436a-b60d-53546bb19c4c"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R5 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.6858
+                            },
+                            "uuid": "6fad82df-f058-46e6-95b9-276fe1c32d07"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R5 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.6858
+                            },
+                            "uuid": "6fad82df-f058-46e6-95b9-276fe1c32d07"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol J4 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.8763
+                            },
+                            "uuid": "ccb52c6b-9508-4c25-b19a-74cecce9acdd"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol J4 [J_Screw_Terminal_01x02]",
+                            "pos": {
+                                "x": 0.254,
+                                "y": 0.8763
+                            },
+                            "uuid": "ccb52c6b-9508-4c25-b19a-74cecce9acdd"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R4 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.4826
+                            },
+                            "uuid": "8eb4e813-ace9-4d0e-a026-286c781cf9e5"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R4 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.4826
+                            },
+                            "uuid": "8eb4e813-ace9-4d0e-a026-286c781cf9e5"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R7 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.8763
+                            },
+                            "uuid": "ace96c24-2922-421b-b5df-817a023a2a3b"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R7 [R]",
+                            "pos": {
+                                "x": 0.5334,
+                                "y": 0.8763
+                            },
+                            "uuid": "ace96c24-2922-421b-b5df-817a023a2a3b"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R6 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.6858
+                            },
+                            "uuid": "44164cf4-9b80-4ded-9353-3e0677762298"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R6 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.6858
+                            },
+                            "uuid": "44164cf4-9b80-4ded-9353-3e0677762298"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol C1 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.2794
+                            },
+                            "uuid": "0f1ece33-d58e-49e6-a604-c3df4e13d6be"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'C' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol C1 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.2794
+                            },
+                            "uuid": "0f1ece33-d58e-49e6-a604-c3df4e13d6be"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol C2 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.4826
+                            },
+                            "uuid": "b93f4cb6-a0f2-48e9-b994-2ca010d1e31e"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'C' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol C2 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.4826
+                            },
+                            "uuid": "b93f4cb6-a0f2-48e9-b994-2ca010d1e31e"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol R8 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.8763
+                            },
+                            "uuid": "63b18a3c-030b-44af-a50c-6ef8dbdad585"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'R' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol R8 [R]",
+                            "pos": {
+                                "x": 0.8128,
+                                "y": 0.8763
+                            },
+                            "uuid": "63b18a3c-030b-44af-a50c-6ef8dbdad585"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol C3 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.6858
+                            },
+                            "uuid": "907e7491-242c-4eaa-ba13-67d98382e5af"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'C' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol C3 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.6858
+                            },
+                            "uuid": "907e7491-242c-4eaa-ba13-67d98382e5af"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol C4 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.8763
+                            },
+                            "uuid": "850ff3ca-0f05-477f-8ff7-2f49c93a53b7"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'C' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol C4 [C]",
+                            "pos": {
+                                "x": 1.0922,
+                                "y": 0.8763
+                            },
+                            "uuid": "850ff3ca-0f05-477f-8ff7-2f49c93a53b7"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol C5 [C]",
+                            "pos": {
+                                "x": 1.4986,
+                                "y": 0.2794
+                            },
+                            "uuid": "5b9df96d-f528-4e51-9cc2-6ee43fd8317c"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'C' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol C5 [C]",
+                            "pos": {
+                                "x": 1.4986,
+                                "y": 0.2794
+                            },
+                            "uuid": "5b9df96d-f528-4e51-9cc2-6ee43fd8317c"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library ''.",
+                    "items": [
+                        {
+                            "description": "Symbol U1 [U_ADS1115]",
+                            "pos": {
+                                "x": 1.4986,
+                                "y": 0.508
+                            },
+                            "uuid": "a987234d-55bc-4bbe-828f-31a807864ae8"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol U1 [U_ADS1115]",
+                            "pos": {
+                                "x": 1.4986,
+                                "y": 0.508
+                            },
+                            "uuid": "a987234d-55bc-4bbe-828f-31a807864ae8"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol C6 [C]",
+                            "pos": {
+                                "x": 1.778,
+                                "y": 0.2794
+                            },
+                            "uuid": "0f8f9c52-2806-49c1-be5f-3ab2f44751a2"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "Symbol 'C' doesn't match copy in library 'Device'",
+                    "items": [
+                        {
+                            "description": "Symbol C6 [C]",
+                            "pos": {
+                                "x": 1.778,
+                                "y": 0.2794
+                            },
+                            "uuid": "0f8f9c52-2806-49c1-be5f-3ab2f44751a2"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_mismatch"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol J5 [J_Conn_02x20_Stacking]",
+                            "pos": {
+                                "x": 1.4986,
+                                "y": 1.1938
+                            },
+                            "uuid": "8e8faae2-9500-438f-a8ce-0194d3fb81e7"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol J5 [J_Conn_02x20_Stacking]",
+                            "pos": {
+                                "x": 1.4986,
+                                "y": 1.1938
+                            },
+                            "uuid": "8e8faae2-9500-438f-a8ce-0194d3fb81e7"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                },
+                {
+                    "description": "The current configuration does not include the footprint library 'Device'.",
+                    "items": [
+                        {
+                            "description": "Symbol SW1 [SW_DIP_Switch_x04]",
+                            "pos": {
+                                "x": 1.9431,
+                                "y": 0.508
+                            },
+                            "uuid": "3cae886e-b1e6-4b83-ab13-3d0131dc8bc3"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "footprint_link_issues"
+                },
+                {
+                    "description": "The current configuration does not include the symbol library 'kicad-ai'",
+                    "items": [
+                        {
+                            "description": "Symbol SW1 [SW_DIP_Switch_x04]",
+                            "pos": {
+                                "x": 1.9431,
+                                "y": 0.508
+                            },
+                            "uuid": "3cae886e-b1e6-4b83-ab13-3d0131dc8bc3"
+                        }
+                    ],
+                    "severity": "warning",
+                    "type": "lib_symbol_issues"
+                }
+            ]
+        }
+    ],
+    "source": "ADS1115_4CH_ADC.kicad_sch"
+}

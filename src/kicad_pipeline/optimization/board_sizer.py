@@ -154,14 +154,10 @@ def optimize_board_size(
     if comp_area <= 0:
         comp_area = _DEFAULT_AREA_MM2
 
-    # Start large and shrink
     max_area = comp_area * max_area_multiplier
     min_area = comp_area * min_area_multiplier
-
     best_w, best_h = _dimensions_from_area(max_area)
-    best_score: QualityScore | None = None
 
-    # Build at largest size first to get a baseline score
     pcb = build_pcb(
         requirements,
         board_width_mm=best_w,
@@ -169,17 +165,41 @@ def optimize_board_size(
         board_template=board_template,
         auto_route=False,
     )
-    best_score = compute_quality_score(pcb, requirements)
+    best_score: QualityScore = compute_quality_score(pcb, requirements)
 
-    # Sweep from large to small
-    current_w = best_w
+    best_w, best_h, best_score = _sweep_board_sizes(
+        requirements, board_template, best_w, best_h, best_score,
+        min_area, step_mm, quality_threshold,
+    )
+
+    return (best_w, best_h, best_score)
+
+
+def _sweep_board_sizes(
+    requirements: ProjectRequirements,
+    board_template: str | None,
+    start_w: float,
+    start_h: float,
+    baseline_score: QualityScore,
+    min_area: float,
+    step_mm: float,
+    quality_threshold: float,
+) -> tuple[float, float, QualityScore]:
+    """Sweep board width downward until quality drops below threshold."""
+    from kicad_pipeline.optimization.scoring import compute_quality_score
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    best_w = start_w
+    best_h = start_h
+    best_score = baseline_score
+    current_w = start_w
+
     while current_w - step_mm >= 1.0:
         current_w -= step_mm
         current_h = round(current_w / _DEFAULT_ASPECT_RATIO)
         if current_h < 1.0:
             break
-        current_area = current_w * current_h
-        if current_area < min_area:
+        if current_w * current_h < min_area:
             break
 
         pcb = build_pcb(
@@ -196,4 +216,4 @@ def optimize_board_size(
             best_h = current_h
             best_score = score
 
-    return (best_w, best_h, best_score)
+    return best_w, best_h, best_score

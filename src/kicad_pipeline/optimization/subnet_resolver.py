@@ -23,8 +23,10 @@ from kicad_pipeline.pcb.pin_map import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from kicad_pipeline.models.pcb import PCBDesign
-    from kicad_pipeline.models.requirements import ProjectRequirements
+    from kicad_pipeline.models.requirements import Component, ProjectRequirements
     from kicad_pipeline.optimization.placement_types import PlacementContext
 
 _log = logging.getLogger(__name__)
@@ -138,6 +140,25 @@ def _classify_role(ic_pin_name: str, ic_pin_function: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _lookup_ic_pin(
+    comp_map: Mapping[str, Component],
+    ic_ref: str,
+    ic_pin: str,
+) -> tuple[str, str | None]:
+    """Return (pin_name, pin_function_value) for *ic_ref* pin *ic_pin*.
+
+    Returns ("", None) if the component or pin is not found.
+    """
+    ic_comp = comp_map.get(ic_ref)
+    if ic_comp is None:
+        return "", None
+    pin_obj = ic_comp.get_pin(ic_pin)
+    if pin_obj is None:
+        return "", None
+    fn = pin_obj.function
+    return pin_obj.name, (fn.value if fn is not None else None)
+
+
 def resolve_subnets(requirements: ProjectRequirements) -> list[SubnetConnection]:
     """Find all private subnet connections in the requirements.
 
@@ -183,16 +204,7 @@ def resolve_subnets(requirements: ProjectRequirements) -> list[SubnetConnection]
         for p_ref, p_pin in passive_conns:
             for ic_ref, ic_pin in ic_conns:
                 # Look up the IC pin to classify the role
-                ic_comp = comp_map.get(ic_ref)
-                ic_pin_name = ""
-                ic_pin_function: str | None = None
-                if ic_comp is not None:
-                    pin_obj = ic_comp.get_pin(ic_pin)
-                    if pin_obj is not None:
-                        ic_pin_name = pin_obj.name
-                        if pin_obj.function is not None:
-                            ic_pin_function = pin_obj.function.value
-
+                ic_pin_name, ic_pin_function = _lookup_ic_pin(comp_map, ic_ref, ic_pin)
                 role = _classify_role(ic_pin_name, ic_pin_function)
 
                 connections.append(SubnetConnection(
@@ -336,67 +348,11 @@ def place_subnet_components(
     placed_refs: set[str] = set()
 
     for conn in connections:
-        # Skip if passive is already fixed
         if conn.passive_ref in ctx.fixed_refs:
             continue
-
-        # Resolve the IC pin position on the board
-        pin_info = resolve_ic_pin_position(
-            conn.ic_ref, conn.ic_pin, ctx.initial_pcb,
-        )
-        if pin_info is None:
-            _log.debug(
-                "Skipping %s: IC pin %s.%s not resolved",
-                conn.passive_ref, conn.ic_ref, conn.ic_pin,
-            )
-            continue
-
-        ic_pin_x, ic_pin_y, ic_pin_side = pin_info
-
-        # Bug 3: Skip components already close to their target IC pin.
-        current_pos = ctx.positions.get(conn.passive_ref)
-        if current_pos is not None:
-            cur_x, cur_y, _cur_rot = current_pos
-            current_dist = math.sqrt(
-                (cur_x - ic_pin_x) ** 2 + (cur_y - ic_pin_y) ** 2,
-            )
-            if current_dist < _MOVE_THRESHOLD_MM:
-                _log.debug(
-                    "Skipping %s: already %.1fmm from %s.%s (threshold %.1f)",
-                    conn.passive_ref, current_dist,
-                    conn.ic_ref, conn.ic_pin, _MOVE_THRESHOLD_MM,
-                )
-                continue
-
-        # Get the passive footprint size
-        fp_size = ctx.fp_sizes.get(conn.passive_ref)
-        if fp_size is None:
-            _log.debug("Skipping %s: no footprint size", conn.passive_ref)
-            continue
-
-        # Compute the pad-facing position with enough gap to clear IC
-        # courtyard.  The pin position is at the IC edge so we need
-        # clearance from the edge, not the pin.
-        x, y, rotation = compute_pad_facing_position(
-            passive_size=fp_size,
-            ic_pin_x=ic_pin_x,
-            ic_pin_y=ic_pin_y,
-            ic_pin_side=ic_pin_side,
-            gap_mm=3.0,
-        )
-
-        # Clamp to board bounds
-        bx_min, by_min, bx_max, by_max = ctx.bounds
-        x = max(bx_min + fp_size[0] / 2, min(bx_max - fp_size[0] / 2, x))
-        y = max(by_min + fp_size[1] / 2, min(by_max - fp_size[1] / 2, y))
-
-        ctx.positions[conn.passive_ref] = (x, y, rotation)
-        placed_refs.add(conn.passive_ref)
-        _log.debug(
-            "Placed %s at (%.1f, %.1f, %.0f) facing %s pin %s.%s [%s]",
-            conn.passive_ref, x, y, rotation,
-            conn.ic_ref, conn.ic_pin, ic_pin_side, conn.role,
-        )
+        placed = _place_one_subnet_component(ctx, conn)
+        if placed:
+            placed_refs.add(conn.passive_ref)
 
     # Bug 2: Do NOT mark subnet-placed refs as fixed.  Later type-specific
     # phases (relay driver, power chain, etc.) may have better rules and
@@ -406,3 +362,57 @@ def place_subnet_components(
         len(placed_refs), len(connections),
     )
     return placed_refs
+
+
+def _place_one_subnet_component(
+    ctx: PlacementContext,
+    conn: SubnetConnection,
+) -> bool:
+    """Place a single passive component; return True if placed, False if skipped."""
+    pin_info = resolve_ic_pin_position(conn.ic_ref, conn.ic_pin, ctx.initial_pcb)
+    if pin_info is None:
+        _log.debug(
+            "Skipping %s: IC pin %s.%s not resolved",
+            conn.passive_ref, conn.ic_ref, conn.ic_pin,
+        )
+        return False
+
+    ic_pin_x, ic_pin_y, ic_pin_side = pin_info
+
+    # Bug 3: Skip components already close to their target IC pin.
+    current_pos = ctx.positions.get(conn.passive_ref)
+    if current_pos is not None:
+        cur_x, cur_y, _cur_rot = current_pos
+        current_dist = math.sqrt((cur_x - ic_pin_x) ** 2 + (cur_y - ic_pin_y) ** 2)
+        if current_dist < _MOVE_THRESHOLD_MM:
+            _log.debug(
+                "Skipping %s: already %.1fmm from %s.%s (threshold %.1f)",
+                conn.passive_ref, current_dist,
+                conn.ic_ref, conn.ic_pin, _MOVE_THRESHOLD_MM,
+            )
+            return False
+
+    fp_size = ctx.fp_sizes.get(conn.passive_ref)
+    if fp_size is None:
+        _log.debug("Skipping %s: no footprint size", conn.passive_ref)
+        return False
+
+    x, y, rotation = compute_pad_facing_position(
+        passive_size=fp_size,
+        ic_pin_x=ic_pin_x,
+        ic_pin_y=ic_pin_y,
+        ic_pin_side=ic_pin_side,
+        gap_mm=3.0,
+    )
+
+    bx_min, by_min, bx_max, by_max = ctx.bounds
+    x = max(bx_min + fp_size[0] / 2, min(bx_max - fp_size[0] / 2, x))
+    y = max(by_min + fp_size[1] / 2, min(by_max - fp_size[1] / 2, y))
+
+    ctx.positions[conn.passive_ref] = (x, y, rotation)
+    _log.debug(
+        "Placed %s at (%.1f, %.1f, %.0f) facing %s pin %s.%s [%s]",
+        conn.passive_ref, x, y, rotation,
+        conn.ic_ref, conn.ic_pin, ic_pin_side, conn.role,
+    )
+    return True

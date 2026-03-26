@@ -119,7 +119,9 @@ def _make_requirements(
         nets=(),
         pin_map=None,
         power_budget=None,
-        mechanical=MechanicalConstraints(board_width_mm=_DEFAULT_BOARD_W, board_height_mm=_DEFAULT_BOARD_H),
+        mechanical=MechanicalConstraints(
+            board_width_mm=_DEFAULT_BOARD_W, board_height_mm=_DEFAULT_BOARD_H
+        ),
         recommendations=(),
         board_context=None,
     )

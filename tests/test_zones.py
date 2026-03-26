@@ -12,8 +12,7 @@ from kicad_pipeline.constants import (
     THERMAL_RELIEF_BRIDGE_MM,
     THERMAL_RELIEF_GAP_MM,
 )
-from kicad_pipeline.models.pcb import BoardOutline, ZoneFill, ZonePolygon
-from kicad_pipeline.models.pcb import Keepout, NetEntry
+from kicad_pipeline.models.pcb import BoardOutline, Keepout, NetEntry, ZoneFill, ZonePolygon
 from kicad_pipeline.pcb.netlist import Netlist, NetlistEntry
 from kicad_pipeline.pcb.zones import (
     _CIRCLE_SEGMENTS,

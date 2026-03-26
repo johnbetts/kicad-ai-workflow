@@ -1062,6 +1062,35 @@ def _find_direct_anchor(
     return best_anchor, best_anchor_pin, best_passive_pin, best_priority
 
 
+def _search_anchor_through_passive(
+    nb_ref: str,
+    passive_pin_number: str,
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    group_ref_set: frozenset[str],
+    requirements: ProjectRequirements,
+    best_priority: int,
+) -> tuple[str, str, int] | None:
+    """Search for an anchor one hop through *nb_ref* (an intermediate passive).
+
+    Returns (anchor_ref, anchor_pin, priority) if a better anchor is found,
+    otherwise None.
+    """
+    if nb_ref not in group_ref_set or _is_anchor_ref(nb_ref):
+        return None
+    nb_comp = next(
+        (c for c in requirements.components if c.ref == nb_ref), None,
+    )
+    if nb_comp is None:
+        return None
+    for nb_p in nb_comp.pins:
+        for nn_ref, nn_pin in pad_conn.get((nb_ref, nb_p.number), []):
+            if nn_ref in group_ref_set and _is_anchor_ref(nn_ref):
+                pri = _anchor_priority(nn_ref)
+                if pri < best_priority:
+                    return nn_ref, nn_pin, pri
+    return None
+
+
 def _find_indirect_anchor(
     pref: str,
     comp: object,
@@ -1080,29 +1109,15 @@ def _find_indirect_anchor(
     best_priority = 999
 
     for pin in comp.pins:  # type: ignore[union-attr]
-        neighbours = pad_conn.get((pref, pin.number), [])
-        found = False
-        for nb_ref, _nb_pin in neighbours:
-            if nb_ref in group_ref_set and not _is_anchor_ref(nb_ref):
-                nb_comp = next(
-                    (c for c in requirements.components if c.ref == nb_ref),
-                    None,
-                )
-                if nb_comp is None:
-                    continue
-                for nb_p in nb_comp.pins:
-                    for nn_ref, nn_pin in pad_conn.get((nb_ref, nb_p.number), []):
-                        if nn_ref in group_ref_set and _is_anchor_ref(nn_ref):
-                            pri = _anchor_priority(nn_ref)
-                            if pri < best_priority:
-                                best_priority = pri
-                                best_anchor = nn_ref
-                                best_anchor_pin = nn_pin
-                                best_passive_pin = pin.number
-                                found = True
-            if found:
+        for nb_ref, _nb_pin in pad_conn.get((pref, pin.number), []):
+            result = _search_anchor_through_passive(
+                nb_ref, pin.number, pad_conn, group_ref_set, requirements, best_priority,
+            )
+            if result is not None:
+                best_anchor, best_anchor_pin, best_priority = result
+                best_passive_pin = pin.number
                 break
-        if found:
+        if best_anchor:
             break
 
     return best_anchor, best_anchor_pin, best_passive_pin
@@ -1257,6 +1272,30 @@ def _place_passive_at_pin(
     return px, py, rot
 
 
+def _find_relay_via_neighbour(
+    nb_ref: str,
+    relay_refs: list[str],
+    pad_conn: dict[tuple[str, str], list[tuple[str, str]]],
+    requirements: ProjectRequirements,
+) -> str:
+    """Search one hop through *nb_ref* to find a directly connected relay.
+
+    Returns the relay ref if found, otherwise an empty string.
+    """
+    if _ref_prefix(nb_ref) == "K":
+        return ""
+    nb_comp = next(
+        (c for c in requirements.components if c.ref == nb_ref), None,
+    )
+    if nb_comp is None:
+        return ""
+    for nb_p in nb_comp.pins:
+        for nn_ref, _ in pad_conn.get((nb_ref, nb_p.number), []):
+            if nn_ref in relay_refs:
+                return nn_ref
+    return ""
+
+
 def _build_relay_ownership(
     layout: dict[str, tuple[float, float, float]],
     relay_refs: list[str],
@@ -1272,34 +1311,22 @@ def _build_relay_ownership(
     for ref in list(layout.keys()):
         if _ref_prefix(ref) == "K":
             continue
-        owning_relay = ""
         comp = next(
             (c for c in requirements.components if c.ref == ref), None,
         )
-        if comp:
+        owning_relay = ""
+        if comp is not None:
             for pin in comp.pins:
-                for nb_ref, _nb_pin in pad_conn.get(
-                    (ref, pin.number), [],
-                ):
+                for nb_ref, _nb_pin in pad_conn.get((ref, pin.number), []):
                     if nb_ref in relay_refs:
                         owning_relay = nb_ref
                         break
-                    if _ref_prefix(nb_ref) != "K":
-                        nb_comp = next(
-                            (c for c in requirements.components
-                             if c.ref == nb_ref),
-                            None,
-                        )
-                        if nb_comp:
-                            for nb_p in nb_comp.pins:
-                                for nn_ref, _ in pad_conn.get(
-                                    (nb_ref, nb_p.number), [],
-                                ):
-                                    if nn_ref in relay_refs:
-                                        owning_relay = nn_ref
-                                        break
-                                if owning_relay:
-                                    break
+                    relay_via_hop = _find_relay_via_neighbour(
+                        nb_ref, relay_refs, pad_conn, requirements,
+                    )
+                    if relay_via_hop:
+                        owning_relay = relay_via_hop
+                        break
                 if owning_relay:
                     break
         ownership[ref] = owning_relay or relay_refs[0]
@@ -1348,6 +1375,48 @@ def _place_relay_support_grid(
                 row_max_h = 0.0
 
 
+def _nudge_pair(
+    layout: dict[str, tuple[float, float, float]],
+    r1: str,
+    r2: str,
+    w1: float,
+    h1: float,
+    w2: float,
+    h2: float,
+) -> bool:
+    """Nudge two overlapping components apart along the smaller overlap axis.
+
+    Returns True if any nudge was applied.
+    """
+    x1, y1, rot1 = layout[r1]
+    x2, y2, rot2 = layout[r2]
+    min_dx = (w1 + w2) / 2.0 + 0.1
+    min_dy = (h1 + h2) / 2.0 + 0.1
+    dx = abs(x1 - x2)
+    dy = abs(y1 - y2)
+    if dx >= min_dx or dy >= min_dy:
+        return False
+    overlap_x = min_dx - dx
+    overlap_y = min_dy - dy
+    if overlap_x <= overlap_y:
+        shift = overlap_x / 2.0 + 0.1
+        if x1 <= x2:
+            layout[r1] = (x1 - shift, y1, rot1)
+            layout[r2] = (x2 + shift, y2, rot2)
+        else:
+            layout[r1] = (x1 + shift, y1, rot1)
+            layout[r2] = (x2 - shift, y2, rot2)
+    else:
+        shift = overlap_y / 2.0 + 0.1
+        if y1 <= y2:
+            layout[r1] = (x1, y1 - shift, rot1)
+            layout[r2] = (x2, y2 + shift, rot2)
+        else:
+            layout[r1] = (x1, y1 + shift, rot1)
+            layout[r2] = (x2, y2 - shift, rot2)
+    return True
+
+
 def _resolve_overlaps(
     layout: dict[str, tuple[float, float, float]],
     footprint_sizes: dict[str, tuple[float, float]],
@@ -1361,39 +1430,16 @@ def _resolve_overlaps(
     for _ in range(_OVERLAP_MAX_PASSES):
         moved = False
         for i, r1 in enumerate(refs):
-            x1, y1, rot1 = layout[r1]
+            _x1, _y1, rot1 = layout[r1]
             w1, h1 = footprint_sizes.get(r1, (5.0, 5.0))
             if rot1 in (90.0, 270.0):
                 w1, h1 = h1, w1
             for r2 in refs[i + 1:]:
-                x2, y2, rot2 = layout[r2]
+                _x2, _y2, rot2 = layout[r2]
                 w2, h2 = footprint_sizes.get(r2, (5.0, 5.0))
                 if rot2 in (90.0, 270.0):
                     w2, h2 = h2, w2
-                min_dx = (w1 + w2) / 2.0 + 0.1
-                min_dy = (h1 + h2) / 2.0 + 0.1
-                dx = abs(x1 - x2)
-                dy = abs(y1 - y2)
-                if dx < min_dx and dy < min_dy:
-                    # Overlap — nudge along smaller overlap axis
-                    overlap_x = min_dx - dx
-                    overlap_y = min_dy - dy
-                    if overlap_x <= overlap_y:
-                        shift = overlap_x / 2.0 + 0.1
-                        if x1 <= x2:
-                            layout[r1] = (x1 - shift, y1, rot1)
-                            layout[r2] = (x2 + shift, y2, rot2)
-                        else:
-                            layout[r1] = (x1 + shift, y1, rot1)
-                            layout[r2] = (x2 - shift, y2, rot2)
-                    else:
-                        shift = overlap_y / 2.0 + 0.1
-                        if y1 <= y2:
-                            layout[r1] = (x1, y1 - shift, rot1)
-                            layout[r2] = (x2, y2 + shift, rot2)
-                        else:
-                            layout[r1] = (x1, y1 + shift, rot1)
-                            layout[r2] = (x2, y2 - shift, rot2)
+                if _nudge_pair(layout, r1, r2, w1, h1, w2, h2):
                     moved = True
         if not moved:
             break

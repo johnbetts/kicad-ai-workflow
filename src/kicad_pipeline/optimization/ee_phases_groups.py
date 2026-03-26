@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import TYPE_CHECKING
 
 from kicad_pipeline.optimization.collision_resolver import (
     _PlacementGrid,
     _rotation_aware_size,
 )
-from kicad_pipeline.optimization.placement_types import (
-    PlacementContext,
-)
+
+if TYPE_CHECKING:
+    from kicad_pipeline.optimization.placement_types import PlacementContext
 from kicad_pipeline.pcb.pin_map import (
     origin_to_centroid,
 )
@@ -130,6 +131,26 @@ def _is_small_passive(ref: str) -> bool:
     return any(ref.startswith(p) for p in _SMALL_PREFIXES)
 
 
+def _should_add_ref(
+    c_ref: str,
+    ctx: PlacementContext,
+    already_claimed: set[str],
+    allow_small_ics: bool,
+    max_ic_pins: int,
+) -> bool:
+    """Return True if *c_ref* should be added during a one-hop expansion."""
+    if c_ref not in ctx.positions or c_ref in already_claimed:
+        return False
+    if _is_small_passive(c_ref):
+        return True
+    if not allow_small_ics or not c_ref.startswith("U"):
+        return False
+    comp = next(
+        (comp for comp in ctx.requirements.components if comp.ref == c_ref), None,
+    )
+    return comp is not None and len(comp.pins) <= max_ic_pins
+
+
 def _expand_one_hop(
     seed_refs: set[str],
     ctx: PlacementContext,
@@ -149,19 +170,10 @@ def _expand_one_hop(
             if not any(c.ref == ref for c in net.connections):
                 continue
             for c in net.connections:
-                if c.ref == ref or c.ref not in ctx.positions:
+                if c.ref == ref:
                     continue
-                if c.ref in already_claimed:
-                    continue
-                if _is_small_passive(c.ref):
+                if _should_add_ref(c.ref, ctx, already_claimed, allow_small_ics, max_ic_pins):
                     new_refs.add(c.ref)
-                elif allow_small_ics and c.ref.startswith("U"):
-                    comp = next(
-                        (comp for comp in ctx.requirements.components
-                         if comp.ref == c.ref), None,
-                    )
-                    if comp and len(comp.pins) <= max_ic_pins:
-                        new_refs.add(c.ref)
     return new_refs
 
 
@@ -186,8 +198,8 @@ def _place_refs_in_column_grid(
     for ref in refs:
         if ref not in ctx.positions:
             continue
-        _raw_w, _raw_h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        w, h = _raw_w, _raw_h
+        _, _raw_h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        h = _raw_h
         tx, ty = _clamp_to_bounds(cur_x, cur_y + h / 2.0, bounds)
         ctx.positions[ref] = (tx, ty, 0.0)
         target_set.add(ref)
@@ -376,7 +388,13 @@ def _mcu_place_u3(
         _trial_oy = (bounds[1] + bounds[3]) / 2.0
         _te = _pad_ext(mcu_fp, _trial_ox, _trial_oy, _mcu_rot)
         _pad_bot = _te[3] - _trial_oy
+        _pad_top = _te[1] - _trial_oy
+        # Leave 10mm at top for USB-C connector + CC resistors
         mcu_origin_y = bounds[3] - _pad_bot - 2.0
+        # Ensure top pads are at least 10mm from top edge (room for connectors)
+        top_clearance = bounds[1] - _pad_top + 10.0
+        if _trial_oy + (mcu_origin_y - _trial_oy) + _pad_top < bounds[1] + 10.0:
+            mcu_origin_y = max(mcu_origin_y, top_clearance)
         if mcu_zone_rect is not None:
             _zx1, _zy1, _zx2, _zy2 = mcu_zone_rect
             mcu_group_refs = _collect_feature_refs(ctx, "mcu", "controller", "processor")
@@ -412,6 +430,63 @@ def _mcu_place_u3(
     return mcu_x, mcu_y, eff_w, eff_h, _mcu_rot
 
 
+def _mcu_power_pin_board_pos(
+    ctx: PlacementContext,
+    mcu_ref: str,
+    mcu_x: float,
+    mcu_y: float,
+    rotation: float,
+) -> tuple[float, float] | None:
+    """Return board-space (x, y) of the 3V3/VCC power pad on the MCU footprint.
+
+    Scans all pads for power-net membership.  Returns the centroid of all
+    matching pad positions in board space, or ``None`` if not determinable.
+    The result is used to position decoupling caps on the correct side of the
+    IC regardless of its rotation.
+    """
+    mcu_fp = next(
+        (fp for fp in ctx.initial_pcb.footprints if fp.ref == mcu_ref), None,
+    )
+    if mcu_fp is None:
+        return None
+
+    # Build set of nets attached to the MCU from requirements
+    power_pads: list[tuple[float, float]] = []
+    rad = math.radians(-rotation)  # KiCad CW convention
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+
+    for pad in mcu_fp.pads:
+        pad_net = pad.net_name if hasattr(pad, "net_name") else ""
+        # Look up net via requirements connections
+        if not pad_net:
+            for net in ctx.requirements.nets:
+                for conn in net.connections:
+                    if conn.ref == mcu_ref and conn.pin == pad.number:
+                        pad_net = net.name
+                        break
+                if pad_net:
+                    break
+        if not pad_net:
+            continue
+        net_up = pad_net.upper()
+        is_power = any(
+            net_up.startswith(pfx) for pfx in
+            ("+3V3", "+3.3V", "VCC", "VDD", "AVCC", "DVCC", "3V3")
+        )
+        if not is_power:
+            continue
+        # Rotate footprint-local pad position to board space
+        bx = mcu_x + pad.position.x * cos_a - pad.position.y * sin_a
+        by = mcu_y + pad.position.x * sin_a + pad.position.y * cos_a
+        power_pads.append((bx, by))
+
+    if not power_pads:
+        return None
+    avg_x = sum(p[0] for p in power_pads) / len(power_pads)
+    avg_y = sum(p[1] for p in power_pads) / len(power_pads)
+    return avg_x, avg_y
+
+
 def _mcu_place_decoupling(
     ctx: PlacementContext,
     decoupling_refs: list[str],
@@ -420,28 +495,76 @@ def _mcu_place_decoupling(
     mcu_left: float,
     grid: _PlacementGrid,
 ) -> None:
-    """Place decoupling caps in a column left of the MCU (Step 3)."""
+    """Place decoupling caps within 3-5mm of the MCU power pin (Step 3).
+
+    Detects which side of the IC body has the 3V3/VCC power pad and places
+    caps on that side.  With rotation=180 the ESP32's left-column 3V3 pad
+    (WEST at rot=0) maps to the EAST (right) side in board coordinates, so
+    caps are placed to the RIGHT rather than to the left.
+    """
     bounds = ctx.bounds
-    max_cap_w = max(
-        (ctx.fp_sizes.get(r, (2.5, 1.5))[0] for r in decoupling_refs),
-        default=2.5,
+
+    # Find the MCU ref and courtyard half-width
+    mcu_ref = None
+    for ref_c in ctx.mcu_peripheral_refs:
+        if ref_c.startswith("U"):
+            mcu_ref = ref_c
+            break
+    if mcu_ref and mcu_ref in ctx.fp_sizes:
+        mcu_cw, _mcu_ch = ctx.fp_sizes[mcu_ref]
+    else:
+        mcu_cw = abs(mcu_x - mcu_left) * 2.0
+
+    courtyard_left = mcu_x - mcu_cw / 2.0
+    courtyard_right = mcu_x + mcu_cw / 2.0
+
+    # Determine which horizontal side has the 3V3/VCC power pad.
+    rotation = ctx.positions.get(mcu_ref, (0.0, 0.0, 0.0))[2] if mcu_ref else 0.0
+    power_pos = (
+        _mcu_power_pin_board_pos(ctx, mcu_ref, mcu_x, mcu_y, rotation)
+        if mcu_ref
+        else None
     )
-    decoup_col_x = mcu_left - max_cap_w / 2.0 - 2.0
-    total_cap_h = sum(
-        ctx.fp_sizes.get(r, (1.5, 1.0))[1] + 1.5 for r in decoupling_refs
-    )
-    decoup_y = mcu_y - total_cap_h / 2.0
-    for ref in decoupling_refs:
+
+    if power_pos is not None:
+        # Place caps on the same horizontal side as the power pad, 3mm away.
+        pwr_x, pwr_y = power_pos
+        cap_y_start = pwr_y  # align with power pin row
+        if pwr_x > mcu_x:
+            # Power pin is to the right → place caps right of MCU
+            def _cap_x(w: float) -> float:
+                return courtyard_right + w / 2.0 + 0.5
+        else:
+            # Power pin is to the left → place caps left of MCU
+            def _cap_x(w: float) -> float:
+                return courtyard_left - w / 2.0 - 0.5
+        _log.info(
+            "    decoupling: power pin at (%.1f,%.1f) → placing caps on %s side",
+            pwr_x, pwr_y, "right" if pwr_x > mcu_x else "left",
+        )
+    else:
+        # Fallback: place left of MCU (original behaviour)
+        cap_y_start = mcu_y - 2.0
+        def _cap_x(w: float) -> float:
+            return courtyard_left - w / 2.0 - 0.5
+        _log.info("    decoupling: no power pin found, falling back to left of MCU")
+
+    cap_spacing = 2.5
+
+    for i, ref in enumerate(decoupling_refs):
         w, h = ctx.fp_sizes.get(ref, (1.0, 0.5))
-        tx, ty = _clamp_to_bounds(decoup_col_x, decoup_y + h / 2.0, bounds)
-        px, py = grid.find_free_pos(tx, ty, w, h, max_radius=8.0)
-        ctx.positions[ref] = (px, py, 0.0)
+        cap_x = _cap_x(w)
+        tx = _clamp(cap_x, bounds[0] + w / 2.0 + 0.5, bounds[2] - w / 2.0 - 0.5)
+        ty = _clamp(cap_y_start + i * cap_spacing,
+                    bounds[1] + h / 2.0 + 0.5, bounds[3] - h / 2.0 - 0.5)
+        # Force-place without grid search — grid may push them far away
+        ctx.positions[ref] = (tx, ty, 0.0)
         ctx.mcu_peripheral_refs.add(ref)
-        grid.place(px, py, w, h)
-        decoup_y += h + 1.5
-        dist_to_mcu = ((px - mcu_x) ** 2 + (py - mcu_y) ** 2) ** 0.5
-        _log.info("    %s (decoupling): ->(%.1f,%.1f) [%.1fmm from U3]",
-                  ref, px, py, dist_to_mcu)
+        ctx.fixed_refs.add(ref)  # protect from clamp/collision phases
+        grid.place(tx, ty, w, h)
+        dist_to_mcu = ((tx - mcu_x) ** 2 + (ty - mcu_y) ** 2) ** 0.5
+        _log.info("    %s (decoupling): FORCE->(%.1f,%.1f) [%.1fmm from MCU]",
+                  ref, tx, ty, dist_to_mcu)
 
 
 def _mcu_place_named_connector(
@@ -516,6 +639,24 @@ def _mcu_place_connectors(
         ctx.mcu_peripheral_refs.add("J16")
         _log.info("    J16 -> right edge, above U3 (%.1f, %.1f)", px, py)
 
+    # J1 (USB-C): FORCE-place at TOP edge, left of MCU (away from antenna).
+    # rotation 180 so pads face into the board.
+    # We skip grid.find_free_pos because U1's large footprint blocks it.
+    # Guard: skip if J1 is owned by the ethernet feature block — ethernet group
+    # phase places the RJ45 at the top edge with the correct rotation.
+    _eth_refs_j1 = _collect_feature_refs(ctx, "ethernet", "eth")
+    if ("J1" in connector_refs and "J1" in ctx.positions
+            and "J1" not in ctx.fixed_refs and "J1" not in _eth_refs_j1):
+        w1, h1 = ctx.fp_sizes.get("J1", (9.0, 7.5))
+        j1_x = mcu_left + 3.0  # left side of MCU, away from antenna
+        j1_y = bounds[1] + h1 / 2.0 + 0.5  # near top edge
+        j1_x = _clamp(j1_x, bounds[0] + w1 / 2.0 + 1.0, bounds[2] - w1 / 2.0 - 1.0)
+        j1_y = _clamp(j1_y, bounds[1] + h1 / 2.0 + 0.5, bounds[3] - h1 / 2.0 - 1.0)
+        ctx.positions["J1"] = (j1_x, j1_y, 180.0)
+        ctx.mcu_peripheral_refs.add("J1")
+        ctx.fixed_refs.add("J1")  # protect from clamp/collision resolution
+        _log.info("    J1 (USB-C) -> top edge at (%.1f, %.1f) rot=180", j1_x, j1_y)
+
     if "J2" in connector_refs and "J2" in ctx.positions and "J2" not in ctx.fixed_refs:
         w2, h2 = ctx.fp_sizes.get("J2", _DEFAULT_J2_SIZE_MM)
         tx = mcu_left - w2 / 2.0 - 8.0
@@ -552,7 +693,32 @@ def _mcu_place_usb_subcircuit(
     other_passive_refs: list[str],
     grid: _PlacementGrid,
 ) -> None:
-    """Place USB ESD + series resistors near J2 (Step 5)."""
+    """Place USB CC resistors near J1 (USB-C) and ESD near J2 (Step 5)."""
+    # --- CC resistors (R3/R4) near J1 (USB-C) ---
+    j1_pos = ctx.positions.get("J1")
+    bounds = ctx.bounds
+    if j1_pos:
+        j1x, j1y, _ = j1_pos
+        j1w, j1h = ctx.fp_sizes.get("J1", (9.0, 7.5))
+        # Find CC resistors: R3/R4 are typical CC1/CC2 resistors
+        cc_refs = [r for r in ("R3", "R4") if r in other_passive_refs
+                   and r in ctx.positions]
+        for i, ref in enumerate(cc_refs):
+            w, h = ctx.fp_sizes.get(ref, (1.0, 0.5))
+            # Place CC resistors just below J1, side by side
+            px = j1x - 2.0 + i * (w + 2.0)
+            py = j1y + j1h / 2.0 + h / 2.0 + 1.0
+            px = _clamp(px, bounds[0] + w / 2.0 + 0.5, bounds[2] - w / 2.0 - 0.5)
+            py = _clamp(py, bounds[1] + h / 2.0 + 0.5, bounds[3] - h / 2.0 - 0.5)
+            ctx.positions[ref] = (px, py, 0.0)
+            ctx.mcu_peripheral_refs.add(ref)
+            ctx.fixed_refs.add(ref)
+            grid.place(px, py, w, h)
+            if ref in other_passive_refs:
+                other_passive_refs.remove(ref)
+            _log.info("    %s (CC resistor) -> near J1 at (%.1f, %.1f)", ref, px, py)
+
+    # --- USB ESD + series resistors near J2 ---
     j2_pos = ctx.positions.get("J2")
     bounds = ctx.bounds
     if "U9" in other_passive_refs and "U9" in ctx.positions and j2_pos:
@@ -599,25 +765,28 @@ def _mcu_place_reset_boot(
 ) -> None:
     """Place switch+resistor pairs for reset/boot (Step 6)."""
     bounds = ctx.bounds
+    # Find SW+R pairs via net connectivity (not hardcoded refs)
+    sw_refs = [r for r in other_passive_refs if r in ctx.positions
+               and r.startswith("SW")]
+    r_refs = [r for r in other_passive_refs if r in ctx.positions
+              and r.startswith("R")]
     sw_pairs: list[tuple[str, str]] = []
-    for sw, res in [("SW1", "R4"), ("SW2", "R5"), ("SW1", "R5"), ("SW2", "R4")]:
-        if (sw in other_passive_refs and sw in ctx.positions
-                and res in other_passive_refs and res in ctx.positions):
-            if res in ref_nets.get(sw, set()):
-                sw_pairs.append((sw, res))
     used_sw: set[str] = set()
-    unique_pairs: list[tuple[str, str]] = []
-    for sw, res in sw_pairs:
-        if sw not in used_sw and res not in used_sw:
-            unique_pairs.append((sw, res))
-            used_sw.add(sw)
-            used_sw.add(res)
-    unpaired_sw = [r for r in other_passive_refs if r in ctx.positions
-                   and r.startswith("SW") and r not in used_sw]
+    for sw in sw_refs:
+        sw_nets = ref_nets.get(sw, set())
+        for res in r_refs:
+            if res in sw_nets and res not in used_sw:
+                sw_pairs.append((sw, res))
+                used_sw.add(sw)
+                used_sw.add(res)
+                break
+    unique_pairs = sw_pairs
+    unpaired_sw = [r for r in sw_refs if r not in used_sw]
 
-    mcu_left = mcu_x - eff_w / 2.0
-    sw_base_x = mcu_left + eff_w / 4.0
-    sw_base_y = mcu_top - 4.0
+    mcu_x - eff_w / 2.0
+    # Place switches on the LEFT side of the board, grouped vertically
+    sw_base_x = bounds[0] + 6.0  # near left edge
+    sw_base_y = mcu_y - 5.0  # near MCU vertical center
 
     for i, (sw, res) in enumerate(unique_pairs):
         sw_w, sw_h = ctx.fp_sizes.get(sw, (3.5, 3.5))
@@ -674,21 +843,21 @@ def _mcu_place_remaining(
     mcu_left = mcu_x - eff_w / 2.0
     mcu_right = mcu_x + eff_w / 2.0
     mcu_top = mcu_y - eff_h / 2.0
-    _MCU_TARGET_GAP = 4.0
-    _MCU_CLEAR = 3.0
+    mcu_target_gap = 4.0
+    mcu_clear = 3.0
 
     ring_slots: list[tuple[float, float]] = []
     if mcu_top > bounds[1] + 10.0:
         for dx_off in range(-4, 5):
-            ring_slots.append((mcu_x + dx_off * 4.0,
-                               mcu_top - _MCU_CLEAR - 3.0))
+            ring_slots.append((mcu_x + dx_off * mcu_target_gap,
+                               mcu_top - mcu_clear - 3.0))
         for dx_off in range(-3, 4):
-            ring_slots.append((mcu_x + dx_off * 4.0,
-                               mcu_top - _MCU_CLEAR - 7.0))
-    slot_x_left = mcu_left - _MCU_CLEAR - 2.0
+            ring_slots.append((mcu_x + dx_off * mcu_target_gap,
+                               mcu_top - mcu_clear - 7.0))
+    slot_x_left = mcu_left - mcu_clear - 2.0
     for dy_off in range(-3, 4):
         ring_slots.append((slot_x_left, mcu_y + dy_off * 3.5))
-    slot_x_right = mcu_right + _MCU_CLEAR + 2.0
+    slot_x_right = mcu_right + mcu_clear + 2.0
     for dy_off in range(-3, 4):
         ring_slots.append((slot_x_right, mcu_y + dy_off * 3.5))
 
@@ -710,7 +879,7 @@ def _mcu_place_remaining(
                 break
 
         if not placed:
-            tx = mcu_left - _MCU_TARGET_GAP - w / 2.0
+            tx = mcu_left - mcu_target_gap - w / 2.0
             ty = mcu_y
             tx, ty = _clamp_to_bounds(tx, ty, bounds)
             px, py = grid.find_free_pos(tx, ty, w, h, max_radius=25.0)
@@ -824,41 +993,54 @@ def _eth_place_crystal_and_caps(
     placed_eth: set[str],
     zone_rect: tuple[float, float, float, float],
 ) -> None:
-    """Place crystal oscillator and its flanking load caps."""
-    bounds = ctx.bounds
+    """Place crystal oscillator and its flanking load caps beside the IC.
+
+    The crystal is placed to the right of U1 (not above it) to avoid
+    colliding with the RJ45 connector at the top edge.  Load caps are
+    stacked above and below the crystal.
+    """
     ezx1, ezy1, ezx2, ezy2 = zone_rect
-    y_crystal_h = ctx.fp_sizes.get(
-        crystal_refs[0], _DEFAULT_CRYSTAL_SIZE_MM)[1] if crystal_refs else 1.5
-    crystal_y = ic_cy - ic_h / 2.0 - y_crystal_h / 2.0 - 0.5
-    crystal_x = ic_cx
+
+    # Determine IC width and crystal size
+    ic_w = ctx.fp_sizes.get(
+        next((r for r in placed_eth if r.startswith("U")), ""), (10.0, 10.0)
+    )[0]
+    crystal_w, crystal_h = (
+        ctx.fp_sizes.get(crystal_refs[0], _DEFAULT_CRYSTAL_SIZE_MM)
+        if crystal_refs else _DEFAULT_CRYSTAL_SIZE_MM
+    )
+    # Place crystal to the right of the IC
+    crystal_x = ic_cx + ic_w / 2.0 + crystal_w / 2.0 + 1.0
+    crystal_y = ic_cy
 
     for ref in crystal_refs:
         if (ref not in ctx.positions or ref in ctx.fixed_refs
                 or ref in placed_eth or ref == ""):
             continue
         w, h = ctx.fp_sizes.get(ref, _DEFAULT_CRYSTAL_SIZE_MM)
-        tx, ty = _clamp_to_bounds(crystal_x, crystal_y, bounds)
-        ctx.positions[ref] = (tx, ty, 0.0)
-        eth_grid.place(tx, ty, w, h)
+        tx = _clamp(crystal_x, ezx1 + w / 2.0 + 2.0, ezx2 - w / 2.0 - 2.0)
+        ty = _clamp(crystal_y, ezy1 + h / 2.0 + 2.0, ezy2 - h / 2.0 - 2.0)
+        px, py = eth_grid.find_free_pos(tx, ty, w, h, max_radius=8.0)
+        ctx.positions[ref] = (px, py, 0.0)
+        eth_grid.place(px, py, w, h)
         ctx.ethernet_fixed.add(ref)
         placed_eth.add(ref)
-        crystal_dist = math.sqrt((tx - ic_cx) ** 2 + (ty - ic_cy) ** 2)
+        crystal_x = px  # Update in case find_free_pos shifted it
+        crystal_y = py
+        crystal_dist = math.sqrt((px - ic_cx) ** 2 + (py - ic_cy) ** 2)
         _log.info("    %s (crystal) -> (%.1f, %.1f) dist=%.1fmm from IC",
-                  ref, tx, ty, crystal_dist)
+                  ref, px, py, crystal_dist)
 
+    # Load caps stacked above/below the crystal
     cap_idx = 0
     for ref in crystal_load_caps:
         if (ref not in ctx.positions or ref in ctx.fixed_refs
                 or ref in placed_eth or ref == ""):
             continue
         w, h = ctx.fp_sizes.get(ref, (1.0, 0.5))
-        y_w = ctx.fp_sizes.get(
-            crystal_refs[0], _DEFAULT_CRYSTAL_SIZE_MM)[0] if crystal_refs else _DEFAULT_CRYSTAL_SIZE_MM[0]
-        if cap_idx % 2 == 0:
-            tx = crystal_x - y_w / 2.0 - w / 2.0 - 0.5
-        else:
-            tx = crystal_x + y_w / 2.0 + w / 2.0 + 0.5
-        ty = crystal_y if crystal_refs else ic_cy - ic_h / 2.0 - 3.0
+        cap_dy = crystal_h / 2.0 + h / 2.0 + 0.5
+        ty = crystal_y - cap_dy if cap_idx % 2 == 0 else crystal_y + cap_dy
+        tx = crystal_x
         tx = _clamp(tx, ezx1 + 2.0, ezx2 - 2.0)
         ty = _clamp(ty, ezy1 + 2.0, ezy2 - 2.0)
         px, py = eth_grid.find_free_pos(tx, ty, w, h, max_radius=5.0)
@@ -921,7 +1103,13 @@ def _eth_place_rj45_connectors(
     placed_eth: set[str],
     zone_rect: tuple[float, float, float, float],
 ) -> None:
-    """Place RJ45 connectors at the bottom board edge."""
+    """Place RJ45 connectors at the top board edge.
+
+    RJ45 connectors are panel-mounted and belong flush with the top edge of
+    the board.  Rotation=0 means the mating face points toward the top edge
+    (y_min).  Origin is placed so that the top of the body is within 2 mm of
+    the board edge and pads stay inside the board.
+    """
     bounds = ctx.bounds
     ezx1, _ezy1, ezx2, _ezy2 = zone_rect
     from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
@@ -933,52 +1121,69 @@ def _eth_place_rj45_connectors(
             if fp.ref == ref:
                 fp_match = fp
                 break
-        w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        cent_y = bounds[3] - h / 2.0 - 1.0
+        w, h = ctx.fp_sizes.get(ref, (19.6, 15.4))
         cent_x = eth_anchor_x
+        # Place at top edge: centroid h/2 below top boundary
+        cent_y = bounds[1] + h / 2.0 + 1.0
         if fp_match is not None:
+            # Use rotation=0 (connector faces top).  Adjust origin so pads
+            # don't fall outside the board.
             trial_origin_x = eth_anchor_x
-            trial_origin_y = bounds[3] - 3.0
-            _, _, _, pad_max_y = pad_extent_in_board_space(
-                fp_match, trial_origin_x, trial_origin_y, 180.0,
+            trial_origin_y = bounds[1] + 3.0
+            _, pad_min_y, _, _ = pad_extent_in_board_space(
+                fp_match, trial_origin_x, trial_origin_y, 0.0,
             )
-            edge_margin = 2.0
-            if pad_max_y > bounds[3] - edge_margin:
-                trial_origin_y -= (pad_max_y - bounds[3] + edge_margin)
+            edge_margin = 1.0
+            if pad_min_y < bounds[1] + edge_margin:
+                trial_origin_y += (bounds[1] + edge_margin - pad_min_y)
             cent_x, cent_y = origin_to_centroid(
-                fp_match, trial_origin_x, trial_origin_y, 180.0,
+                fp_match, trial_origin_x, trial_origin_y, 0.0,
             )
-        px, py = cent_x, cent_y
-        px = _clamp(px, ezx1 + w / 2.0, ezx2 - w / 2.0)
-        ctx.positions[ref] = (px, py, 180.0)
+        px = _clamp(cent_x, ezx1 + w / 2.0, ezx2 - w / 2.0)
+        py = cent_y
+        ctx.positions[ref] = (px, py, 0.0)
         ctx.ethernet_fixed.add(ref)
         placed_eth.add(ref)
-        _log.info("    %s (RJ45) -> bottom edge (%.1f, %.1f)", ref, px, py)
+        _log.info("    %s (RJ45) -> top edge (%.1f, %.1f)", ref, px, py)
 
 
 def _eth_fix_crystal_cap_overlaps(
     ctx: PlacementContext,
     placed_eth: set[str],
     zone_rect: tuple[float, float, float, float],
+    crystal_load_caps: list[str] | None = None,
 ) -> None:
-    """Shift caps that overlap crystals in the ethernet group."""
+    """Shift caps that overlap crystals in the ethernet group.
+
+    Crystal load caps (C4/C5) are intentionally placed flanking the crystal
+    by ``_eth_place_crystal_and_caps`` and must not be repositioned here.
+    """
     _ezy1 = zone_rect[1]
     _ezy2 = zone_rect[3]
+    _crystal_load: set[str] = set(crystal_load_caps) if crystal_load_caps else set()
     crystal_placed = [r for r in placed_eth if r.startswith("Y")]
     for yref in crystal_placed:
         yx, yy, _yrot = ctx.positions[yref]
         yw, yh = ctx.fp_sizes.get(yref, _DEFAULT_CRYSTAL_SIZE_MM)
-        for cref in list(placed_eth):
+        shift_count = 0
+        for cref in sorted(placed_eth):
             if cref == yref or not cref.startswith("C"):
+                continue
+            # Never reposition crystal load caps — they were deliberately placed
+            # adjacent to the crystal by _eth_place_crystal_and_caps.
+            if cref in _crystal_load:
                 continue
             cx, cy, crot = ctx.positions[cref]
             cw, ch = ctx.fp_sizes.get(cref, (1.5, 1.0))
             _margin = 2.0
             if (abs(cx - yx) < (cw + yw) / 2.0 + _margin
                     and abs(cy - yy) < (ch + yh) / 2.0 + _margin):
-                new_cy = yy + yh / 2.0 + ch / 2.0 + 2.0
+                # Offset each subsequent cap further to avoid stacking
+                cap_offset = (ch + 1.5) * shift_count
+                new_cy = yy + yh / 2.0 + ch / 2.0 + 2.0 + cap_offset
                 new_cy = _clamp(new_cy, _ezy1 + 2.0, _ezy2 - 2.0)
                 ctx.positions[cref] = (cx, new_cy, crot)
+                shift_count += 1
                 _log.info("    3c4: shifted %s below %s (%.1f,%.1f) -> (%.1f,%.1f)",
                           cref, yref, cx, cy, cx, new_cy)
 
@@ -1276,7 +1481,7 @@ def _classify_power_columns(
         net_refs.get("+3V3", set()) & group_refs
         - {buck2_ic} - set(power_connectors),
     )
-    buck2_left = buck2_in_caps + [buck2_ic] + bst2_passives + l2_refs
+    buck2_left = [*buck2_in_caps, buck2_ic, *bst2_passives, *l2_refs]
     buck2_right = v33_caps
 
     # Tail
@@ -1310,22 +1515,39 @@ def _classify_power_columns(
 # Relative offsets (dx, dy, rotation) for passives around a BUCK IC anchor.
 # Learned from human-routed TPS54331 layout on a 50x40mm board.
 # Coordinates are relative to the buck IC centroid.
+#
+# Clearance check (0805 courtyard 2.7x2.0mm, SOD-323 ~2.7x2.0mm, L1210 4.1x3.4mm):
+#   input_cap vs bootstrap_cap: same x, dy=10.1 — OK (>>2.0mm)
+#   inductor vs catch_diode: dy=3.2, min=(3.4+2.0)/2=2.7 -> OK
+#   catch_diode vs fb_bot_r: dy=3.3 > 2.0mm minimum — OK
+#   fb_bot_r vs fb_top_r: dy=2.5 > 2.0mm minimum — OK
 _BUCK_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
     # (role, (dx, dy, rotation))  — role matched by net name keywords
     "input_cap": (-0.9, -5.3, 0.0),       # C on VIN rail, above IC
     "bootstrap_cap": (0.1, 4.8, 0.0),     # C on BST/BOOT net, below IC
-    "inductor": (8.3, -1.2, 0.0),         # L on SW/PH net, right of IC
-    "catch_diode": (7.8, 2.2, 180.0),     # D on SW/PH net, right-below IC
-    "fb_top_r": (8.0, 6.8, 180.0),        # R on FB/VSNS net (top of divider)
-    "fb_bot_r": (8.0, 4.3, 0.0),          # R on FB/VSNS net (bottom of divider)
+    "inductor": (8.3, -1.6, 0.0),         # L on SW/PH net, right of IC
+    "catch_diode": (8.3, 1.6, 180.0),     # D on SW/PH net, below inductor (same x column)
+    "fb_bot_r": (8.0, 4.9, 0.0),          # R on FB/VSNS+GND net (bottom of divider)
+    "fb_top_r": (8.0, 7.4, 180.0),        # R on FB/VSNS net only (top of divider)
     "output_cap": (12.6, 1.5, -90.0),     # C at output (past inductor)
 }
 
 # Relative offsets for passives around an LDO IC anchor.
-# Learned from human-routed AMS1117-3.3 layout.
+# Learned from human-routed AMS1117-3.3 layout on a 50x40mm board.
+#
+# Clearance calculation (actual measured values from easyeda2kicad SOT-223 footprint):
+#   fp_size_dict returns U2=9.36x6.70mm (includes tab pad), half-width=4.68mm
+#   C_0805 fp_size at -90°: effective width=2.35mm, half=1.175mm
+#   No-collision condition: cap_cx ± 1.175 must not overlap [u2_cx ± 4.68]
+#   Input cap (left): cap_cx + 1.175 ≤ u2_cx - 4.68 → offset ≤ -5.855 → use -6.5mm
+#   Output cap (right): cap_cx - 1.175 ≥ u2_cx + 4.68 → offset ≥ +5.855 → use +6.5mm
+#
+# The LDO input cap sits just outside the IC tab pad (NOT at the midpoint
+# between the buck and LDO — the old -17.4mm offset placed it on top of the
+# buck output cap, and -5.5mm still left 0.355mm overlap due to the wide tab).
 _LDO_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
-    "input_cap": (-17.4, -1.5, -90.0),    # C on VIN side, left of LDO
-    "output_cap": (6.9, 1.1, -90.0),      # C on VOUT side, right of LDO
+    "input_cap": (-6.5, 0.0, -90.0),      # C on VIN side, clear of LDO tab pad
+    "output_cap": (6.5, 0.0, -90.0),      # C on VOUT side, clear of LDO signal pads
 }
 
 # Net-name keywords used to classify passive roles in power subcircuits.
@@ -1334,6 +1556,72 @@ _BST_KEYWORDS = ("BST", "BOOT", "BOOTSTRAP")
 _SW_KEYWORDS = ("SW", "PH", "PHASE")
 _FB_KEYWORDS = ("FB", "VSNS", "FEEDBACK", "SENSE")
 _OUTPUT_KEYWORDS = ("+5V", "+3V3", "+3.3V", "+1V8", "VOUT", "V_OUT", "BUCK_5V")
+
+
+def _collect_passive_nets(
+    ref: str,
+    ic_ref: str,
+    ctx: PlacementContext,
+) -> tuple[list[str], list[str]]:
+    """Return (all_nets_for_ref, shared_nets_with_ic) for a passive component.
+
+    Both lists contain upper-cased net names.
+    """
+    all_nets: list[str] = []
+    shared: list[str] = []
+    for net in ctx.requirements.nets:
+        conn_refs = {c.ref for c in net.connections}
+        if ref not in conn_refs:
+            continue
+        name_upper = net.name.upper()
+        all_nets.append(name_upper)
+        if ic_ref in conn_refs:
+            shared.append(name_upper)
+    return all_nets, shared
+
+
+def _classify_cap_role(
+    all_nets: list[str],
+    shared_nets: list[str],
+    ic_input_voltage: float,
+    ic_output_voltage: float,
+) -> str:
+    """Classify a capacitor's role in a power subcircuit.
+
+    Returns one of: "bootstrap_cap", "input_cap", "output_cap".
+    """
+    # Bootstrap cap: on BST net
+    if any(any(kw in n for kw in _BST_KEYWORDS) for n in all_nets):
+        return "bootstrap_cap"
+    # Input cap: on VIN net shared with IC
+    if any(any(kw in n for kw in _VIN_KEYWORDS) for n in shared_nets):
+        return "input_cap"
+    # Use voltage magnitude when regulator voltages are known
+    if ic_input_voltage > 0 and ic_output_voltage > 0:
+        cap_voltage = _estimate_net_voltage(all_nets)
+        if cap_voltage is not None:
+            in_diff = abs(cap_voltage - ic_input_voltage)
+            out_diff = abs(cap_voltage - ic_output_voltage)
+            return "input_cap" if in_diff < out_diff else "output_cap"
+    # Output cap: on output net keyword
+    if any(any(kw in n for kw in _OUTPUT_KEYWORDS) for n in all_nets):
+        return "output_cap"
+    # Fallback: shared net with IC → input, otherwise output
+    return "input_cap" if shared_nets else "output_cap"
+
+
+_GND_NET_NAMES: frozenset[str] = frozenset({"GND", "AGND", "DGND", "PGND"})
+"""Canonical GND net names used to classify feedback-divider resistors."""
+
+
+def _classify_resistor_role_power(all_nets: list[str]) -> str | None:
+    """Classify a resistor's role in a power subcircuit (FB divider top/bottom)."""
+    for n in all_nets:
+        if any(kw in n for kw in _FB_KEYWORDS):
+            if any(n2 in _GND_NET_NAMES for n2 in all_nets):
+                return "fb_bot_r"
+            return "fb_top_r"
+    return None
 
 
 def _classify_passive_role_power(
@@ -1357,68 +1645,24 @@ def _classify_passive_role_power(
     if ref == ic_ref or ref not in ctx.positions:
         return None
 
-    # Collect net names this passive shares with the IC
-    shared_nets: list[str] = []
-    all_nets_for_ref: list[str] = []
-    for net in ctx.requirements.nets:
-        conn_refs = {c.ref for c in net.connections}
-        if ref in conn_refs:
-            all_nets_for_ref.append(net.name.upper())
-            if ic_ref in conn_refs:
-                shared_nets.append(net.name.upper())
-
-    # Classify by net keyword priority
+    all_nets_for_ref, shared_nets = _collect_passive_nets(ref, ic_ref, ctx)
     prefix = ref[0]
 
     if prefix == "L":
-        for n in all_nets_for_ref:
-            if any(kw in n for kw in _SW_KEYWORDS):
-                return "inductor"
-        return "inductor"  # inductors in power subcircuit are almost always the main inductor
+        # Inductors in a power subcircuit are always the main switching inductor
+        return "inductor"
 
     if prefix == "D":
-        for n in all_nets_for_ref:
-            if any(kw in n for kw in _SW_KEYWORDS):
-                return "catch_diode"
+        # Diodes in a power subcircuit are always the catch/freewheeling diode
         return "catch_diode"
 
     if prefix == "C":
-        # Bootstrap cap: on BST net
-        for n in all_nets_for_ref:
-            if any(kw in n for kw in _BST_KEYWORDS):
-                return "bootstrap_cap"
-        # Input cap: on VIN net shared with IC
-        for n in shared_nets:
-            if any(kw in n for kw in _VIN_KEYWORDS):
-                return "input_cap"
-        # For regulators with known voltages, use voltage magnitude to
-        # distinguish input vs output caps.  Higher voltage net = input.
-        if ic_input_voltage > 0 and ic_output_voltage > 0:
-            cap_voltage = _estimate_net_voltage(all_nets_for_ref)
-            if cap_voltage is not None:
-                # If cap voltage is closer to input voltage, it's input cap
-                in_diff = abs(cap_voltage - ic_input_voltage)
-                out_diff = abs(cap_voltage - ic_output_voltage)
-                if in_diff < out_diff:
-                    return "input_cap"
-                return "output_cap"
-        # Output cap: on output net or not sharing any net with IC directly
-        for n in all_nets_for_ref:
-            if any(kw in n for kw in _OUTPUT_KEYWORDS):
-                return "output_cap"
-        # Fallback: if shared net with IC, likely input; otherwise output
-        return "input_cap" if shared_nets else "output_cap"
+        return _classify_cap_role(
+            all_nets_for_ref, shared_nets, ic_input_voltage, ic_output_voltage,
+        )
 
     if prefix == "R":
-        for n in all_nets_for_ref:
-            if any(kw in n for kw in _FB_KEYWORDS):
-                # Determine top vs bottom: top R connects to output rail,
-                # bottom R connects to GND
-                for n2 in all_nets_for_ref:
-                    if n2 in ("GND", "AGND", "DGND", "PGND"):
-                        return "fb_bot_r"
-                return "fb_top_r"
-        return None
+        return _classify_resistor_role_power(all_nets_for_ref)
 
     return None
 
@@ -1464,6 +1708,256 @@ def _estimate_regulator_voltages(
     return (0.0, 0.0)
 
 
+def _resolve_power_zone_bounds(
+    ctx: PlacementContext,
+    n_regs: int,
+) -> tuple[float, float, float, float]:
+    """Return (zx1, zy1, zx2, zy2) for the power zone, expanding if too narrow."""
+    min_power_zone_w = 25.0
+    zone_rect = _find_zone_rect(ctx, "power")
+    if zone_rect is None:
+        return ctx.bounds
+    zx1, zy1, zx2, zy2 = zone_rect
+    if zx2 - zx1 < min_power_zone_w and n_regs >= 2:
+        _log.info(
+            "    3c1b: power zone too narrow (%.1fmm) — expanding to board bounds",
+            zx2 - zx1,
+        )
+        return ctx.bounds
+    return zone_rect
+
+
+def _compute_regulator_x_fractions(n_regs: int) -> list[float]:
+    """Compute horizontal zone-fraction positions for N regulators.
+
+    - 1 regulator: 30% (room for output passives on right)
+    - 2 regulators: 17%, 82% (learned from human reference board)
+    - N regulators: evenly spread 15%-85%
+    """
+    if n_regs == 1:
+        return [0.30]
+    if n_regs == 2:
+        return [0.17, 0.82]
+    return [0.15 + 0.70 * i / (n_regs - 1) for i in range(n_regs)]
+
+
+def _sort_regulators_by_flow(
+    all_reg_scs: list[object],
+    ctx: PlacementContext,
+    topology: object,
+) -> None:
+    """Sort regulator subcircuits in-place by power-chain flow order.
+
+    Earlier in the chain (higher input voltage) sorts to a lower index
+    so it is placed further left in the signal-flow layout.
+    """
+    def _flow_order(sc: object) -> float:
+        if sc.input_domain and sc.input_domain in topology.domain_order:  # type: ignore[union-attr]
+            return float(list(topology.domain_order).index(sc.input_domain))  # type: ignore[union-attr]
+        max_v = 0.0
+        for net in ctx.requirements.nets:
+            if not any(c.ref == sc.anchor_ref for c in net.connections):  # type: ignore[union-attr]
+                continue
+            upper = net.name.upper()
+            for prefix in ("+24V", "+12V", "+5V", "+3V3", "+3.3V", "+1V8"):
+                if prefix in upper:
+                    try:
+                        v = float(prefix.replace("+", "").replace("V", ".").rstrip("."))
+                    except ValueError:
+                        continue
+                    max_v = max(max_v, v)
+            if "VIN" in upper or "V_IN" in upper:
+                max_v = max(max_v, 100.0)
+        return -max_v if max_v > 0 else 999.0
+
+    all_reg_scs.sort(key=_flow_order)
+
+
+def _gather_ic_net_refs(
+    ic_ref: str,
+    sc_refs: set[str],
+    ctx: PlacementContext,
+    power_group_refs: set[str],
+) -> set[str]:
+    """Return all passive refs connected (directly or 1-hop) to *ic_ref*.
+
+    Pass 1: direct connections on non-GND nets shared with *ic_ref*.
+    Pass 2: one hop — non-GND nets that share any ref from pass-1 result.
+    """
+    _gnd_nets = frozenset({"GND", "AGND", "DGND", "PGND"})
+    ic_net_refs: set[str] = set(sc_refs)
+
+    for net in ctx.requirements.nets:
+        if net.name.upper() in _gnd_nets:
+            continue
+        conn_refs = {c.ref for c in net.connections}
+        if ic_ref not in conn_refs:
+            continue
+        for c in net.connections:
+            if (c.ref != ic_ref
+                    and c.ref in ctx.positions
+                    and c.ref[0] in "RCLDF"
+                    and (c.ref in power_group_refs or c.ref in sc_refs)):
+                ic_net_refs.add(c.ref)
+
+    for net in ctx.requirements.nets:
+        if net.name.upper() in _gnd_nets:
+            continue
+        conn_refs = {c.ref for c in net.connections}
+        if conn_refs & ic_net_refs:
+            for c in net.connections:
+                if (c.ref not in ic_net_refs
+                        and c.ref != ic_ref
+                        and c.ref in ctx.positions
+                        and c.ref[0] in "RCLDF"
+                        and c.ref in power_group_refs):
+                    ic_net_refs.add(c.ref)
+
+    return ic_net_refs
+
+
+def _place_regulator_passives(
+    ic_ref: str,
+    ic_x: float,
+    ic_y: float,
+    ic_net_refs: set[str],
+    offsets: dict[str, tuple[float, float, float]],
+    zone_bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+    in_v: float,
+    out_v: float,
+) -> set[str]:
+    """Place passives for one regulator IC at learned offsets.
+
+    Returns the set of role names that were placed.
+    """
+    zx1, zy1, zx2, zy2 = zone_bounds
+    placed_roles: set[str] = set()
+    for ref in sorted(ic_net_refs):
+        if ref == ic_ref:
+            continue
+        role = _classify_passive_role_power(ref, ctx, ic_ref, ic_net_refs, in_v, out_v)
+        if role is None or role not in offsets:
+            continue
+        if role in placed_roles:
+            continue
+        placed_roles.add(role)
+        dx, dy, rot = offsets[role]
+        px = _clamp(ic_x + dx, zx1 + 1.0, zx2 - 1.0)
+        py = _clamp(ic_y + dy, zy1 + 1.0, zy2 - 1.0)
+        ctx.positions[ref] = (px, py, rot)
+        ctx.power_group_fixed.add(ref)
+    return placed_roles
+
+
+def _place_power_chain_ic(
+    sc: object,
+    reg_idx: int,
+    x_fracs: list[float],
+    zone_bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place one regulator IC and its passives at the signal-flow position."""
+    from kicad_pipeline.optimization.functional_grouper import SubCircuitType
+
+    ic_ref: str = sc.anchor_ref  # type: ignore[union-attr]
+    if ic_ref not in ctx.positions:
+        return
+
+    zx1, zy1, zx2, zy2 = zone_bounds
+    zone_w = zx2 - zx1
+    zone_h = zy2 - zy1
+
+    is_buck = sc.circuit_type == SubCircuitType.BUCK_CONVERTER  # type: ignore[union-attr]
+    offsets = _BUCK_PASSIVE_OFFSETS if is_buck else _LDO_PASSIVE_OFFSETS
+    y_frac = 0.40 if is_buck else 0.47
+    ic_rot = -90.0 if is_buck else 0.0
+
+    ic_x = zx1 + zone_w * x_fracs[reg_idx]
+    ic_y = _clamp(zy1 + zone_h * y_frac, zy1 + 3.0, zy2 - 3.0)
+
+    ctx.positions[ic_ref] = (ic_x, ic_y, ic_rot)
+    ctx.power_group_fixed.add(ic_ref)
+
+    power_group_refs = _collect_feature_refs(ctx, "power", "supply")
+    ic_net_refs = _gather_ic_net_refs(
+        ic_ref, set(sc.refs), ctx, power_group_refs,  # type: ignore[union-attr]
+    )
+    in_v, out_v = _estimate_regulator_voltages(ic_ref, ctx)
+    placed_roles = _place_regulator_passives(
+        ic_ref, ic_x, ic_y, ic_net_refs, offsets, zone_bounds, ctx, in_v, out_v,
+    )
+
+    _log.info(
+        "    3c1b: placed %s (%s) at (%.1f, %.1f, %.0f) with %d passives (roles: %s)",
+        ic_ref,
+        "buck" if is_buck else "ldo",
+        ic_x, ic_y, ic_rot,
+        len(placed_roles),
+        ", ".join(sorted(placed_roles)),
+    )
+
+
+def _place_power_connectors(
+    ctx: PlacementContext,
+    all_reg_scs: list[object],
+    x_fracs: list[float],
+    zone_bounds: tuple[float, float, float, float],
+) -> None:
+    """Place power-group connectors at learned reference-board positions.
+
+    Only applied on dedicated power boards (<=2 features, <=4 connectors).
+    On larger boards, _phase_top_edge_connectors handles connector placement.
+    """
+    zx1, zy1, zx2, zy2 = zone_bounds
+    zone_w = zx2 - zx1
+    zone_h = zy2 - zy1
+
+    power_group_refs = _collect_feature_refs(ctx, "power", "supply")
+    power_connectors = sorted(
+        r for r in power_group_refs
+        if r.startswith("J") and r in ctx.positions
+    )
+    is_power_focused_board = (
+        len(ctx.requirements.features) <= 2 and len(power_connectors) <= 4
+    )
+    if not (power_connectors and all_reg_scs and is_power_focused_board):
+        return
+
+    first_ic_x = zx1 + zone_w * x_fracs[0]
+    first_ic_y = zy1 + zone_h * 0.40
+
+    # index -> (x_frac_or_offset, y_frac, rotation, is_relative_to_ic, ic_dx)
+    conn_rules: dict[int, tuple[float, float, float, float, float]] = {
+        0: (0.0, 0.15, 0.0, 1.0, 7.7),
+        1: (0.61, 0.0, -90.0, 0.0, 0.0),
+        2: (0.88, 0.73, -90.0, 0.0, 0.0),
+    }
+    for idx, j_ref in enumerate(power_connectors):
+        if j_ref in ctx.fixed_refs:
+            continue
+        rule = conn_rules.get(idx)
+        if rule is None:
+            continue
+        x_frac, y_frac, rot, is_rel, ic_dx = rule
+        if is_rel > 0.5:
+            jx = first_ic_x + ic_dx
+            jy = zy1 + zone_h * y_frac
+        else:
+            jx = zx1 + zone_w * x_frac
+            jy = zy1 + zone_h * y_frac if y_frac > 0.01 else first_ic_y + 1.7
+        clamped_x = _clamp(jx, zx1 + 1.0, zx2 - 1.0)
+        clamped_y = _clamp(jy, zy1 + 1.0, zy2 - 1.0)
+        # Respect placement constraints (proximity, ordering)
+        from kicad_pipeline.optimization.constraint_guard import respect_constraints
+        clamped_x, clamped_y, rot = respect_constraints(
+            j_ref, clamped_x, clamped_y, rot, ctx,
+        )
+        ctx.positions[j_ref] = (clamped_x, clamped_y, rot)
+        ctx.power_group_fixed.add(j_ref)
+        ctx.fixed_refs.add(j_ref)
+
+
 def _phase_power_chain_flow(ctx: PlacementContext) -> None:
     """3c1b: Power chain signal-flow ordering.
 
@@ -1486,232 +1980,169 @@ def _phase_power_chain_flow(ctx: PlacementContext) -> None:
 
     _log.info("  3c1b: Power chain signal-flow ordering")
 
-    # Collect power regulator subcircuits
-    buck_scs = [sc for sc in ctx.subcircuits
-                if sc.circuit_type == SubCircuitType.BUCK_CONVERTER]
-    ldo_scs = [sc for sc in ctx.subcircuits
-               if sc.circuit_type == SubCircuitType.LDO_REGULATOR]
+    buck_scs = [sc for sc in ctx.subcircuits if sc.circuit_type == SubCircuitType.BUCK_CONVERTER]
+    ldo_scs = [sc for sc in ctx.subcircuits if sc.circuit_type == SubCircuitType.LDO_REGULATOR]
 
     if not (buck_scs or ldo_scs):
         _log.info("    No power regulators found — skipping signal-flow phase")
         return
 
-    # Get power zone bounds.  If the zone is too small for the learned
-    # offsets (~25mm width for buck+LDO chain), expand to board bounds.
-    min_power_zone_w = 25.0
-    power_zone_rect = _find_zone_rect(ctx, "power")
-    if power_zone_rect is None:
-        power_zone_rect = ctx.bounds
-    zx1, zy1, zx2, zy2 = power_zone_rect
-    zone_w = zx2 - zx1
-    zone_h = zy2 - zy1
-    if zone_w < min_power_zone_w and len(buck_scs) + len(ldo_scs) >= 2:
-        _log.info("    3c1b: power zone too narrow (%.1fmm) — expanding to board bounds",
-                  zone_w)
-        zx1, zy1, zx2, zy2 = ctx.bounds
-        zone_w = zx2 - zx1
-        zone_h = zy2 - zy1
-
-    # Order regulators by power flow topology (highest voltage -> lowest)
     all_reg_scs = buck_scs + ldo_scs
+    zone_bounds = _resolve_power_zone_bounds(ctx, len(all_reg_scs))
     topology = compute_power_flow_topology(tuple(ctx.subcircuits))
-
-    def _regulator_flow_order(sc: object) -> float:
-        """Return flow-order index: earlier in chain = lower index = further left.
-
-        Falls back to input voltage magnitude (higher voltage = earlier in chain).
-        """
-        if sc.input_domain and sc.input_domain in topology.domain_order:
-            return float(list(topology.domain_order).index(sc.input_domain))
-        # Fallback: estimate input voltage from net names connected to IC
-        max_v = 0.0
-        for net in ctx.requirements.nets:
-            if not any(c.ref == sc.anchor_ref for c in net.connections):
-                continue
-            upper = net.name.upper()
-            for prefix in ("+24V", "+12V", "+5V", "+3V3", "+3.3V", "+1V8"):
-                if prefix in upper:
-                    try:
-                        v = float(prefix.replace("+", "").replace("V", ".").rstrip("."))
-                    except ValueError:
-                        continue
-                    max_v = max(max_v, v)
-            if "VIN" in upper or "V_IN" in upper:
-                max_v = max(max_v, 100.0)  # VIN is usually the highest
-        # Higher voltage = lower sort key = placed further left
-        return -max_v if max_v > 0 else 999.0
-
-    all_reg_scs.sort(key=_regulator_flow_order)
+    _sort_regulators_by_flow(all_reg_scs, ctx, topology)
 
     if not all_reg_scs:
         return
 
-    # Compute horizontal positions: spread regulators left-to-right across zone
-    n_regs = len(all_reg_scs)
-    # For 1 regulator: center at 30% zone width (leaving room for output passives)
-    # For 2 regulators: 17% and 82% (learned from human reference)
-    # For N regulators: evenly spread from 15% to 85%
-    if n_regs == 1:
-        x_fracs = [0.30]
-    elif n_regs == 2:
-        x_fracs = [0.17, 0.82]
-    else:
-        x_fracs = [0.15 + 0.70 * i / (n_regs - 1) for i in range(n_regs)]
+    x_fracs = _compute_regulator_x_fractions(len(all_reg_scs))
 
     for reg_idx, sc in enumerate(all_reg_scs):
-        ic_ref = sc.anchor_ref
-        if ic_ref not in ctx.positions:
-            continue
+        _place_power_chain_ic(sc, reg_idx, x_fracs, zone_bounds, ctx)
 
-        is_buck = sc.circuit_type == SubCircuitType.BUCK_CONVERTER
-        offsets = _BUCK_PASSIVE_OFFSETS if is_buck else _LDO_PASSIVE_OFFSETS
-
-        # Place IC at signal-flow position
-        ic_x = zx1 + zone_w * x_fracs[reg_idx]
-        # Force Y to learned zone fractions (from human reference):
-        #   Buck IC at ~40% zone height, LDO at ~47% zone height.
-        # Previous code kept old_y which was set by _phase_power_group
-        # near the zone bottom — causing ~20mm drift from reference.
-        y_frac = 0.40 if is_buck else 0.47
-        ic_y = zy1 + zone_h * y_frac
-        ic_y = _clamp(ic_y, zy1 + 3.0, zy2 - 3.0)
-        # Buck ICs are rotated -90deg for signal flow; LDOs stay at 0
-        ic_rot = -90.0 if is_buck else 0.0
-
-        ctx.positions[ic_ref] = (ic_x, ic_y, ic_rot)
-        ctx.power_group_fixed.add(ic_ref)
-
-        # Gather ALL passives connected to this IC via nets (the subcircuit
-        # detector often only captures a subset).  Include power group refs
-        # that share a non-GND net with the IC.
-        power_group_refs = _collect_feature_refs(ctx, "power", "supply")
-        ic_net_refs: set[str] = set(sc.refs)
-        for net in ctx.requirements.nets:
-            conn_refs = {c.ref for c in net.connections}
-            if ic_ref not in conn_refs:
-                continue
-            # Skip pure GND nets — they connect everything
-            if net.name.upper() in ("GND", "AGND", "DGND", "PGND"):
-                continue
-            for c in net.connections:
-                if (c.ref != ic_ref
-                        and c.ref in ctx.positions
-                        and c.ref[0] in "RCLDF"
-                        and (c.ref in power_group_refs or c.ref in sc.refs)):
-                    ic_net_refs.add(c.ref)
-        # Also look for passives 1 hop away (e.g. FB divider bottom R
-        # connects to GND, not to IC directly, but top R connects to IC)
-        for net in ctx.requirements.nets:
-            if net.name.upper() in ("GND", "AGND", "DGND", "PGND"):
-                continue
-            conn_refs = {c.ref for c in net.connections}
-            # If any ref in ic_net_refs is in this net, grab other small
-            # passives from the same power group
-            if conn_refs & ic_net_refs:
-                for c in net.connections:
-                    if (c.ref not in ic_net_refs
-                            and c.ref != ic_ref
-                            and c.ref in ctx.positions
-                            and c.ref[0] in "RCLDF"
-                            and c.ref in power_group_refs):
-                        ic_net_refs.add(c.ref)
-
-        # Estimate input/output voltages to disambiguate input vs output caps
-        in_v, out_v = _estimate_regulator_voltages(ic_ref, ctx)
-
-        # Place passives at learned offsets from IC
-        placed_roles: set[str] = set()
-        for ref in sorted(ic_net_refs):
-            if ref == ic_ref:
-                continue
-            role = _classify_passive_role_power(
-                ref, ctx, ic_ref, ic_net_refs, in_v, out_v,
-            )
-            if role is None or role not in offsets:
-                continue
-            # Only place one component per role (first match wins)
-            if role in placed_roles:
-                continue
-            placed_roles.add(role)
-            dx, dy, rot = offsets[role]
-            px = ic_x + dx
-            py = ic_y + dy
-            # Clamp inside zone
-            px = _clamp(px, zx1 + 1.0, zx2 - 1.0)
-            py = _clamp(py, zy1 + 1.0, zy2 - 1.0)
-            ctx.positions[ref] = (px, py, rot)
-            ctx.power_group_fixed.add(ref)
-
-        _log.info(
-            "    3c1b: placed %s (%s) at (%.1f, %.1f, %.0f) with %d passives"
-            " (roles: %s)",
-            ic_ref,
-            "buck" if is_buck else "ldo",
-            ic_x, ic_y, ic_rot,
-            len(placed_roles),
-            ", ".join(sorted(placed_roles)),
-        )
-
-    # Place connectors at learned positions from human reference.
-    # Only apply on dedicated power boards (few feature blocks, few
-    # connectors).  On larger multi-group boards, connectors are
-    # handled by _phase_top_edge_connectors and _phase_connector_orientation.
-    power_group_refs = _collect_feature_refs(ctx, "power", "supply")
-    power_connectors = sorted(
-        r for r in power_group_refs
-        if r.startswith("J") and r in ctx.positions
-    )
-    is_power_focused_board = (
-        len(ctx.requirements.features) <= 2
-        and len(power_connectors) <= 4
-    )
-    if power_connectors and all_reg_scs and is_power_focused_board:
-        first_ic_x = zx1 + zone_w * x_fracs[0]
-        first_ic_y = zy1 + zone_h * 0.40  # buck IC Y
-
-        # Connector placement rules learned from human reference:
-        #   J1 (input): near top of zone, X = first_ic_x + 7.7, y = 15%
-        #   J2 (mid TP): 61% zone width, y = IC_y + 1.7, rot=-90
-        #   J3 (output TP): 88% zone width, 73% height, rot=-90
-        conn_rules: dict[int, tuple[float, float, float, float, float]] = {
-            # index -> (x_frac_or_offset, y_frac, rotation, is_relative_to_ic, ic_dx)
-            0: (0.0, 0.15, 0.0, 1.0, 7.7),
-            1: (0.61, 0.0, -90.0, 0.0, 0.0),
-            2: (0.88, 0.73, -90.0, 0.0, 0.0),
-        }
-        for idx, j_ref in enumerate(power_connectors):
-            if j_ref in ctx.fixed_refs:
-                continue
-            rule = conn_rules.get(idx)
-            if rule is None:
-                continue
-            x_frac, y_frac, rot, is_rel, ic_dx = rule
-            if is_rel > 0.5:
-                jx = first_ic_x + ic_dx
-                jy = zy1 + zone_h * y_frac
-            else:
-                jx = zx1 + zone_w * x_frac
-                jy = (zy1 + zone_h * y_frac
-                      if y_frac > 0.01 else first_ic_y + 1.7)
-            jx = _clamp(jx, zx1 + 1.0, zx2 - 1.0)
-            jy = _clamp(jy, zy1 + 1.0, zy2 - 1.0)
-            ctx.positions[j_ref] = (jx, jy, rot)
-            ctx.power_group_fixed.add(j_ref)
-            # Also add to fixed_refs so _phase_top_edge_connectors
-            # does not override the power-chain connector positions.
-            ctx.fixed_refs.add(j_ref)
+    _place_power_connectors(ctx, all_reg_scs, x_fracs, zone_bounds)
 
     _log.info(
         "    3c1b: signal-flow ordered %d regulators across power zone",
-        n_regs,
+        len(all_reg_scs),
     )
+
+
+def _pwr_place_column_down(
+    ctx: PlacementContext,
+    refs: list[str],
+    col_x: float,
+    start_y: float,
+    placed_in_col: set[str],
+    grid: object,
+    pz_bounds: tuple[float, float, float, float],
+    strip_gap: float,
+) -> float:
+    """Place *refs* in a vertical column going DOWN. Returns bottom Y."""
+    pz_x1, pz_y1, pz_x2, pz_y2 = pz_bounds
+    cy = start_y
+    for ref in refs:
+        if ref not in ctx.positions or ref in ctx.fixed_refs or ref in placed_in_col or ref == "":
+            continue
+        w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        px = max(pz_x1, min(pz_x2, col_x))
+        py = max(pz_y1, min(pz_y2, cy + h / 2.0))
+        ctx.positions[ref] = (px, py, 0.0)
+        grid.place(px, py, w, h)
+        ctx.power_group_fixed.add(ref)
+        placed_in_col.add(ref)
+        cy = py + h / 2.0 + strip_gap
+    return cy
+
+
+def _pwr_place_column_up(
+    ctx: PlacementContext,
+    refs: list[str],
+    col_x: float,
+    start_y: float,
+    placed_in_col: set[str],
+    grid: object,
+    pz_bounds: tuple[float, float, float, float],
+    strip_gap: float,
+) -> float:
+    """Place *refs* in a vertical column going UP. Returns top Y."""
+    pz_x1, pz_y1, pz_x2, pz_y2 = pz_bounds
+    cy = start_y
+    for ref in refs:
+        if ref not in ctx.positions or ref in ctx.fixed_refs or ref in placed_in_col or ref == "":
+            continue
+        w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        px = max(pz_x1, min(pz_x2, col_x))
+        py = max(pz_y1, min(pz_y2, cy - h / 2.0))
+        ctx.positions[ref] = (px, py, 0.0)
+        grid.place(px, py, w, h)
+        ctx.power_group_fixed.add(ref)
+        placed_in_col.add(ref)
+        cy = py - h / 2.0 - strip_gap
+    return cy
+
+
+def _pwr_place_fork_columns(
+    ctx: PlacementContext,
+    columns: dict[str, list[str]],
+    anchor_x: float,
+    sub_col_offset: float,
+    col_spacing: float,
+    output_top: float,
+    placed_in_col: set[str],
+    grid: object,
+    pz_bounds: tuple[float, float, float, float],
+    strip_gap: float,
+) -> None:
+    """Place output, bridge, buck2, and tail columns around the anchor IC."""
+    left_x = anchor_x - sub_col_offset
+    right_x = anchor_x + sub_col_offset
+
+    def _col_down(refs: list[str], col_x: float, start_y: float) -> float:
+        return _pwr_place_column_down(ctx, refs, col_x, start_y,
+                                      placed_in_col, grid, pz_bounds, strip_gap)
+
+    # Output columns
+    left_bottom = _col_down(columns["output_left"], left_x, output_top)
+    right_bottom = _col_down(columns["output_right"], right_x, output_top)
+
+    # Bridge
+    bridge_top = max(left_bottom, right_bottom)
+    bridge_col = columns["bridge"]
+    mid = len(bridge_col) // 2 + 1
+    fork_y_l = _col_down(bridge_col[:mid], left_x, bridge_top)
+    fork_y_r = _col_down(bridge_col[mid:], right_x, bridge_top)
+    fork_y = max(fork_y_l, fork_y_r)
+
+    # Buck #2 sub-columns
+    col2_x = anchor_x + col_spacing
+    col2_left_bottom = _col_down(columns["buck2_left"], col2_x, output_top)
+    b2l_max_w = max(
+        (ctx.fp_sizes.get(r, (2.0, 2.0))[0] for r in columns["buck2_left"] if r in ctx.fp_sizes),
+        default=3.0,
+    )
+    b2r_max_w = max(
+        (ctx.fp_sizes.get(r, (2.0, 2.0))[0] for r in columns["buck2_right"] if r in ctx.fp_sizes),
+        default=2.0,
+    )
+    col2_right_x = col2_x + (b2l_max_w + b2r_max_w) / 2.0 + 0.5
+    _col_down(columns["buck2_right"], col2_right_x, output_top)
+
+    # Tail
+    tail_y = max(fork_y, col2_left_bottom)
+    tail_col = columns["tail"]
+    mid_t = len(tail_col) // 2 + 1
+    _col_down(tail_col[:mid_t], left_x, tail_y)
+    _col_down(tail_col[mid_t:], right_x, tail_y)
+
+
+def _pwr_place_anchor_ic(
+    ctx: PlacementContext,
+    buck1_ic: str,
+    anchor_x: float,
+    u1_y: float,
+    u1_w: float,
+    u1_h: float,
+    placed_in_col: set[str],
+    grid: object,
+    pz_bounds: tuple[float, float, float, float],
+) -> tuple[float, float]:
+    """Place buck1 IC at its anchor position. Returns updated (u1_x, u1_y)."""
+    pz_x1, pz_y1, pz_x2, pz_y2 = pz_bounds
+    if not (buck1_ic and buck1_ic not in ctx.fixed_refs):
+        return anchor_x, u1_y
+    px = max(pz_x1, min(pz_x2, anchor_x))
+    py = max(pz_y1, min(pz_y2, u1_y))
+    ctx.positions[buck1_ic] = (px, py, 0.0)
+    grid.place(px, py, u1_w, u1_h)  # type: ignore[union-attr]
+    ctx.power_group_fixed.add(buck1_ic)
+    placed_in_col.add(buck1_ic)
+    return px, py
 
 
 def _phase_power_group(ctx: PlacementContext) -> None:
     """3c1: Power group organization — IC-anchored fork/branch layout."""
     _log.info("  3c1: Power group organization")
-    bounds = ctx.bounds
-    _min_x, _min_y, max_x, max_y = bounds
 
     power_group_refs = _collect_feature_refs(ctx, "power", "supply")
     if not power_group_refs:
@@ -1719,156 +2150,44 @@ def _phase_power_group(ctx: PlacementContext) -> None:
 
     power_zone_rect = _find_zone_rect(ctx, "power")
     net_to_pwr_refs = _build_net_to_group_refs(ctx, power_group_refs)
-
     by_prefix = _classify_refs_by_prefix(power_group_refs, ctx, "U", "J")
-    power_ics = by_prefix["U"]
-    power_connectors = by_prefix["J"]
+    power_ics, power_connectors = by_prefix["U"], by_prefix["J"]
 
     if not (power_ics and power_zone_rect is not None):
         return
 
     zx1, zy1, zx2, zy2 = power_zone_rect
-
-    _STRIP_GAP = 0.5
-    _COL_SPACING = 8.0
-    _IC_MARGIN = 3.0
-
+    strip_gap, col_spacing, sub_col_offset = 0.5, 8.0, 3.5
     placed_in_col: set[str] = set()
 
     buck1_ic = power_ics[0] if power_ics else ""
     buck2_ic = power_ics[1] if len(power_ics) > 1 else ""
-
     columns = _classify_power_columns(
         ctx, power_group_refs, power_ics, power_connectors,
         net_to_pwr_refs, buck1_ic, buck2_ic,
     )
-    vin_above = columns["vin_above"]
-    output_left = columns["output_left"]
-    output_right = columns["output_right"]
-    bridge_column = columns["bridge"]
-    buck2_left = columns["buck2_left"]
-    buck2_right = columns["buck2_right"]
-    tail_column = columns["tail"]
 
-    # --- IC-anchored placement ---
-    u1_x, u1_y, _u1_rot = ctx.positions.get(
-        buck1_ic, (zx1 + 5.0, zy1 + 15.0, 0.0),
-    )
+    u1_x, u1_y, _u1_rot = ctx.positions.get(buck1_ic, (zx1 + 5.0, zy1 + 15.0, 0.0))
     u1_w, u1_h = ctx.fp_sizes.get(buck1_ic, (5.0, 5.0))
-    zone_quarter_x = zx1 + (zx2 - zx1) * 0.25
-    anchor_x = max(
-        zx1 + 6.0,
-        min(zx2 - _COL_SPACING - 3.0, zone_quarter_x),
-    )
+    anchor_x = max(zx1 + 6.0, min(zx2 - col_spacing - 3.0, zx1 + (zx2 - zx1) * 0.25))
+    pwr_grid = _build_exclusion_grid(ctx, power_group_refs)
+    pz_bounds = (zx1 + 2.0, zy1 + 2.0, zx2 - 2.0, ctx.bounds[3] - 3.0)
 
-    # Build occupancy grid of non-power components
-    _pwr_grid = _build_exclusion_grid(ctx, power_group_refs)
-
-    _pz_x1 = zx1 + 2.0
-    _pz_y1 = zy1 + 2.0
-    _pz_x2 = zx2 - 2.0
-    _pz_y2 = max_y - 3.0
-
-    def _place_column(
-        refs: list[str],
-        col_x: float,
-        start_y: float,
-    ) -> float:
-        """Place refs in a vertical column. Returns bottom Y."""
-        cy = start_y
-        for ref in refs:
-            if (ref not in ctx.positions or ref in ctx.fixed_refs
-                    or ref in placed_in_col or ref == ""):
-                continue
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            tx = max(_pz_x1, min(_pz_x2, col_x))
-            ty = max(_pz_y1, min(_pz_y2, cy + h / 2.0))
-            px, py = tx, ty
-            ctx.positions[ref] = (px, py, 0.0)
-            _pwr_grid.place(px, py, w, h)
-            ctx.power_group_fixed.add(ref)
-            placed_in_col.add(ref)
-            cy = py + h / 2.0 + _STRIP_GAP
-        return cy
-
-    def _place_column_upward(
-        refs: list[str],
-        col_x: float,
-        start_y: float,
-    ) -> float:
-        """Place refs in a vertical column going UP. Returns top Y."""
-        cy = start_y
-        for ref in refs:
-            if (ref not in ctx.positions or ref in ctx.fixed_refs
-                    or ref in placed_in_col or ref == ""):
-                continue
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            tx = max(_pz_x1, min(_pz_x2, col_x))
-            ty = max(_pz_y1, min(_pz_y2, cy - h / 2.0))
-            px, py = tx, ty
-            ctx.positions[ref] = (px, py, 0.0)
-            _pwr_grid.place(px, py, w, h)
-            ctx.power_group_fixed.add(ref)
-            placed_in_col.add(ref)
-            cy = py - h / 2.0 - _STRIP_GAP
-        return cy
-
-    # Register connectors (don't move them)
     for ref in power_connectors:
         ctx.power_group_fixed.add(ref)
 
-    # Place U1 at its anchor position
-    _SUB_COL_OFFSET = 3.5
-    if buck1_ic and buck1_ic not in ctx.fixed_refs:
-        px = max(_pz_x1, min(_pz_x2, anchor_x))
-        py = max(_pz_y1, min(_pz_y2, u1_y))
-        ctx.positions[buck1_ic] = (px, py, 0.0)
-        _pwr_grid.place(px, py, u1_w, u1_h)
-        ctx.power_group_fixed.add(buck1_ic)
-        placed_in_col.add(buck1_ic)
-        u1_x, u1_y = px, py
-
-    # VIN passives ABOVE U1
-    vin_top = u1_y - u1_h / 2.0 - _STRIP_GAP
-    _place_column_upward(vin_above, anchor_x, vin_top)
-
-    # Output passives in 2-column grid BELOW U1
-    output_top = u1_y + u1_h / 2.0 + _STRIP_GAP
-    left_x = anchor_x - _SUB_COL_OFFSET
-    right_x = anchor_x + _SUB_COL_OFFSET
-    left_bottom = _place_column(output_left, left_x, output_top)
-    right_bottom = _place_column(output_right, right_x, output_top)
-
-    # Bridge
-    bridge_top = max(left_bottom, right_bottom)
-    bridge_left = bridge_column[:len(bridge_column) // 2 + 1]
-    bridge_right = bridge_column[len(bridge_column) // 2 + 1:]
-    fork_y_l = _place_column(bridge_left, left_x, bridge_top)
-    fork_y_r = _place_column(bridge_right, right_x, bridge_top)
-    fork_y = max(fork_y_l, fork_y_r)
-
-    # Column 2: Buck #2
-    col2_x = anchor_x + _COL_SPACING
-    col2_top = output_top
-    col2_left_bottom = _place_column(buck2_left, col2_x, col2_top)
-    _b2l_max_w = max(
-        (ctx.fp_sizes.get(r, (2.0, 2.0))[0] for r in buck2_left if r in ctx.fp_sizes),
-        default=3.0,
+    u1_x, u1_y = _pwr_place_anchor_ic(
+        ctx, buck1_ic, anchor_x, u1_y, u1_w, u1_h, placed_in_col, pwr_grid, pz_bounds,
     )
-    _b2r_max_w = max(
-        (ctx.fp_sizes.get(r, (2.0, 2.0))[0] for r in buck2_right if r in ctx.fp_sizes),
-        default=2.0,
+    _pwr_place_column_up(
+        ctx, columns["vin_above"], anchor_x, u1_y - u1_h / 2.0 - strip_gap,
+        placed_in_col, pwr_grid, pz_bounds, strip_gap,
     )
-    col2_right_x = col2_x + (_b2l_max_w + _b2r_max_w) / 2.0 + 0.5
-    _place_column(buck2_right, col2_right_x, col2_top)
-    col2_bottom = col2_left_bottom
-
-    # Tail
-    tail_y = max(fork_y, col2_bottom)
-    tail_left = tail_column[:len(tail_column) // 2 + 1]
-    tail_right = tail_column[len(tail_column) // 2 + 1:]
-    _place_column(tail_left, left_x, tail_y)
-    _place_column(tail_right, right_x, tail_y)
+    _pwr_place_fork_columns(
+        ctx, columns, anchor_x, sub_col_offset, col_spacing,
+        u1_y + u1_h / 2.0 + strip_gap,
+        placed_in_col, pwr_grid, pz_bounds, strip_gap,
+    )
 
     _log.info(
         "    3c1: organized %d power components anchored at %s (%.1f, %.1f)",
@@ -2077,6 +2396,230 @@ def _adc_assign_passive_role(
     return None
 
 
+def _adc_init_ctx_defaults(ctx: PlacementContext) -> None:
+    """Set ctx ADC attributes to empty defaults when no channels are detected."""
+    ctx._adc_channels = []  # type: ignore[attr-defined]
+    ctx._ic_channels = {}  # type: ignore[attr-defined]
+    ctx._r_top_connector_x = {}  # type: ignore[attr-defined]
+    ctx._occupied_x_ranges = []  # type: ignore[attr-defined]
+    ctx._CHANNEL_SPACING_MM = 8.0  # type: ignore[attr-defined]
+    ctx._STRIP_GAP_MM = 1.5  # type: ignore[attr-defined]
+
+
+def _adc_group_by_ic(
+    adc_channels: list[tuple[str, str, list[str]]],
+    ctx: PlacementContext,
+) -> dict[str, list[tuple[str, list[str]]]]:
+    """Group ADC channels by IC ref and register IC refs on ctx."""
+    ic_channels: dict[str, list[tuple[str, list[str]]]] = {}
+    for ic_ref, ic_pin, passives in adc_channels:
+        ic_channels.setdefault(ic_ref, []).append((ic_pin, passives))
+        ctx.adc_ic_refs.add(ic_ref)
+    return ic_channels
+
+
+def _adc_build_channel_connector_list(
+    adc_channels: list[tuple[str, str, list[str]]],
+    ctx: PlacementContext,
+) -> list[tuple[str | None, str, str, list[str]]]:
+    """Build sorted (connector_ref, ic_ref, ic_pin, passives) list.
+
+    Sorted by connector ref so J1 < J2 < J3 < J4.
+    """
+    channel_with_connectors: list[tuple[str | None, str, str, list[str]]] = [
+        (_find_channel_connector_ref(passives, ctx), ic_ref, ic_pin, passives)
+        for ic_ref, ic_pin, passives in adc_channels
+    ]
+    channel_with_connectors.sort(key=lambda t: (t[0] or "Z999",))
+    return channel_with_connectors
+
+
+def _adc_compute_zone_scale(
+    ctx: PlacementContext,
+) -> tuple[float, float, float, float, float, float]:
+    """Return (az_x1, az_y1, az_x2, az_y2, sx, sy) from the analog zone."""
+    analog_zone = _find_zone_rect(ctx, "analog")
+    bounds = ctx.bounds
+    az_x1 = analog_zone[0] if analog_zone else bounds[0]
+    az_y1 = analog_zone[1] if analog_zone else bounds[1]
+    az_x2 = analog_zone[2] if analog_zone else bounds[2]
+    az_y2 = analog_zone[3] if analog_zone else bounds[3]
+    zone_w = az_x2 - az_x1
+    zone_h = az_y2 - az_y1
+    sx = zone_w / 60.0  # scale relative to 60mm reference board
+    sy = zone_h / 40.0  # scale relative to 40mm reference board
+    return az_x1, az_y1, az_x2, az_y2, sx, sy
+
+
+def _adc_place_connectors(
+    channel_with_connectors: list[tuple[str | None, str, str, list[str]]],
+    az_x1: float,
+    az_y1: float,
+    sx: float,
+    sy: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> tuple[list[str], float]:
+    """Place ADC channel connectors at the top edge of the analog zone.
+
+    Returns (connector_refs, j_spacing_mm).
+    """
+    n_channels = len(channel_with_connectors)
+    if n_channels > 1:
+        j_x_start = az_x1 + 12.35 * sx
+        j_x_end = az_x1 + 46.35 * sx
+        j_spacing = (j_x_end - j_x_start) / (n_channels - 1)
+    else:
+        j_x_start = az_x1 + (az_x1 + 60.0 * sx - az_x1) * 0.5
+        j_spacing = 0.0
+
+    j_y = az_y1 + 4.5 * sy
+    connector_refs: list[str] = []
+
+    for ch_idx, (j_ref, _ic_ref, _ic_pin, _passives) in enumerate(
+        channel_with_connectors,
+    ):
+        if j_ref is None or j_ref not in ctx.positions:
+            continue
+        j_x = j_x_start + ch_idx * j_spacing
+        j_x_clamped, j_y_clamped = _clamp_to_bounds(j_x, j_y, bounds)
+        ctx.positions[j_ref] = (j_x_clamped, j_y_clamped, 180.0)
+        ctx.fixed_refs.add(j_ref)
+        ctx.adc_channel_refs.add(j_ref)
+        connector_refs.append(j_ref)
+        _log.info(
+            "    3c2: connector %s -> (%.1f, %.1f) rot=180",
+            j_ref, j_x_clamped, j_y_clamped,
+        )
+    return connector_refs, j_spacing
+
+
+def _adc_place_passive_strips(
+    channel_with_connectors: list[tuple[str | None, str, str, list[str]]],
+    sx: float,
+    sy: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place each channel's passive components in a horizontal strip below its connector."""
+    strip_dy = _ADC_STRIP_DY_MM * sy
+    for ch_idx, (j_ref, _ic_ref, _ic_pin, passives) in enumerate(
+        channel_with_connectors,
+    ):
+        if j_ref is None or j_ref not in ctx.positions:
+            continue
+        jx, jy, _jrot = ctx.positions[j_ref]
+        r_refs = sorted(r for r in passives if r.startswith("R"))
+
+        for ref in passives:
+            if ref not in ctx.positions or ref in ctx.fixed_refs:
+                continue
+            role = _adc_assign_passive_role(ref, r_refs)
+            if role is None or role not in _ADC_STRIP_OFFSETS:
+                continue
+            avg_dx, slope_dx, rot = _ADC_STRIP_OFFSETS[role]
+            dx = (avg_dx + slope_dx * ch_idx) * sx
+            new_x, new_y = _clamp_to_bounds(jx + dx, jy + strip_dy, bounds)
+            ctx.positions[ref] = (new_x, new_y, rot)
+            ctx.adc_channel_refs.add(ref)
+            ctx.fixed_refs.add(ref)
+
+        _log.info("    3c2: ch%d passives placed as strip below %s", ch_idx, j_ref)
+
+
+def _adc_place_ics_and_decoupling(
+    az_x1: float,
+    az_y1: float,
+    sx: float,
+    sy: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place ADC IC(s) and their decoupling caps below the channel strips."""
+    ic_y = az_y1 + 28.58 * sy
+    for ic_ref in sorted(ctx.adc_ic_refs):
+        if ic_ref not in ctx.positions:
+            continue
+        ic_x = az_x1 + 45.75 * sx
+        ic_x_clamped, ic_y_clamped = _clamp_to_bounds(ic_x, ic_y, bounds)
+        ctx.positions[ic_ref] = (ic_x_clamped, ic_y_clamped, -90.0)
+        ctx.fixed_refs.add(ic_ref)
+        _log.info(
+            "    3c2: ADC IC %s -> (%.1f, %.1f) rot=-90",
+            ic_ref, ic_x_clamped, ic_y_clamped,
+        )
+        _adc_place_decoupling_caps(ic_ref, ic_x_clamped, ic_y_clamped, sy, bounds, ctx)
+
+
+def _adc_place_decoupling_caps(
+    ic_ref: str,
+    ic_x: float,
+    ic_y: float,
+    sy: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place decoupling caps connected to *ic_ref* directly below it."""
+    for net in ctx.requirements.nets:
+        if not any(c.ref == ic_ref for c in net.connections):
+            continue
+        for c in net.connections:
+            if (c.ref.startswith("C")
+                    and c.ref in ctx.positions
+                    and c.ref not in ctx.adc_channel_refs
+                    and c.ref not in ctx.fixed_refs):
+                cap_x, cap_y = _clamp_to_bounds(ic_x, ic_y + 3.3 * sy, bounds)
+                ctx.positions[c.ref] = (cap_x, cap_y, 180.0)
+                ctx.adc_channel_refs.add(c.ref)
+                ctx.fixed_refs.add(c.ref)
+                _log.info("    3c2: ADC decoupling %s -> (%.1f, %.1f)", c.ref, cap_x, cap_y)
+
+
+def _adc_place_i2c_pullups(
+    sx: float,
+    sy: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> list[str]:
+    """Place I2C pull-up resistors near the first ADC IC.
+
+    Returns the list of placed pull-up refs.
+    """
+    i2c_pullups = _find_i2c_pullup_refs(
+        ctx.adc_ic_refs, ctx, ctx.adc_channel_refs | ctx.fixed_refs,
+    )
+    if not i2c_pullups or not ctx.adc_ic_refs:
+        return i2c_pullups
+
+    anchor_ic = sorted(ctx.adc_ic_refs)[0]
+    if anchor_ic not in ctx.positions:
+        return i2c_pullups
+
+    aix, aiy, _airot = ctx.positions[anchor_ic]
+    for pidx, pr_ref in enumerate(i2c_pullups):
+        pr_x, pr_y = _clamp_to_bounds(
+            aix + 7.0 * sx, aiy + (-6.0 + pidx * 3.0) * sy, bounds,
+        )
+        ctx.positions[pr_ref] = (pr_x, pr_y, 0.0)
+        ctx.adc_channel_refs.add(pr_ref)
+        ctx.fixed_refs.add(pr_ref)
+        _log.info("    3c2: I2C pullup %s -> (%.1f, %.1f)", pr_ref, pr_x, pr_y)
+    return i2c_pullups
+
+
+def _adc_build_occupied_x_ranges(
+    connector_refs: list[str],
+    ctx: PlacementContext,
+) -> list[tuple[float, float]]:
+    """Return occupied X ranges for downstream phases based on connector positions."""
+    if not connector_refs:
+        return []
+    placed = [ctx.positions[r][0] for r in connector_refs if r in ctx.positions]
+    if not placed:
+        return []
+    return [(min(placed) - 5.0, max(placed) + 5.0)]
+
+
 def _phase_adc_channels(ctx: PlacementContext) -> None:
     """3c2: ADC channel formation — connector-first horizontal strip layout.
 
@@ -2098,186 +2641,28 @@ def _phase_adc_channels(ctx: PlacementContext) -> None:
     adc_channels = _detect_adc_channels(ctx)
     if not adc_channels:
         _log.info("    3c2: no ADC channels detected")
-        ctx._adc_channels = []  # type: ignore[attr-defined]
-        ctx._ic_channels = {}  # type: ignore[attr-defined]
-        ctx._r_top_connector_x = {}  # type: ignore[attr-defined]
-        ctx._occupied_x_ranges = []  # type: ignore[attr-defined]
-        ctx._CHANNEL_SPACING_MM = 8.0  # type: ignore[attr-defined]
-        ctx._STRIP_GAP_MM = 1.5  # type: ignore[attr-defined]
+        _adc_init_ctx_defaults(ctx)
         return
 
-    # Group channels by IC
-    ic_channels: dict[str, list[tuple[str, list[str]]]] = {}
-    for ic_ref, ic_pin, passives in adc_channels:
-        ic_channels.setdefault(ic_ref, []).append((ic_pin, passives))
-        ctx.adc_ic_refs.add(ic_ref)
-
-    # Collect all ADC channel passive refs
-    all_adc_passive_refs: set[str] = set()
-    for _ic_ref, _ic_pin, passives in adc_channels:
-        all_adc_passive_refs.update(passives)
-
-    # --- Step 1: Discover channel connectors via net connectivity ---
-    # Build ordered list of (connector_ref, ic_ref, ic_pin, passives)
-    channel_with_connectors: list[tuple[str | None, str, str, list[str]]] = []
-    for ic_ref, ic_pin, passives in adc_channels:
-        j_ref = _find_channel_connector_ref(passives, ctx)
-        channel_with_connectors.append((j_ref, ic_ref, ic_pin, passives))
-
-    # Sort channels by connector ref so J1 < J2 < J3 < J4
-    channel_with_connectors.sort(key=lambda t: (t[0] or "Z999",))
-
-    # --- Step 2: Place channel connectors at top edge, evenly spaced ---
-    analog_zone = _find_zone_rect(ctx, "analog")
+    ic_channels = _adc_group_by_ic(adc_channels, ctx)
+    channel_with_connectors = _adc_build_channel_connector_list(adc_channels, ctx)
+    az_x1, az_y1, _az_x2, _az_y2, sx, sy = _adc_compute_zone_scale(ctx)
     bounds = ctx.bounds
-    az_x1 = analog_zone[0] if analog_zone else bounds[0]
-    az_y1 = analog_zone[1] if analog_zone else bounds[1]
-    az_x2 = analog_zone[2] if analog_zone else bounds[2]
-    az_y2 = analog_zone[3] if analog_zone else bounds[3]
 
-    zone_w = az_x2 - az_x1
-    zone_h = az_y2 - az_y1
-
-    # Scale factors relative to reference 60x40mm board
-    sx = zone_w / 60.0
-    sy = zone_h / 40.0
-
-    n_channels = len(channel_with_connectors)
-    connector_refs: list[str] = []
-
-    # Reference positions: J1=12.35, J4=46.35 on 60mm board → use 20%-77%
-    if n_channels > 1:
-        j_x_start = az_x1 + 12.35 * sx
-        j_x_end = az_x1 + 46.35 * sx
-        j_spacing = (j_x_end - j_x_start) / (n_channels - 1)
-    else:
-        j_x_start = az_x1 + zone_w * 0.5
-        j_spacing = 0.0
-
-    j_y = az_y1 + 4.5 * sy  # ~4.5mm from top edge (scaled)
-
-    for ch_idx, (j_ref, _ic_ref, _ic_pin, _passives) in enumerate(
-        channel_with_connectors,
-    ):
-        if j_ref is None or j_ref not in ctx.positions:
-            continue
-        j_x = j_x_start + ch_idx * j_spacing
-        j_x_clamped, j_y_clamped = _clamp_to_bounds(j_x, j_y, bounds)
-        ctx.positions[j_ref] = (j_x_clamped, j_y_clamped, 180.0)
-        ctx.fixed_refs.add(j_ref)
-        ctx.adc_channel_refs.add(j_ref)
-        connector_refs.append(j_ref)
-        _log.info(
-            "    3c2: connector %s -> (%.1f, %.1f) rot=180",
-            j_ref, j_x_clamped, j_y_clamped,
-        )
-
-    # --- Step 3: Place passive strips below each connector ---
-    channel_spacing_mm = j_spacing if j_spacing > 0 else 11.0
-    strip_gap_mm = 1.5
-    strip_dy = _ADC_STRIP_DY_MM * sy
-
-    for ch_idx, (j_ref, _ic_ref, _ic_pin, passives) in enumerate(
-        channel_with_connectors,
-    ):
-        if j_ref is None or j_ref not in ctx.positions:
-            continue
-        jx, jy, _jrot = ctx.positions[j_ref]
-
-        r_refs = sorted([r for r in passives if r.startswith("R")])
-
-        for ref in passives:
-            if ref not in ctx.positions or ref in ctx.fixed_refs:
-                continue
-            role = _adc_assign_passive_role(ref, r_refs)
-            if role is None or role not in _ADC_STRIP_OFFSETS:
-                continue
-            avg_dx, slope_dx, rot = _ADC_STRIP_OFFSETS[role]
-            dx = (avg_dx + slope_dx * ch_idx) * sx
-            new_x = jx + dx
-            new_y = jy + strip_dy
-            new_x, new_y = _clamp_to_bounds(new_x, new_y, bounds)
-            ctx.positions[ref] = (new_x, new_y, rot)
-            ctx.adc_channel_refs.add(ref)
-            ctx.fixed_refs.add(ref)
-
-        _log.info(
-            "    3c2: ch%d passives placed as strip below %s",
-            ch_idx, j_ref,
-        )
-
-    # --- Step 4: Place ADC IC(s) below the channel strips, centered ---
-    # Reference: U1 at ~76% Y, ~76% X on 60x40 board
-    ic_y = az_y1 + 28.58 * sy
-    for ic_ref in sorted(ctx.adc_ic_refs):
-        if ic_ref not in ctx.positions:
-            continue
-        ic_x = az_x1 + 45.75 * sx
-        ic_x_clamped, ic_y_clamped = _clamp_to_bounds(ic_x, ic_y, bounds)
-        ctx.positions[ic_ref] = (ic_x_clamped, ic_y_clamped, -90.0)
-        ctx.fixed_refs.add(ic_ref)
-        _log.info(
-            "    3c2: ADC IC %s -> (%.1f, %.1f) rot=-90",
-            ic_ref, ic_x_clamped, ic_y_clamped,
-        )
-
-        # Place decoupling cap(s) near ADC IC
-        # Reference: C1 at dx~0, dy~+3.3 from U1
-        for net in ctx.requirements.nets:
-            ic_in_net = any(c.ref == ic_ref for c in net.connections)
-            if not ic_in_net:
-                continue
-            for c in net.connections:
-                if (c.ref.startswith("C")
-                        and c.ref in ctx.positions
-                        and c.ref not in ctx.adc_channel_refs
-                        and c.ref not in ctx.fixed_refs):
-                    cap_x = ic_x_clamped
-                    cap_y = ic_y_clamped + 3.3 * sy
-                    cap_x, cap_y = _clamp_to_bounds(cap_x, cap_y, bounds)
-                    ctx.positions[c.ref] = (cap_x, cap_y, 180.0)
-                    ctx.adc_channel_refs.add(c.ref)
-                    ctx.fixed_refs.add(c.ref)
-                    _log.info(
-                        "    3c2: ADC decoupling %s -> (%.1f, %.1f)",
-                        c.ref, cap_x, cap_y,
-                    )
-
-    # --- Step 5: Place I2C pull-ups near ADC IC ---
-    i2c_pullups = _find_i2c_pullup_refs(
-        ctx.adc_ic_refs, ctx, ctx.adc_channel_refs | ctx.fixed_refs,
+    connector_refs, j_spacing = _adc_place_connectors(
+        channel_with_connectors, az_x1, az_y1, sx, sy, bounds, ctx,
     )
-    if i2c_pullups and ctx.adc_ic_refs:
-        # Pick the first ADC IC as anchor
-        anchor_ic = sorted(ctx.adc_ic_refs)[0]
-        if anchor_ic in ctx.positions:
-            aix, aiy, _airot = ctx.positions[anchor_ic]
-            # Reference: R9 at dx~+7, dy~-6; R10 at dx~+7, dy~-3 from U1
-            for pidx, pr_ref in enumerate(i2c_pullups):
-                pr_x = aix + 7.0 * sx
-                pr_y = aiy + (-6.0 + pidx * 3.0) * sy
-                pr_x, pr_y = _clamp_to_bounds(pr_x, pr_y, bounds)
-                ctx.positions[pr_ref] = (pr_x, pr_y, 0.0)
-                ctx.adc_channel_refs.add(pr_ref)
-                ctx.fixed_refs.add(pr_ref)
-                _log.info(
-                    "    3c2: I2C pullup %s -> (%.1f, %.1f)",
-                    pr_ref, pr_x, pr_y,
-                )
+    _adc_place_passive_strips(channel_with_connectors, sx, sy, bounds, ctx)
+    _adc_place_ics_and_decoupling(az_x1, az_y1, sx, sy, bounds, ctx)
+    i2c_pullups = _adc_place_i2c_pullups(sx, sy, bounds, ctx)
 
+    channel_spacing_mm = j_spacing if j_spacing > 0 else 11.0
     _r_top_connector_x = _build_r_top_connector_x(ctx)
-
-    # Build occupied X ranges for downstream phases
-    _occupied_x_ranges: list[tuple[float, float]] = []
-    if connector_refs:
-        min_cx = min(ctx.positions[r][0] for r in connector_refs if r in ctx.positions)
-        max_cx = max(ctx.positions[r][0] for r in connector_refs if r in ctx.positions)
-        _occupied_x_ranges.append((min_cx - 5.0, max_cx + 5.0))
+    _occupied_x_ranges = _adc_build_occupied_x_ranges(connector_refs, ctx)
 
     _log.info(
         "    3c2: %d channels across %d ICs, %d connectors placed, %d I2C pullups",
-        len(adc_channels), len(ctx.adc_ic_refs), len(connector_refs),
-        len(i2c_pullups),
+        len(adc_channels), len(ctx.adc_ic_refs), len(connector_refs), len(i2c_pullups),
     )
 
     # Store on ctx for use by _phase_adc_analog_cluster and late phases
@@ -2286,7 +2671,7 @@ def _phase_adc_channels(ctx: PlacementContext) -> None:
     ctx._r_top_connector_x = _r_top_connector_x  # type: ignore[attr-defined]
     ctx._occupied_x_ranges = _occupied_x_ranges  # type: ignore[attr-defined]
     ctx._CHANNEL_SPACING_MM = channel_spacing_mm  # type: ignore[attr-defined]
-    ctx._STRIP_GAP_MM = strip_gap_mm  # type: ignore[attr-defined]
+    ctx._STRIP_GAP_MM = 1.5  # type: ignore[attr-defined]
 
 
 def _phase_adc_analog_cluster(ctx: PlacementContext) -> None:
@@ -2294,17 +2679,51 @@ def _phase_adc_analog_cluster(ctx: PlacementContext) -> None:
     _log.info("  3c3: Analog subcircuit clustering")
     bounds = ctx.bounds
 
-    _CHANNEL_SPACING_MM: float = getattr(ctx, "_CHANNEL_SPACING_MM", 8.0)
-    _occupied_x_ranges: list[tuple[float, float]] = getattr(
-        ctx, "_occupied_x_ranges", [],
+    channel_spacing_mm: float = getattr(ctx, "_CHANNEL_SPACING_MM", 8.0)
+    occupied_x_ranges: list[tuple[float, float]] = getattr(ctx, "_occupied_x_ranges", [])
+    other_group_refs = ctx.relay_support_refs | ctx.power_group_fixed
+
+    all_analog_cluster_refs = _collect_adc_hop_refs(ctx, other_group_refs)
+
+    if all_analog_cluster_refs and occupied_x_ranges:
+        last_x_max = max(xmax for _, xmax in occupied_x_ranges)
+        cluster_x = last_x_max + channel_spacing_mm + 2.0
+        adc_ys = [ctx.positions[r][1] for r in ctx.adc_channel_refs if r in ctx.positions]
+        cluster_y_top = min(adc_ys) - 1.0 if adc_ys else bounds[1] + 5.0
+        sorted_cluster = sorted(
+            all_analog_cluster_refs,
+            key=lambda r: (0 if r.startswith("U") else 2, r),
+        )
+        placed_count = _place_refs_in_column_grid(
+            sorted_cluster, cluster_x, cluster_y_top, ctx, ctx.adc_channel_refs,
+        )
+        _log.info("    3c3: clustered %d analog refs near ADC channels", placed_count)
+
+    # 3c3b. Pull remaining analog group outliers toward the cluster.
+    analog_group_refs = _collect_analog_group_refs(ctx)
+    if analog_group_refs and ctx.adc_channel_refs:
+        outlier_refs = _find_analog_outliers(ctx, analog_group_refs)
+        if outlier_refs:
+            adc_xs = [ctx.positions[r][0] for r in ctx.adc_channel_refs if r in ctx.positions]
+            adc_ys = [ctx.positions[r][1] for r in ctx.adc_channel_refs if r in ctx.positions]
+            outlier_x = max(adc_xs) + channel_spacing_mm + 2.0
+            outlier_y_top = min(adc_ys) - 1.0
+            cnt = _place_refs_in_column_grid(
+                outlier_refs, outlier_x, outlier_y_top, ctx, ctx.adc_channel_refs,
+            )
+            _log.info("    3c3b: pulled %d outliers into analog cluster", cnt)
+
+
+def _collect_adc_hop_refs(
+    ctx: PlacementContext,
+    other_group_refs: set[str],
+) -> set[str]:
+    """Collect analog refs connected to ADC ICs via up to 4 hops."""
+    already_claimed = (
+        ctx.adc_channel_refs | ctx.adc_ic_refs | ctx.fixed_refs | other_group_refs
     )
 
-    # Find small passives on ADC signal nets (hop 1 — direct IC connection)
     analog_signal_refs: set[str] = set()
-    _other_group_refs = ctx.relay_support_refs | ctx.power_group_fixed
-    _already_claimed = (
-        ctx.adc_channel_refs | ctx.adc_ic_refs | ctx.fixed_refs | _other_group_refs
-    )
     for net in ctx.requirements.nets:
         if _is_power_or_bus_net(net.name):
             continue
@@ -2313,73 +2732,111 @@ def _phase_adc_analog_cluster(ctx: PlacementContext) -> None:
             continue
         for c in net.connections:
             if (c.ref in ctx.positions
-                    and c.ref not in _already_claimed
+                    and c.ref not in already_claimed
                     and _is_small_passive(c.ref)):
                 analog_signal_refs.add(c.ref)
 
-    # Hops 2-4: expand outward via signal nets
     hop2_refs = _expand_one_hop(
-        analog_signal_refs, ctx,
-        _already_claimed | analog_signal_refs,
-        allow_small_ics=True,
+        analog_signal_refs, ctx, already_claimed | analog_signal_refs, allow_small_ics=True,
     )
     small_ics_found = {r for r in hop2_refs if r.startswith("U")}
     hop3_refs = _expand_one_hop(
-        small_ics_found, ctx,
-        _already_claimed | analog_signal_refs | hop2_refs,
+        small_ics_found, ctx, already_claimed | analog_signal_refs | hop2_refs,
     )
     hop4_refs = _expand_one_hop(
-        hop3_refs, ctx,
-        _already_claimed | analog_signal_refs | hop2_refs | hop3_refs,
+        hop3_refs, ctx, already_claimed | analog_signal_refs | hop2_refs | hop3_refs,
     )
 
-    all_analog_cluster_refs = (
+    return (
         analog_signal_refs | hop2_refs | hop3_refs | hop4_refs
-    ) - ctx.adc_channel_refs - _other_group_refs
+    ) - ctx.adc_channel_refs - other_group_refs
 
-    if all_analog_cluster_refs and _occupied_x_ranges:
-        last_x_max = max(xmax for _, xmax in _occupied_x_ranges)
-        cluster_x = last_x_max + _CHANNEL_SPACING_MM + 2.0
 
-        adc_ys = [ctx.positions[r][1] for r in ctx.adc_channel_refs
-                  if r in ctx.positions]
-        cluster_y_top = min(adc_ys) - 1.0 if adc_ys else bounds[1] + 5.0
+def _find_mcu_feature_group_refs(
+    ctx: PlacementContext,
+    mcu_ref: str,
+) -> set[str]:
+    """Return the set of refs in the FeatureBlock that contains *mcu_ref*."""
+    for feat in ctx.requirements.features:
+        feat_refs: set[str] = set()
+        for comp in feat.components:
+            r = comp.ref if hasattr(comp, "ref") else comp
+            feat_refs.add(r)
+        if mcu_ref in feat_refs:
+            return feat_refs
+    return set()
 
-        sorted_cluster = sorted(
-            all_analog_cluster_refs,
-            key=lambda r: (0 if r.startswith("U") else 2, r),
-        )
 
-        placed_count = _place_refs_in_column_grid(
-            sorted_cluster, cluster_x, cluster_y_top,
-            ctx, ctx.adc_channel_refs,
-        )
-        _log.info("    3c3: clustered %d analog refs near ADC channels", placed_count)
+def _classify_mcu_group_refs(
+    ctx: PlacementContext,
+    mcu_ref: str,
+    mcu_group_refs: set[str],
+    ref_nets: dict[str, set[str]],
+) -> tuple[set[str], list[str], list[str]]:
+    """Partition MCU group into (connectors, decoupling_caps, other_passives)."""
+    connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
+    # Build a set of net names per ref for signal/control cap detection
+    ref_net_names: dict[str, set[str]] = {}
+    for net in ctx.requirements.nets:
+        for conn in net.connections:
+            ref_net_names.setdefault(conn.ref, set()).add(net.name)
+    _signal_keywords = {"EN", "DEB", "RESET", "BOOT", "LED", "UART", "SPI", "I2C"}
 
-    # 3c3b. Pull remaining analog group outliers toward the cluster.
-    analog_group_refs = _collect_analog_group_refs(ctx)
-
-    if analog_group_refs and ctx.adc_channel_refs:
-        outlier_refs = _find_analog_outliers(ctx, analog_group_refs)
-        if outlier_refs:
-            adc_xs = [ctx.positions[r][0] for r in ctx.adc_channel_refs
-                      if r in ctx.positions]
-            adc_ys = [ctx.positions[r][1] for r in ctx.adc_channel_refs
-                      if r in ctx.positions]
-            outlier_x = max(adc_xs) + _CHANNEL_SPACING_MM + 2.0
-            outlier_y_top = min(adc_ys) - 1.0
-
-            cnt = _place_refs_in_column_grid(
-                outlier_refs, outlier_x, outlier_y_top,
-                ctx, ctx.adc_channel_refs,
+    decoupling_refs: list[str] = []
+    other_passive_refs: list[str] = []
+    for ref in sorted(mcu_group_refs):
+        if ref == mcu_ref or ref in connector_refs or ref in ctx.fixed_refs:
+            continue
+        if ref not in ctx.positions:
+            continue
+        if ref.startswith("C") and mcu_ref in ref_nets.get(ref, set()):
+            # Check if this cap is on a signal/control net (not power decoupling)
+            non_gnd_nets = {n for n in ref_net_names.get(ref, set())
+                           if "GND" not in n.upper()}
+            is_signal_cap = any(
+                kw in n.upper() for n in non_gnd_nets for kw in _signal_keywords
             )
-            _log.info("    3c3b: pulled %d outliers into analog cluster", cnt)
+            if is_signal_cap:
+                other_passive_refs.append(ref)
+            else:
+                decoupling_refs.append(ref)
+        else:
+            other_passive_refs.append(ref)
+    return connector_refs, decoupling_refs, other_passive_refs
+
+
+def _mcu_push_courtyard_violations(
+    ctx: PlacementContext,
+    mcu_ref: str,
+    mcu_x: float,
+    mcu_y: float,
+    eff_w: float,
+    eff_h: float,
+    mcu_grid: object,
+) -> None:
+    """Push peripheral refs that overlap the MCU courtyard outward."""
+    court_margin = 2.0
+    court = (
+        mcu_x - eff_w / 2.0 - court_margin,
+        mcu_y - eff_h / 2.0 - court_margin,
+        mcu_x + eff_w / 2.0 + court_margin,
+        mcu_y + eff_h / 2.0 + court_margin,
+    )
+    for ref in list(ctx.mcu_peripheral_refs):
+        if ref == mcu_ref:
+            continue
+        # Skip refs already in fixed_refs — they were intentionally placed
+        # (e.g. J1 at top edge, decoupling caps next to MCU pads).
+        if ref in ctx.fixed_refs:
+            continue
+        if ref.startswith("J") and ctx.positions[ref][0] > mcu_x:
+            continue
+        _push_component_outside_courtyard(ref, ctx, court, mcu_grid)
 
 
 def _phase_mcu_group(ctx: PlacementContext) -> None:
     """3c3: MCU peripheral tightening."""
     _log.info("  3c3: MCU peripheral tightening")
-    bounds = ctx.bounds
 
     from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref as _find_mcu
     mcu_ref_c3 = _find_mcu(ctx.requirements)
@@ -2391,96 +2848,104 @@ def _phase_mcu_group(ctx: PlacementContext) -> None:
         _log.info("    3c3: skipping %s — already placed by power chain phase",
                   mcu_ref_c3)
         return
+    # Skip if the detected MCU is owned by the ethernet feature block —
+    # it's an ethernet IC (e.g. W5500) misidentified as MCU due to pin count.
+    # The ethernet group phase handles its placement.
+    _eth_refs_mcu = _collect_feature_refs(ctx, "ethernet", "eth")
+    if mcu_ref_c3 in _eth_refs_mcu:
+        _log.info("    3c3: skipping %s — belongs to ethernet group", mcu_ref_c3)
+        return
 
-    _mcu_x, _mcu_y, _mcu_rot_orig = ctx.positions[mcu_ref_c3]
     mcu_w, mcu_h = ctx.fp_sizes.get(mcu_ref_c3, (5.0, 5.0))
+    mcu_group_refs = _find_mcu_feature_group_refs(ctx, mcu_ref_c3)
 
-    # Find MCU's FeatureBlock group
-    mcu_group_refs: set[str] = set()
-    for feat in ctx.requirements.features:
-        feat_refs: set[str] = set()
-        for comp in feat.components:
-            r = comp.ref if hasattr(comp, "ref") else comp
-            feat_refs.add(r)
-        if mcu_ref_c3 in feat_refs:
-            mcu_group_refs = feat_refs
-            break
-
-    # --- Step 0: Place U3 with antenna on BOTTOM board edge ---
-    mcu_x, mcu_y, eff_w, eff_h, _mcu_rot = _mcu_place_u3(
-        ctx, mcu_ref_c3, mcu_w, mcu_h,
-    )
-
+    # Step 0: Place U3 with antenna on BOTTOM board edge
+    mcu_x, mcu_y, eff_w, eff_h, _mcu_rot = _mcu_place_u3(ctx, mcu_ref_c3, mcu_w, mcu_h)
     mcu_left = mcu_x - eff_w / 2.0
     mcu_top = mcu_y - eff_h / 2.0
-    mcu_right = mcu_x + eff_w / 2.0
 
-    # --- Step 1: Build occupancy grid ---
+    # Step 1: Build occupancy grid
     mcu_grid = _build_exclusion_grid(ctx, mcu_group_refs)
     mcu_grid.place(mcu_x, mcu_y, eff_w, eff_h)
 
-    # --- Step 2: Build net adjacency and classify components ---
+    # Step 2: Build net adjacency and classify components
     ref_nets = _build_ref_net_adjacency(ctx, mcu_group_refs)
+    connector_refs, decoupling_refs, other_passive_refs = _classify_mcu_group_refs(
+        ctx, mcu_ref_c3, mcu_group_refs, ref_nets,
+    )
 
-    connector_refs = {r for r in mcu_group_refs if r.startswith("J")}
-    decoupling_refs: list[str] = []
-    other_passive_refs: list[str] = []
-    for ref in sorted(mcu_group_refs):
-        if ref == mcu_ref_c3 or ref in connector_refs or ref in ctx.fixed_refs:
-            continue
-        if ref not in ctx.positions:
-            continue
-        if ref.startswith("C") and mcu_ref_c3 in ref_nets.get(ref, set()):
-            decoupling_refs.append(ref)
-        else:
-            other_passive_refs.append(ref)
-
-    # --- Step 3: Place decoupling caps ---
+    # Steps 3-6: place sub-groups
     _mcu_place_decoupling(ctx, decoupling_refs, mcu_x, mcu_y, mcu_left, mcu_grid)
-
-    # --- Step 4: Place connectors ---
-    _mcu_place_connectors(
-        ctx, connector_refs, mcu_grid, mcu_x, mcu_y, mcu_left, mcu_top, eff_w,
-    )
-
-    # --- Step 5: USB subcircuit ---
+    _mcu_place_connectors(ctx, connector_refs, mcu_grid, mcu_x, mcu_y, mcu_left, mcu_top, eff_w)
     _mcu_place_usb_subcircuit(ctx, other_passive_refs, mcu_grid)
-
-    # --- Step 6: Reset/Boot subcircuit ---
     sw_base_x, sw_base_y = _mcu_place_reset_boot(
-        ctx, other_passive_refs, ref_nets, mcu_grid,
-        mcu_x, mcu_y, eff_w, mcu_top,
+        ctx, other_passive_refs, ref_nets, mcu_grid, mcu_x, mcu_y, eff_w, mcu_top,
     )
-
-    # --- Step 6b: Place LED1 ---
     _mcu_place_led(ctx, other_passive_refs, mcu_grid, sw_base_x, sw_base_y)
 
-    # --- Step 7: Place remaining passives ---
-    def _mcu_prox_key(ref: str) -> tuple[int, float]:
+    # Step 6c: Place EN/debounce caps near associated switch/resistor
+    # C5 connects to EN_DEB, SW2 connects to EN — they don't share a net
+    # directly, but both relate to the EN circuit. Use net-name matching.
+    _ref_net_names: dict[str, set[str]] = {}
+    for net in ctx.requirements.nets:
+        for conn in net.connections:
+            _ref_net_names.setdefault(conn.ref, set()).add(net.name)
+
+    for ref in list(other_passive_refs):
+        if not ref.startswith("C") or ref not in ctx.positions:
+            continue
+        cap_nets = _ref_net_names.get(ref, set())
+        non_gnd = {n for n in cap_nets if "GND" not in n.upper()}
+        # Check if this cap is on an EN/debounce/reset net
+        is_debounce = any(
+            kw in n.upper() for n in non_gnd for kw in ("EN", "DEB", "RESET")
+        )
+        if not is_debounce:
+            continue
+        # Find the nearest switch (SW*) that's in the MCU group
+        sw_candidates = [r for r in ctx.positions
+                         if r.startswith("SW") and r in ctx.mcu_peripheral_refs]
+        if not sw_candidates:
+            continue
+        # Pick the switch whose net names share a keyword with the cap
+        best_sw = sw_candidates[0]
+        for sw in sw_candidates:
+            sw_nets = _ref_net_names.get(sw, set())
+            sw_non_gnd = {n for n in sw_nets if "GND" not in n.upper()}
+            # Check for shared keyword (EN in EN_DEB matches EN in EN)
+            for cn in non_gnd:
+                for sn in sw_non_gnd:
+                    if any(kw in cn.upper() and kw in sn.upper()
+                           for kw in ("EN", "RESET", "BOOT")):
+                        best_sw = sw
+        tx, ty, _ = ctx.positions[best_sw]
+        tw, th = ctx.fp_sizes.get(ref, (1.0, 0.5))
+        sw_w, _sw_h = ctx.fp_sizes.get(best_sw, (4.0, 4.0))
+        # Place cap just to the right of the switch courtyard (edge-to-edge + 0.5mm gap)
+        cx = tx + sw_w / 2.0 + tw / 2.0 + 0.5
+        cy = ty
+        cx = _clamp(cx, ctx.bounds[0] + tw / 2.0 + 0.5,
+                    ctx.bounds[2] - tw / 2.0 - 0.5)
+        cy = _clamp(cy, ctx.bounds[1] + th / 2.0 + 0.5,
+                    ctx.bounds[3] - th / 2.0 - 0.5)
+        ctx.positions[ref] = (cx, cy, 0.0)
+        ctx.mcu_peripheral_refs.add(ref)
+        ctx.fixed_refs.add(ref)  # protect from late decoupling retightening
+        other_passive_refs.remove(ref)
+        _log.info("    %s (debounce) -> near %s at (%.1f, %.1f)",
+                  ref, best_sw, cx, cy)
+
+    # Step 7: Place remaining passives sorted by proximity to MCU
+    def _prox_key(ref: str) -> tuple[int, float]:
         connected = mcu_ref_c3 in ref_nets.get(ref, set())
         rx, ry, _ = ctx.positions[ref]
-        dist = math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2)
-        return (0 if connected else 1, dist)
+        return (0 if connected else 1, math.sqrt((rx - mcu_x) ** 2 + (ry - mcu_y) ** 2))
 
-    remaining = [r for r in other_passive_refs if r in ctx.positions]
-    remaining.sort(key=_mcu_prox_key)
-    _mcu_place_remaining(ctx, remaining, mcu_ref_c3, mcu_x, mcu_y,
-                          eff_w, eff_h, mcu_grid)
+    remaining = sorted([r for r in other_passive_refs if r in ctx.positions], key=_prox_key)
+    _mcu_place_remaining(ctx, remaining, mcu_ref_c3, mcu_x, mcu_y, eff_w, eff_h, mcu_grid)
 
-    # --- Post-placement: Push components outside U3 courtyard ---
-    _COURT_MARGIN = 2.0
-    court = (
-        mcu_x - eff_w / 2.0 - _COURT_MARGIN,
-        mcu_y - eff_h / 2.0 - _COURT_MARGIN,
-        mcu_x + eff_w / 2.0 + _COURT_MARGIN,
-        mcu_y + eff_h / 2.0 + _COURT_MARGIN,
-    )
-    for ref in list(ctx.mcu_peripheral_refs):
-        if ref == mcu_ref_c3:
-            continue
-        if ref.startswith("J") and ctx.positions[ref][0] > mcu_x:
-            continue
-        _push_component_outside_courtyard(ref, ctx, court, mcu_grid)
+    # Post-placement: push peripherals outside U3 courtyard
+    _mcu_push_courtyard_violations(ctx, mcu_ref_c3, mcu_x, mcu_y, eff_w, eff_h, mcu_grid)
 
     _log.info(
         "    3c3: organized %d peripherals around %s at (%.1f, %.1f)",
@@ -2488,10 +2953,202 @@ def _phase_mcu_group(ctx: PlacementContext) -> None:
     )
 
 
+def _eth_force_place_main_ic(
+    ctx: PlacementContext,
+    eth_main_ic: str,
+    eth_anchor_x: float,
+    eth_anchor_y: float,
+    eth_grid: object,
+    placed_eth: set[str],
+    eth_zone_rect: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """Force-place the main ethernet IC. Returns (ic_cx, ic_cy, ic_w, ic_h)."""
+    ezx1, ezy1, ezx2, ezy2 = eth_zone_rect
+    ic_w, ic_h = ctx.fp_sizes.get(eth_main_ic, (10.0, 10.0))
+    ic_cx = _clamp(eth_anchor_x, ezx1 + ic_w / 2.0 + 1.0, ezx2 - ic_w / 2.0 - 1.0)
+    ic_cy = _clamp(
+        eth_anchor_y + ic_h / 2.0, ezy1 + ic_h / 2.0 + 1.0, ezy2 - ic_h / 2.0 - 5.0,
+    )
+    if eth_main_ic in ctx.positions and eth_main_ic not in ctx.fixed_refs:
+        ctx.positions[eth_main_ic] = (ic_cx, ic_cy, 0.0)
+        eth_grid.place(ic_cx, ic_cy, ic_w, ic_h)  # type: ignore[union-attr]
+        ctx.ethernet_fixed.add(eth_main_ic)
+        ctx.fixed_refs.add(eth_main_ic)
+        placed_eth.add(eth_main_ic)
+        _log.info("    %s (W5500) force-placed at (%.1f, %.1f) in ethernet zone",
+                  eth_main_ic, ic_cx, ic_cy)
+    return ic_cx, ic_cy, ic_w, ic_h
+
+
+def _eth_register_connectors(
+    ctx: PlacementContext,
+    eth_connectors: list[str],
+    eth_anchor_x: float,
+    eth_grid: object,
+    board_min_y: float,
+) -> None:
+    """Pre-register RJ45 connector footprints in the ethernet occupancy grid.
+
+    Connectors are reserved at the top edge so the IC/crystal placement logic
+    knows the space is taken.
+    """
+    for jref in eth_connectors:
+        jw, jh = ctx.fp_sizes.get(jref, (19.6, 12.5))
+        eth_grid.place(eth_anchor_x, board_min_y + jh / 2.0 + 1.0, jw, jh)  # type: ignore[union-attr]
+
+
+def _eth_connector_pad_bottom(
+    ctx: PlacementContext,
+    eth_connectors: list[str],
+    placed_eth: set[str],
+    gap_mm: float = 2.0,
+) -> float:
+    """Return the lowest pad-extent Y of placed RJ45 connectors plus *gap_mm*.
+
+    Uses the actual pad extent in board space (accounting for through-hole
+    offsets) rather than the courtyard size, so the IC anchor is placed
+    immediately below the connector's real pad footprint — not an over-
+    estimate based on the courtyard envelope.
+
+    Falls back to the centroid-Y + courtyard-half + gap if the footprint
+    is not found in initial_pcb.
+    """
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
+    max_pad_y: float = ctx.bounds[1]
+    for jref in eth_connectors:
+        if jref not in placed_eth:
+            continue
+        pos = ctx.positions.get(jref)
+        if pos is None:
+            continue
+        jx, jy, jrot = pos
+        # Find the actual footprint to use pad geometry
+        fp_match = next(
+            (fp for fp in ctx.initial_pcb.footprints if fp.ref == jref), None,
+        )
+        if fp_match is not None:
+            _, _, _, pad_y1 = pad_extent_in_board_space(fp_match, jx, jy, jrot)
+            max_pad_y = max(max_pad_y, pad_y1)
+        else:
+            _, jh = ctx.fp_sizes.get(jref, (19.6, 15.4))
+            max_pad_y = max(max_pad_y, jy + jh / 2.0)
+    return max_pad_y + gap_mm
+
+
+def _eth_place_column(
+    ctx: PlacementContext,
+    refs: list[str],
+    col_x: float,
+    start_y: float,
+    placed_eth: set[str],
+    eth_grid: object,
+    eth_zone_rect: tuple[float, float, float, float],
+    strip_gap: float = 1.0,
+) -> float:
+    """Place *refs* in a vertical column within the ethernet zone. Returns bottom Y."""
+    ezx1, ezy1, ezx2, ezy2 = eth_zone_rect
+    cy = start_y
+    for ref in refs:
+        if ref not in ctx.positions or ref in ctx.fixed_refs or ref in placed_eth or ref == "":
+            continue
+        w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        tx = _clamp(col_x, ezx1 + 2.0, ezx2 - 2.0)
+        ty = _clamp(cy + h / 2.0, ezy1 + 2.0, ezy2 - 2.0)
+        px, py = eth_grid.find_free_pos(tx, ty, w, h, max_radius=6.0)  # type: ignore[union-attr]
+        ctx.positions[ref] = (px, py, 0.0)
+        eth_grid.place(px, py, w, h)  # type: ignore[union-attr]
+        ctx.ethernet_fixed.add(ref)
+        placed_eth.add(ref)
+        cy = py + h / 2.0 + strip_gap
+    return cy
+
+
+def _eth_place_signal_chain(
+    ctx: PlacementContext,
+    crystal_refs: list[str],
+    crystal_load_caps: list[str],
+    other_caps: list[str],
+    poe_ic: str,
+    poe_caps: list[str],
+    eth_connectors: list[str],
+    eth_anchor_x: float,
+    ic_cx: float,
+    ic_cy: float,
+    ic_h: float,
+    eth_grid: object,
+    placed_eth: set[str],
+    eth_zone_rect: tuple[float, float, float, float],
+) -> float:
+    """Place all ethernet signal-chain components. Returns the bottom column Y.
+
+    RJ45 connectors must already be placed before calling this function
+    (done in _phase_ethernet_group so the IC anchor uses the real pad extent).
+    """
+    _eth_place_crystal_and_caps(
+        ctx, crystal_refs, crystal_load_caps,
+        ic_cx, ic_cy, ic_h, eth_grid, placed_eth, eth_zone_rect,
+    )
+    col1_bottom = _eth_place_caps_column(
+        ctx, other_caps, ic_cx, ic_cy + ic_h / 2.0 + 1.5,
+        eth_grid, placed_eth, eth_zone_rect,
+    )
+    _eth_place_poe_ic_and_caps(ctx, poe_ic, poe_caps, eth_anchor_x, eth_grid, placed_eth)
+    # Note: _eth_place_rj45_connectors is called BEFORE this function in
+    # _phase_ethernet_group so the IC anchor is based on actual pad extent.
+    # Connectors already in placed_eth are skipped automatically here.
+    _eth_place_rj45_connectors(
+        ctx, eth_connectors, eth_anchor_x, eth_grid, placed_eth, eth_zone_rect,
+    )
+    return col1_bottom
+
+
+def _eth_push_non_group_clear(ctx: PlacementContext) -> None:
+    """Push non-ethernet components clear of ethernet IC footprints (3c4-post)."""
+    skip_refs = ctx.relay_support_refs | {r for r in ctx.positions if r.startswith("K")}
+    for eic in [r for r in ctx.ethernet_fixed if r.startswith("U")]:
+        _push_non_group_away_from_ic(eic, ctx, ctx.ethernet_fixed, skip_refs)
+
+
+def _eth_place_headers_bottom(
+    ctx: PlacementContext,
+    eth_headers: list[str],
+    eth_grid: object,
+    placed_eth: set[str],
+    zone_rect: tuple[float, float, float, float],
+) -> None:
+    """Place small interface headers (SPI, power) along the bottom board edge.
+
+    Headers are spaced evenly within the ethernet zone's x-range, placed
+    near the bottom edge (board_max_y - h/2 - 1mm).
+    """
+    bounds = ctx.bounds
+    ezx1, _ezy1, ezx2, ezy2 = zone_rect
+    unplaced = [r for r in eth_headers
+                if r in ctx.positions and r not in ctx.fixed_refs and r not in placed_eth]
+    if not unplaced:
+        return
+    total_w = sum(ctx.fp_sizes.get(r, (2.54, 5.08))[0] for r in unplaced)
+    gap = 3.0
+    avail_w = ezx2 - ezx1
+    if total_w + gap * (len(unplaced) - 1) > avail_w:
+        gap = max(1.0, (avail_w - total_w) / max(len(unplaced) - 1, 1))
+    cx = ezx1 + (avail_w - (total_w + gap * (len(unplaced) - 1))) / 2.0
+    for ref in unplaced:
+        w, h = ctx.fp_sizes.get(ref, (2.54, 5.08))
+        x = _clamp(cx + w / 2.0, ezx1 + w / 2.0 + 1.0, ezx2 - w / 2.0 - 1.0)
+        y = _clamp(bounds[3] - h / 2.0 - 1.0, _ezy1 + h / 2.0 + 1.0, ezy2 - h / 2.0 - 1.0)
+        ctx.positions[ref] = (x, y, 0.0)
+        eth_grid.place(x, y, w, h)  # type: ignore[union-attr]
+        ctx.ethernet_fixed.add(ref)
+        placed_eth.add(ref)
+        _log.info("    %s (header) -> bottom edge (%.1f, %.1f)", ref, x, y)
+        cx += w + gap
+
+
 def _phase_ethernet_group(ctx: PlacementContext) -> None:
     """3c4: Ethernet group organization — vertical signal-chain column."""
     _log.info("  3c4: Ethernet group organization")
-    bounds = ctx.bounds
 
     eth_group_refs = _collect_feature_refs(ctx, "ethernet")
     if not eth_group_refs:
@@ -2500,14 +3157,17 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
     eth_zone_rect = _find_zone_rect(ctx, "ethernet")
     by_prefix = _classify_refs_by_prefix(eth_group_refs, ctx, "U", "J")
     eth_ics = by_prefix["U"]
-    eth_connectors = by_prefix["J"]
+    # Split J refs into large panel connectors (RJ45/SH*, width > 10mm → top
+    # edge) vs. small headers (SPI/power, width ≤ 10mm → bottom edge).
+    all_j_refs = by_prefix["J"]
+    eth_connectors = [r for r in all_j_refs
+                      if ctx.fp_sizes.get(r, (0.0, 0.0))[0] > 10.0]
+    eth_headers = [r for r in all_j_refs if r not in eth_connectors]
 
     if not (eth_ics and eth_zone_rect is not None):
         return
 
     ezx1, ezy1, ezx2, ezy2 = eth_zone_rect
-    _ETH_STRIP_GAP = 1.0
-
     eth_net_refs = _build_net_to_group_refs(ctx, eth_group_refs)
     eth_grid = _build_exclusion_grid(ctx, eth_group_refs)
 
@@ -2515,97 +3175,61 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
     crystal_refs = sorted([r for r in eth_group_refs
                            if r.startswith("Y") and r in ctx.positions])
     poe_ic = eth_ics[1] if len(eth_ics) > 1 else ""
-
-    # Classify caps by net connectivity
     crystal_load_caps, poe_caps, other_caps = _classify_eth_caps(
         eth_group_refs, eth_net_refs, crystal_refs, poe_ic, ctx,
     )
 
     eth_anchor_x = (ezx1 + ezx2) / 2.0
-    eth_anchor_y = ezy1 + 3.0
     placed_eth: set[str] = set()
 
-    # Force-place main IC
-    ic_w, ic_h = ctx.fp_sizes.get(eth_main_ic, (10.0, 10.0))
-    ic_cx = _clamp(eth_anchor_x, ezx1 + ic_w / 2.0 + 1.0, ezx2 - ic_w / 2.0 - 1.0)
-    ic_cy = _clamp(eth_anchor_y + ic_h / 2.0, ezy1 + ic_h / 2.0 + 1.0,
-                   ezy2 - ic_h / 2.0 - 5.0)
-    if eth_main_ic in ctx.positions and eth_main_ic not in ctx.fixed_refs:
-        ctx.positions[eth_main_ic] = (ic_cx, ic_cy, 0.0)
-        eth_grid.place(ic_cx, ic_cy, ic_w, ic_h)
-        ctx.ethernet_fixed.add(eth_main_ic)
-        ctx.fixed_refs.add(eth_main_ic)
-        placed_eth.add(eth_main_ic)
-        _log.info("    %s (W5500) force-placed at (%.1f, %.1f) "
-                  "in ethernet zone", eth_main_ic, ic_cx, ic_cy)
-
-    # Pre-register connector footprints in grid
-    for _j13_ref in eth_connectors:
-        _j13_w, _j13_h = ctx.fp_sizes.get(_j13_ref, (19.6, 12.5))
-        eth_grid.place(eth_anchor_x, bounds[3] - _j13_h / 2.0 - 1.0,
-                       _j13_w, _j13_h)
-
-    def _place_eth_column(
-        refs: list[str], col_x: float, start_y: float,
-    ) -> float:
-        cy = start_y
-        for ref in refs:
-            if (ref not in ctx.positions or ref in ctx.fixed_refs
-                    or ref in placed_eth or ref == ""):
-                continue
-            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-            tx = _clamp(col_x, ezx1 + 2.0, ezx2 - 2.0)
-            ty = _clamp(cy + h / 2.0, ezy1 + 2.0, ezy2 - 2.0)
-            px, py = eth_grid.find_free_pos(tx, ty, w, h, max_radius=6.0)
-            ctx.positions[ref] = (px, py, 0.0)
-            eth_grid.place(px, py, w, h)
-            ctx.ethernet_fixed.add(ref)
-            placed_eth.add(ref)
-            cy = py + h / 2.0 + _ETH_STRIP_GAP
-        return cy
-
-    # Crystal + load caps
-    _eth_place_crystal_and_caps(
-        ctx, crystal_refs, crystal_load_caps,
-        ic_cx, ic_cy, ic_h, eth_grid, placed_eth, eth_zone_rect,
+    # Place RJ45 connectors FIRST so we can derive the IC anchor from their
+    # actual pad extent rather than from a courtyard-size estimate.
+    # Courtyard sizes over-estimate through-hole connectors because the
+    # courtyard encloses the entire body including the mating face that hangs
+    # over the board edge; using the real pad extent gives a tighter (and
+    # physically correct) gap between the connector pads and the IC.
+    _eth_place_rj45_connectors(
+        ctx, eth_connectors, eth_anchor_x, eth_grid, placed_eth, eth_zone_rect,
     )
+    # IC anchor: 2 mm below the lowest RJ45 pad, derived from actual geometry.
+    ic_anchor_y = _eth_connector_pad_bottom(ctx, eth_connectors, placed_eth, gap_mm=2.0)
+    # Fallback if no connectors were placed (boards without RJ45).
+    if not eth_connectors or not any(r in placed_eth for r in eth_connectors):
+        max_conn_h = max(
+            (ctx.fp_sizes.get(r, (0.0, 15.4))[1] for r in eth_connectors),
+            default=15.4,
+        )
+        ic_anchor_y = ctx.bounds[1] + max_conn_h + 2.0
 
-    # Remaining caps below main IC
-    col1_bottom = _eth_place_caps_column(
-        ctx, other_caps, ic_cx, ic_cy + ic_h / 2.0 + 1.5,
+    ic_cx, ic_cy, ic_w, ic_h = _eth_force_place_main_ic(
+        ctx, eth_main_ic, eth_anchor_x, ic_anchor_y,
         eth_grid, placed_eth, eth_zone_rect,
     )
 
-    # PoE/PHY module
-    _eth_place_poe_ic_and_caps(
-        ctx, poe_ic, poe_caps, eth_anchor_x, eth_grid, placed_eth,
-    )
+    # Place small interface headers (SPI/power) at the bottom edge BEFORE the
+    # decoupling caps column so that the caps column sees the headers as occupied
+    # grid cells and avoids them (prevents C1/J2-style courtyard collisions).
+    _eth_place_headers_bottom(ctx, eth_headers, eth_grid, placed_eth, eth_zone_rect)
 
-    # RJ45 connectors at bottom edge
-    _eth_place_rj45_connectors(
-        ctx, eth_connectors, eth_anchor_x, eth_grid, placed_eth, eth_zone_rect,
+    col1_bottom = _eth_place_signal_chain(
+        ctx, crystal_refs, crystal_load_caps, other_caps, poe_ic, poe_caps,
+        eth_connectors, eth_anchor_x, ic_cx, ic_cy, ic_h,
+        eth_grid, placed_eth, eth_zone_rect,
     )
 
     # Any remaining eth refs
     remaining_eth = sorted(eth_group_refs - placed_eth - ctx.fixed_refs)
     if remaining_eth:
-        _place_eth_column(
+        _eth_place_column(
+            ctx,
             [r for r in remaining_eth if r in ctx.positions],
-            eth_anchor_x, col1_bottom,
+            eth_anchor_x, col1_bottom, placed_eth, eth_grid, eth_zone_rect,
         )
 
     _log.info(
         "    3c4: organized %d ethernet components in signal chain: %s",
         len(ctx.ethernet_fixed), sorted(ctx.ethernet_fixed),
     )
-
-    # Local overlap fix: shift caps that collide with crystal
-    _eth_fix_crystal_cap_overlaps(ctx, placed_eth, eth_zone_rect)
-
-    # Protect all ethernet from collision resolution
+    _eth_fix_crystal_cap_overlaps(ctx, placed_eth, eth_zone_rect, crystal_load_caps)
     ctx.fixed_refs.update(ctx.ethernet_fixed)
-
-    # 3c4-post: Push non-ethernet components clear of ethernet ICs
-    skip_refs = ctx.relay_support_refs | {r for r in ctx.positions if r.startswith("K")}
-    for eic in [r for r in ctx.ethernet_fixed if r.startswith("U")]:
-        _push_non_group_away_from_ic(eic, ctx, ctx.ethernet_fixed, skip_refs)
+    _eth_push_non_group_clear(ctx)

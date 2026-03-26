@@ -10,9 +10,7 @@ import pytest
 
 from kicad_pipeline.models.pcb import (
     BoardOutline,
-    DesignRules,
     Footprint,
-    NetEntry,
     Pad,
     PCBDesign,
     Point,
@@ -28,8 +26,6 @@ from kicad_pipeline.models.requirements import (
     ProjectInfo,
     ProjectRequirements,
 )
-from tests.helpers import make_board_outline, make_pcb_design, make_requirements
-
 from kicad_pipeline.optimization.placement_optimizer import (
     OptimizationConfig,
     PlacementCandidate,
@@ -49,6 +45,7 @@ from kicad_pipeline.optimization.placement_optimizer import (
     optimize_placement_ee,
     optimize_placement_sa,
 )
+from tests.helpers import make_board_outline, make_pcb_design, make_requirements
 
 # ---------------------------------------------------------------------------
 # Fake QualityScore for mocking
@@ -875,8 +872,8 @@ class TestConnectorOrientation:
         bounds = (0.0, 0.0, 100.0, 80.0)
 
         result = _orient_connectors(positions, fp_sizes, bounds, set(), pcb)
-        # Near right edge, wide connector → 180° (screws accessible from right)
-        assert result["J1"][2] == 180.0
+        # Near right edge, screw terminal → 270° (wire entry faces right edge)
+        assert result["J1"][2] == 270.0
 
     def test_connector_in_center_not_rotated(self) -> None:
         """Connector in center of board (far from edges) is not reoriented."""

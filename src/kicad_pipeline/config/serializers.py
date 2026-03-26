@@ -30,7 +30,7 @@ def _relay_action(relay: RelayConfig) -> str:
     elif relay.polarity == RelayPolarity.ACTIVE_LOW:
         drive = "LOW"
     else:
-        return f"Polarity unknown — verify driver topology manually"
+        return "Polarity unknown — verify driver topology manually"
 
     return (
         f"GPIO {drive} on {relay.gpio_net} energizes relay, "

@@ -63,8 +63,98 @@ class OptimizationResult:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_placement_pipeline(
+    req: ProjectRequirements,
+) -> tuple[PCBDesign, QualityScore, PCBDesign, QualityScore, object]:
+    """Steps 1-3: build PCB, score it, run EE placement optimization.
+
+    Uses lazy imports to avoid circular dependencies at module load time.
+    """
+    from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
+    from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+    from kicad_pipeline.pcb.board_templates import detect_template
+    from kicad_pipeline.pcb.builder import build_pcb
+
+    tmpl = detect_template(req.mechanical)
+    board_template = tmpl.name if tmpl is not None else None
+    pcb = build_pcb(req, board_template=board_template, auto_route=False)
+    initial_quality = compute_fast_placement_score(pcb, req)
+    best_pcb, ee_review = optimize_placement_ee(req, pcb, max_review_passes=5)
+    best_quality = compute_fast_placement_score(best_pcb, req)
+
+    return pcb, initial_quality, best_pcb, best_quality, ee_review
+
+
+def _collect_ee_suggestions(violations: object) -> tuple[OptimizationSuggestion, ...]:
+    """Convert EE review violations to OptimizationSuggestion objects.
+
+    Minor violations are skipped; all others become high or critical priority.
+    """
+    from typing import Any
+    result: list[OptimizationSuggestion] = []
+    for violation in violations:  # type: ignore[union-attr]
+        v: Any = violation
+        if v.severity == "minor":
+            continue
+        result.append(OptimizationSuggestion(
+            category="placement",
+            priority="critical" if v.severity == "critical" else "high",
+            title=f"{v.rule.value}: {', '.join(v.refs)}",
+            description=v.message,
+        ))
+    return tuple(result)
+
+
+# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
+
+
+def _score_dimension_suggestions(best: QualityScore) -> list[OptimizationSuggestion]:
+    """Return suggestions for any score dimension that falls below threshold."""
+    result: list[OptimizationSuggestion] = []
+    checks = [
+        (best.electrical_score, 0.8, "electrical", "high",
+         "Electrical issues detected", "review net connectivity and power rails"),
+        (best.manufacturing_score, 0.8, "manufacturing", "high",
+         "Manufacturing constraints violated", "check JLCPCB trace/via limits"),
+        (best.thermal_score, 0.8, "thermal", "medium",
+         "Thermal concerns", "review high-power component placement"),
+        (best.signal_integrity_score, 0.8, "signal", "medium",
+         "Signal integrity issues", "check differential pairs and analog routing"),
+        (best.placement_score, 0.7, "placement", "high",
+         "Placement quality low", "decoupling caps may be too far from ICs"),
+    ]
+    for score_val, threshold, category, priority, title, hint in checks:
+        if score_val < threshold:
+            result.append(OptimizationSuggestion(
+                category=category,
+                priority=priority,
+                title=title,
+                description=f"{title.split()[0]} score {score_val:.2f}/1.0 — {hint}",
+            ))
+    return result
+
+
+def _append_zone_suggestions(
+    suggestions: list[OptimizationSuggestion],
+    zone_strategy: object,
+) -> None:
+    """Append zone-strategy suggestions to *suggestions* in place."""
+    from kicad_pipeline.optimization.zone_optimizer import ZoneStrategy
+
+    if isinstance(zone_strategy, ZoneStrategy):
+        for reason in zone_strategy.rationale:
+            suggestions.append(OptimizationSuggestion(
+                category="zone",
+                priority="medium",
+                title=f"Zone strategy: {zone_strategy.gnd_strategy}",
+                description=reason,
+            ))
 
 
 class OptimizerAgent:
@@ -94,68 +184,26 @@ class OptimizerAgent:
             6. Write results to ``variant/optimization/``.
             7. Return result (never overwrite PCB).
         """
-        from kicad_pipeline.optimization.placement_optimizer import (
-            _extract_positions,
-            optimize_placement_ee,
-        )
-        from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+        from kicad_pipeline.optimization.placement_optimizer import _extract_positions
         from kicad_pipeline.optimization.zone_optimizer import recommend_zone_strategy
-        from kicad_pipeline.pcb.board_templates import detect_template
-        from kicad_pipeline.pcb.builder import build_pcb
         from kicad_pipeline.requirements.decomposer import load_requirements
 
         vdir = self._root / "variants" / variant_name
         req = load_requirements(vdir / "requirements.json")
 
-        tmpl = detect_template(req.mechanical)
-        board_template = tmpl.name if tmpl is not None else None
-        pcb = build_pcb(req, board_template=board_template, auto_route=False)
-
-        # Initial score — use fast-path scoring for placement optimization
-        initial_quality = compute_fast_placement_score(pcb, req)
+        pcb, initial_quality, best_pcb, best_quality, ee_review = _run_placement_pipeline(req)
         initial_score = initial_quality.overall_score
-
-        # Placement optimization — use EE-grade deterministic placement
-        best_pcb, ee_review = optimize_placement_ee(
-            req, pcb, max_review_passes=5,
-        )
-        best_quality = compute_fast_placement_score(best_pcb, req)
         best_score = best_quality.overall_score
 
-        # Zone analysis
         zone_strategy = recommend_zone_strategy(best_pcb, req)
-
-        # Generate suggestions — combine agent suggestions + EE review violations
         suggestions = self._generate_suggestions(
-            initial_quality,
-            best_quality,
-            zone_strategy,
-            pcb,
-            req,
+            initial_quality, best_quality, zone_strategy, pcb, req,
         )
-
-        # Add EE review violations as suggestions
-        ee_suggestions: list[OptimizationSuggestion] = []
-        for violation in ee_review.violations:
-            if violation.severity == "minor":
-                continue
-            ee_suggestions.append(
-                OptimizationSuggestion(
-                    category="placement",
-                    priority="critical" if violation.severity == "critical" else "high",
-                    title=f"{violation.rule.value}: {', '.join(violation.refs)}",
-                    description=violation.message,
-                )
-            )
-        suggestions = suggestions + tuple(ee_suggestions)
+        suggestions = suggestions + _collect_ee_suggestions(ee_review.violations)
 
         improvement = (
-            ((best_score - initial_score) / initial_score * 100)
-            if initial_score > 0
-            else 0.0
+            ((best_score - initial_score) / initial_score * 100) if initial_score > 0 else 0.0
         )
-
-        # Build result
         best_positions = _extract_positions(best_pcb) if best_score > initial_score else None
 
         result = OptimizationResult(
@@ -166,7 +214,27 @@ class OptimizerAgent:
             best_positions=best_positions,
         )
 
-        # Write results atomically
+        self._write_optimization_results(vdir, result, initial_score, best_score, improvement)
+
+        log.info(
+            "Optimization complete: %.2f -> %.2f (%+.1f%%)",
+            initial_score,
+            best_score,
+            improvement,
+        )
+
+        return result
+
+
+    def _write_optimization_results(
+        self,
+        vdir: Path,
+        result: OptimizationResult,
+        initial_score: float,
+        best_score: float,
+        improvement: float,
+    ) -> None:
+        """Step 6: Write progress and suggestions JSON to variant/optimization/."""
         opt_dir = vdir / "optimization"
         opt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -181,11 +249,7 @@ class OptimizerAgent:
                 {"iteration": 1, "score": round(best_score, 4)},
             ),
         )
-
-        self._atomic_write_json(
-            opt_dir / "progress.json",
-            asdict(progress),
-        )
+        self._atomic_write_json(opt_dir / "progress.json", asdict(progress))
         self._atomic_write_json(
             opt_dir / "suggestions.json",
             {
@@ -196,15 +260,6 @@ class OptimizerAgent:
             },
         )
 
-        log.info(
-            "Optimization complete: %.2f -> %.2f (%+.1f%%)",
-            initial_score,
-            best_score,
-            improvement,
-        )
-
-        return result
-
     def _generate_suggestions(
         self,
         initial: QualityScore,
@@ -214,88 +269,8 @@ class OptimizerAgent:
         requirements: ProjectRequirements,
     ) -> tuple[OptimizationSuggestion, ...]:
         """Generate human-readable optimization suggestions."""
-        suggestions: list[OptimizationSuggestion] = []
-
-        # Check each score dimension
-        if best.electrical_score < 0.8:
-            suggestions.append(
-                OptimizationSuggestion(
-                    category="electrical",
-                    priority="high",
-                    title="Electrical issues detected",
-                    description=(
-                        f"Electrical score {best.electrical_score:.2f}/1.0"
-                        " — review net connectivity and power rails"
-                    ),
-                )
-            )
-
-        if best.manufacturing_score < 0.8:
-            suggestions.append(
-                OptimizationSuggestion(
-                    category="manufacturing",
-                    priority="high",
-                    title="Manufacturing constraints violated",
-                    description=(
-                        f"Manufacturing score {best.manufacturing_score:.2f}/1.0"
-                        " — check JLCPCB trace/via limits"
-                    ),
-                )
-            )
-
-        if best.thermal_score < 0.8:
-            suggestions.append(
-                OptimizationSuggestion(
-                    category="thermal",
-                    priority="medium",
-                    title="Thermal concerns",
-                    description=(
-                        f"Thermal score {best.thermal_score:.2f}/1.0"
-                        " — review high-power component placement"
-                    ),
-                )
-            )
-
-        if best.signal_integrity_score < 0.8:
-            suggestions.append(
-                OptimizationSuggestion(
-                    category="signal",
-                    priority="medium",
-                    title="Signal integrity issues",
-                    description=(
-                        f"SI score {best.signal_integrity_score:.2f}/1.0"
-                        " — check differential pairs and analog routing"
-                    ),
-                )
-            )
-
-        if best.placement_score < 0.7:
-            suggestions.append(
-                OptimizationSuggestion(
-                    category="placement",
-                    priority="high",
-                    title="Placement quality low",
-                    description=(
-                        f"Placement score {best.placement_score:.2f}/1.0"
-                        " — decoupling caps may be too far from ICs"
-                    ),
-                )
-            )
-
-        # Zone strategy suggestions
-        from kicad_pipeline.optimization.zone_optimizer import ZoneStrategy
-
-        if isinstance(zone_strategy, ZoneStrategy):
-            for reason in zone_strategy.rationale:
-                suggestions.append(
-                    OptimizationSuggestion(
-                        category="zone",
-                        priority="medium",
-                        title=f"Zone strategy: {zone_strategy.gnd_strategy}",
-                        description=reason,
-                    )
-                )
-
+        suggestions = list(_score_dimension_suggestions(best))
+        _append_zone_suggestions(suggestions, zone_strategy)
         return tuple(suggestions)
 
     @staticmethod

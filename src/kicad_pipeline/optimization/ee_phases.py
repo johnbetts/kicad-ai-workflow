@@ -15,7 +15,8 @@ import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.requirements import ProjectRequirements
+    from kicad_pipeline.models.requirements import Net, ProjectRequirements
+    from kicad_pipeline.optimization.placement_types import PlacementContext
 
 from kicad_pipeline.optimization.collision_resolver import (
     _PlacementGrid,
@@ -52,9 +53,6 @@ from kicad_pipeline.optimization.level3_phases import (
     _orient_connectors,
     _pin_rf_to_edge,
     _place_row_layout,
-)
-from kicad_pipeline.optimization.placement_types import (
-    PlacementContext,
 )
 from kicad_pipeline.pcb.pin_map import (
     origin_to_centroid,
@@ -138,6 +136,89 @@ def _phase_group_placement(ctx: PlacementContext) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _phase_constraint_placement(ctx: PlacementContext) -> None:
+    """3-constraints: Enforce explicit placement constraints (ordering, proximity).
+
+    Runs early in Level 3 so subsequent type-specific phases refine from a
+    constraint-correct starting point.  Is a no-op when ``ctx.constraints``
+    is ``None`` or when all constraint collections are empty — existing boards
+    with no placement annotations are completely unaffected.
+    """
+    if ctx.constraints is None:
+        return
+    if not ctx.constraints.proximity and not ctx.constraints.ordering:
+        return
+
+    _log.info("  3-constraints: Enforcing placement constraints")
+    constraints = ctx.constraints
+
+    # 1. Enforce ordering chains FIRST ----------------------------------------
+    # Ordering runs before proximity so that proximity has the final say.
+    # Otherwise ordering can undo proximity adjustments by sorting components
+    # back to their pre-proximity positions.
+    for chain in constraints.ordering:
+        present = [r for r in chain.refs if r in ctx.positions]
+        if len(present) < 2:
+            continue
+        # Determine dominant axis from current spread
+        xs = [ctx.positions[r][0] for r in present]
+        ys = [ctx.positions[r][1] for r in present]
+        use_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+
+        vals = [ctx.positions[r][0 if use_x else 1] for r in present]
+        if all(vals[i] <= vals[i + 1] + 1.0 for i in range(len(vals) - 1)):
+            continue  # already in order
+
+        # Reassign sorted coordinate values to preserve declared order,
+        # ensuring minimum spacing between adjacent components and
+        # clamping each to board bounds.
+        bounds = ctx.bounds
+        sorted_vals = sorted(vals)
+
+        # Ensure minimum gap between adjacent chain members
+        min_gap = 4.0  # mm between component centers
+        for i in range(1, len(sorted_vals)):
+            if sorted_vals[i] - sorted_vals[i - 1] < min_gap:
+                sorted_vals[i] = sorted_vals[i - 1] + min_gap
+
+        for i, ref in enumerate(present):
+            rx, ry, rrot = ctx.positions[ref]
+            w, h = ctx.fp_sizes.get(ref, (2.0, 1.0))
+            if use_x:
+                new_v = max(bounds[0] + w / 2 + 1, min(bounds[2] - w / 2 - 1, sorted_vals[i]))
+                ctx.positions[ref] = (new_v, ry, rrot)
+            else:
+                new_v = max(bounds[1] + h / 2 + 1, min(bounds[3] - h / 2 - 1, sorted_vals[i]))
+                ctx.positions[ref] = (rx, new_v, rrot)
+            ctx.fixed_refs.add(ref)
+        _log.info("    Reordered chain '%s': %s", chain.group, present)
+
+    # 2. Enforce proximity constraints AFTER ordering -------------------------
+    # Proximity has the final say — it pulls components to their targets
+    # even if ordering just rearranged them.
+    for prox in constraints.proximity:
+        if prox.ref not in ctx.positions or prox.target_ref not in ctx.positions:
+            continue
+        rx, ry, rrot = ctx.positions[prox.ref]
+        tx, ty, _ = ctx.positions[prox.target_ref]
+        dist = math.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
+        if dist <= prox.max_distance_mm:
+            continue
+        ratio = prox.max_distance_mm / max(dist, 0.1)
+        new_x = tx + (rx - tx) * ratio
+        new_y = ty + (ry - ty) * ratio
+        bounds = ctx.bounds
+        w, h = ctx.fp_sizes.get(prox.ref, (2.0, 1.0))
+        new_x = max(bounds[0] + w / 2 + 1, min(bounds[2] - w / 2 - 1, new_x))
+        new_y = max(bounds[1] + h / 2 + 1, min(bounds[3] - h / 2 - 1, new_y))
+        ctx.positions[prox.ref] = (new_x, new_y, rrot)
+        ctx.fixed_refs.add(prox.ref)
+        _log.info(
+            "    %s: moved to (%.1f, %.1f) [proximity to %s]",
+            prox.ref, new_x, new_y, prox.target_ref,
+        )
+
+
 def _phase_relay_rows(ctx: PlacementContext) -> None:
     """3a: Relay row formation — arrange relays in 1xN horizontal row."""
     _log.info("  3a: Relay row formation")
@@ -209,11 +290,182 @@ def _phase_relay_connector_alignment(ctx: PlacementContext) -> None:
         py = max(min_y + 2.0, min(max_y - 2.0, terminal_y))
         ctx.positions[j_ref] = (px, py, 180.0)
         ctx.relay_support_refs.add(j_ref)
+        ctx.fixed_refs.add(j_ref)  # protect from phase 3f/3f2 overriding rotation
         aligned += 1
         _log.info("    %s -> (%.1f, %.1f) rot=180 aligned to %s",
                    j_ref, px, py, k_ref)
 
     _log.info("    Aligned %d connectors to their relays", aligned)
+
+
+_RELAY_DRIVER_POWER_NETS: frozenset[str] = frozenset(
+    {"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"}
+)
+"""Power/rail nets excluded from drive-net classification."""
+
+
+def _classify_relay_support_members(
+    support_members: list[str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Split *support_members* into (q_refs, d_refs, all_r_refs, other_refs)."""
+    q_refs = sorted(r for r in support_members if r.startswith("Q"))
+    d_refs = sorted(r for r in support_members if r.startswith("D"))
+    all_r_refs = sorted(r for r in support_members if r.startswith("R"))
+    other_refs = sorted(
+        r for r in support_members
+        if not r.startswith("Q") and not r.startswith("D") and not r.startswith("R")
+    )
+    return q_refs, d_refs, all_r_refs, other_refs
+
+
+def _split_flyback_and_led_diodes(
+    d_refs: list[str],
+    ctx: PlacementContext,
+) -> tuple[list[str], list[str]]:
+    """Split diode refs into flyback diodes and LED indicator diodes.
+
+    A flyback diode has at least one pin on a ``_COIL`` net.
+    A LED indicator diode connects to a ``LED*`` net (not a COIL net directly).
+
+    Returns:
+        (flyback_refs, led_indicator_refs)
+    """
+    flyback_refs: list[str] = []
+    led_refs: list[str] = []
+    for d_ref in d_refs:
+        nets_for_d = {
+            net.name for net in ctx.requirements.nets
+            if any(c.ref == d_ref for c in net.connections)
+        }
+        if any("_COIL" in n.upper() for n in nets_for_d):
+            flyback_refs.append(d_ref)
+        else:
+            led_refs.append(d_ref)
+    return flyback_refs, led_refs
+
+
+def _split_gate_resistors(
+    all_r_refs: list[str],
+    q_refs: list[str],
+    ctx: PlacementContext,
+) -> tuple[list[str], list[str]]:
+    """Separate gate resistors from LED/other resistors.
+
+    A gate resistor is one that shares a non-power, non-COIL net with a Q ref
+    in the subcircuit.  LED resistors share the COIL net with Q's collector
+    (they sense the coil drive), so they must be excluded by checking that the
+    shared net name does not contain ``_COIL``.
+
+    Returns:
+        (r_gate_refs, r_other_refs)
+    """
+    r_gate_refs: list[str] = []
+    r_other_refs: list[str] = []
+    for r_ref in all_r_refs:
+        shares_net_with_q = any(
+            net.name.upper() not in _RELAY_DRIVER_POWER_NETS
+            and "_COIL" not in net.name.upper()
+            and any(c.ref == r_ref for c in net.connections)
+            and any(c.ref in q_refs for c in net.connections)
+            for net in ctx.requirements.nets
+        )
+        if shares_net_with_q:
+            r_gate_refs.append(r_ref)
+        else:
+            r_other_refs.append(r_ref)
+    return r_gate_refs, r_other_refs
+
+
+def _find_external_gate_resistors(
+    q_refs: list[str],
+    r_gate_refs: list[str],
+    r_other_refs: list[str],
+    ctx: PlacementContext,
+) -> list[str]:
+    """Find gate resistors outside the subcircuit sharing a DRIVE net with Q.
+
+    Returns list of newly discovered external gate R refs.
+    """
+    external: list[str] = []
+    known = set(r_gate_refs) | set(r_other_refs)
+    for net in ctx.requirements.nets:
+        if net.name.upper() in _RELAY_DRIVER_POWER_NETS:
+            continue
+        if "DRIVE" not in net.name.upper():
+            continue
+        if not any(c.ref in q_refs for c in net.connections):
+            continue
+        for conn in net.connections:
+            if (conn.ref.startswith("R")
+                    and conn.ref not in known
+                    and conn.ref in ctx.positions
+                    and conn.ref not in ctx.fixed_refs):
+                external.append(conn.ref)
+                known.add(conn.ref)
+                _log.info("    Found external gate R %s via net %s",
+                           conn.ref, net.name)
+    return external
+
+
+def _place_relay_left_column(
+    d_refs: list[str],
+    q_refs: list[str],
+    left_x: float,
+    ky: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place D_flyback and Q transistor in the relay driver left column."""
+    for d_ref in d_refs:
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 11.5))
+        ctx.positions[d_ref] = (px, py, 0.0)
+        ctx.relay_support_refs.add(d_ref)
+        _log.info("    D %s -> (%.1f, %.1f) LEFT col, rot=0", d_ref, px, py)
+
+    for q_ref in q_refs:
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 14.1))
+        ctx.positions[q_ref] = (px, py, 180.0)
+        ctx.relay_support_refs.add(q_ref)
+        _log.info("    Q %s -> (%.1f, %.1f) LEFT col, rot=180", q_ref, px, py)
+
+
+def _place_relay_right_column(
+    r_refs: list[str],
+    right_x: float,
+    ky: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place R_gate resistors in the relay driver right column."""
+    for r_ref in r_refs:
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.4))
+        ctx.positions[r_ref] = (px, py, 180.0)
+        ctx.relay_support_refs.add(r_ref)
+        _log.info("    R %s -> (%.1f, %.1f) RIGHT col, rot=180", r_ref, px, py)
+
+
+def _place_relay_others_grid(
+    other_refs: list[str],
+    kx: float,
+    ky: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Place remaining relay driver components in a 2-wide grid below the relay."""
+    if not other_refs:
+        return
+    other_y = ky + 20.5
+    for i, ref in enumerate(other_refs):
+        _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        px = kx - 4.0 + (i % 2) * 8.0
+        py = other_y + (i // 2) * (h + 0.5)
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+        ctx.positions[ref] = (px, py, 0.0)
+        ctx.relay_support_refs.add(ref)
 
 
 def _phase_relay_drivers(ctx: PlacementContext) -> None:
@@ -222,8 +474,8 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
     Two-column layout relative to relay anchor K:
 
     LEFT column (dx ~ -4.3mm from K.x) — high-current signal chain:
-      D_flyback at dy=+10.8, rot=0   (anode down toward Q collector)
-      Q transistor at dy=+13.3, rot=180 (collector up toward D, base toward R_gate)
+      D_flyback at dy=+11.5, rot=0   (anode down toward Q collector)
+      Q transistor at dy=+14.1, rot=180 (collector up toward D, base toward R_gate)
 
     RIGHT column (dx ~ +4.0mm from K.x) — control:
       R_gate at dy=+15.4, rot=180  (connects Q base to GPIO)
@@ -249,55 +501,21 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
             if r != anchor and r in ctx.positions and r not in ctx.fixed_refs
         ]
 
-        # Classify support members by type
-        q_refs = sorted(r for r in support_members if r.startswith("Q"))
-        d_refs = sorted(r for r in support_members if r.startswith("D"))
-        all_r_refs = sorted(r for r in support_members if r.startswith("R"))
-        other_refs = sorted(
-            r for r in support_members
-            if not r.startswith("Q") and not r.startswith("D") and not r.startswith("R")
+        q_refs, d_refs, all_r_refs, other_refs = _classify_relay_support_members(
+            support_members,
         )
+        # Separate flyback diodes (on COIL net) from LED indicator diodes.
+        # LED indicator diodes are NOT placed here — they are handled by
+        # _phase_relay_leds (phase 3b2) which places them correctly in each
+        # channel's left column.  Adding them to relay_support_refs here would
+        # cause _find_relay_led_pairs to skip them.
+        d_flyback_refs, _d_led_indicator_refs = _split_flyback_and_led_diodes(d_refs, ctx)
+        d_refs = d_flyback_refs
 
-        # Separate gate resistors from LED resistors:
-        # Gate resistor shares a DRIVE net with a Q ref in this subcircuit.
-        power_nets = {"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"}
-        r_gate_refs: list[str] = []
-        r_other_refs: list[str] = []
-        for r_ref in all_r_refs:
-            shares_net_with_q = False
-            for net in ctx.requirements.nets:
-                if net.name.upper() in power_nets:
-                    continue
-                r_in_net = any(c.ref == r_ref for c in net.connections)
-                q_in_net = any(c.ref in q_refs for c in net.connections)
-                if r_in_net and q_in_net:
-                    shares_net_with_q = True
-                    break
-            if shares_net_with_q:
-                r_gate_refs.append(r_ref)
-            else:
-                r_other_refs.append(r_ref)
-
-        # Also find gate resistors NOT in subcircuit but sharing a DRIVE net with Q
-        for net in ctx.requirements.nets:
-            if net.name.upper() in power_nets:
-                continue
-            if "DRIVE" not in net.name.upper():
-                continue
-            q_in_net = any(c.ref in q_refs for c in net.connections)
-            if not q_in_net:
-                continue
-            for conn in net.connections:
-                if (conn.ref.startswith("R")
-                        and conn.ref not in r_gate_refs
-                        and conn.ref not in r_other_refs
-                        and conn.ref in ctx.positions
-                        and conn.ref not in ctx.fixed_refs):
-                    r_gate_refs.append(conn.ref)
-                    _log.info("    Found external gate R %s via net %s",
-                               conn.ref, net.name)
-
-        r_refs = r_gate_refs
+        r_gate_refs, r_other_refs = _split_gate_resistors(all_r_refs, q_refs, ctx)
+        r_gate_refs.extend(
+            _find_external_gate_resistors(q_refs, r_gate_refs, r_other_refs, ctx),
+        )
         # LED resistors go to other_refs for generic grid placement
         other_refs.extend(r_other_refs)
 
@@ -305,41 +523,9 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         left_x = kx - 4.3   # LEFT column: high-current signal chain
         right_x = kx + 4.0  # RIGHT column: control
 
-        # LEFT column: D_flyback above Q (anode facing down toward Q collector)
-        for d_ref in d_refs:
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 10.8))
-            ctx.positions[d_ref] = (px, py, 0.0)
-            ctx.relay_support_refs.add(d_ref)
-            _log.info("    D %s -> (%.1f, %.1f) LEFT col, rot=0", d_ref, px, py)
-
-        # LEFT column: Q below D_flyback (collector up toward D, 180 deg)
-        for q_ref in q_refs:
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 13.3))
-            ctx.positions[q_ref] = (px, py, 180.0)
-            ctx.relay_support_refs.add(q_ref)
-            _log.info("    Q %s -> (%.1f, %.1f) LEFT col, rot=180", q_ref, px, py)
-
-        # RIGHT column: R_gate (connects Q base to GPIO)
-        for r_ref in r_refs:
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.4))
-            ctx.positions[r_ref] = (px, py, 180.0)
-            ctx.relay_support_refs.add(r_ref)
-            _log.info("    R %s -> (%.1f, %.1f) RIGHT col, rot=180", r_ref, px, py)
-
-        # Place any remaining components in a grid below
-        if other_refs:
-            other_y = ky + 18.0
-            for i, ref in enumerate(other_refs):
-                w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-                px = kx - 4.0 + (i % 2) * 8.0
-                py = other_y + (i // 2) * (h + 0.5)
-                px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
-                py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
-                ctx.positions[ref] = (px, py, 0.0)
-                ctx.relay_support_refs.add(ref)
+        _place_relay_left_column(d_refs, q_refs, left_x, ky, bounds, ctx)
+        _place_relay_right_column(r_gate_refs, right_x, ky, bounds, ctx)
+        _place_relay_others_grid(other_refs, kx, ky, bounds, ctx)
 
 
 def _build_coil_net_to_relay(
@@ -357,21 +543,14 @@ def _build_coil_net_to_relay(
     return coil_net_to_relay
 
 
-def _find_relay_led_pairs(
+def _build_ref_net_maps(
     requirements: ProjectRequirements,
-    coil_net_to_relay: dict[str, str],
-    relay_support_refs: set[str],
-) -> dict[str, list[str]]:
-    """Find LED+resistor refs per relay via coil and LED nets.
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Build bidirectional ref↔net lookup maps.
 
-    Detection strategy:
-    1. Find R refs on COIL nets (these are LED resistors connected to the coil)
-    2. Trace those R refs to LED nets to find the LED D refs
-    3. Also find D refs on COIL nets not already in support (original path)
+    Returns:
+        (ref_to_nets, net_to_refs) — both keyed by name strings.
     """
-    relay_leds: dict[str, list[str]] = {}
-
-    # Build ref-to-nets map for tracing
     ref_to_nets: dict[str, set[str]] = {}
     net_to_refs: dict[str, set[str]] = {}
     for net in requirements.nets:
@@ -380,41 +559,43 @@ def _find_relay_led_pairs(
             refs_in_net.add(conn.ref)
             ref_to_nets.setdefault(conn.ref, set()).add(net.name)
         net_to_refs[net.name] = refs_in_net
+    return ref_to_nets, net_to_refs
 
-    # Strategy 1: R refs on COIL nets → trace via LED nets → find D_LED
-    for net in requirements.nets:
-        name_upper = net.name.upper()
-        if "_COIL" not in name_upper:
-            continue
-        k_ref = coil_net_to_relay.get(net.name)
-        if not k_ref:
-            continue
 
-        # Find R refs on this COIL net (these are LED current-limiting resistors)
-        r_refs_on_coil = [
-            c.ref for c in net.connections
-            if c.ref.startswith("R")
-        ]
+def _apply_led_via_r_on_coil(
+    net: Net,
+    k_ref: str,
+    ref_to_nets: dict[str, set[str]],
+    net_to_refs: dict[str, set[str]],
+    relay_support_refs: set[str],
+    relay_leds: dict[str, list[str]],
+) -> None:
+    """Strategy 1 helper: trace R refs on one COIL net to their D_LED refs."""
+    coil_net_name = net.name
+    r_refs_on_coil = [c.ref for c in net.connections if c.ref.startswith("R")]
+    for r_ref in r_refs_on_coil:
+        for other_net_name in ref_to_nets.get(r_ref, set()):
+            if other_net_name == coil_net_name:
+                continue
+            for ref in net_to_refs.get(other_net_name, set()):
+                if not ref.startswith("D") or ref == r_ref or ref in relay_support_refs:
+                    continue
+                if any("_COIL" in n.upper() for n in ref_to_nets.get(ref, set())):
+                    continue  # flyback diode — skip
+                led_list = relay_leds.setdefault(k_ref, [])
+                if ref not in led_list:
+                    led_list.append(ref)
+                if r_ref not in led_list:
+                    led_list.append(r_ref)
 
-        for r_ref in r_refs_on_coil:
-            # Trace this R through its other nets to find LED D refs
-            for other_net_name in ref_to_nets.get(r_ref, set()):
-                if other_net_name == net.name:
-                    continue  # Skip the COIL net itself
-                other_refs = net_to_refs.get(other_net_name, set())
-                for ref in other_refs:
-                    if ref.startswith("D") and ref != r_ref and ref not in relay_support_refs:
-                        # Check this D is not a flyback diode (not on a COIL net)
-                        d_nets = ref_to_nets.get(ref, set())
-                        is_flyback = any("_COIL" in n.upper() for n in d_nets)
-                        if not is_flyback:
-                            led_list = relay_leds.setdefault(k_ref, [])
-                            if ref not in led_list:
-                                led_list.append(ref)
-                            if r_ref not in led_list:
-                                led_list.append(r_ref)
 
-    # Strategy 2 (original): D refs on COIL nets not in support → LED nets → R refs
+def _apply_led_strategy2(
+    requirements: ProjectRequirements,
+    coil_net_to_relay: dict[str, str],
+    relay_support_refs: set[str],
+    relay_leds: dict[str, list[str]],
+) -> None:
+    """Strategy 2: D refs on COIL nets + R refs via LED nets."""
     for net in requirements.nets:
         name_upper = net.name.upper()
         if "_COIL" in name_upper:
@@ -437,6 +618,36 @@ def _find_relay_led_pairs(
                                 led_list.append(r)
                         break
 
+
+def _find_relay_led_pairs(
+    requirements: ProjectRequirements,
+    coil_net_to_relay: dict[str, str],
+    relay_support_refs: set[str],
+) -> dict[str, list[str]]:
+    """Find LED+resistor refs per relay via coil and LED nets.
+
+    Detection strategy:
+    1. Find R refs on COIL nets (these are LED resistors connected to the coil)
+    2. Trace those R refs to LED nets to find the LED D refs
+    3. Also find D refs on COIL nets not already in support (original path)
+    """
+    relay_leds: dict[str, list[str]] = {}
+    ref_to_nets, net_to_refs = _build_ref_net_maps(requirements)
+
+    # Strategy 1: R refs on COIL nets → trace via LED nets → find D_LED
+    for net in requirements.nets:
+        if "_COIL" not in net.name.upper():
+            continue
+        k_ref = coil_net_to_relay.get(net.name)
+        if not k_ref:
+            continue
+        _apply_led_via_r_on_coil(
+            net, k_ref, ref_to_nets, net_to_refs, relay_support_refs, relay_leds,
+        )
+
+    # Strategy 2: D refs on COIL nets not in support → LED nets → R refs
+    _apply_led_strategy2(requirements, coil_net_to_relay, relay_support_refs, relay_leds)
+
     return relay_leds
 
 
@@ -446,8 +657,8 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
     Pad-connectivity-driven layout (continuation of two-column pattern):
 
     LEFT column (dx ~ -4.3mm from K.x):
-      R_LED at dy=+15.5, rot=0    (pad 1 up toward Q collector / COIL net)
-      D_LED at dy=+17.7, rot=180  (anode up toward R_LED pad 2)
+      R_LED at dy=+16.8, rot=0    (pad 1 up toward Q collector / COIL net)
+      D_LED at dy=+19.1, rot=180  (anode up toward R_LED pad 2)
 
     The logic: R_LED pad 1 connects to the COIL net (same as Q collector),
     so it goes directly below Q.  D_LED anode connects to R_LED pad 2,
@@ -489,7 +700,7 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         # R_LED: below Q, pad 1 facing up toward COIL net (rot=0)
         for ref in r_led_refs:
             px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.5))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 16.8))
             ctx.positions[ref] = (px, py, 0.0)
             ctx.relay_support_refs.add(ref)
             relay_led_refs.add(ref)
@@ -497,7 +708,7 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         # D_LED: below R_LED, anode facing up (rot=180)
         for ref in d_led_refs:
             px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 17.7))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 19.1))
             ctx.positions[ref] = (px, py, 180.0)
             ctx.relay_support_refs.add(ref)
             relay_led_refs.add(ref)
@@ -505,7 +716,7 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         # Remaining LED-related refs below
         for i, ref in enumerate(other_led_refs):
             px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x + i * 3.0))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 19.5))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 21.3))
             _, _, rot = ctx.positions[ref]
             ctx.positions[ref] = (px, py, rot)
             ctx.relay_support_refs.add(ref)
@@ -697,12 +908,60 @@ def _phase_connector_orientation(ctx: PlacementContext) -> None:
     )
 
 
+def _is_usb_connector(ref: str, pcb: object) -> bool:
+    """Return True if *ref* is a USB connector (not a screw terminal)."""
+    for fp in pcb.footprints:  # type: ignore[union-attr]
+        if fp.ref == ref:
+            val = (fp.value or "").upper()
+            lib = (fp.lib_id or "").upper()
+            return "USB" in val or "USB" in lib
+    return False
+
+
+def _is_pin_header(ref: str, pcb: object) -> bool:
+    """Return True if *ref* is a pin header (not a screw terminal).
+
+    Pin headers (PinHeader, IDC, JST, Molex) are NOT top-edge screw
+    terminals and should not be placed there.  Only genuine screw/push-wire
+    terminal blocks belong at the top edge for sensor wiring.
+    """
+    for fp in pcb.footprints:  # type: ignore[union-attr]
+        if fp.ref == ref:
+            val = (fp.value or "").upper()
+            lib = (fp.lib_id or "").upper()
+            return any(kw in val or kw in lib for kw in (
+                "PINHEADER", "PIN_HEADER", "HEADER", "IDC", "JST", "MOLEX",
+                "CONNECTOR_PINHEADER",
+            ))
+    return False
+
+
 def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
-    """3f2: Top-edge screw terminal ordering."""
+    """3f2: Top-edge screw terminal ordering.
+
+    USB connectors (USB-C, USB-A, Micro-USB) and pin headers are excluded —
+    the MCU group phase handles their placement and rotation.  Only genuine
+    screw/push-wire terminal blocks (TerminalBlock) are placed here.
+    """
     min_x, min_y, max_x, max_y = ctx.bounds
 
-    _TOP_EDGE_ORDER = ["J6", "J5", "J4", "J3", "J1"]
-    _top_refs = [r for r in _TOP_EDGE_ORDER if r in ctx.positions and r not in ctx.fixed_refs]
+    # Collect refs that are in mcu_peripheral_cluster subcircuits so we can
+    # exclude them — they belong near the MCU, not at the top sensor edge.
+    _mcu_peripheral_sc_refs: set[str] = set()
+    from kicad_pipeline.optimization.functional_grouper import SubCircuitType
+    for sc in ctx.subcircuits:
+        if sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER:
+            _mcu_peripheral_sc_refs.update(sc.refs)
+
+    top_edge_order = ["J6", "J5", "J4", "J3", "J2", "J1"]
+    _top_refs = [
+        r for r in top_edge_order
+        if r in ctx.positions
+        and r not in ctx.fixed_refs
+        and r not in _mcu_peripheral_sc_refs
+        and not _is_usb_connector(r, ctx.initial_pcb)
+        and not _is_pin_header(r, ctx.initial_pcb)
+    ]
     if not _top_refs:
         return
 
@@ -738,9 +997,9 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
             )
         else:
             cent_x, cent_y = origin_x, origin_y_target
-        ctx.positions[r] = (cent_x, cent_y, 0.0)
+        ctx.positions[r] = (cent_x, cent_y, 180.0)
         cursor_x += tw + term_gap
-        _log.info("    %s -> centroid(%.1f, %.1f) origin(%.1f, %.1f) rot=0",
+        _log.info("    %s -> centroid(%.1f, %.1f) origin(%.1f, %.1f) rot=180",
                   r, cent_x, cent_y, origin_x, origin_y_target)
     ctx.top_edge_connector_refs = set(_top_refs)
 

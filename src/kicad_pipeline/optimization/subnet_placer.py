@@ -55,6 +55,108 @@ _DEFAULT_SERIES_GAP_MM: float = 1.5
 _MOVE_THRESHOLD_MM: float = 8.0
 
 
+def _load_subnet_resolver() -> (
+    tuple[object, object, object] | None
+):
+    """Import subnet_resolver and return (resolve_subnets, resolve_ic_pin, compute_pad_facing).
+
+    Returns None if the module is unavailable or missing required functions.
+    """
+    try:
+        _mod = importlib.import_module("kicad_pipeline.optimization.subnet_resolver")
+    except (ImportError, ModuleNotFoundError):
+        _log.debug("subnet_resolver not available — skipping subnet placement")
+        return None
+
+    _resolve_subnets = getattr(_mod, "resolve_subnets", None)
+    _resolve_ic_pin = getattr(_mod, "resolve_ic_pin_position", None)
+    _compute_pad_facing = getattr(_mod, "compute_pad_facing_position", None)
+    if not all((_resolve_subnets, _resolve_ic_pin, _compute_pad_facing)):
+        _log.debug("subnet_resolver missing required functions — skipping")
+        return None
+    assert callable(_resolve_subnets)
+    assert callable(_resolve_ic_pin)
+    assert callable(_compute_pad_facing)
+    return _resolve_subnets, _resolve_ic_pin, _compute_pad_facing
+
+
+def _try_place_passive_facing_ic(
+    ctx: PlacementContext,
+    passive_ref: str,
+    conns: list[_SubnetConnectionLike],
+    resolve_ic_pin: object,
+    compute_pad_facing: object,
+) -> bool:
+    """Attempt to place *passive_ref* facing its IC pin.
+
+    Returns True if the position was updated, False if skipped.
+    """
+    import math
+
+    assert callable(resolve_ic_pin)
+    assert callable(compute_pad_facing)
+
+    first_conn = conns[0]
+    ic_ref: str = first_conn.ic_ref
+    ic_pin: str = first_conn.ic_pin
+
+    try:
+        result: tuple[float, float, str] = resolve_ic_pin(
+            ic_ref, ic_pin, ctx.initial_pcb,
+        )
+        ic_x, ic_y, ic_side = result
+    except (ValueError, KeyError):
+        _log.debug(
+            "Cannot resolve IC pin position for %s.%s — skipping %s",
+            ic_ref, ic_pin, passive_ref,
+        )
+        return False
+
+    # Bug 3: Skip components already close to their target IC pin.
+    cur_x, cur_y, _cur_rot = ctx.positions[passive_ref]
+    current_dist = math.sqrt((cur_x - ic_x) ** 2 + (cur_y - ic_y) ** 2)
+    if current_dist < _MOVE_THRESHOLD_MM:
+        _log.debug(
+            "Skipping %s: already %.1fmm from %s.%s (threshold %.1f)",
+            passive_ref, current_dist, ic_ref, ic_pin, _MOVE_THRESHOLD_MM,
+        )
+        return False
+
+    pw, ph = ctx.fp_sizes.get(passive_ref, (1.6, 0.8))
+    try:
+        pos_result: tuple[float, float, float] = compute_pad_facing(
+            (pw, ph), ic_x, ic_y, ic_side, _DEFAULT_CHAIN_GAP_MM,
+        )
+        new_x, new_y, new_rot = pos_result
+    except (ValueError, TypeError):
+        _log.debug(
+            "Cannot compute pad-facing position for %s -> %s.%s",
+            passive_ref, ic_ref, ic_pin,
+        )
+        return False
+
+    ctx.positions[passive_ref] = (new_x, new_y, new_rot)
+    return True
+
+
+def _place_passives_by_subnet(
+    ctx: PlacementContext,
+    passive_connections: dict[str, list[_SubnetConnectionLike]],
+    resolve_ic_pin: object,
+    compute_pad_facing: object,
+) -> set[str]:
+    """Place all passives facing their IC pins. Returns set of placed refs."""
+    placed_refs: set[str] = set()
+    for passive_ref, conns in passive_connections.items():
+        if passive_ref in ctx.fixed_refs or passive_ref not in ctx.positions:
+            continue
+        if _try_place_passive_facing_ic(
+            ctx, passive_ref, conns, resolve_ic_pin, compute_pad_facing,
+        ):
+            placed_refs.add(passive_ref)
+    return placed_refs
+
+
 def _phase_subnet_placement(ctx: PlacementContext) -> None:
     """Generic subcircuit placement using subnet topology.
 
@@ -69,109 +171,30 @@ def _phase_subnet_placement(ctx: PlacementContext) -> None:
     when the dependency module is not yet available or the design has no
     subnet-resolvable subcircuits).
     """
-    try:
-        _mod = importlib.import_module("kicad_pipeline.optimization.subnet_resolver")
-    except (ImportError, ModuleNotFoundError):
-        _log.debug("subnet_resolver not available — skipping subnet placement")
+    fns = _load_subnet_resolver()
+    if fns is None:
         return
-
-    _resolve_subnets = getattr(_mod, "resolve_subnets", None)
-    _resolve_ic_pin = getattr(_mod, "resolve_ic_pin_position", None)
-    _compute_pad_facing = getattr(_mod, "compute_pad_facing_position", None)
-    if not all((_resolve_subnets, _resolve_ic_pin, _compute_pad_facing)):
-        _log.debug("subnet_resolver missing required functions — skipping")
-        return
-    # Narrow types for mypy after the None guard above
-    assert callable(_resolve_subnets)
-    assert callable(_resolve_ic_pin)
-    assert callable(_compute_pad_facing)
-
-    import math
+    resolve_subnets, resolve_ic_pin, compute_pad_facing = fns
+    assert callable(resolve_subnets)
 
     from kicad_pipeline.optimization.signal_flow import order_subcircuit_by_flow
 
-    raw_connections: list[_SubnetConnectionLike] = _resolve_subnets(ctx.requirements)
+    raw_connections: list[_SubnetConnectionLike] = resolve_subnets(ctx.requirements)
     if not raw_connections:
         _log.debug("No subnet connections resolved — skipping subnet placement")
         return
 
     _log.info("  Subnet placement: %d connections resolved", len(raw_connections))
 
-    # Build lookup: passive_ref -> list of SubnetConnection
     passive_connections: dict[str, list[_SubnetConnectionLike]] = {}
     for sn_conn in raw_connections:
         passive_connections.setdefault(sn_conn.passive_ref, []).append(sn_conn)
 
-    # Track which refs we've placed in this phase
-    placed_refs: set[str] = set()
+    placed_refs = _place_passives_by_subnet(
+        ctx, passive_connections, resolve_ic_pin, compute_pad_facing,
+    )
 
-    # Place each passive facing its IC pin
-    for passive_ref, conns in passive_connections.items():
-        if passive_ref in ctx.fixed_refs:
-            continue
-        if passive_ref not in ctx.positions:
-            continue
-
-        # Use the first connection's IC pin for primary placement
-        first_conn = conns[0]
-        ic_ref: str = first_conn.ic_ref
-        ic_pin: str = first_conn.ic_pin
-
-        try:
-            result: tuple[float, float, str] = _resolve_ic_pin(
-                ic_ref,
-                ic_pin,
-                ctx.initial_pcb,
-            )
-            ic_x, ic_y, ic_side = result
-        except (ValueError, KeyError):
-            _log.debug(
-                "Cannot resolve IC pin position for %s.%s — skipping %s",
-                ic_ref,
-                ic_pin,
-                passive_ref,
-            )
-            continue
-
-        # Bug 3: Skip components already close to their target IC pin.
-        cur_x, cur_y, _cur_rot = ctx.positions[passive_ref]
-        current_dist = math.sqrt(
-            (cur_x - ic_x) ** 2 + (cur_y - ic_y) ** 2,
-        )
-        if current_dist < _MOVE_THRESHOLD_MM:
-            _log.debug(
-                "Skipping %s: already %.1fmm from %s.%s (threshold %.1f)",
-                passive_ref, current_dist, ic_ref, ic_pin, _MOVE_THRESHOLD_MM,
-            )
-            continue
-
-        # Get passive size
-        pw, ph = ctx.fp_sizes.get(passive_ref, (1.6, 0.8))
-        passive_size = (pw, ph)
-
-        try:
-            pos_result: tuple[float, float, float] = _compute_pad_facing(
-                passive_size,
-                ic_x,
-                ic_y,
-                ic_side,
-                _DEFAULT_CHAIN_GAP_MM,
-            )
-            new_x, new_y, new_rot = pos_result
-        except (ValueError, TypeError):
-            _log.debug(
-                "Cannot compute pad-facing position for %s -> %s.%s",
-                passive_ref,
-                ic_ref,
-                ic_pin,
-            )
-            continue
-
-        ctx.positions[passive_ref] = (new_x, new_y, new_rot)
-        placed_refs.add(passive_ref)
-
-    # For series chains within subcircuits, adjust positions to form
-    # a connected flow.
+    # For series chains within subcircuits, adjust positions to form a connected flow.
     for sc in ctx.subcircuits:
         flow_order = order_subcircuit_by_flow(sc, ctx.requirements)
         if len(flow_order) >= 2:

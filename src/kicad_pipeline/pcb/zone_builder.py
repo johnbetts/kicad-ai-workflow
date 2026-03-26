@@ -151,10 +151,7 @@ def _point_in_any_bbox(
     bboxes: list[tuple[float, float, float, float]],
 ) -> bool:
     """Return True if (x, y) is inside any bounding box."""
-    for x1, y1, x2, y2 in bboxes:
-        if x1 <= x <= x2 and y1 <= y <= y2:
-            return True
-    return False
+    return any(x1 <= x <= x2 and y1 <= y <= y2 for x1, y1, x2, y2 in bboxes)
 
 
 def _point_in_any_keepout(
@@ -178,10 +175,7 @@ def _too_close_to_via(
     min_dist: float = 1.0,
 ) -> bool:
     """Return True if (x, y) is within *min_dist* of an existing via."""
-    for vx, vy in via_positions:
-        if abs(x - vx) < min_dist and abs(y - vy) < min_dist:
-            return True
-    return False
+    return any(abs(x - vx) < min_dist and abs(y - vy) < min_dist for vx, vy in via_positions)
 
 
 def _too_close_to_track(

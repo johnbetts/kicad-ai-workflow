@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -21,10 +21,6 @@ from kicad_pipeline.pcb.footprint_library import (
     remap_footprint_lib_ids,
     write_fp_lib_table,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -394,6 +390,5 @@ class TestWriteFpLibTableEdge:
         assert '"first"' not in content
 
     def test_returns_path_type(self, tmp_path: Path) -> None:
-        from pathlib import Path as P
         result = write_fp_lib_table(tmp_path, "test")
-        assert isinstance(result, P)
+        assert isinstance(result, Path)

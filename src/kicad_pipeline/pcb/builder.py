@@ -617,7 +617,16 @@ def _build_pre_footprints(
             comp.ref, comp.value, comp.footprint, comp.lcsc, layer=comp_layer,
         )
         fp = _apply_nets_to_footprint(fp, comp, net_lookup)
-        if comp.datasheet or comp.description:
+        custom_props: list[tuple[str, str]] = []
+        if comp.placement_group:
+            custom_props.append(("PlacementGroup", comp.placement_group))
+        if comp.placement_near:
+            custom_props.append(("PlacementNear", comp.placement_near))
+        if comp.placement_order is not None:
+            custom_props.append(("PlacementOrder", str(comp.placement_order)))
+        if comp.placement_near_max_mm is not None:
+            custom_props.append(("PlacementNearMaxMM", str(comp.placement_near_max_mm)))
+        if comp.datasheet or comp.description or custom_props:
             fp = Footprint(
                 lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
                 position=fp.position, rotation=fp.rotation, layer=fp.layer,
@@ -625,6 +634,7 @@ def _build_pre_footprints(
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
                 datasheet=comp.datasheet, description=comp.description,
                 fp_zones=fp.fp_zones,
+                custom_properties=tuple(custom_props),
             )
         if project_name is not None:
             new_lib_id = _footprint_lib_id(comp, project_name=project_name)
@@ -635,6 +645,7 @@ def _build_pre_footprints(
                 lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
                 datasheet=fp.datasheet, description=fp.description,
                 fp_zones=fp.fp_zones,
+                custom_properties=fp.custom_properties,
             )
         pre_footprints.append(fp)
     return pre_footprints
@@ -749,6 +760,7 @@ def _run_placement(
             lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
             models=fp.models, datasheet=fp.datasheet,
             description=fp.description, fp_zones=fp.fp_zones,
+            custom_properties=fp.custom_properties,
         )
         footprints_with_pos.append(fp_placed)
     return footprints_with_pos
@@ -1614,7 +1626,6 @@ def _fp_standard_properties(fp: Footprint) -> list[list[SExpNode]]:
     if ref_hidden:
         ref_effects.append(["hide", "yes"])
 
-    val_text = next((t for t in fp.texts if t.text_type == "value"), None)
     val_x = 0.0
     val_y = 0.0
 
@@ -1639,7 +1650,7 @@ def _fp_standard_properties(fp: Footprint) -> list[list[SExpNode]]:
 
 
 def _fp_optional_properties(fp: Footprint) -> list[list[SExpNode]]:
-    """Build LCSC, MPN, Manufacturer properties if present."""
+    """Build LCSC, MPN, Manufacturer, and custom properties if present."""
     fab = "B.Fab" if fp.layer == LAYER_B_CU else "F.Fab"
     props: list[list[SExpNode]] = []
     if fp.lcsc:
@@ -1648,6 +1659,9 @@ def _fp_optional_properties(fp: Footprint) -> list[list[SExpNode]]:
         props.append(_hidden_property_sexp("MPN", fp.mpn, fab))
     if fp.manufacturer:
         props.append(_hidden_property_sexp("Manufacturer", fp.manufacturer, fab))
+    # Emit custom properties (placement constraints, etc.)
+    for prop_name, prop_value in fp.custom_properties:
+        props.append(_hidden_property_sexp(prop_name, prop_value, fab))
     return props
 
 
@@ -1760,7 +1774,7 @@ def _footprint_sexp(fp: Footprint) -> SExpNode:
 
     # Footprint graphics (courtyard, silkscreen, fab outlines)
     for graphic in fp.graphics:
-        if isinstance(graphic, (FootprintLine, FootprintArc, FootprintCircle)):
+        if isinstance(graphic, FootprintLine | FootprintArc | FootprintCircle):
             node.append(_fp_graphic_sexp(graphic))
 
     for pad in fp.pads:

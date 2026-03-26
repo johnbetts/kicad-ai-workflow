@@ -631,9 +631,11 @@ def test_write_schematic_warns_on_unannotated_ref(
     sch_bad = dreplace(sch, symbols=(*sch.symbols, bad_inst))
 
     dest = tmp_path / "test_warn.kicad_sch"
-    with caplog.at_level(logging.WARNING, logger="kicad_pipeline.schematic.builder"):
-        with pytest.raises(SchematicError, match="R\\?"):
-            write_schematic(sch_bad, dest)
+    with (
+        caplog.at_level(logging.WARNING, logger="kicad_pipeline.schematic.builder"),
+        pytest.raises(SchematicError, match="R\\?"),
+    ):
+        write_schematic(sch_bad, dest)
 
     # Warning is still emitted before the validation error
     assert any("R?" in rec.message for rec in caplog.records)

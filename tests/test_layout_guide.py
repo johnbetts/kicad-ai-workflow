@@ -245,8 +245,9 @@ class TestGenerateLayoutGuide:
 # Tests for layout_templates module
 # ---------------------------------------------------------------------------
 
-from kicad_pipeline.models.pcb import Footprint, Pad, Point as PcbPoint
-from kicad_pipeline.pcb.layout_templates import (
+from kicad_pipeline.models.pcb import Footprint, Pad  # noqa: E402
+from kicad_pipeline.models.pcb import Point as PcbPoint  # noqa: E402
+from kicad_pipeline.pcb.layout_templates import (  # noqa: E402
     CardinalSide,
     ComponentRole,
     ICTemplate,

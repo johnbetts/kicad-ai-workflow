@@ -9,6 +9,7 @@ from kicad_pipeline.pcb.netlist import Netlist, NetlistEntry
 from kicad_pipeline.routing.grid_router import (
     RouteRequest,
     RouteResult,
+    _BcuEndpoint,
     _find_free_via_position,
     _Grid,
     _is_line_clear,
@@ -19,7 +20,6 @@ from kicad_pipeline.routing.grid_router import (
     _PadInfo,
     _prepare_bcu_grid,
     _prepare_grid,
-    _BcuEndpoint,
     _route_on_bcu,
     _route_stub_on_fcu,
     _score_route,

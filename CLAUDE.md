@@ -139,6 +139,38 @@ data/   (jlcpcb_basic_parts.json, rotation_offsets.json, drill_chart.json, e_ser
 docs/   (PLAN.md, architecture.md, kicad_format_reference.md, ai_decisions.md)
 ```
 
+## PCB Image Generation (kicad-image-gen)
+
+Use `kicad-image-gen` to generate PCB screenshots for review without opening KiCad.
+This is the **primary visual feedback tool** for autonomous iteration loops.
+
+```python
+# Python API (recommended for agents and scripts)
+from kicad_image_gen import render_2d, render_3d
+
+# 2D editor view with ratsnest + pad labels (most common use case)
+render_2d("path/to/board.kicad_pcb", "output/placement.png")
+
+# 3D isometric render
+render_3d("path/to/board.kicad_pcb", "output/board_3d.png", view="iso")
+
+# Full set (2D top/bottom + 3D top/bottom/iso)
+from kicad_image_gen import render_all
+render_all("path/to/board.kicad_pcb", "output/images/")
+```
+
+```bash
+# CLI — ALWAYS render all 4 views for review
+kicad-image-gen 2d board.kicad_pcb -o dir/board_2d.png
+kicad-image-gen 3d board.kicad_pcb --view top -o dir/board_3d_top.png
+kicad-image-gen 3d board.kicad_pcb --view iso -o dir/board_3d_iso.png
+kicad-image-gen 3d board.kicad_pcb --view iso-back -o dir/board_3d_isoback.png
+```
+
+**4-view standard**: 2D + 3D-top + 3D-iso + 3D-iso-back. Single iso hides problems.
+3D top view is the most reliable for checking body-to-pad alignment (confirmed matching KiCad 3D viewer).
+Sub-agents MUST render all 4 views after any PCB change before reporting success.
+
 ## Board Regeneration & Visual Placement Review
 
 When asked to "regenerate the board" or "run the visual placement test", do this immediately:
@@ -151,12 +183,11 @@ pytest tests/integration/test_placement_visual.py -x --tb=short -s 2>&1 | tail -
 This builds the nl-s-3c-complete board from requirements, runs the full 3-level EE placement
 optimizer, renders group-colored and domain-colored PNGs, and checks placement quality scores.
 
-**Output images** are written to a pytest tmp directory — the test output will show the path.
-Copy them to `output/` for easy viewing:
+**Output images** — use kicad-image-gen for the definitive render:
 ```bash
-# After test passes, copy renders to output/ for review
-cp /tmp/pytest-*/placement*/placement.png output/placement_groups.png
-cp /tmp/pytest-*/placement*/placement_domains.png output/placement_domains.png
+# After generating a .kicad_pcb file, render it for review
+kicad-image-gen 2d output/board.kicad_pcb -o output/placement.png
+kicad-image-gen 3d output/board.kicad_pcb --view iso -o output/board_3d.png
 ```
 
 Then **follow the visual inspection process** in `docs/visual_inspection_process.md`:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 from kicad_pipeline.models.pcb import (

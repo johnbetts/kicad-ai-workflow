@@ -786,9 +786,31 @@ def npn_buzzer_drive(
         :class:`SubcircuitResult` with transistor, base resistor, and flyback
         diode components plus their interconnecting nets.
     """
-    # Internal net: base resistor output → transistor base
     base_net = f"{ref_q}_B"
+    components = _npn_buzzer_components(
+        ref_q, ref_r_base, ref_d, base_net, buzzer_net, gpio_net, vcc_net, gnd_net,
+    )
+    nets = _npn_buzzer_nets(
+        ref_q, ref_r_base, ref_d, base_net, buzzer_net, gpio_net, vcc_net, gnd_net,
+    )
+    return SubcircuitResult(
+        components=components,
+        nets=nets,
+        description=f"NPN buzzer drive: {ref_q} + base R {ref_r_base} + flyback {ref_d}",
+    )
 
+
+def _npn_buzzer_components(
+    ref_q: str,
+    ref_r_base: str,
+    ref_d: str,
+    base_net: str,
+    buzzer_net: str,
+    gpio_net: str,
+    vcc_net: str,
+    gnd_net: str,
+) -> tuple[Component, ...]:
+    """Build component tuple for npn_buzzer_drive."""
     q_comp = Component(
         ref=ref_q,
         value="NPN_BJT",
@@ -801,7 +823,7 @@ def npn_buzzer_drive(
         ),
     )
     r_base_comp = _resistor_component(
-        ref_r_base, _BASE_RESISTOR_OHMS, "0805", gpio_net, base_net, None
+        ref_r_base, _BASE_RESISTOR_OHMS, "0805", gpio_net, base_net, None,
     )
     diode_comp = Component(
         ref=ref_d,
@@ -813,40 +835,32 @@ def npn_buzzer_drive(
             Pin(number="K", name="K", pin_type=PinType.PASSIVE, net=vcc_net),
         ),
     )
+    return (q_comp, r_base_comp, diode_comp)
 
-    net_gpio = Net(
-        name=gpio_net,
-        connections=(NetConnection(ref=ref_r_base, pin="1"),),
-    )
-    net_base = Net(
-        name=base_net,
-        connections=(
+
+def _npn_buzzer_nets(
+    ref_q: str,
+    ref_r_base: str,
+    ref_d: str,
+    base_net: str,
+    buzzer_net: str,
+    gpio_net: str,
+    vcc_net: str,
+    gnd_net: str,
+) -> tuple[Net, ...]:
+    """Build net tuple for npn_buzzer_drive."""
+    return (
+        Net(name=gpio_net, connections=(NetConnection(ref=ref_r_base, pin="1"),)),
+        Net(name=base_net, connections=(
             NetConnection(ref=ref_r_base, pin="2"),
             NetConnection(ref=ref_q, pin="B"),
-        ),
-    )
-    net_buzzer = Net(
-        name=buzzer_net,
-        connections=(
+        )),
+        Net(name=buzzer_net, connections=(
             NetConnection(ref=ref_q, pin="C"),
             NetConnection(ref=ref_d, pin="A"),
-        ),
-    )
-    net_vcc = Net(
-        name=vcc_net,
-        connections=(NetConnection(ref=ref_d, pin="K"),),
-    )
-    net_gnd = Net(
-        name=gnd_net,
-        connections=(NetConnection(ref=ref_q, pin="E"),),
-    )
-
-    return SubcircuitResult(
-        components=(q_comp, r_base_comp, diode_comp),
-        nets=(net_gpio, net_base, net_buzzer, net_vcc, net_gnd),
-        description=(
-            f"NPN buzzer drive: {ref_q} + base R {ref_r_base} + flyback {ref_d}"
-        ),
+        )),
+        Net(name=vcc_net, connections=(NetConnection(ref=ref_d, pin="K"),)),
+        Net(name=gnd_net, connections=(NetConnection(ref=ref_q, pin="E"),)),
     )
 
 
@@ -969,75 +983,10 @@ def dip_switch_address(
             f"{addr_net}_{i}" for i in range(len(target_nets), bit_count)
         )
 
-    components: list[Component] = []
-    nets: list[Net] = []
-
-    # DIP switch component: 2 * bit_count pins
-    # Left column: pins 1..bit_count (inputs)
-    # Right column: pins bit_count+1..2*bit_count (outputs, reversed order)
-    sw_pins: list[Pin] = []
-    for i in range(bit_count):
-        input_net = f"{addr_net}_SW{i}_IN"
-        sw_pins.append(
-            Pin(
-                number=str(i + 1),
-                name=f"IN{i + 1}",
-                pin_type=PinType.PASSIVE,
-                net=input_net,
-            )
-        )
-    for i in range(bit_count):
-        output_net = f"{addr_net}_SW{bit_count - 1 - i}_OUT"
-        sw_pins.append(
-            Pin(
-                number=str(bit_count + i + 1),
-                name=f"OUT{bit_count - i}",
-                pin_type=PinType.PASSIVE,
-                net=output_net,
-            )
-        )
-
-    sw_comp = Component(
-        ref=switch_ref,
-        value=f"DIPx{bit_count:02d}",
-        footprint=f"SW_DIP_SPSTx{bit_count:02d}",
-        description=f"DIP switch {bit_count}-position address selector",
-        pins=tuple(sw_pins),
+    sw_comp = _build_dip_switch_component(switch_ref, bit_count, addr_net)
+    resistors, nets = _build_dip_switch_nets(
+        switch_ref, bit_count, addr_net, target_nets, series_resistance, package, db,
     )
-    components.append(sw_comp)
-
-    # Series resistors: one per bit
-    for i in range(bit_count):
-        r_ref = f"R_{switch_ref}_{i + 1}"
-        input_net = f"{addr_net}_SW{i}_IN"
-        output_net = f"{addr_net}_SW{i}_OUT"
-
-        r_comp = _resistor_component(
-            r_ref, series_resistance, package,
-            output_net, target_nets[i], db,
-        )
-        components.append(r_comp)
-
-        # Net: switch input to source
-        nets.append(Net(
-            name=input_net,
-            connections=(NetConnection(ref=switch_ref, pin=str(i + 1)),),
-        ))
-
-        # Net: switch output through resistor
-        nets.append(Net(
-            name=output_net,
-            connections=(
-                NetConnection(ref=switch_ref, pin=str(bit_count + (bit_count - 1 - i) + 1)),
-                NetConnection(ref=r_ref, pin="1"),
-            ),
-        ))
-
-        # Net: resistor output to target
-        nets.append(Net(
-            name=target_nets[i],
-            connections=(NetConnection(ref=r_ref, pin="2"),),
-        ))
 
     desc = (
         f"DIP switch {switch_ref}: {bit_count}-bit address selector "
@@ -1045,10 +994,87 @@ def dip_switch_address(
         f"WARNING: activate only ONE switch at a time to avoid contention."
     )
     return SubcircuitResult(
-        components=tuple(components),
+        components=(sw_comp, *resistors),
         nets=tuple(nets),
         description=desc,
     )
+
+
+def _build_dip_switch_component(
+    switch_ref: str,
+    bit_count: int,
+    addr_net: str,
+) -> Component:
+    """Build the DIP switch Component with input/output pins.
+
+    Left column: pins 1..bit_count (inputs).
+    Right column: pins bit_count+1..2*bit_count (outputs, reversed order).
+    """
+    sw_pins: list[Pin] = []
+    for i in range(bit_count):
+        sw_pins.append(Pin(
+            number=str(i + 1),
+            name=f"IN{i + 1}",
+            pin_type=PinType.PASSIVE,
+            net=f"{addr_net}_SW{i}_IN",
+        ))
+    for i in range(bit_count):
+        sw_pins.append(Pin(
+            number=str(bit_count + i + 1),
+            name=f"OUT{bit_count - i}",
+            pin_type=PinType.PASSIVE,
+            net=f"{addr_net}_SW{bit_count - 1 - i}_OUT",
+        ))
+    return Component(
+        ref=switch_ref,
+        value=f"DIPx{bit_count:02d}",
+        footprint=f"SW_DIP_SPSTx{bit_count:02d}",
+        description=f"DIP switch {bit_count}-position address selector",
+        pins=tuple(sw_pins),
+    )
+
+
+def _build_dip_switch_nets(
+    switch_ref: str,
+    bit_count: int,
+    addr_net: str,
+    target_nets: tuple[str, ...],
+    series_resistance: float,
+    package: str,
+    db: ComponentDB | None,
+) -> tuple[list[Component], list[Net]]:
+    """Build per-bit series resistors and nets for a DIP switch.
+
+    Returns a 2-tuple of (resistor components, nets).
+    """
+    components: list[Component] = []
+    nets: list[Net] = []
+    for i in range(bit_count):
+        r_ref = f"R_{switch_ref}_{i + 1}"
+        input_net = f"{addr_net}_SW{i}_IN"
+        output_net = f"{addr_net}_SW{i}_OUT"
+
+        r_comp = _resistor_component(
+            r_ref, series_resistance, package, output_net, target_nets[i], db,
+        )
+        components.append(r_comp)
+
+        nets.append(Net(
+            name=input_net,
+            connections=(NetConnection(ref=switch_ref, pin=str(i + 1)),),
+        ))
+        nets.append(Net(
+            name=output_net,
+            connections=(
+                NetConnection(ref=switch_ref, pin=str(bit_count + (bit_count - 1 - i) + 1)),
+                NetConnection(ref=r_ref, pin="1"),
+            ),
+        ))
+        nets.append(Net(
+            name=target_nets[i],
+            connections=(NetConnection(ref=r_ref, pin="2"),),
+        ))
+    return components, nets
 
 
 def usb_c_input(

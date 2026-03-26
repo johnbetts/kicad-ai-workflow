@@ -21,7 +21,6 @@ from kicad_pipeline.models.requirements import (
     FeatureBlock,
     MechanicalConstraints,
     Net,
-    NetConnection,
     Pin,
     PinType,
     ProjectInfo,

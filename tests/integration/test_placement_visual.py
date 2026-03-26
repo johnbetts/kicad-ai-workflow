@@ -91,9 +91,9 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
         _fp_courtyard_sizes,
         optimize_placement_ee,
     )
-    from kicad_pipeline.pcb.pin_map import origin_to_centroid
     from kicad_pipeline.optimization.scoring import compute_fast_placement_score
     from kicad_pipeline.pcb.builder import build_pcb
+    from kicad_pipeline.pcb.pin_map import origin_to_centroid
     from kicad_pipeline.visualization.placement_render import render_placement
 
     requirements = _build_requirements()
@@ -157,7 +157,7 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
         from kicad_pipeline.visualization.kicad_export import export_pcb_image
         hifi_path = export_pcb_image(pcb_path, out_dir / "placement_hifi.png", pcb=pcb_opt)
         shutil.copy2(hifi_path, output_dir / "placement_hifi.png")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass  # kicad-cli not available in CI — don't fail the test
 
     # Push optimized positions to running KiCad via IPC (if available)
@@ -171,15 +171,15 @@ def placement_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
         old_handler = signal.signal(signal.SIGALRM, _ipc_timeout_handler)
         signal.alarm(5)  # 5 second max for IPC push
         try:
-            from kicad_pipeline.ipc.connection import connect, is_available
             from kicad_pipeline.ipc.board_ops import push_pcb_design
+            from kicad_pipeline.ipc.connection import connect, is_available
             if is_available():
                 with connect(timeout_ms=3000) as conn:
                     push_pcb_design(pcb_opt, conn)
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass  # IPC not available or timed out — don't fail the test
 
     return {

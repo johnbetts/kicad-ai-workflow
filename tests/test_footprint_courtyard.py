@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from kicad_pipeline.models.pcb import Footprint, FootprintLine, Pad, Point
 from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
 
@@ -43,7 +42,9 @@ def _make_fp(
     )
 
 
-def _make_pad(x: float, y: float, sx: float = _DEFAULT_PAD_SIZE, sy: float = _DEFAULT_PAD_SIZE) -> Pad:
+def _make_pad(
+    x: float, y: float, sx: float = _DEFAULT_PAD_SIZE, sy: float = _DEFAULT_PAD_SIZE,
+) -> Pad:
     return Pad(
         number="1",
         pad_type="smd",
@@ -71,7 +72,9 @@ class TestModuleCourtyards:
         # Module extension: 0.5mm/side width + 3.5mm/side height + 0.25 clearance
         # pad_w=16.5, pad_h=18.5 → w≈18.0, h≈26.0
         assert w >= _ESP32_MIN_WIDTH, f"ESP32 width {w} too small (expected ≥{_ESP32_MIN_WIDTH}mm)"
-        assert h >= _ESP32_MIN_HEIGHT, f"ESP32 height {h} too small (expected ≥{_ESP32_MIN_HEIGHT}mm)"
+        assert h >= _ESP32_MIN_HEIGHT, (
+            f"ESP32 height {h} too small (expected ≥{_ESP32_MIN_HEIGHT}mm)"
+        )
 
     def test_esp32_wroom_courtyard_from_graphics(self) -> None:
         """ESP32 courtyard from CrtYd graphics should use actual body dimensions."""
@@ -180,7 +183,8 @@ class TestConnectorCourtyards:
     def test_6pin_terminal_block(self) -> None:
         """6-pin screw terminal courtyard should be ~30x10mm."""
         pads = tuple(
-            _make_pad(i * _TERMINAL_BLOCK_PITCH, 0.0, _TERMINAL_BLOCK_PAD_SIZE, _TERMINAL_BLOCK_PAD_SIZE)
+            _make_pad(i * _TERMINAL_BLOCK_PITCH, 0.0,
+                      _TERMINAL_BLOCK_PAD_SIZE, _TERMINAL_BLOCK_PAD_SIZE)
             for i in range(6)
         )
         fp = _make_fp("TerminalBlock_01x06_P5.08mm", pads=pads, ref="J1")

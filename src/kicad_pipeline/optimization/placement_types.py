@@ -19,7 +19,7 @@ from kicad_pipeline.pcb.pin_map import (
 )
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.pcb import Footprint, PCBDesign
+    from kicad_pipeline.models.pcb import Footprint, PCBDesign, PlacementConstraintSet
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.functional_grouper import DetectedSubCircuit
     from kicad_pipeline.optimization.scoring import QualityScore
@@ -93,6 +93,8 @@ class PlacementContext:
     ethernet_fixed: set[str] = field(default_factory=set)
     top_edge_connector_refs: set[str] = field(default_factory=set)
     template_fixed: set[str] = field(default_factory=set)
+    # Explicit placement constraints — resolved from requirements + subcircuits
+    constraints: PlacementConstraintSet | None = None
     # Review loop output — set by _phase_review_loop
     best_positions: dict[str, tuple[float, float, float]] = field(
         default_factory=dict,

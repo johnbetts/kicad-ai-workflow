@@ -494,10 +494,7 @@ def _track_crosses_other_pads(
         return False
 
     # Use pad cache if available, otherwise compute on the fly
-    if _pad_cache is not None:
-        pads_iter = _pad_cache
-    else:
-        pads_iter = _build_pad_cache(footprints)
+    pads_iter = _pad_cache if _pad_cache is not None else _build_pad_cache(footprints)
 
     for cp in pads_iter:
         if allow_same_ref is not None and cp.ref == allow_same_ref:
@@ -1321,29 +1318,39 @@ def _astar(
         or None if no path exists.
     """
 
-    def heuristic(c: int, r: int) -> float:
-        return float(abs(c - goal_col) + abs(r - goal_row))
-
     start = (start_col, start_row)
     goal = (goal_col, goal_row)
 
-    # Priority queue: (f, g, col, row, prev_dc, prev_dr)
+    neighbors: tuple[tuple[int, int], ...] = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    if diag:
+        neighbors = (*neighbors, (-1, -1), (-1, 1), (1, -1), (1, 1))
+
+    return _astar_search(
+        grid, start, goal, neighbors, bend_penalty, use_congestion,
+    )
+
+
+def _astar_search(
+    grid: _Grid,
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    neighbors: tuple[tuple[int, int], ...],
+    bend_penalty: float,
+    use_congestion: bool,
+) -> list[tuple[int, int]] | None:
+    """Core A* search loop; returns path or None."""
+    goal_col, goal_row = goal
+
+    def heuristic(c: int, r: int) -> float:
+        return float(abs(c - goal_col) + abs(r - goal_row))
+
     open_heap: list[tuple[float, float, int, int, int, int]] = []
-    heapq.heappush(open_heap, (
-        heuristic(start_col, start_row), 0.0,
-        start_col, start_row, 0, 0,
-    ))
+    start_col, start_row = start
+    heapq.heappush(open_heap, (heuristic(start_col, start_row), 0.0, start_col, start_row, 0, 0))
 
     came_from: dict[tuple[int, int], tuple[int, int]] = {}
     g_score: dict[tuple[int, int], float] = {start: 0.0}
     closed: set[tuple[int, int]] = set()
-
-    # Orthogonal + optional diagonal neighbors
-    neighbors: tuple[tuple[int, int], ...] = (
-        (-1, 0), (1, 0), (0, -1), (0, 1),
-    )
-    if diag:
-        neighbors = (*neighbors, (-1, -1), (-1, 1), (1, -1), (1, 1))
 
     while open_heap:
         _f, g, col, row, prev_dc, prev_dr = heapq.heappop(open_heap)
@@ -1359,14 +1366,11 @@ def _astar(
         for dc, dr in neighbors:
             nc, nr = col + dc, row + dr
             neighbor = (nc, nr)
-            if not _astar_neighbor_valid(
-                grid, neighbor, start, goal, closed,
-            ):
+            if not _astar_neighbor_valid(grid, neighbor, start, goal, closed):
                 continue
 
             step_cost = _astar_step_cost(
-                grid, nc, nr, dc, dr, prev_dc, prev_dr,
-                bend_penalty, use_congestion,
+                grid, nc, nr, dc, dr, prev_dc, prev_dr, bend_penalty, use_congestion,
             )
 
             tentative_g = g + step_cost
@@ -2094,30 +2098,10 @@ def _route_fanout_to_target(
         ctx.net_clearances, ctx.net_widths,
         _pad_cache=ctx.pad_cache,
     )
-    # Unmark THT header pads for A* corridor
-    _tht_fp_unmarked: list[tuple[float, float, float, float]] = []
     _tgt_ref = _find_target_ref(ctx, best_pi, ic_refs_in_net)
-    if _tgt_ref:
-        _t_fp = ctx.fp_by_ref[_tgt_ref]
-        has_tht = any(p.pad_type == "thru_hole" for p in _t_fp.pads)
-        if has_tht and len(_t_fp.pads) > 4:
-            _tphw = best_pi.half_w
-            _tphh = best_pi.half_h
-            _unmark_pad_area(
-                ctx.grid, best_pi.x, best_pi.y,
-                _tphw + ctx.pad_cl, _tphh + ctx.pad_cl, ctx.pad_cl,
-            )
-            _tht_fp_unmarked.append((
-                best_pi.x, best_pi.y,
-                _tphw + ctx.pad_cl, _tphh + ctx.pad_cl,
-            ))
-
-    fcu_fan_path = _astar(
-        ctx.grid, fan_via_col, fan_via_row, tgt_col, tgt_row, diag=True,
+    fcu_fan_path = _astar_with_tht_corridor(
+        ctx, best_pi, _tgt_ref, fan_via_col, fan_via_row, tgt_col, tgt_row,
     )
-    # Re-mark temporarily unmarked THT pads
-    for _rpx, _rpy, _rhw, _rhh in _tht_fp_unmarked:
-        _mark_pad_area(ctx.grid, _rpx, _rpy, _rhw, _rhh, ctx.pad_cl)
 
     _fan_routed = False
     fan_segs: list[Track] = []
@@ -2150,19 +2134,47 @@ def _route_fanout_to_target(
 
     # B.Cu fallback for fanout-via -> target pad
     if not _fan_routed and ctx.bcu_grid is not None:
-        bcu_fan_result = _try_fanout_bcu(
-            ctx, best_pi, fan_via_pos, ic_stub_width,
-        )
+        bcu_fan_result = _try_fanout_bcu(ctx, best_pi, fan_via_pos, ic_stub_width)
         if bcu_fan_result is not None:
             fan_segs, fan_via_extra = bcu_fan_result
             _fan_routed = True
         else:
-            _log.debug(
-                "IC fanout %s pad %s: B.Cu fan FAIL",
-                ic_ref, ic_pn,
-            )
+            _log.debug("IC fanout %s pad %s: B.Cu fan FAIL", ic_ref, ic_pn)
 
     return _fan_routed, fan_segs, fan_via_extra, fcu_fan_path
+
+
+def _astar_with_tht_corridor(
+    ctx: _RouteContext,
+    best_pi: _PadInfo,
+    tgt_ref: str,
+    fan_via_col: int,
+    fan_via_row: int,
+    tgt_col: int,
+    tgt_row: int,
+) -> list[tuple[int, int]] | None:
+    """Run A* from fanout-via to target pad, temporarily unmarking THT pads."""
+    tht_fp_unmarked: list[tuple[float, float, float, float]] = []
+    if tgt_ref:
+        t_fp = ctx.fp_by_ref[tgt_ref]
+        has_tht = any(p.pad_type == "thru_hole" for p in t_fp.pads)
+        if has_tht and len(t_fp.pads) > 4:
+            tphw = best_pi.half_w
+            tphh = best_pi.half_h
+            _unmark_pad_area(
+                ctx.grid, best_pi.x, best_pi.y,
+                tphw + ctx.pad_cl, tphh + ctx.pad_cl, ctx.pad_cl,
+            )
+            tht_fp_unmarked.append((
+                best_pi.x, best_pi.y, tphw + ctx.pad_cl, tphh + ctx.pad_cl,
+            ))
+
+    path = _astar(ctx.grid, fan_via_col, fan_via_row, tgt_col, tgt_row, diag=True)
+
+    for rpx, rpy, rhw, rhh in tht_fp_unmarked:
+        _mark_pad_area(ctx.grid, rpx, rpy, rhw, rhh, ctx.pad_cl)
+
+    return path
 
 
 def _find_target_ref(
@@ -2690,6 +2702,46 @@ def route_net(
             tracks=(), vias=(), routed=False, reason="insufficient pad positions",
         )
 
+    ctx_result = _build_route_context(
+        request, grid, bcu_grid, fp_by_ref, pad_infos, footprints,
+        net_clearances, net_widths, _pad_cache, placed_via_positions,
+    )
+    if isinstance(ctx_result, RouteResult):
+        return ctx_result
+    ctx = ctx_result
+
+    failure = _route_mst_pairs(ctx, footprints, net_clearances, net_widths)
+    if failure is not None:
+        return failure
+
+    _route_ic_final_legs(ctx)
+
+    _restore_pad_marks(grid, footprints, net_clearances, net_widths, _pad_cache=_pad_cache)
+
+    return RouteResult(
+        net_number=request.net_number, net_name=request.net_name,
+        tracks=tuple(ctx.all_tracks), vias=tuple(ctx.all_vias),
+        routed=True,
+    )
+
+
+def _build_route_context(
+    request: RouteRequest,
+    grid: _Grid,
+    bcu_grid: _Grid | None,
+    fp_by_ref: dict[str, Footprint],
+    pad_infos: list[_PadInfo],
+    footprints: list[Footprint],
+    net_clearances: dict[str, float] | None,
+    net_widths: dict[str, float] | None,
+    pad_cache: dict[str, list[tuple[float, float, float, float, str]]],
+    placed_via_positions: list[tuple[float, float]] | None,
+) -> _RouteContext | RouteResult:
+    """Set up the route context: unmark pads, handle IC pads, build _RouteContext.
+
+    Returns a :class:`_RouteContext` on success or a failed
+    :class:`RouteResult` if IC pad handling requires early exit.
+    """
     pad_cl = _global_pad_clearance(net_clearances, net_widths)
     net_pad_set = frozenset(request.pad_refs)
     for pi in pad_infos:
@@ -2700,19 +2752,19 @@ def route_net(
 
     ic_result = _handle_ic_pads(
         ic_refs_in_net, pad_infos, request, fp_by_ref, net_pad_set,
-        grid, pad_cl, footprints, net_clearances, net_widths, _pad_cache,
+        grid, pad_cl, footprints, net_clearances, net_widths, pad_cache,
     )
     if isinstance(ic_result, RouteResult):
         return ic_result
-    pad_infos, _ic_pad_infos, _ic_pad_refs = ic_result
+    pad_infos, ic_pad_infos, ic_pad_refs = ic_result
 
     _remark_other_pads(grid, footprints, net_pad_set, net_clearances, net_widths,
-                       _pad_cache=_pad_cache)
+                       _pad_cache=pad_cache)
 
     excl_cells = max(1, math.ceil(
         (request.clearance_mm + request.width_mm) / grid.grid_step_mm,
     ) - 1)
-    ctx = _RouteContext(
+    return _RouteContext(
         request=request, grid=grid, bcu_grid=bcu_grid,
         fp_by_ref=fp_by_ref, pad_infos=pad_infos,
         net_pad_set=net_pad_set, original_net_pad_set=net_pad_set,
@@ -2721,30 +2773,13 @@ def route_net(
         all_tracks=[], all_vias=[],
         tht_refs_in_net=tht_refs_in_net,
         ic_refs_in_net=ic_refs_in_net,
-        ic_pad_infos=_ic_pad_infos,
-        ic_pad_refs=_ic_pad_refs,
-        pad_cache=_pad_cache,
+        ic_pad_infos=ic_pad_infos,
+        ic_pad_refs=ic_pad_refs,
+        pad_cache=pad_cache,
         net_clearances=net_clearances,
         net_widths=net_widths,
         placed_via_positions=placed_via_positions,
         footprints=footprints,
-    )
-
-    # MST-style routing
-    failure = _route_mst_pairs(ctx, footprints, net_clearances, net_widths)
-    if failure is not None:
-        return failure
-
-    # IC final-leg routing
-    _route_ic_final_legs(ctx)
-
-    _restore_pad_marks(grid, footprints, net_clearances, net_widths,
-                       _pad_cache=_pad_cache)
-
-    return RouteResult(
-        net_number=request.net_number, net_name=request.net_name,
-        tracks=tuple(ctx.all_tracks), vias=tuple(ctx.all_vias),
-        routed=True,
     )
 
 

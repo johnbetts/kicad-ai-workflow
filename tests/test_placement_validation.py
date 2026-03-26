@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from kicad_pipeline.constants import (
     DECOUPLING_CAP_MAX_DISTANCE_MM,
     DECOUPLING_CAP_MIN_DISTANCE_MM,
@@ -13,8 +12,8 @@ from kicad_pipeline.models.pcb import (
     DesignRules,
     Footprint,
     NetEntry,
-    PCBDesign,
     Pad,
+    PCBDesign,
     PlacementConstraint,
     PlacementConstraintType,
     Point,
@@ -33,7 +32,6 @@ from kicad_pipeline.pcb.constraints import (
 )
 from kicad_pipeline.validation.drc import Severity
 from kicad_pipeline.validation.electrical import run_electrical_checks
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -157,6 +157,43 @@ class PlacementConstraint:
 
 
 @dataclass(frozen=True)
+class ProximityConstraint:
+    """Component must be within max_distance_mm of target ref/pin."""
+
+    ref: str
+    target_ref: str
+    target_pin: str | None = None
+    max_distance_mm: float = 5.0
+
+
+@dataclass(frozen=True)
+class OrderingChain:
+    """Components must be placed in this order along the signal flow axis."""
+
+    group: str
+    refs: tuple[str, ...] = ()  # in order
+
+
+@dataclass(frozen=True)
+class TraceLengthPair:
+    """Two nets that must have matched trace lengths."""
+
+    net_a: str
+    net_b: str
+    max_skew_mm: float = 0.5
+
+
+@dataclass(frozen=True)
+class PlacementConstraintSet:
+    """Resolved placement constraints for the optimizer."""
+
+    groups: tuple[tuple[str, tuple[str, ...]], ...] = ()  # (group_name, refs)
+    proximity: tuple[ProximityConstraint, ...] = ()
+    ordering: tuple[OrderingChain, ...] = ()
+    trace_length_match: tuple[TraceLengthPair, ...] = ()
+
+
+@dataclass(frozen=True)
 class PlacementResult:
     """Result of constraint-based placement solving.
 
@@ -306,6 +343,8 @@ class Footprint:
     manufacturer: str | None = None
     fp_zones: tuple[FootprintKeepout, ...] = ()
     """Footprint-level keepout zones (e.g. antenna keepout on RF modules)."""
+    custom_properties: tuple[tuple[str, str], ...] = ()
+    """Arbitrary (name, value) pairs written as KiCad ``property`` entries."""
 
 
 @dataclass(frozen=True)

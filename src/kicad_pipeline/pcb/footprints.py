@@ -332,8 +332,8 @@ def _model_ws2812(upper: str) -> Footprint3DModel | None:
     if "WS2812" not in upper:
         return None
     if (
-        "2.0X2.0" in upper or "2020" in upper
-        or "3.5X3.5" in upper or "3535" in upper or "P2.45" in upper
+        "2.0X2.0" in upper or _WS2812_SIZE_2020 in upper
+        or "3.5X3.5" in upper or _WS2812_SIZE_3535 in upper or "P2.45" in upper
     ):
         step = "LED_WS2812B-Mini_PLCC4_3.5x3.5mm.step"
     elif "PLCC6" in upper:
@@ -601,6 +601,11 @@ _ESP32_BOTTOM_PINS: int = 12
 _ESP32_TOP_MARGIN: float = 2.5
 _ESP32_GND_PAD_SIZE: float = 6.7
 
+# ESP32-S3-WROOM-1 thermal/GND pad number — KiCad pad identifier string.
+# The exposed GND pad on the module underside is designated pad "41"
+# (one past the 40 perimeter castellations) per the datasheet.
+_ESP32_THERMAL_PAD_NUMBER = "41"
+
 # ESP32-S3-WROOM-1 pin names (datasheet Table 3-1, top view, 41 pads).
 # Index 0 = pad 1, index 40 = pad 41.
 _ESP32_PIN_NAMES: tuple[str, ...] = (
@@ -641,6 +646,9 @@ _ESP32_GND_PAD_Y_OFFSET: float = 2.5
 _CRYSTAL_PAD_W: float = 1.2
 _CRYSTAL_PAD_H: float = 1.0
 _CRYSTAL_SHIELD_MIN_HEIGHT: float = 2.0
+# Default body size for SMD_3215 crystal (3.2x1.5mm per IEC 61671 designator)
+_CRYSTAL_SMD3215_DEFAULT_W_MM: float = 3.2
+_CRYSTAL_SMD3215_DEFAULT_H_MM: float = 1.5
 
 # Through-hole connector dimensions (mm)
 _THT_CONNECTOR_DRILL: float = 1.0
@@ -697,11 +705,17 @@ _RJ45_COURTYARD_CY: float = -0.125
 _RJ45_COURTYARD_W: float = 19.56
 _RJ45_COURTYARD_H: float = 16.75
 
+# WS2812B LED size variant codes — EIA package designators (tenths of mm).
+# "5050" = 5.0x5.0mm body, "3535" = 3.5x3.5mm, "2020" = 2.0x2.0mm.
+_WS2812_SIZE_5050 = "5050"
+_WS2812_SIZE_3535 = "3535"
+_WS2812_SIZE_2020 = "2020"
+
 # WS2812B LED size variants: (pad_w, pad_h, x_pitch, y_pitch, body_w, body_h)
 _WS2812B_DIMS: dict[str, tuple[float, float, float, float, float, float]] = {
-    "2020": (0.7, 0.5, 0.75, 0.55, 2.6, 2.6),
-    "3535": (1.0, 0.8, 1.65, 1.05, 4.0, 4.0),
-    "5050": (1.5, 1.0, 2.45, 1.6, 5.4, 5.4),
+    _WS2812_SIZE_2020: (0.7, 0.5, 0.75, 0.55, 2.6, 2.6),
+    _WS2812_SIZE_3535: (1.0, 0.8, 1.65, 1.05, 4.0, 4.0),
+    _WS2812_SIZE_5050: (1.5, 1.0, 2.45, 1.6, 5.4, 5.4),
 }
 
 # Micro SD card slot dimensions (mm)
@@ -737,6 +751,44 @@ _COMPACT_PKG_THRESHOLD: float = 1.0
 _IC_PAD_W_MAX: float = 0.5
 _IC_PAD_H_MAX: float = 1.5
 _IC_COL_OFFSET: float = 1.5
+
+# Courtyard line width (KiCad standard, differs from silkscreen width) (mm)
+_COURTYARD_LINE_WIDTH_MM: float = 0.05
+
+# Silkscreen side-mark geometry
+_SILK_PAD_MASK_EXPANSION_MM: float = 0.35  # push silk outside pad edge + mask expansion
+_SILK_MARK_HEIGHT_FRACTION: float = 0.45   # fraction of half-height for silk marks
+
+# LED polarity triangle size relative to pad height
+_LED_POLARITY_TRIANGLE_RATIO: float = 0.4
+
+# Value text offset below/above body on FAB layer (compact packages) (mm)
+_VAL_TEXT_OFFSET_MM: float = 1.0
+
+# ESP32 pin label constants
+_ESP32_PIN_LABEL_SIZE: float = 0.5    # fab-layer text height (mm)
+_ESP32_PIN_LABEL_OFFSET: float = 1.6  # inward offset from pad centre (mm)
+
+# Crystal pitch geometry adjustment (mm)
+_CRYSTAL_PITCH_ADJUST_MM: float = 0.4
+
+# SOT-23 body bounding box padding beyond pad extents (mm)
+_SOT23_BODY_PADDING_MM: float = 0.2
+
+# IC silkscreen column pitch multiplier (silk marks use 1.6x col_pitch width)
+_IC_SILK_COL_PITCH_FACTOR: float = 1.6
+
+# DIP package minimum body height (mm)
+_DIP_MIN_BODY_HEIGHT_MM: float = 3.0
+
+# MicroSD shield pad positions (x, y) in mm
+_MICROSD_SHIELD_PAD_LEFT_X: float = -7.0
+_MICROSD_SHIELD_PAD_RIGHT_X: float = 7.0
+_MICROSD_SHIELD_PAD_Y: float = -1.5
+
+# QFN/DFN thermal pad sizing
+_QFN_THERMAL_PAD_MIN_MM: float = 2.0    # minimum exposed pad size (mm)
+_QFN_THERMAL_PAD_SCALE: float = 0.08   # exposed pad size = pin_count * scale
 
 
 # ---------------------------------------------------------------------------
@@ -829,10 +881,14 @@ def _courtyard_rect(
     hh = body_h / 2.0 + clearance
     w = PCB_SILKSCREEN_LINE_WIDTH_MM
     return (
-        FootprintLine(start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh), layer=layer, width=w),
-        FootprintLine(start=Point(cx + hw, cy - hh), end=Point(cx + hw, cy + hh), layer=layer, width=w),
-        FootprintLine(start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh), layer=layer, width=w),
-        FootprintLine(start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh), layer=layer, width=w),
+        FootprintLine(
+            start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh), layer=layer, width=w),
+        FootprintLine(
+            start=Point(cx + hw, cy - hh), end=Point(cx + hw, cy + hh), layer=layer, width=w),
+        FootprintLine(
+            start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh), layer=layer, width=w),
+        FootprintLine(
+            start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh), layer=layer, width=w),
     )
 
 
@@ -849,8 +905,8 @@ def _silk_side_marks(
     hw = body_w / 2.0
     if pad_edge_x is not None:
         # Push silk marks outside pad edge + mask expansion + half silk width
-        hw = max(hw, pad_edge_x + 0.35)
-    hh = body_h / 2.0 * 0.45  # 45 % of half-height (avoid pad mask)
+        hw = max(hw, pad_edge_x + _SILK_PAD_MASK_EXPANSION_MM)
+    hh = body_h / 2.0 * _SILK_MARK_HEIGHT_FRACTION  # 45 % of half-height (avoid pad mask)
     layer = LAYER_F_SILKSCREEN
     w = PCB_SILKSCREEN_LINE_WIDTH_MM
     return (
@@ -980,7 +1036,7 @@ def make_smd_led(
 
     # Polarity triangle near cathode (pin 1, negative x)
     tri_x = -pitch / 2.0
-    tri_size = pad_h * 0.4
+    tri_size = pad_h * _LED_POLARITY_TRIANGLE_RATIO
     tri_lines = (
         FootprintLine(
             start=Point(tri_x - tri_size, -tri_size / 2.0),
@@ -1052,7 +1108,7 @@ def make_sod123(
     )
     texts = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+        _val_text(value, body_h / 2.0 + _VAL_TEXT_OFFSET_MM, LAYER_F_FAB),
     )
     lib_id = "Diode_SMD:D_SOD-123"
     model = _model_for_package(lib_id)
@@ -1094,7 +1150,7 @@ def make_inductor_smd(
     )
     texts = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+        _val_text(value, body_h / 2.0 + _VAL_TEXT_OFFSET_MM, LAYER_F_FAB),
     )
     lib_id = f"Inductor_SMD:L_{pkg}"
     model = _model_for_package(lib_id)
@@ -1154,8 +1210,8 @@ def make_tact_switch(
     body = size_mm
     graphics = _courtyard_rect(body + _TEXT_OFFSET_LARGE, body + _TEXT_OFFSET_LARGE)
     texts = (
-        _ref_text(ref, -(body / 2.0 + 1.5), LAYER_F_SILKSCREEN),
-        _val_text(value, body / 2.0 + 1.5, LAYER_F_FAB),
+        _ref_text(ref, -(body / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
+        _val_text(value, body / 2.0 + _TEXT_OFFSET_LARGE, LAYER_F_FAB),
     )
     lib_id = f"Button_Switch_THT:SW_Push_{size_mm}x{size_mm}mm"
     model = _model_for_package(lib_id)
@@ -1176,7 +1232,7 @@ def make_smd_tact_switch(
     """SMD tactile push-button switch (XKB TS-1187A style, 4-pad).
 
     Matches XKB TS-1187A-B-A-B (LCSC C318884) footprint layout:
-    4 pads (two per terminal), body 5.1×5.1mm.
+    4 pads (two per terminal), body 5.1x5.1mm.
     Pin 1 pads at left-top and right-top, pin 2 pads at left-bottom
     and right-bottom (internally shorted per side).
 
@@ -1190,7 +1246,7 @@ def make_smd_tact_switch(
         Fully constructed :class:`Footprint`.
     """
     # XKB TS-1187A dimensions from datasheet:
-    # Body: 5.1×5.1mm, pad size: 1.5×3.0mm
+    # Body: 5.1x5.1mm, pad size: 1.5x3.0mm
     # Pad centers: horizontal span 7.0mm (±3.5), vertical span 5.0mm (±2.5)
     pad_size_x = _SMD_TACT_PAD_W
     pad_size_y = _SMD_TACT_PAD_H
@@ -1251,59 +1307,10 @@ def make_relay_spdt(
     body_h = _RELAY_BODY_Y_MAX - _RELAY_BODY_Y_MIN
     cx = (_RELAY_BODY_X_MIN + _RELAY_BODY_X_MAX) / 2.0
     cy = (_RELAY_BODY_Y_MIN + _RELAY_BODY_Y_MAX) / 2.0
-    hw = body_w / 2.0 + PCB_COURTYARD_CLEARANCE_MM
-    hh = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM
-    # U-shaped isolation cutout around COM pin (pin 1 at 0,0).
-    # Lives on Edge.Cuts inside the footprint so it moves with the relay.
-    # The U opens toward positive X (toward relay body).
-    _cutout_w = _RELAY_CUTOUT_WIDTH
-    _cutout_clr = _RELAY_CUTOUT_CLEARANCE
-    _com_pad_r = _RELAY_CONTACT_PAD_DIAM / 2.0
-    _u_half = _com_pad_r + _cutout_clr   # half-height of the U
-    _u_closed_x = -(_com_pad_r + _cutout_clr)  # closed end (left)
-    _u_open_x = _com_pad_r + _cutout_clr       # open end (right, toward body)
-
-    graphics = (
-        # Courtyard
-        FootprintLine(
-            start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh),
-            layer=LAYER_F_COURTYARD, width=0.05,
-        ),
-        FootprintLine(
-            start=Point(cx + hw, cy - hh), end=Point(cx + hw, cy + hh),
-            layer=LAYER_F_COURTYARD, width=0.05,
-        ),
-        FootprintLine(
-            start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh),
-            layer=LAYER_F_COURTYARD, width=0.05,
-        ),
-        FootprintLine(
-            start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh),
-            layer=LAYER_F_COURTYARD, width=0.05,
-        ),
-        # U-shaped Edge.Cuts isolation cutout around COM pin
-        # Left vertical (closed end of U)
-        FootprintLine(
-            start=Point(_u_closed_x, -_u_half),
-            end=Point(_u_closed_x, _u_half),
-            layer=LAYER_EDGE_CUTS, width=_cutout_w,
-        ),
-        # Bottom horizontal arm
-        FootprintLine(
-            start=Point(_u_closed_x, -_u_half),
-            end=Point(_u_open_x, -_u_half),
-            layer=LAYER_EDGE_CUTS, width=_cutout_w,
-        ),
-        # Top horizontal arm
-        FootprintLine(
-            start=Point(_u_closed_x, _u_half),
-            end=Point(_u_open_x, _u_half),
-            layer=LAYER_EDGE_CUTS, width=_cutout_w,
-        ),
-    )
+    graphics = _relay_spdt_graphics(cx, cy, body_w, body_h)
     texts = (
         _ref_text(ref, cy - (body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
-        _val_text(value, cy + body_h / 2.0 + 1.5, LAYER_F_FAB),
+        _val_text(value, cy + body_h / 2.0 + _TEXT_OFFSET_LARGE, LAYER_F_FAB),
     )
     lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
     model = _model_for_package(lib_id)
@@ -1313,6 +1320,213 @@ def make_relay_spdt(
         layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
         attr="through_hole", models=models,
     )
+
+
+def _relay_spdt_graphics(
+    cx: float, cy: float, body_w: float, body_h: float,
+) -> tuple[FootprintLine, ...]:
+    """Build courtyard and U-shaped Edge.Cuts graphics for make_relay_spdt."""
+    hw = body_w / 2.0 + PCB_COURTYARD_CLEARANCE_MM
+    hh = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM
+    # U-shaped isolation cutout around COM pin (pin 1 at 0,0).
+    # Lives on Edge.Cuts inside the footprint so it moves with the relay.
+    cutout_w = _RELAY_CUTOUT_WIDTH
+    cutout_clr = _RELAY_CUTOUT_CLEARANCE
+    com_pad_r = _RELAY_CONTACT_PAD_DIAM / 2.0
+    u_half = com_pad_r + cutout_clr
+    u_closed_x = -(com_pad_r + cutout_clr)
+    u_open_x = com_pad_r + cutout_clr
+    return (
+        FootprintLine(
+            start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh),
+            layer=LAYER_F_COURTYARD, width=_COURTYARD_LINE_WIDTH_MM,
+        ),
+        FootprintLine(
+            start=Point(cx + hw, cy - hh), end=Point(cx + hw, cy + hh),
+            layer=LAYER_F_COURTYARD, width=_COURTYARD_LINE_WIDTH_MM,
+        ),
+        FootprintLine(
+            start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh),
+            layer=LAYER_F_COURTYARD, width=_COURTYARD_LINE_WIDTH_MM,
+        ),
+        FootprintLine(
+            start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh),
+            layer=LAYER_F_COURTYARD, width=_COURTYARD_LINE_WIDTH_MM,
+        ),
+        FootprintLine(
+            start=Point(u_closed_x, -u_half), end=Point(u_closed_x, u_half),
+            layer=LAYER_EDGE_CUTS, width=cutout_w,
+        ),
+        FootprintLine(
+            start=Point(u_closed_x, -u_half), end=Point(u_open_x, -u_half),
+            layer=LAYER_EDGE_CUTS, width=cutout_w,
+        ),
+        FootprintLine(
+            start=Point(u_closed_x, u_half), end=Point(u_open_x, u_half),
+            layer=LAYER_EDGE_CUTS, width=cutout_w,
+        ),
+    )
+
+
+def _esp32_make_pads(layer: str) -> list[Pad]:
+    """Generate all 41 ESP32-S3-WROOM-1 pads (left col, bottom row, right col, GND)."""
+    body_w = _ESP32_BODY_W
+    body_h = _ESP32_BODY_H
+    pad_w = _ESP32_PAD_W
+    pad_h = _ESP32_PAD_H
+    pitch = _ESP32_PITCH
+    n_side = _ESP32_SIDE_PINS
+    n_bottom = _ESP32_BOTTOM_PINS
+
+    col_top_y = -(body_h / 2.0) + _ESP32_TOP_MARGIN + pad_h / 2.0
+    col_bot_y = col_top_y + (n_side - 1) * pitch
+
+    pad_list: list[Pad] = []
+
+    # Left column: pins 1-14, top to bottom
+    left_x = -(body_w / 2.0 - pad_h / 2.0)
+    for i in range(n_side):
+        pad_list.append(_smd_pad(str(i + 1), left_x, col_top_y + i * pitch, pad_h, pad_w, layer))
+
+    # Bottom row: pins 15-26, left to right
+    bottom_y = body_h / 2.0 - pad_h / 2.0
+    start_x = -((n_bottom - 1) * pitch) / 2.0
+    for i in range(n_bottom):
+        pad_list.append(_smd_pad(str(15 + i), start_x + i * pitch, bottom_y, pad_w, pad_h, layer))
+
+    # Right column: pins 27-40, bottom to top
+    right_x = body_w / 2.0 - pad_h / 2.0
+    for i in range(n_side):
+        pad_list.append(_smd_pad(str(27 + i), right_x, col_bot_y - i * pitch, pad_h, pad_w, layer))
+
+    # Center GND thermal pad — pin 41
+    paste = LAYER_F_PASTE if layer == LAYER_F_CU else LAYER_B_PASTE
+    mask = LAYER_F_MASK if layer == LAYER_F_CU else LAYER_B_MASK
+    pad_list.append(Pad(
+        number=_ESP32_THERMAL_PAD_NUMBER, pad_type="smd", shape="rect",
+        position=Point(0.0, _ESP32_GND_PAD_Y_OFFSET),
+        size_x=_ESP32_GND_PAD_SIZE, size_y=_ESP32_GND_PAD_SIZE,
+        layers=(layer, paste, mask),
+    ))
+    return pad_list
+
+
+def _esp32_make_pin_labels(
+    pad_list: list[Pad],
+    n_side: int,
+    n_bottom: int,
+    fab_layer: str,
+) -> list[FootprintText]:
+    """Generate fab-layer pin name labels for all signal pads (skip pad 41)."""
+    labels: list[FootprintText] = []
+    for i, pad in enumerate(pad_list[:-1]):  # skip pad 41
+        pin_name = _ESP32_PIN_NAMES[i]
+        px, py = pad.position.x, pad.position.y
+        if i < n_side:  # left column → shift right
+            lx, ly = px + _ESP32_PIN_LABEL_OFFSET, py
+        elif i < n_side + n_bottom:  # bottom row → shift up
+            lx, ly = px, py - _ESP32_PIN_LABEL_OFFSET
+        else:  # right column → shift left
+            lx, ly = px - _ESP32_PIN_LABEL_OFFSET, py
+        labels.append(FootprintText(
+            text_type="user", text=pin_name,
+            position=Point(lx, ly), layer=fab_layer,
+            effects_size=_ESP32_PIN_LABEL_SIZE,
+        ))
+    return labels
+
+
+def _esp32_make_antenna_keepout(
+    pad_list: list[Pad],
+    body_w: float,
+    body_h: float,
+) -> FootprintKeepout:
+    """Derive antenna-end keepout zone from actual pad positions."""
+    antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+    antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
+    half_w = body_w / 2.0
+    half_h = body_h / 2.0
+
+    signal_pad_ys = [
+        p.position.y for p in pad_list
+        if p.number not in (_ESP32_THERMAL_PAD_NUMBER,) and not p.number.startswith("V")
+    ]
+    if signal_pad_ys:
+        min_pad_y, max_pad_y = min(signal_pad_ys), max(signal_pad_ys)
+        dist_to_neg = abs(min_pad_y - (-half_h))
+        dist_to_pos = abs(max_pad_y - half_h)
+        antenna_at_positive_y = dist_to_pos > dist_to_neg
+    else:
+        antenna_at_positive_y = False
+
+    if antenna_at_positive_y:
+        body_antenna_edge = half_h
+        keepout_top_y = body_antenna_edge - antenna_depth
+        keepout_bot_y = body_antenna_edge + antenna_ext
+    else:
+        body_antenna_edge = -half_h
+        keepout_top_y = body_antenna_edge - antenna_ext
+        keepout_bot_y = body_antenna_edge + antenna_depth
+
+    keepout_poly = (
+        Point(-half_w, keepout_top_y), Point(half_w, keepout_top_y),
+        Point(half_w, keepout_bot_y), Point(-half_w, keepout_bot_y),
+    )
+    return FootprintKeepout(
+        polygon=keepout_poly, layers=(LAYER_F_CU, LAYER_B_CU),
+        no_copper=True, no_vias=True, no_tracks=True, tag="antenna",
+    )
+
+
+def _esp32_make_via_fence(
+    half_w: float,
+    keepout_top_y: float,
+    keepout_bot_y: float,
+    via_idx_start: int,
+) -> list[Pad]:
+    """Build GND via fence pads along three sides of the antenna keepout."""
+    via_size = _ESP32_VIA_FENCE_PAD_SIZE
+    via_drill = _ESP32_VIA_FENCE_DRILL
+    via_spacing = _ESP32_VIA_FENCE_SPACING
+    via_layers = (LAYER_F_CU, LAYER_B_CU)
+    via_pads: list[Pad] = []
+    via_idx = via_idx_start
+
+    def _via(num: int, x: float, y: float) -> Pad:
+        return Pad(
+            number=str(num), pad_type="thru_hole", shape="circle",
+            position=Point(x, y), size_x=via_size, size_y=via_size,
+            layers=via_layers, drill_diameter=via_drill,
+        )
+
+    # Bottom row (horizontal)
+    n_bottom_vias = max(1, int((2 * half_w) / via_spacing) + 1)
+    for i in range(n_bottom_vias):
+        vx = -half_w + i * (2 * half_w) / max(1, n_bottom_vias - 1)
+        via_pads.append(_via(via_idx, vx, keepout_bot_y))
+        via_idx += 1
+
+    # Left and right columns
+    fence_height = keepout_bot_y - keepout_top_y
+    n_side_vias = max(1, int(fence_height / via_spacing))
+    for i in range(1, n_side_vias):
+        vy = keepout_bot_y - i * via_spacing
+        via_pads.append(_via(via_idx, -half_w, vy))
+        via_idx += 1
+        via_pads.append(_via(via_idx, half_w, vy))
+        via_idx += 1
+
+    return via_pads
+
+
+def _esp32_make_3d_model(lib_id: str) -> Footprint3DModel:
+    """Return a 3D model for the ESP32-S3-WROOM-1, falling back to a built-in path."""
+    model = _model_for_package(lib_id)
+    if model is None:
+        model = Footprint3DModel(
+            path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
+        )
+    return model
 
 
 def make_esp32_wroom(
@@ -1346,213 +1560,142 @@ def make_esp32_wroom(
     """
     body_w = _ESP32_BODY_W
     body_h = _ESP32_BODY_H
-    pad_w = _ESP32_PAD_W
-    pad_h = _ESP32_PAD_H
-    pitch = _ESP32_PITCH
-
-    # 41 pads: left(14) + bottom(12) + right(14) + center GND(1)
-    pad_list: list[Pad] = []
-
-    # Left and right columns share the same vertical span so pin 1
-    # (top-left) aligns with pin 40 (top-right), and pin 14 (bottom-left)
-    # aligns with pin 27 (bottom-right) — per datasheet Figure 3-1.
-    n_side = _ESP32_SIDE_PINS
-    col_top_y = -(body_h / 2.0) + _ESP32_TOP_MARGIN + pad_h / 2.0
-    col_bot_y = col_top_y + (n_side - 1) * pitch
-
-    # Left column: 14 pads (pins 1-14), top to bottom
-    # Pin 1 (GND) at top-left near antenna, pin 14 (IO20) at bottom-left.
-    left_x = -(body_w / 2.0 - pad_h / 2.0)
-    for i in range(n_side):
-        pad_list.append(_smd_pad(
-            str(i + 1), left_x, col_top_y + i * pitch, pad_h, pad_w, layer,
-        ))
-
-    # Bottom row: 12 pads (pins 15-26), left to right
-    # Pin 15 (IO3) at bottom-left, pin 26 (IO45) at bottom-right.
-    bottom_y = body_h / 2.0 - pad_h / 2.0
-    n_bottom = _ESP32_BOTTOM_PINS
-    start_x = -((n_bottom - 1) * pitch) / 2.0
-    for i in range(n_bottom):
-        pad_list.append(_smd_pad(
-            str(15 + i), start_x + i * pitch, bottom_y, pad_w, pad_h, layer,
-        ))
-
-    # Right column: 14 pads (pins 27-40), bottom to top
-    # Pin 27 (IO0) at bottom-right, pin 40 (GND) at top-right.
-    right_x = body_w / 2.0 - pad_h / 2.0
-    for i in range(n_side):
-        pad_list.append(_smd_pad(
-            str(27 + i), right_x, col_bot_y - i * pitch, pad_h, pad_w, layer,
-        ))
-
-    # Center GND pad (large thermal pad underneath) — pin 41.
-    # Offset south by _ESP32_GND_PAD_Y_OFFSET to centre it on the active
-    # silicon area (the antenna occupies the top ~5mm of the module body).
-    pad_list.append(Pad(
-        number="41",
-        pad_type="smd",
-        shape="rect",
-        position=Point(0.0, _ESP32_GND_PAD_Y_OFFSET),
-        size_x=_ESP32_GND_PAD_SIZE,
-        size_y=_ESP32_GND_PAD_SIZE,
-        layers=(layer, LAYER_F_PASTE if layer == LAYER_F_CU else LAYER_B_PASTE,
-                LAYER_F_MASK if layer == LAYER_F_CU else LAYER_B_MASK),
-    ))
-
-    # --- Pin name labels on the fab layer (Bug 1 fix) ---
-    # KiCad pad numbers must stay numeric for netlist matching, so we add
-    # small text labels next to each pad showing the functional pin name.
+    lib_id = "RF_Module:ESP32-S3-WROOM-1"
     fab_layer = LAYER_F_FAB if layer == LAYER_F_CU else LAYER_B_FAB
-    pin_labels: list[FootprintText] = []
-    _label_size = 0.5
-    _label_offset = 1.6  # mm offset from pad centre toward body interior
-    for i, pad in enumerate(pad_list[:-1]):  # skip pad 41 (GND label not needed)
-        pin_name = _ESP32_PIN_NAMES[i]
-        px, py = pad.position.x, pad.position.y
-        # Shift label inward: left pads -> right, right pads -> left,
-        # bottom pads -> up.
-        if i < n_side:  # left column
-            lx, ly = px + _label_offset, py
-        elif i < n_side + n_bottom:  # bottom row
-            lx, ly = px, py - _label_offset
-        else:  # right column
-            lx, ly = px - _label_offset, py
-        pin_labels.append(FootprintText(
-            text_type="user", text=pin_name,
-            position=Point(lx, ly), layer=fab_layer,
-            effects_size=_label_size,
-        ))
 
-    # --- Antenna keepout zone (footprint-level) ---
-    # The antenna is at the end of the module WITHOUT pins.
-    # Detect which end by checking pad Y positions.
-    antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
-    antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
-    half_w = body_w / 2.0
+    pad_list = _esp32_make_pads(layer)
+    pin_labels = _esp32_make_pin_labels(pad_list, _ESP32_SIDE_PINS, _ESP32_BOTTOM_PINS, fab_layer)
+    antenna_keepout = _esp32_make_antenna_keepout(pad_list, body_w, body_h)
+
+    # Compute keepout bounds to position via fence consistently
     half_h = body_h / 2.0
-
-    # Find which end has no pads — that's the antenna end
-    signal_pad_ys = [p.position.y for p in pad_list if p.number not in ("41",) and not p.number.startswith("V")]
-    if signal_pad_ys:
-        min_pad_y = min(signal_pad_ys)
-        max_pad_y = max(signal_pad_ys)
-        # If pads extend further toward -Y, antenna is at +Y end (and vice versa)
-        dist_to_neg = abs(min_pad_y - (-half_h))
-        dist_to_pos = abs(max_pad_y - half_h)
-        antenna_at_positive_y = dist_to_pos > dist_to_neg  # larger gap = antenna end
-    else:
-        antenna_at_positive_y = False  # default: antenna at -Y
-
-    if antenna_at_positive_y:
-        # Antenna at +Y end (JLCPCB footprint layout)
-        body_antenna_edge = half_h
-        keepout_top_y = body_antenna_edge - antenna_depth  # inside body
-        keepout_bot_y = body_antenna_edge + antenna_ext    # past body edge
-    else:
-        # Antenna at -Y end (parametric layout)
-        body_antenna_edge = -half_h
-        keepout_top_y = body_antenna_edge - antenna_ext    # past body edge
-        keepout_bot_y = body_antenna_edge + antenna_depth  # inside body
-    keepout_poly = (
-        Point(-half_w, keepout_top_y),
-        Point(half_w, keepout_top_y),
-        Point(half_w, keepout_bot_y),
-        Point(-half_w, keepout_bot_y),
-    )
-    antenna_keepout = FootprintKeepout(
-        polygon=keepout_poly,
-        layers=(LAYER_F_CU, LAYER_B_CU),
-        no_copper=True,
-        no_vias=True,
-        no_tracks=True,
-        tag="antenna",
-    )
-
-    # --- GND via fence around antenna keepout (Issue 2) ---
-    # Place isolation vias in the footprint so they move with the module.
-    # Vias line 3 sides of the keepout: left, right, and bottom (NOT the
-    # module edge side, which is open for antenna radiation).
-    via_size = _ESP32_VIA_FENCE_PAD_SIZE
-    via_drill = _ESP32_VIA_FENCE_DRILL
-    via_spacing = _ESP32_VIA_FENCE_SPACING
-    via_layers = (LAYER_F_CU, LAYER_B_CU)
-    via_pads: list[Pad] = []
-    via_idx = 42  # start numbering after pad 41 (GND thermal)
-
-    # Bottom row of via fence (horizontal, at keepout_bot_y)
-    n_bottom_vias = max(1, int((2 * half_w) / via_spacing) + 1)
-    for i in range(n_bottom_vias):
-        vx = -half_w + i * (2 * half_w) / max(1, n_bottom_vias - 1)
-        via_pads.append(Pad(
-            number=str(via_idx),
-            pad_type="thru_hole",
-            shape="circle",
-            position=Point(vx, keepout_bot_y),
-            size_x=via_size,
-            size_y=via_size,
-            layers=via_layers,
-            drill_diameter=via_drill,
-        ))
-        via_idx += 1
-
-    # Left and right columns of via fence (vertical, from keepout_bot_y
-    # up to keepout_top_y, excluding the module edge end which stays open).
-    fence_height = keepout_bot_y - keepout_top_y
-    n_side_vias = max(1, int(fence_height / via_spacing))
-    for i in range(1, n_side_vias):  # skip bottom row (already placed)
-        vy = keepout_bot_y - i * via_spacing
-        # Left column
-        via_pads.append(Pad(
-            number=str(via_idx),
-            pad_type="thru_hole",
-            shape="circle",
-            position=Point(-half_w, vy),
-            size_x=via_size,
-            size_y=via_size,
-            layers=via_layers,
-            drill_diameter=via_drill,
-        ))
-        via_idx += 1
-        # Right column
-        via_pads.append(Pad(
-            number=str(via_idx),
-            pad_type="thru_hole",
-            shape="circle",
-            position=Point(half_w, vy),
-            size_x=via_size,
-            size_y=via_size,
-            layers=via_layers,
-            drill_diameter=via_drill,
-        ))
-        via_idx += 1
-
+    ant_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
+    ant_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+    keepout_top_y = -half_h - ant_ext
+    keepout_bot_y = -half_h + ant_depth
+    via_pads = _esp32_make_via_fence(body_w / 2.0, keepout_top_y, keepout_bot_y, via_idx_start=42)
     pad_list.extend(via_pads)
 
     graphics = _courtyard_rect(body_w, body_h)
     texts: tuple[FootprintText, ...] = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.5, LAYER_F_FAB),
+        _val_text(value, body_h / 2.0 + _TEXT_OFFSET_LARGE, LAYER_F_FAB),
         *pin_labels,
     )
-    lib_id = "RF_Module:ESP32-S3-WROOM-1"
-
-    # 3D model — always include a path even if the file is not present
-    # locally; KiCad will display a placeholder.
-    model = _model_for_package(lib_id)
-    if model is None:
-        model = Footprint3DModel(
-            path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/"
-            "ESP32-S3-WROOM-1.step",
-        )
-    models = (model,)
 
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
         layer=layer, pads=tuple(pad_list), graphics=graphics, texts=texts,
-        attr="smd", models=models,
+        attr="smd", models=(_esp32_make_3d_model(lib_id),),
         fp_zones=(antenna_keepout,),
     )
+
+
+def _esp32_enrich_pin_labels(fp: Footprint, fab_layer: str) -> list[FootprintText]:
+    """Return fab-layer pin labels for *fp* if not already present (idempotent)."""
+    if any(t.text_type == "user" and t.text in _ESP32_PIN_NAMES for t in fp.texts):
+        return []
+    if len(fp.pads) < 40:
+        return []
+    all_x = [p.position.x for p in fp.pads[:40]]
+    min_x, max_x = min(all_x), max(all_x)
+    labels: list[FootprintText] = []
+    for idx, pad in enumerate(fp.pads[:40]):
+        if idx >= len(_ESP32_PIN_NAMES):
+            break
+        pin_name = _ESP32_PIN_NAMES[idx]
+        px, py = pad.position.x, pad.position.y
+        if abs(px - min_x) < 1.0:  # left column
+            lx, ly = px + _ESP32_PIN_LABEL_OFFSET, py
+        elif abs(px - max_x) < 1.0:  # right column
+            lx, ly = px - _ESP32_PIN_LABEL_OFFSET, py
+        else:  # bottom row
+            lx, ly = px, py - _ESP32_PIN_LABEL_OFFSET
+        labels.append(FootprintText(
+            text_type="user", text=pin_name,
+            position=Point(lx, ly), layer=fab_layer,
+            effects_size=_ESP32_PIN_LABEL_SIZE,
+        ))
+    return labels
+
+
+def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout], list[Pad]]:
+    """Return antenna keepout zone and via-fence pads for *fp* if not already present.
+
+    Uses the same distance-based antenna-side detection as
+    :func:`_esp32_make_antenna_keepout`: the antenna occupies the end of the
+    module body furthest from the pad field (pins 1-40 span the lower ~22mm,
+    leaving ~3mm of bare PCB at the antenna end at negative-Y in the default
+    orientation).  This approach works correctly regardless of which external
+    footprint source was loaded.
+    """
+    if any(fz.tag == "antenna" for fz in fp.fp_zones):
+        return [], []
+
+    antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
+    antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
+    half_w = _ESP32_BODY_W / 2.0
+    half_h = _ESP32_BODY_H / 2.0
+
+    # Determine which end of the module body has no pads (= antenna end).
+    # Primary: distance-based (antenna end is furthest from pad field).
+    # Fallback: pin numbering (pins 15-26 are on the antenna side).
+    signal_pad_ys = [
+        p.position.y for p in fp.pads
+        if p.number != _ESP32_THERMAL_PAD_NUMBER and not p.number.startswith("V")
+    ]
+    if signal_pad_ys:
+        min_pad_y, max_pad_y = min(signal_pad_ys), max(signal_pad_ys)
+        dist_to_neg = abs(min_pad_y - (-half_h))
+        dist_to_pos = abs(max_pad_y - half_h)
+        if abs(dist_to_pos - dist_to_neg) > 0.5:
+            antenna_at_positive_y = dist_to_pos > dist_to_neg
+        else:
+            # Symmetric footprint — use pin numbering as tiebreaker.
+            # Pins 15-26 are on the antenna side of the ESP32-S3-WROOM.
+            ant_pins = [p for p in fp.pads if p.number in {str(i) for i in range(15, 27)}]
+            pin1 = [p for p in fp.pads if p.number == "1"]
+            if ant_pins and pin1:
+                antenna_at_positive_y = ant_pins[0].position.y > pin1[0].position.y
+            else:
+                antenna_at_positive_y = False
+    else:
+        antenna_at_positive_y = False
+
+    if antenna_at_positive_y:
+        body_antenna_edge = half_h
+        keepout_top_y = body_antenna_edge - antenna_depth
+        keepout_bot_y = body_antenna_edge + antenna_ext
+    else:
+        body_antenna_edge = -half_h
+        keepout_top_y = body_antenna_edge - antenna_ext
+        keepout_bot_y = body_antenna_edge + antenna_depth
+
+    keepout_poly = (
+        Point(-half_w, keepout_top_y), Point(half_w, keepout_top_y),
+        Point(half_w, keepout_bot_y), Point(-half_w, keepout_bot_y),
+    )
+    zone = FootprintKeepout(
+        polygon=keepout_poly, layers=(LAYER_F_CU, LAYER_B_CU),
+        no_copper=True, no_vias=True, no_tracks=True, tag="antenna",
+    )
+    via_pads = _esp32_make_via_fence(
+        half_w, keepout_top_y, keepout_bot_y,
+        via_idx_start=42 + len(fp.pads),
+    )
+    return [zone], via_pads
+
+
+def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
+    """Return existing or new 3D model tuple for *fp* (idempotent)."""
+    if fp.models:
+        return fp.models
+    model = _model_for_package("RF_Module:ESP32-S3-WROOM-1", fp.layer)
+    if model is None:
+        model = Footprint3DModel(
+            path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
+        )
+    return (model,)
 
 
 def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
@@ -1568,181 +1711,32 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
     Returns:
         Enriched copy of *fp*.
     """
-    layer = fp.layer
-    fab_layer = LAYER_F_FAB if layer == LAYER_F_CU else LAYER_B_FAB
+    fab_layer = LAYER_F_FAB if fp.layer == LAYER_F_CU else LAYER_B_FAB
 
-    # --- Bug 1: Pin name labels on the fab layer ---
-    # Only add if not already present (idempotent).
-    has_pin_labels = any(
-        t.text_type == "user" and t.text in _ESP32_PIN_NAMES
-        for t in fp.texts
-    )
-    extra_texts: list[FootprintText] = []
-    if not has_pin_labels and len(fp.pads) >= 40:
-        # Determine pad field bounding box to decide label offsets.
-        _label_size = 0.5
-        _label_offset = 1.6  # mm inward from pad centre
-        all_x = [p.position.x for p in fp.pads[:40]]
-        min_x, max_x = min(all_x), max(all_x)
-        for idx, pad in enumerate(fp.pads[:40]):
-            if idx >= len(_ESP32_PIN_NAMES):
-                break
-            pin_name = _ESP32_PIN_NAMES[idx]
-            px, py = pad.position.x, pad.position.y
-            # Classify pad side by position relative to centroid.
-            # Left-side pads have small x, right-side have large x,
-            # bottom pads have large y.
-            if abs(px - min_x) < 1.0:  # left column
-                lx, ly = px + _label_offset, py
-            elif abs(px - max_x) < 1.0:  # right column
-                lx, ly = px - _label_offset, py
-            else:  # bottom row
-                lx, ly = px, py - _label_offset
-            extra_texts.append(FootprintText(
-                text_type="user", text=pin_name,
-                position=Point(lx, ly), layer=fab_layer,
-                effects_size=_label_size,
-            ))
+    extra_texts = _esp32_enrich_pin_labels(fp, fab_layer)
+    models = _esp32_enrich_3d_model(fp)
 
-    # --- Bug 3: Antenna keepout zone ---
-    has_antenna_keepout = any(
-        fz.tag == "antenna" for fz in fp.fp_zones
-    )
-    extra_zones: list[FootprintKeepout] = []
+    # Antenna keepout and via fence are handled at BOARD level by
+    # _refresh_antenna_keepout in ee_phases_refinement.py. This correctly
+    # accounts for the final placement rotation. Footprint-level keepout/vias
+    # would rotate to the wrong position (e.g., rot=180 flips +Y to -Y).
     extra_pads: list[Pad] = []
-    if not has_antenna_keepout:
-        # Derive body bounds from actual pad positions rather than assuming
-        # body-center origin.  JLCPCB footprints may have a different origin
-        # than our parametric model (which uses body centre).  Pins 1 and 40
-        # are at the antenna end (most negative Y); the body top edge is
-        # _ESP32_TOP_MARGIN + pad_h/2 above those pad centres.
-        antenna_depth = _ESP32_ANTENNA_KEEPOUT_DEPTH_MM
-        antenna_ext = _ESP32_ANTENNA_KEEPOUT_EXTENSION_MM
-        half_w = _ESP32_BODY_W / 2.0
 
-        # Detect antenna end using pin numbering: the ESP32 top row
-        # (pins 15-26) is at the antenna end. Pin 1 is at the opposite end.
-        signal_pads = [p for p in fp.pads if p.number != "41" and not p.number.startswith("V")]
-        pin1 = [p for p in signal_pads if p.number == "1"]
-        top_row = [p for p in signal_pads if p.number in {str(i) for i in range(15, 27)}]
-
-        if pin1 and top_row:
-            # Antenna is at the top-row end (opposite from pin 1)
-            top_row_y = top_row[0].position.y
-            pin1_y = pin1[0].position.y
-            half_h = _ESP32_BODY_H / 2.0
-            margin = abs(top_row_y - pin1_y) / 2.0  # half the pad span
-
-            if top_row_y > pin1_y:
-                # Antenna at +Y end
-                antenna_edge_y = top_row_y + (half_h - margin)
-            else:
-                # Antenna at -Y end
-                antenna_edge_y = top_row_y - (half_h - margin)
-
-            keepout_top_y = antenna_edge_y - antenna_depth
-            keepout_bot_y = antenna_edge_y + antenna_ext
-        else:
-            # Fallback: antenna at -Y
-            antenna_edge_y = -(_ESP32_BODY_H / 2.0)
-            keepout_top_y = antenna_edge_y - antenna_ext
-            keepout_bot_y = antenna_edge_y + antenna_depth
-        keepout_poly = (
-            Point(-half_w, keepout_top_y),
-            Point(half_w, keepout_top_y),
-            Point(half_w, keepout_bot_y),
-            Point(-half_w, keepout_bot_y),
-        )
-        extra_zones.append(FootprintKeepout(
-            polygon=keepout_poly,
-            layers=(LAYER_F_CU, LAYER_B_CU),
-            no_copper=True,
-            no_vias=True,
-            no_tracks=True,
-            tag="antenna",
-        ))
-
-        # --- GND via fence around antenna keepout (Issue 2) ---
-        via_size = _ESP32_VIA_FENCE_PAD_SIZE
-        via_drill = _ESP32_VIA_FENCE_DRILL
-        via_spacing = _ESP32_VIA_FENCE_SPACING
-        via_layers = (LAYER_F_CU, LAYER_B_CU)
-        # Number vias starting after pad 41 to avoid conflicts with
-        # _postprocess_esp32_thermal_pad (which merges all pad "41"s).
-        via_idx = 42 + len(fp.pads)  # safe offset beyond existing pads
-
-        # Bottom row (horizontal)
-        n_bottom_vias = max(1, int((2 * half_w) / via_spacing) + 1)
-        for i in range(n_bottom_vias):
-            vx = -half_w + i * (2 * half_w) / max(1, n_bottom_vias - 1)
-            extra_pads.append(Pad(
-                number=str(via_idx),
-                pad_type="thru_hole",
-                shape="circle",
-                position=Point(vx, keepout_bot_y),
-                size_x=via_size,
-                size_y=via_size,
-                layers=via_layers,
-                drill_diameter=via_drill,
-            ))
-            via_idx += 1
-
-        # Left and right columns
-        fence_height = keepout_bot_y - keepout_top_y
-        n_side_vias = max(1, int(fence_height / via_spacing))
-        for i in range(1, n_side_vias):
-            vy = keepout_bot_y - i * via_spacing
-            extra_pads.append(Pad(
-                number=str(via_idx),
-                pad_type="thru_hole",
-                shape="circle",
-                position=Point(-half_w, vy),
-                size_x=via_size,
-                size_y=via_size,
-                layers=via_layers,
-                drill_diameter=via_drill,
-            ))
-            via_idx += 1
-            extra_pads.append(Pad(
-                number=str(via_idx),
-                pad_type="thru_hole",
-                shape="circle",
-                position=Point(half_w, vy),
-                size_x=via_size,
-                size_y=via_size,
-                layers=via_layers,
-                drill_diameter=via_drill,
-            ))
-            via_idx += 1
-
-    # --- Bug 4: 3D model ---
-    has_model = len(fp.models) > 0
-    models = fp.models
-    if not has_model:
-        model = _model_for_package("RF_Module:ESP32-S3-WROOM-1", layer)
-        if model is None:
-            model = Footprint3DModel(
-                path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/"
-                "ESP32-S3-WROOM-1.step",
-            )
-        models = (model,)
-
-    # Return enriched copy only if something changed.
-    if not extra_texts and not extra_zones and not extra_pads and has_model:
+    if not extra_texts and models is fp.models:
         return fp
 
-    new_pads = (*fp.pads, *extra_pads) if extra_pads else fp.pads
     return Footprint(
         lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
         position=fp.position, rotation=fp.rotation, layer=fp.layer,
-        pads=new_pads, graphics=fp.graphics,
+        pads=(*fp.pads, *extra_pads) if extra_pads else fp.pads,
+        graphics=fp.graphics,
         texts=(*fp.texts, *extra_texts),
         lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
         models=models,
         datasheet=fp.datasheet, description=fp.description,
         footprint_source=fp.footprint_source,
         mpn=fp.mpn, manufacturer=fp.manufacturer,
-        fp_zones=(*fp.fp_zones, *extra_zones),
+        fp_zones=fp.fp_zones,  # no footprint-level keepout
     )
 
 
@@ -1767,7 +1761,7 @@ def make_crystal_smd(
     """
     pad_w = _CRYSTAL_PAD_W
     pad_h = _CRYSTAL_PAD_H
-    pitch = size_w - pad_w + 0.4
+    pitch = size_w - pad_w + _CRYSTAL_PITCH_ADJUST_MM
     # Signal pads (1, 2) + shield/ground pads (3, 4) for 4-pin crystals.
     # 4-pin variants (3.2x2.5mm etc.) have ground pads at corners.
     has_shield = size_h >= _CRYSTAL_SHIELD_MIN_HEIGHT
@@ -1835,13 +1829,15 @@ def make_sot23(
     # Approximate body bounding box for courtyard / silkscreen
     all_x = [c[0] for c in coords]
     all_y = [c[1] for c in coords]
-    body_w = (max(all_x) - min(all_x)) + pad_w + 0.2
-    body_h = (max(all_y) - min(all_y)) + pad_h + 0.2
+    body_w = (max(all_x) - min(all_x)) + pad_w + _SOT23_BODY_PADDING_MM
+    body_h = (max(all_y) - min(all_y)) + pad_h + _SOT23_BODY_PADDING_MM
 
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
+        _ref_text(ref, ref_y, LAYER_F_SILKSCREEN),
+        _val_text(value, val_y, LAYER_F_FAB),
     )
     sot_lib_id = f"Package_TO_SOT_SMD:{variant}"
     model = _model_for_package(sot_lib_id)
@@ -2017,7 +2013,7 @@ def make_generic_smd_ic(
         thermal_pad = any(kw in _upper for kw in ("QFN", "DFN"))
     if thermal_pad:
         # Center exposed pad, size ~60% of body
-        ep_size = max(row_span * 0.5, 2.0)
+        ep_size = max(row_span * 0.5, _QFN_THERMAL_PAD_MIN_MM)
         pads.append(_smd_pad(str(pin_count + 1), 0.0, 0.0, ep_size, ep_size, LAYER_F_CU))
 
     body_w = col_pitch * 2.0 + pad_h
@@ -2025,11 +2021,13 @@ def make_generic_smd_ic(
     ic_pad_edge_x = col_pitch + pad_h / 2.0
     graphics: tuple[FootprintLine, ...] = (
         *_courtyard_rect(body_w, body_h),
-        *_silk_side_marks(col_pitch * 1.6, body_h, pad_edge_x=ic_pad_edge_x),
+        *_silk_side_marks(col_pitch * _IC_SILK_COL_PITCH_FACTOR, body_h, pad_edge_x=ic_pad_edge_x),
     )
+    _ic_ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    _ic_val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
+        _ref_text(ref, _ic_ref_y, LAYER_F_SILKSCREEN),
+        _val_text(value, _ic_val_y, LAYER_F_FAB),
     )
     if not lib_id:
         lib_id = f"Package_SO:SOIC-{pin_count}_P{pitch_mm:.2f}mm"
@@ -2110,7 +2108,9 @@ def make_pin_header_socket(
     cy = span_y / 2.0  # center of pad span in Y
     body_w = span_x + pad_diam + _TEXT_OFFSET_LARGE
     body_h = span_y + pad_diam + _TEXT_OFFSET_LARGE
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy),)
+    graphics: tuple[FootprintLine, ...] = (
+        *_courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy),
+    )
     ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     texts = (
@@ -2267,12 +2267,14 @@ def make_dip_switch(
     body_w = row_pitch + pad_diam + _BODY_MARGIN_MM
     body_h = span_y + pad_diam + _BODY_MARGIN_MM
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
+    _dip_ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    _dip_val_y = cy + body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
         FootprintText(text_type="reference", text=ref,
-                      position=Point(cx, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)),
+                      position=Point(cx, _dip_ref_y),
                       layer=LAYER_F_SILKSCREEN, effects_size=1.0),
         FootprintText(text_type="value", text=value,
-                      position=Point(cx, cy + body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM),
+                      position=Point(cx, _dip_val_y),
                       layer=LAYER_F_FAB, effects_size=1.0),
     )
     lib_id = (
@@ -2318,9 +2320,11 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
     body_w = _USBC_BODY_W
     body_h = _USBC_BODY_H
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    _usbc_ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    _usbc_val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
+        _ref_text(ref, _usbc_ref_y, LAYER_F_SILKSCREEN),
+        _val_text(value, _usbc_val_y, LAYER_F_FAB),
     )
     lib_id = "Connector_USB:USB_C_Receptacle_GCT_USB4105"
     model = _model_for_package(lib_id)
@@ -2392,9 +2396,11 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     body_w = _RJ45_COURTYARD_W
     body_h = _RJ45_COURTYARD_H
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
+    _rj45_ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    _rj45_val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     texts = (
-        _ref_text(ref, cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
-        _val_text(value, cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_FAB),
+        _ref_text(ref, _rj45_ref_y, LAYER_F_SILKSCREEN),
+        _val_text(value, _rj45_val_y, LAYER_F_FAB),
     )
     lib_id = "Connector_RJ:RJ45_Amphenol_RJHSE538X"
     model = _model_for_package(lib_id)
@@ -2496,7 +2502,7 @@ def make_sod323(
     )
     texts = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+        _val_text(value, body_h / 2.0 + _VAL_TEXT_OFFSET_MM, LAYER_F_FAB),
     )
     lib_id = "Diode_SMD:D_SOD-323"
     model = _model_for_package(lib_id)
@@ -2545,11 +2551,13 @@ def make_dip_package(
         pads.append(_thru_pad(str(half + i + 1), row_spacing_mm / 2.0, y, pad_diam, drill_mm))
 
     body_w = row_spacing_mm + pad_diam + _BODY_MARGIN_MM
-    body_h = max((half - 1) * pitch_mm + pad_diam + _BODY_MARGIN_MM, 3.0)
+    body_h = max((half - 1) * pitch_mm + pad_diam + _BODY_MARGIN_MM, _DIP_MIN_BODY_HEIGHT_MM)
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    _dip_tht_ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    _dip_tht_val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
-        _ref_text(ref, -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM, LAYER_F_FAB),
+        _ref_text(ref, _dip_tht_ref_y, LAYER_F_SILKSCREEN),
+        _val_text(value, _dip_tht_val_y, LAYER_F_FAB),
     )
     if not lib_id:
         lib_id = f"Package_DIP:DIP-{pin_count}_W{row_spacing_mm:.2f}mm"
@@ -2598,16 +2606,16 @@ def make_ws2812b(
     ref: str,
     value: str = "WS2812B",
     layer: str = LAYER_F_CU,
-    size: str = "5050",
+    size: str = _WS2812_SIZE_5050,
 ) -> Footprint:
     """WS2812B addressable RGB LED footprint (PLCC-4, 4 pads).
 
     Pin 1 = VDD, Pin 2 = DOUT, Pin 3 = GND, Pin 4 = DIN.
 
     Supported sizes:
-        - ``"5050"``: 5.0×5.0 mm body (WS2812B standard)
-        - ``"3535"``: 3.5×3.5 mm body (WS2812B-Mini)
-        - ``"2020"``: 2.0×2.0 mm body (WS2812C-2020)
+        - ``"5050"``: 5.0x5.0 mm body (WS2812B standard)
+        - ``"3535"``: 3.5x3.5 mm body (WS2812B-Mini)
+        - ``"2020"``: 2.0x2.0 mm body (WS2812C-2020)
 
     Args:
         ref: Reference designator (e.g. "LED1").
@@ -2618,14 +2626,14 @@ def make_ws2812b(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    dims = _WS2812B_DIMS.get(size, _WS2812B_DIMS["5050"])
+    dims = _WS2812B_DIMS.get(size, _WS2812B_DIMS[_WS2812_SIZE_5050])
     pad_w, pad_h, x_pitch, y_pitch, body_w, body_h = dims
-    _WS2812B_LIB_IDS = {
-        "2020": "LED_SMD:LED_WS2812B_PLCC4_2.0x2.0mm",
-        "3535": "LED_SMD:LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm",
-        "5050": "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm",
+    ws2812b_lib_ids = {
+        _WS2812_SIZE_2020: "LED_SMD:LED_WS2812B_PLCC4_2.0x2.0mm",
+        _WS2812_SIZE_3535: "LED_SMD:LED_WS2812B_PLCC4_3.5x3.5mm_P2.45mm",
+        _WS2812_SIZE_5050: "LED_SMD:LED_WS2812B_PLCC4_5.0x5.0mm_P3.2mm",
     }
-    lib_id = _WS2812B_LIB_IDS.get(size, _WS2812B_LIB_IDS["5050"])
+    lib_id = ws2812b_lib_ids.get(size, ws2812b_lib_ids[_WS2812_SIZE_5050])
 
     pads = (
         _smd_pad("1", -x_pitch, -y_pitch, pad_w, pad_h, layer),  # VDD
@@ -2636,7 +2644,7 @@ def make_ws2812b(
     graphics = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+        _val_text(value, body_h / 2.0 + _VAL_TEXT_OFFSET_MM, LAYER_F_FAB),
     )
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
@@ -2667,17 +2675,25 @@ def make_microsd_slot(
     pads: list[Pad] = []
     for i in range(8):
         x = (i - 3.5) * _MICROSD_SIGNAL_PITCH
-        pads.append(_smd_pad(str(i + 1), x, _MICROSD_SIGNAL_Y, _MICROSD_PAD_W, _MICROSD_PAD_H, LAYER_F_CU))
+        pads.append(_smd_pad(
+            str(i + 1), x, _MICROSD_SIGNAL_Y, _MICROSD_PAD_W, _MICROSD_PAD_H, LAYER_F_CU,
+        ))
     # Shield / card detect pads (larger, on sides)
-    pads.append(_smd_pad("9", -7.0, -1.5, _MICROSD_SHIELD_PAD_W, _MICROSD_SHIELD_PAD_H, LAYER_F_CU))
-    pads.append(_smd_pad("10", 7.0, -1.5, _MICROSD_SHIELD_PAD_W, _MICROSD_SHIELD_PAD_H, LAYER_F_CU))
+    pads.append(_smd_pad(
+        "9", _MICROSD_SHIELD_PAD_LEFT_X, _MICROSD_SHIELD_PAD_Y,
+        _MICROSD_SHIELD_PAD_W, _MICROSD_SHIELD_PAD_H, LAYER_F_CU,
+    ))
+    pads.append(_smd_pad(
+        "10", _MICROSD_SHIELD_PAD_RIGHT_X, _MICROSD_SHIELD_PAD_Y,
+        _MICROSD_SHIELD_PAD_W, _MICROSD_SHIELD_PAD_H, LAYER_F_CU,
+    ))
 
     body_w = _MICROSD_BODY_W
     body_h = _MICROSD_BODY_H
     graphics = (*_courtyard_rect(body_w, body_h),)
     texts = (
         _ref_text(ref, -(body_h / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
-        _val_text(value, body_h / 2.0 + 1.0, LAYER_F_FAB),
+        _val_text(value, body_h / 2.0 + _VAL_TEXT_OFFSET_MM, LAYER_F_FAB),
     )
     lib_id = "Connector_Card:microSD_HC_Hirose_DM3AT-SF-PEJM5"
     model = _model_for_package(lib_id)
@@ -2800,7 +2816,7 @@ def _postprocess_esp32_thermal_pad(fp: Footprint) -> Footprint:
     Returns:
         A copy of *fp* with at most one pad "41".
     """
-    p41_pads = [p for p in fp.pads if p.number == "41"]
+    p41_pads = [p for p in fp.pads if p.number == _ESP32_THERMAL_PAD_NUMBER]
     if len(p41_pads) <= 1:
         return fp  # Already correct — nothing to do.
 
@@ -2836,7 +2852,7 @@ def _postprocess_esp32_thermal_pad(fp: Footprint) -> Footprint:
     )
 
     # Replace all pad-41 entries with the single merged pad.
-    new_pads = tuple(p for p in fp.pads if p.number != "41") + (merged,)
+    new_pads = (*[p for p in fp.pads if p.number != _ESP32_THERMAL_PAD_NUMBER], merged)
     _log.info(
         "%s: merged %d pad-41 grid entries into single %.1fx%.1fmm thermal pad "
         "at (%.1f, %.1f)",
@@ -2902,7 +2918,7 @@ def _try_jlcpcb_footprint(
             pin_count = _parse_pin_count(footprint_id) or _parse_pin_count(fp.lib_id)
             if pin_count > 0 and len(fp.pads) == pin_count:
                 # No thermal pad present — add one
-                ep_size = max(2.0, pin_count * 0.08)
+                ep_size = max(_QFN_THERMAL_PAD_MIN_MM, pin_count * _QFN_THERMAL_PAD_SCALE)
                 ep = _smd_pad(str(pin_count + 1), 0.0, 0.0, ep_size, ep_size, fp.layer)
                 fp = Footprint(
                     lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
@@ -2915,7 +2931,10 @@ def _try_jlcpcb_footprint(
                 _log.info("Added thermal pad %d to QFN footprint %s", pin_count + 1, ref)
 
         # JLCPCB .kicad_mod files rarely include 3D model references.
-        # Resolve a model from the original footprint_id or the JLCPCB lib_id.
+        # Both KiCad standard 3D models and JLCPCB footprints use body-center
+        # as origin — so no offset is needed (use default 0,0,0).
+        # If the cached footprint already has a model with a pre-computed
+        # offset, that is preserved above (fp.models is non-empty).
         if not fp.models:
             model = _model_for_package(footprint_id, layer)
             if model is None:
@@ -2953,11 +2972,11 @@ def _fp_ws2812(
     ref: str, value: str, fid: str, _upper: str, layer: str,
 ) -> Footprint:
     """Build WS2812 footprint with size auto-detection."""
-    ws_size = "5050"
-    if "2020" in fid:
-        ws_size = "2020"
-    elif "3535" in fid:
-        ws_size = "3535"
+    ws_size = _WS2812_SIZE_5050
+    if _WS2812_SIZE_2020 in fid:
+        ws_size = _WS2812_SIZE_2020
+    elif _WS2812_SIZE_3535 in fid:
+        ws_size = _WS2812_SIZE_3535
     return make_ws2812b(ref, value, layer=layer, size=ws_size)
 
 
@@ -3177,7 +3196,7 @@ def _fp_crystal(
 ) -> Footprint:
     """Build SMD crystal footprint."""
     dims = _parse_dimensions(fid)
-    w, h = dims if dims else (3.2, 1.5)
+    w, h = dims if dims else (_CRYSTAL_SMD3215_DEFAULT_W_MM, _CRYSTAL_SMD3215_DEFAULT_H_MM)
     return make_crystal_smd(ref, value, size_w=w, size_h=h)
 
 
@@ -3244,10 +3263,7 @@ def _route_fp_smd_ic(
         pin_count = 8
     pitch = _parse_pitch(fid)
     if pitch > 2.0:
-        if upper.startswith(("SOP", "SOIC")):
-            pitch = 1.27
-        else:
-            pitch = 0.5
+        pitch = 1.27 if upper.startswith(("SOP", "SOIC")) else 0.5
     return make_generic_smd_ic(ref, value, pin_count, pitch, lib_id=fid)
 
 
@@ -3528,7 +3544,7 @@ def compute_footprint_bbox(fp: Footprint) -> FootprintBBox:
 
 _BODY_EXTENSION: dict[str, tuple[float, float]] = {
     # (extra_width_per_side, extra_height_per_side)
-    "module": (0.5, 3.5),       # ESP32/W5500 — body extends well beyond pad field (antenna, shield)
+    "module": (0.5, 3.5),       # ESP32/W5500 — body extends beyond pad field (antenna, shield)
     "qfn": (0.25, 0.25),        # QFN/QFP/BGA — body ≈ pad field
     "qfp": (0.25, 0.25),
     "bga": (0.25, 0.25),

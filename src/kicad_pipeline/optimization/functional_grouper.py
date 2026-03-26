@@ -1030,6 +1030,19 @@ def _detect_decoupling_pairs(
     return results
 
 
+def _divider_connected_to_connector(
+    all_nets: set[str],
+    net_to_refs: dict[str, set[str]],
+) -> bool:
+    """Return True if any non-power signal net in *all_nets* leads to a connector (J*)."""
+    for net_name in all_nets:
+        if _is_power_net(net_name) or _is_gnd_net(net_name):
+            continue
+        if any(_ref_prefix(ref) == "J" for ref in net_to_refs.get(net_name, set())):
+            return True
+    return False
+
+
 def _detect_voltage_dividers(
     requirements: ProjectRequirements,
     net_to_refs: dict[str, set[str]],
@@ -1068,16 +1081,9 @@ def _detect_voltage_dividers(
             # Also accept sensor-input dividers: one R connects to a
             # connector (J*) via a non-power signal net (e.g. AIN_RAW).
             if not has_power:
-                all_nets = r1_nets | nb_nets
-                for net_name in all_nets:
-                    if _is_power_net(net_name) or _is_gnd_net(net_name):
-                        continue
-                    for ref in net_to_refs.get(net_name, set()):
-                        if _ref_prefix(ref) == "J":
-                            has_power = True
-                            break
-                    if has_power:
-                        break
+                has_power = _divider_connected_to_connector(
+                    r1_nets | nb_nets, net_to_refs,
+                )
             has_gnd = any(_is_gnd_net(n) for n in r1_nets | nb_nets)
             shared_signal = (r1_nets & nb_nets) - {
                 n for n in r1_nets & nb_nets if _is_power_net(n)

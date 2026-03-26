@@ -453,9 +453,7 @@ def _detect_relay_clusters(
                 ref_nets = ref_nets_index.get(ref, set())
                 shared = ref_nets & relay_nets
                 signal_shared = {n for n in shared if not _is_power_net(n)}
-                if signal_shared:
-                    cluster.append(ref)
-                elif ref.startswith("J") and shared:
+                if signal_shared or (ref.startswith("J") and shared):
                     cluster.append(ref)
             if len(cluster) > 1:
                 group_name = f"_subcircuit_{relay_ref}"
@@ -1732,13 +1730,13 @@ def _get_component_pad_offsets(
 
 def _find_multipin_refs(requirements: ProjectRequirements) -> set[str]:
     """Identify multi-pin switches/connectors/relays with 4+ pins."""
-    _ALIGN_PREFIXES = frozenset({"SW", "J", "K"})
+    align_prefixes = frozenset({"SW", "J", "K"})
     result: set[str] = set()
     for comp in requirements.components:
         if len(comp.pins) < 4:
             continue
         prefix = "".join(ch for ch in comp.ref if ch.isalpha()).upper()
-        if prefix in _ALIGN_PREFIXES:
+        if prefix in align_prefixes:
             result.add(comp.ref)
     return result
 

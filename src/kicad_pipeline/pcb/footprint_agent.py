@@ -363,55 +363,15 @@ def audit_board(
     """
     entries: list[ComponentAuditEntry] = []
     issues: list[str] = []
-    models_present = 0
-    models_missing = 0
-    props_complete = 0
-    props_incomplete = 0
-    keepouts_required = 0
-    keepouts_present = 0
+    counts = {"models_present": 0, "models_missing": 0,
+              "props_complete": 0, "props_incomplete": 0,
+              "keepouts_required": 0, "keepouts_present": 0}
 
     for fp in pcb.footprints:
         model_report = _check_model(fp)
         prop_report = _check_properties(fp)
         keepout_report = _check_rf_keepout(fp, pcb.keepouts)
-
-        # Tally models
-        if model_report.status == ModelStatus.MISSING:
-            models_missing += 1
-            issues.append(f"{fp.ref}: missing 3D model")
-        else:
-            models_present += 1
-        for w in model_report.rotation_warnings:
-            issues.append(w)
-
-        # Tally properties
-        if _is_property_complete(prop_report):
-            props_complete += 1
-        else:
-            props_incomplete += 1
-            missing_props: list[str] = []
-            for name, status in [
-                ("LCSC", prop_report.lcsc),
-                ("datasheet", prop_report.datasheet),
-                ("description", prop_report.description),
-            ]:
-                if status != PropertyStatus.PRESENT:
-                    missing_props.append(name)
-            if missing_props:
-                issues.append(
-                    f"{fp.ref}: missing properties: {', '.join(missing_props)}"
-                )
-
-        # Tally keepouts
-        if keepout_report.requires_keepout:
-            keepouts_required += 1
-            if keepout_report.keepout_present:
-                keepouts_present += 1
-            else:
-                issues.append(
-                    f"{fp.ref}: RF component missing keepout zone"
-                )
-
+        _tally_fp_reports(fp, model_report, prop_report, keepout_report, counts, issues)
         entries.append(ComponentAuditEntry(
             ref=fp.ref,
             lib_id=fp.lib_id,
@@ -424,14 +384,54 @@ def audit_board(
     return FootprintAuditReport(
         entries=tuple(entries),
         total_components=len(pcb.footprints),
-        models_present=models_present,
-        models_missing=models_missing,
-        properties_complete=props_complete,
-        properties_incomplete=props_incomplete,
-        keepouts_required=keepouts_required,
-        keepouts_present=keepouts_present,
+        models_present=counts["models_present"],
+        models_missing=counts["models_missing"],
+        properties_complete=counts["props_complete"],
+        properties_incomplete=counts["props_incomplete"],
+        keepouts_required=counts["keepouts_required"],
+        keepouts_present=counts["keepouts_present"],
         issues=tuple(issues),
     )
+
+
+def _tally_fp_reports(
+    fp: Footprint,
+    model_report: ModelReport,
+    prop_report: PropertyReport,
+    keepout_report: KeepoutReport,
+    counts: dict[str, int],
+    issues: list[str],
+) -> None:
+    """Update *counts* and *issues* in place for a single footprint's reports."""
+    if model_report.status == ModelStatus.MISSING:
+        counts["models_missing"] += 1
+        issues.append(f"{fp.ref}: missing 3D model")
+    else:
+        counts["models_present"] += 1
+    for w in model_report.rotation_warnings:
+        issues.append(w)
+
+    if _is_property_complete(prop_report):
+        counts["props_complete"] += 1
+    else:
+        counts["props_incomplete"] += 1
+        missing_props = [
+            name for name, status in [
+                ("LCSC", prop_report.lcsc),
+                ("datasheet", prop_report.datasheet),
+                ("description", prop_report.description),
+            ]
+            if status != PropertyStatus.PRESENT
+        ]
+        if missing_props:
+            issues.append(f"{fp.ref}: missing properties: {', '.join(missing_props)}")
+
+    if keepout_report.requires_keepout:
+        counts["keepouts_required"] += 1
+        if keepout_report.keepout_present:
+            counts["keepouts_present"] += 1
+        else:
+            issues.append(f"{fp.ref}: RF component missing keepout zone")
 
 
 def build_library(

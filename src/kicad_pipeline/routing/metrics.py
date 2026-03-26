@@ -54,6 +54,44 @@ class BoardRoutingMetrics:
     drc_violations: int = 0
 
 
+def _accumulate_net_stats(
+    r: RouteResult,
+    fp_by_ref: dict[str, Footprint],
+    per_net: list[RouteQuality],
+    totals: dict[str, float | int],
+) -> None:
+    """Score one routed net and accumulate stats into *totals* in place."""
+    from kicad_pipeline.routing.grid_router import _pad_abs_pos, _score_route
+
+    # Resolve pad positions for this net
+    pad_positions: list[tuple[float, float]] = []
+    for ref, pad_num in getattr(r, "_pad_refs", ()):
+        fp = fp_by_ref.get(ref)
+        if fp is None:
+            continue
+        for pad in fp.pads:
+            if pad.number == pad_num:
+                pad_positions.append(_pad_abs_pos(fp, pad))
+                break
+
+    # If we can't resolve pads, estimate from track endpoints
+    if len(pad_positions) < 2 and r.tracks:
+        endpoints: set[tuple[float, float]] = set()
+        for trk in r.tracks:
+            endpoints.add((round(trk.start.x, 3), round(trk.start.y, 3)))
+            endpoints.add((round(trk.end.x, 3), round(trk.end.y, 3)))
+        pad_positions = list(endpoints)[:10]
+
+    q = _score_route(r, pad_positions)
+    per_net.append(q)
+    totals["length"] += q.actual_length_mm
+    totals["manhattan"] += q.manhattan_ideal_mm
+    totals["vias"] += q.via_count
+    totals["bends"] += q.bend_count
+    totals["max_vias"] = max(float(totals["max_vias"]), q.via_count)
+    totals["ping_pong"] += count_via_ping_pongs(r)
+
+
 def compute_board_metrics(
     results: tuple[RouteResult, ...],
     footprints: list[Footprint],
@@ -67,19 +105,15 @@ def compute_board_metrics(
     Returns:
         :class:`BoardRoutingMetrics` with per-net and aggregate data.
     """
-    from kicad_pipeline.routing.grid_router import _pad_abs_pos, _score_route
-
     fp_by_ref: dict[str, Footprint] = {fp.ref: fp for fp in footprints}
 
     per_net: list[RouteQuality] = []
-    total_length = 0.0
-    total_vias = 0
-    total_manhattan = 0.0
     nets_routed = 0
     nets_failed = 0
-    max_vias = 0
-    total_bends = 0
-    ping_pong_count = 0
+    totals: dict[str, float | int] = {
+        "length": 0.0, "vias": 0, "manhattan": 0.0,
+        "bends": 0, "max_vias": 0, "ping_pong": 0,
+    }
 
     for r in results:
         if r.routed:
@@ -87,56 +121,24 @@ def compute_board_metrics(
         else:
             nets_failed += 1
             continue
+        _accumulate_net_stats(r, fp_by_ref, per_net, totals)
 
-        # Resolve pad positions for this net
-        pad_positions: list[tuple[float, float]] = []
-        for ref, pad_num in getattr(r, "_pad_refs", ()):
-            fp = fp_by_ref.get(ref)
-            if fp is None:
-                continue
-            for pad in fp.pads:
-                if pad.number == pad_num:
-                    pad_positions.append(_pad_abs_pos(fp, pad))
-                    break
+    total_manhattan = float(totals["manhattan"])
+    total_length = float(totals["length"])
+    overall_ratio = total_length / total_manhattan if total_manhattan > 0.01 else 1.0
 
-        # If we can't resolve pads, estimate from track endpoints
-        if len(pad_positions) < 2 and r.tracks:
-            endpoints: set[tuple[float, float]] = set()
-            for trk in r.tracks:
-                endpoints.add((round(trk.start.x, 3), round(trk.start.y, 3)))
-                endpoints.add((round(trk.end.x, 3), round(trk.end.y, 3)))
-            pad_positions = list(endpoints)[:10]
-
-        q = _score_route(r, pad_positions)
-        per_net.append(q)
-        total_length += q.actual_length_mm
-        total_manhattan += q.manhattan_ideal_mm
-        total_vias += q.via_count
-        total_bends += q.bend_count
-        max_vias = max(max_vias, q.via_count)
-
-        # Detect via ping-pong (top→bottom→top within one net)
-        ping_pong_count += count_via_ping_pongs(r)
-
-    overall_ratio = (
-        total_length / total_manhattan
-        if total_manhattan > 0.01
-        else 1.0
-    )
-
-    # Compute passive proximity (avg distance to dominant connected pin)
     avg_passive_dist = compute_passive_proximity(footprints)
 
     return BoardRoutingMetrics(
         total_track_length_mm=round(total_length, 1),
-        total_vias=total_vias,
+        total_vias=int(totals["vias"]),
         nets_routed=nets_routed,
         nets_failed=nets_failed,
         overall_length_ratio=round(overall_ratio, 2),
-        max_vias_per_net=max_vias,
+        max_vias_per_net=int(totals["max_vias"]),
         per_net=tuple(per_net),
-        total_bends=total_bends,
-        via_ping_pong_count=ping_pong_count,
+        total_bends=int(totals["bends"]),
+        via_ping_pong_count=int(totals["ping_pong"]),
         avg_passive_distance_mm=round(avg_passive_dist, 2),
     )
 

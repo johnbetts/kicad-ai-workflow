@@ -309,6 +309,31 @@ def _extract_net_map(tree: SExpNode) -> dict[int, str]:
     return result
 
 
+def _record_pad_net(
+    net_sub: list[SExpNode],
+    result: dict[int, str],
+    name_to_num: dict[str, int],
+) -> None:
+    """Record a single pad net entry into *result* and *name_to_num*."""
+    if len(net_sub) >= 3:
+        # (net N "name") format
+        try:
+            num = int(float(str(net_sub[1])))
+            name = str(net_sub[2])
+            result[num] = name
+        except (ValueError, IndexError):
+            pass
+    elif len(net_sub) == 2:
+        # (net "name") format (KiCad 10)
+        name = str(net_sub[1])
+        if name in name_to_num:
+            result[name_to_num[name]] = name
+        elif name not in result.values():
+            next_num = max(result.keys(), default=0) + 1
+            result[next_num] = name
+            name_to_num[name] = next_num
+
+
 def _extract_nets_from_pads(
     tree: SExpNode,
     result: dict[int, str],
@@ -322,25 +347,9 @@ def _extract_nets_from_pads(
             if not isinstance(child, list) or not child or child[0] != "pad":
                 continue
             net_sub = _find_child(child, "net")
-            if net_sub is None:
+            if not isinstance(net_sub, list):
                 continue
-            if len(net_sub) >= 3:
-                # (net N "name") format
-                try:
-                    num = int(float(str(net_sub[1])))
-                    name = str(net_sub[2])
-                    result[num] = name
-                except (ValueError, IndexError):
-                    pass
-            elif len(net_sub) == 2:
-                # (net "name") format (KiCad 10)
-                name = str(net_sub[1])
-                if name in name_to_num:
-                    result[name_to_num[name]] = name
-                elif name not in result.values():
-                    next_num = max(result.keys(), default=0) + 1
-                    result[next_num] = name
-                    name_to_num[name] = next_num
+            _record_pad_net(net_sub, result, name_to_num)
 
 
 def _net_info(
@@ -877,7 +886,22 @@ def remap_routing(
             ", ".join(sorted(dropped_nets)[:10]),
         )
 
-    # Remap tracks
+    tracks, vias, zones = _remap_routing_elements(routing, old_to_new, new_nets)
+    log.info(
+        "Remapped routing: %d/%d tracks, %d/%d vias, %d/%d zones",
+        len(tracks), len(routing.tracks),
+        len(vias), len(routing.vias),
+        len(zones), len(routing.zones),
+    )
+    return tuple(tracks), tuple(vias), tuple(zones)
+
+
+def _remap_routing_elements(
+    routing: PreservedRouting,
+    old_to_new: dict[int, int],
+    new_nets: dict[str, int],
+) -> tuple[list[Track], list[Via], list[ZonePolygon]]:
+    """Remap tracks, vias, and zones using the provided net-number map."""
     tracks: list[Track] = []
     for t in routing.tracks:
         new_net = old_to_new.get(t.net_number)
@@ -887,7 +911,6 @@ def remap_routing(
                 layer=t.layer, net_number=new_net, uuid=t.uuid,
             ))
 
-    # Remap vias
     vias: list[Via] = []
     for v in routing.vias:
         new_net = old_to_new.get(v.net_number)
@@ -897,13 +920,11 @@ def remap_routing(
                 layers=v.layers, net_number=new_net, uuid=v.uuid,
             ))
 
-    # Remap zones
     zones: list[ZonePolygon] = []
     for z in routing.zones:
         new_net = old_to_new.get(z.net_number)
         new_name = z.net_name
         if new_net is not None:
-            # Update net name to match new design
             for name, num in new_nets.items():
                 if num == new_net:
                     new_name = name
@@ -920,10 +941,4 @@ def remap_routing(
                 uuid=z.uuid,
             ))
 
-    log.info(
-        "Remapped routing: %d/%d tracks, %d/%d vias, %d/%d zones",
-        len(tracks), len(routing.tracks),
-        len(vias), len(routing.vias),
-        len(zones), len(routing.zones),
-    )
-    return tuple(tracks), tuple(vias), tuple(zones)
+    return tracks, vias, zones

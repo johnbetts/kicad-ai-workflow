@@ -121,7 +121,8 @@ def build_requirements() -> ProjectRequirements:
             Pin(number="5", name="AIN1", pin_type=PinType.INPUT, function=PinFunction.ANALOG_IN),
             Pin(number="6", name="AIN2", pin_type=PinType.INPUT, function=PinFunction.ANALOG_IN),
             Pin(number="7", name="AIN3", pin_type=PinType.INPUT, function=PinFunction.ANALOG_IN),
-            Pin(number="8", name="SDA", pin_type=PinType.BIDIRECTIONAL, function=PinFunction.I2C_SDA),
+            Pin(number="8", name="SDA", pin_type=PinType.BIDIRECTIONAL,
+                function=PinFunction.I2C_SDA),
             Pin(number="9", name="SCL", pin_type=PinType.INPUT, function=PinFunction.I2C_SCL),
             Pin(number="10", name="VDD", pin_type=PinType.POWER_IN, function=PinFunction.VCC),
         ),
@@ -213,7 +214,7 @@ def build_requirements() -> ProjectRequirements:
     # ----------------------------------------------------------------
     # All components (no R9 — DIP switch handles address selection)
     # ----------------------------------------------------------------
-    all_comps = tuple(sensor_comps + [u1, sw1, j5, c5, c6])
+    all_comps = tuple([*sensor_comps, u1, sw1, j5, c5, c6])
 
     # ----------------------------------------------------------------
     # Nets
@@ -227,9 +228,7 @@ def build_requirements() -> ProjectRequirements:
             if existing.name == ain:
                 all_nets[idx] = Net(
                     name=ain,
-                    connections=existing.connections + (
-                        NetConnection(ref="U1", pin=str(4 + ch)),
-                    ),
+                    connections=(*existing.connections, NetConnection(ref="U1", pin=str(4 + ch))),
                 )
                 break
 

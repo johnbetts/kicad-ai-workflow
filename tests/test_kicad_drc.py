@@ -190,14 +190,16 @@ class TestRunDrc:
         pcb.write_text("(kicad_pcb)")
         monkeypatch.delenv("KICAD_CLI", raising=False)
         # Mock the shared find_kicad_cli to raise, simulating kicad-cli not found
-        with patch(
-            "kicad_pipeline.validation.kicad_drc._find_kicad_cli_shared",
-            side_effect=__import__(
-                "kicad_pipeline.exceptions", fromlist=["KiCadPipelineError"]
-            ).KiCadPipelineError("Cannot find kicad-cli"),
+        with (
+            patch(
+                "kicad_pipeline.validation.kicad_drc._find_kicad_cli_shared",
+                side_effect=__import__(
+                    "kicad_pipeline.exceptions", fromlist=["KiCadPipelineError"]
+                ).KiCadPipelineError("Cannot find kicad-cli"),
+            ),
+            pytest.raises(DRCError, match="Cannot find"),
         ):
-            with pytest.raises(DRCError, match="Cannot find"):
-                run_drc(str(pcb))
+            run_drc(str(pcb))
 
 
 class TestDRCReport:

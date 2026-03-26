@@ -134,6 +134,10 @@ def _build_placement_context(
         positions[fp.ref] = (cx, cy, fp.rotation)
 
     subcircuits = detect_subcircuits(requirements)
+
+    from kicad_pipeline.optimization.constraint_resolver import resolve_constraints
+    constraint_set = resolve_constraints(requirements, subcircuits)
+
     return PlacementContext(
         positions=positions,
         fp_sizes=fp_sizes,
@@ -144,6 +148,7 @@ def _build_placement_context(
         zones=[],
         subcircuits=list(subcircuits),
         max_review_passes=max_review_passes,
+        constraints=constraint_set,
     )
 
 
@@ -153,6 +158,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     Returns relay_leds data for late-phase use.
     """
     phases["subnet_placement"](ctx)  # type: ignore[operator]
+    phases["constraint_placement"](ctx)  # type: ignore[operator]
     phases["relay_rows"](ctx)  # type: ignore[operator]
     phases["relay_connector_align"](ctx)  # type: ignore[operator]
     phases["relay_drivers"](ctx)  # type: ignore[operator]
@@ -213,6 +219,7 @@ def optimize_placement_ee(
         _phase_build_final,
         _phase_collision_resolution,
         _phase_connector_orientation,
+        _phase_constraint_placement,
         _phase_crystal_placement,
         _phase_decoupling,
         _phase_ethernet_group,
@@ -255,6 +262,7 @@ def optimize_placement_ee(
     _relay_leds = _run_level3_phases(
         ctx,
         subnet_placement=_phase_subnet_placement,
+        constraint_placement=_phase_constraint_placement,
         relay_rows=_phase_relay_rows,
         relay_connector_align=_phase_relay_connector_alignment,
         relay_drivers=_phase_relay_drivers,

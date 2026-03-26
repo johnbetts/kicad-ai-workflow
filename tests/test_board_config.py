@@ -28,7 +28,6 @@ from kicad_pipeline.models.requirements import (
     ProjectRequirements,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -219,7 +218,7 @@ class TestRelayInference:
         """GPIO net should resolve to MCU pin name when MCU is present."""
         comps, nets = _relay_circuit(1, "VIN", "OUT", "RELAY_1")
         mcu = _mcu_component({"IO15": "RELAY_1"})
-        all_comps = comps + (mcu,)
+        all_comps = (*comps, mcu)
         # Add MCU to RELAY_1 net
         net_map: dict[str, set[tuple[str, str]]] = {}
         for net in nets:

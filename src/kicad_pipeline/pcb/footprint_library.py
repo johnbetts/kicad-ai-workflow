@@ -331,7 +331,6 @@ def sync_pcb_to_schematic(pcb_path: Path, sch_path: Path) -> int:
     Returns:
         Number of footprints patched.
     """
-    import re
 
     if not sch_path.exists():
         log.warning("sync_pcb_to_schematic: schematic not found at %s", sch_path)
@@ -343,55 +342,7 @@ def sync_pcb_to_schematic(pcb_path: Path, sch_path: Path) -> int:
         return 0
 
     pcb_text = pcb_path.read_text(encoding="utf-8")
-    patched = 0
-
-    # For each footprint in the PCB, find its Reference property and
-    # insert a (path "/uuid") before the closing paren of the footprint.
-    # We work line-by-line to preserve formatting.
-    lines = pcb_text.split("\n")
-    result: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        result.append(line)
-
-        # Detect the start of a footprint block at indent level 2
-        if re.match(r'^  \(footprint\s', line):
-            # Scan the footprint block to find its Reference and where it ends
-            depth = line.count("(") - line.count(")")
-            j = i + 1
-            ref_found: str | None = None
-            has_path = False
-            while j < len(lines) and depth > 0:
-                fp_line = lines[j]
-                depth += fp_line.count("(") - fp_line.count(")")
-
-                # Look for Reference property
-                ref_match = re.search(
-                    r'\(property\s+"Reference"\s+"([^"]+)"', fp_line
-                )
-                if ref_match:
-                    ref_found = ref_match.group(1)
-
-                # Check if path already exists
-                if re.search(r'\(path\s+"', fp_line):
-                    has_path = True
-
-                if depth == 0 and ref_found and not has_path:
-                    # This is the closing line of the footprint.
-                    # Insert (path ...) before it.
-                    sym_uuid = ref_uuid.get(ref_found)
-                    if sym_uuid:
-                        result.append(f'    (path "/{sym_uuid}")')
-                        patched += 1
-
-                result.append(fp_line)
-                j += 1
-
-            i = j
-            continue
-
-        i += 1
+    result, patched = _patch_pcb_lines(pcb_text.split("\n"), ref_uuid)
 
     if patched > 0:
         pcb_path.write_text("\n".join(result), encoding="utf-8")
@@ -401,3 +352,47 @@ def sync_pcb_to_schematic(pcb_path: Path, sch_path: Path) -> int:
         )
 
     return patched
+
+
+def _patch_pcb_lines(
+    lines: list[str],
+    ref_uuid: dict[str, str],
+) -> tuple[list[str], int]:
+    """Scan PCB lines and insert ``(path ...)`` entries for footprints missing them.
+
+    Returns ``(patched_lines, count_patched)``.
+    """
+    import re as _re
+    result: list[str] = []
+    patched = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        result.append(line)
+
+        if _re.match(r'^  \(footprint\s', line):
+            depth = line.count("(") - line.count(")")
+            j = i + 1
+            ref_found: str | None = None
+            has_path = False
+            while j < len(lines) and depth > 0:
+                fp_line = lines[j]
+                depth += fp_line.count("(") - fp_line.count(")")
+                ref_match = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_line)
+                if ref_match:
+                    ref_found = ref_match.group(1)
+                if _re.search(r'\(path\s+"', fp_line):
+                    has_path = True
+                if depth == 0 and ref_found and not has_path:
+                    sym_uuid = ref_uuid.get(ref_found)
+                    if sym_uuid:
+                        result.append(f'    (path "/{sym_uuid}")')
+                        patched += 1
+                result.append(fp_line)
+                j += 1
+            i = j
+            continue
+
+        i += 1
+
+    return result, patched

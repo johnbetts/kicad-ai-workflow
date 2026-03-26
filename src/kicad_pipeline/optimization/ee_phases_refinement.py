@@ -271,6 +271,11 @@ def _post_clamp_decoupling_repull(
                 continue
             if cap_ref not in ctx.positions:
                 continue
+            # Skip caps that were deliberately positioned by a group phase
+            # (e.g. ethernet phase) — those placements are intentional and
+            # must not be overridden here.
+            if cap_ref in ctx.power_group_fixed or cap_ref in ctx.fixed_refs:
+                continue
             cap_group = _ref_to_group.get(cap_ref, "")
             if cap_group != ic_group:
                 continue
@@ -358,7 +363,7 @@ def _phase_late_decoupling(ctx: PlacementContext) -> None:
                 continue
             if cap_ref not in ctx.positions:
                 continue
-            if cap_ref in ctx.power_group_fixed:
+            if cap_ref in ctx.power_group_fixed or cap_ref in ctx.fixed_refs:
                 continue
             cap_group = _ref_to_group.get(cap_ref, "")
             if cap_group != ic_group:
@@ -372,6 +377,9 @@ def _phase_late_decoupling(ctx: PlacementContext) -> None:
             tx, ty = _cap_side_position(placed_count, ix, iy, iw, ih, cw, ch)
             tx = max(bounds[0] + 1.0, min(bounds[2] - 1.0, tx))
             ty = max(bounds[1] + 1.0, min(bounds[3] - 1.0, ty))
+            # Respect placement constraints before committing move
+            from kicad_pipeline.optimization.constraint_guard import respect_constraints
+            tx, ty, crot = respect_constraints(cap_ref, tx, ty, crot, ctx)
             ctx.positions[cap_ref] = (tx, ty, crot)
             placed_count += 1
             _decoupling_pulled += 1
@@ -588,8 +596,8 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
     adc_channels: list[tuple[str, str, list[str]]] = getattr(
         ctx, "_adc_channels", [],
     )
-    _STRIP_GAP_MM: float = getattr(ctx, "_STRIP_GAP_MM", 1.5)
-    _CHANNEL_SPACING_MM: float = getattr(ctx, "_CHANNEL_SPACING_MM", 8.0)
+    strip_gap_mm: float = getattr(ctx, "_STRIP_GAP_MM", 1.5)
+    channel_spacing_mm: float = getattr(ctx, "_CHANNEL_SPACING_MM", 8.0)
 
     if not (adc_channels and ctx.adc_ic_refs):
         return
@@ -618,10 +626,33 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
 
     n_total_ch = len(_all_ch_with_x)
     ch_zone_width = az_x2 - az_x1 - 4.0
-    ch_spacing = min(_CHANNEL_SPACING_MM, ch_zone_width / max(n_total_ch - 1, 1))
+    ch_spacing = min(channel_spacing_mm, ch_zone_width / max(n_total_ch - 1, 1))
     total_ch_width = (n_total_ch - 1) * ch_spacing
     ch_x_start = az_x1 + 2.0 + (ch_zone_width - total_ch_width) / 2.0
-    ch_y_top = az_y1 + 2.0
+
+    # Compute ch_y_top from the bottom edge of ADC channel connectors so
+    # passives are placed BELOW the screw terminals, not inside their
+    # courtyards.  Use only the J-refs that the ADC channel phase placed
+    # (ctx.adc_channel_refs), which are exclusively the input screw
+    # terminals (J1-J4 etc.).  Other J-refs (MCU headers, I2C connectors)
+    # are excluded to avoid a false high ch_y_top.
+    _gap_mm = 2.0  # clearance gap between connector bottom and first passive
+    _connector_bottoms: list[float] = []
+    for _jref in ctx.adc_channel_refs:
+        if not _jref.startswith("J"):
+            continue
+        if _jref not in ctx.best_positions:
+            continue
+        _jx, _jy, _jrot = ctx.best_positions[_jref]
+        _jw, _jh = ctx.fp_sizes.get(_jref, (5.0, 5.0))
+        # swap w/h for 90/270-degree rotated connectors
+        if _jrot % 180 in (90.0, 270.0):
+            _jw, _jh = _jh, _jw
+        _connector_bottoms.append(_jy + _jh / 2.0)
+    # Fallback to az_y1+2 when no channel connectors have been placed yet.
+    ch_y_top = (
+        max(_connector_bottoms) + _gap_mm if _connector_bottoms else az_y1 + 2.0
+    )
 
     _realigned = 0
     _ic_ch_xs: dict[str, list[float]] = {}
@@ -632,7 +663,7 @@ def _phase_late_adc_realignment(ctx: PlacementContext) -> None:
 
         strip_order = _build_adc_strip_order(passives)
         _realigned += _place_adc_strip(
-            strip_order, ch_x, ch_y_top, _STRIP_GAP_MM,
+            strip_order, ch_x, ch_y_top, strip_gap_mm,
             ctx.best_positions, ctx.fp_sizes, bounds,
         )
         _log.info(
@@ -702,6 +733,236 @@ def _place_grid_below_anchor(
     return realigned, row_y, col, row_max_h
 
 
+def _collect_all_relay_refs(
+    ctx: PlacementContext,
+    sc_list: list[object],
+    relay_leds: dict[str, list[str]],
+) -> set[str]:
+    """Build the complete set of relay-related refs across all relay driver subcircuits."""
+    all_refs: set[str] = set()
+    for sc in sc_list:
+        if sc.circuit_type == SubCircuitType.RELAY_DRIVER:  # type: ignore[union-attr]
+            all_refs.update(sc.refs)  # type: ignore[union-attr]
+            all_refs.update(relay_leds.get(sc.anchor_ref, []))  # type: ignore[union-attr]
+    all_refs.update(r for r in ctx.best_positions if r.startswith("K"))
+    return all_refs
+
+
+def _classify_relay_support_members(
+    support_members: list[str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Split support members into (q_refs, d_refs, all_r_refs, other_refs)."""
+    q_refs = sorted(r for r in support_members if r.startswith("Q"))
+    d_refs = sorted(r for r in support_members if r.startswith("D"))
+    all_r_refs = sorted(r for r in support_members if r.startswith("R"))
+    other_refs = sorted(
+        r for r in support_members
+        if not r.startswith("Q") and not r.startswith("D") and not r.startswith("R")
+    )
+    return q_refs, d_refs, all_r_refs, other_refs
+
+
+_RELAY_POWER_NETS = frozenset({"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"})
+
+
+def _separate_gate_resistors(
+    all_r_refs: list[str],
+    q_refs: list[str],
+    ctx: PlacementContext,
+) -> tuple[list[str], list[str]]:
+    """Split R refs into gate resistors (share non-power net with Q) and others."""
+    r_gate: list[str] = []
+    r_other: list[str] = []
+    for r_ref in all_r_refs:
+        shares_net = False
+        for net in ctx.requirements.nets:
+            if net.name.upper() in _RELAY_POWER_NETS:
+                continue
+            r_in = any(c.ref == r_ref for c in net.connections)
+            q_in = any(c.ref in q_refs for c in net.connections)
+            if r_in and q_in:
+                shares_net = True
+                break
+        if shares_net:
+            r_gate.append(r_ref)
+        else:
+            r_other.append(r_ref)
+    return r_gate, r_other
+
+
+def _find_extra_gate_resistors(
+    q_refs: list[str],
+    r_gate: list[str],
+    r_other: list[str],
+    ctx: PlacementContext,
+) -> list[str]:
+    """Find gate resistors outside the subcircuit that share a DRIVE net with Q."""
+    extra: list[str] = []
+    for net in ctx.requirements.nets:
+        if net.name.upper() in _RELAY_POWER_NETS:
+            continue
+        if "DRIVE" not in net.name.upper():
+            continue
+        if not any(c.ref in q_refs for c in net.connections):
+            continue
+        for conn in net.connections:
+            if (conn.ref.startswith("R")
+                    and conn.ref not in r_gate
+                    and conn.ref not in r_other
+                    and conn.ref in ctx.best_positions):
+                extra.append(conn.ref)
+    return extra
+
+
+def _place_two_column_ref(
+    ref: str,
+    col_x: float,
+    row_y: float,
+    rot: float,
+    bounds: tuple[float, float, float, float],
+    positions: dict[str, tuple[float, float, float]],
+) -> int:
+    """Place *ref* at (col_x, row_y, rot) clamped to bounds. Returns 1 if moved."""
+    px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, col_x))
+    py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, row_y))
+    old_x, old_y, _ = positions[ref]
+    positions[ref] = (px, py, rot)
+    return 1 if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0 else 0
+
+
+def _place_relay_driver_columns(
+    sc: object,
+    relay_leds: dict[str, list[str]],
+    ctx: PlacementContext,
+) -> int:
+    """Place D, Q, R, other, and LED members for one relay driver subcircuit.
+
+    Returns count of repositioned components.
+    """
+    anchor: str = sc.anchor_ref  # type: ignore[union-attr]
+    if anchor not in ctx.best_positions:
+        return 0
+
+    kx, ky, krot = ctx.best_positions[anchor]
+    kw, kh = ctx.fp_sizes.get(anchor, (18.0, 16.0))
+    if krot % 180 in (90.0, 270.0):
+        kw, kh = kh, kw
+    _log.info(
+        "    3b-late: %s centroid=(%.1f,%.1f) rot=%.0f size=%.1fx%.1f",
+        anchor, kx, ky, krot, kw, kh,
+    )
+
+    bounds = ctx.bounds
+    support_members = [r for r in sc.refs if r != anchor and r in ctx.best_positions]  # type: ignore[union-attr]
+    q_refs, d_refs, all_r_refs, other_refs = _classify_relay_support_members(support_members)
+    r_gate, r_other = _separate_gate_resistors(all_r_refs, q_refs, ctx)
+    r_gate.extend(_find_extra_gate_resistors(q_refs, r_gate, r_other, ctx))
+    other_refs.extend(r_other)
+
+    led_members = sorted(
+        set(relay_leds.get(anchor, [])) & set(ctx.best_positions.keys())
+    )
+
+    left_x = kx - 4.3
+    right_x = kx + 4.0
+    moved = 0
+
+    for d_ref in d_refs:
+        moved += _place_two_column_ref(d_ref, left_x, ky + 11.5, 0.0, bounds, ctx.best_positions)
+    for q_ref in q_refs:
+        moved += _place_two_column_ref(q_ref, left_x, ky + 14.1, 180.0, bounds, ctx.best_positions)
+    for r_ref in r_gate:
+        moved += _place_two_column_ref(
+            r_ref, right_x, ky + 15.4, 180.0, bounds, ctx.best_positions,
+        )
+
+    if other_refs:
+        count_other, _, _, _ = _place_grid_below_anchor(
+            other_refs, kx, kw, ky + 20.5, 2, bounds, ctx.fp_sizes, ctx.best_positions,
+        )
+        moved += count_other
+
+    moved += _place_relay_led_members(led_members, left_x, kx, kw, ky, bounds, ctx)
+    return moved
+
+
+def _place_relay_led_members(
+    led_members: list[str],
+    left_x: float,
+    kx: float,
+    kw: float,
+    ky: float,
+    bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> int:
+    """Place LED resistors and diodes in the left column below Q. Returns moved count."""
+    led_r = sorted(r for r in led_members if r.startswith("R"))
+    led_d = sorted(r for r in led_members if r.startswith("D"))
+    led_other = sorted(r for r in led_members if not r.startswith("R") and not r.startswith("D"))
+    moved = 0
+    for ref in led_r:
+        moved += _place_two_column_ref(ref, left_x, ky + 16.8, 0.0, bounds, ctx.best_positions)
+    for ref in led_d:
+        moved += _place_two_column_ref(ref, left_x, ky + 19.1, 180.0, bounds, ctx.best_positions)
+    if led_other:
+        count_led, _, _, _ = _place_grid_below_anchor(
+            led_other, kx, kw, ky + 21.3, 2, bounds, ctx.fp_sizes, ctx.best_positions,
+        )
+        moved += count_led
+    return moved
+
+
+def _place_relay_terminal_connectors(
+    ctx: PlacementContext,
+    all_relay_refs: set[str],
+) -> int:
+    """Align relay terminal connectors (J) to their relay X-coordinate. Returns moved count."""
+    from kicad_pipeline.optimization.ee_phases import _build_connector_to_relay_map
+
+    conn_to_relay = _build_connector_to_relay_map(ctx.requirements)
+    min_x, min_y, max_x, max_y = ctx.bounds
+    terminal_y = min_y + 5.0
+    moved = 0
+    for j_ref, k_ref in conn_to_relay.items():
+        if j_ref not in ctx.best_positions or k_ref not in ctx.best_positions:
+            continue
+        kx_late, _, _ = ctx.best_positions[k_ref]
+        old_jx, old_jy, _ = ctx.best_positions[j_ref]
+        px = max(min_x + 2.0, min(max_x - 2.0, kx_late))
+        py = max(min_y + 2.0, min(max_y - 2.0, terminal_y))
+        if abs(old_jx - px) > 1.0 or abs(old_jy - py) > 1.0:
+            moved += 1
+        ctx.best_positions[j_ref] = (px, py, 180.0)
+        all_relay_refs.add(j_ref)
+    return moved
+
+
+def _resolve_relay_post_alignment_collisions(
+    ctx: PlacementContext,
+    all_relay_refs: set[str],
+    n_realigned: int,
+) -> None:
+    """Resolve collisions after relay realignment if any components were moved."""
+    if not n_realigned:
+        return
+    _log.info("    3b-late: re-aligned %d relay support components", n_realigned)
+    post_collisions = _count_collisions(ctx.best_positions, ctx.fp_sizes)
+    if not post_collisions:
+        return
+    _log.info("    3b-late: %d post-alignment collisions — resolving", len(post_collisions))
+    relay_fixed = (
+        ctx.fixed_refs
+        | all_relay_refs
+        | ctx.top_edge_connector_refs
+        | ctx.adc_channel_refs
+        | ctx.adc_ic_refs
+        | ctx.power_group_fixed
+    )
+    ctx.best_positions = _resolve_collisions(
+        ctx.best_positions, ctx.fp_sizes, ctx.bounds, relay_fixed,
+    )
+
+
 def _phase_late_relay_realignment(
     ctx: PlacementContext,
     _relay_leds: dict[str, list[str]],
@@ -712,198 +973,27 @@ def _phase_late_relay_realignment(
     resolution may have displaced components.
 
     LEFT column (dx ~ -4.3mm from K.x):
-      D_flyback at dy=+10.8, rot=0
-      Q at dy=+13.3, rot=180
-      R_LED at dy=+15.5, rot=0
-      D_LED at dy=+17.7, rot=180
+      D_flyback at dy=+11.5, rot=0
+      Q at dy=+14.1, rot=180
+      R_LED at dy=+16.8, rot=0
+      D_LED at dy=+19.1, rot=180
+      other at dy=+20.5 (grid)
 
     RIGHT column (dx ~ +4.0mm from K.x):
       R_gate at dy=+15.4, rot=180
     """
     _log.info("  3b-late: Relay driver re-alignment (two-column)")
     sc_list = list(ctx.subcircuits)
-    bounds = ctx.bounds
+    all_relay_refs = _collect_all_relay_refs(ctx, sc_list, _relay_leds)
 
-    _all_relay_refs: set[str] = set()
-    for sc in sc_list:
-        if sc.circuit_type == SubCircuitType.RELAY_DRIVER:
-            _all_relay_refs.update(sc.refs)
-            _all_relay_refs.update(_relay_leds.get(sc.anchor_ref, []))
-    _all_relay_refs.update(r for r in ctx.best_positions if r.startswith("K"))
-
-    _relay_realigned = 0
+    relay_realigned = 0
     for sc in sc_list:
         if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
             continue
-        anchor = sc.anchor_ref
-        if anchor not in ctx.best_positions:
-            continue
-        kx, ky, krot = ctx.best_positions[anchor]
-        kw, kh = ctx.fp_sizes.get(anchor, (18.0, 16.0))
-        if krot % 180 in (90.0, 270.0):
-            kw, kh = kh, kw
-        _log.info("    3b-late: %s centroid=(%.1f,%.1f) rot=%.0f size=%.1fx%.1f",
-                  anchor, kx, ky, krot, kw, kh)
+        relay_realigned += _place_relay_driver_columns(sc, _relay_leds, ctx)
 
-        support_members = [
-            r for r in sc.refs
-            if r != anchor and r in ctx.best_positions
-        ]
-
-        # Classify by component type
-        q_refs = sorted(r for r in support_members if r.startswith("Q"))
-        d_refs = sorted(r for r in support_members if r.startswith("D"))
-        all_r_refs = sorted(r for r in support_members if r.startswith("R"))
-        other_refs = sorted(
-            r for r in support_members
-            if not r.startswith("Q") and not r.startswith("D") and not r.startswith("R")
-        )
-
-        # Separate gate resistors from LED resistors
-        power_nets = {"GND", "+5V", "+5V_RELAY", "+5V_LOGIC", "VCC"}
-        r_refs: list[str] = []
-        r_other: list[str] = []
-        for r_ref in all_r_refs:
-            shares_net = False
-            for net in ctx.requirements.nets:
-                if net.name.upper() in power_nets:
-                    continue
-                r_in = any(c.ref == r_ref for c in net.connections)
-                q_in = any(c.ref in q_refs for c in net.connections)
-                if r_in and q_in:
-                    shares_net = True
-                    break
-            if shares_net:
-                r_refs.append(r_ref)
-            else:
-                r_other.append(r_ref)
-
-        # Also find gate resistors NOT in subcircuit but sharing a DRIVE net with Q
-        for net in ctx.requirements.nets:
-            if net.name.upper() in power_nets:
-                continue
-            if "DRIVE" not in net.name.upper():
-                continue
-            q_in_net = any(c.ref in q_refs for c in net.connections)
-            if not q_in_net:
-                continue
-            for conn in net.connections:
-                if (conn.ref.startswith("R")
-                        and conn.ref not in r_refs
-                        and conn.ref not in r_other
-                        and conn.ref in ctx.best_positions):
-                    r_refs.append(conn.ref)
-
-        other_refs.extend(r_other)
-
-        led_members = sorted(
-            set(_relay_leds.get(anchor, []))
-            & set(ctx.best_positions.keys()),
-        )
-
-        # Two-column layout offsets (relative to K centroid)
-        left_x = kx - 4.3
-        right_x = kx + 4.0
-
-        # LEFT column: D_flyback (anode facing down toward Q collector)
-        for d_ref in d_refs:
-            old_x, old_y, _old_rot = ctx.best_positions[d_ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 10.8))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[d_ref] = (px, py, 0.0)
-
-        # LEFT column: Q (collector up toward D, 180 deg)
-        for q_ref in q_refs:
-            old_x, old_y, _old_rot = ctx.best_positions[q_ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 13.3))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[q_ref] = (px, py, 180.0)
-
-        # RIGHT column: R_gate
-        for r_ref in r_refs:
-            old_x, old_y, _old_rot = ctx.best_positions[r_ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.4))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[r_ref] = (px, py, 180.0)
-
-        # Place other support refs in grid below
-        if other_refs:
-            other_y = ky + 18.0
-            count_other, _, _, _ = _place_grid_below_anchor(
-                other_refs, kx, kw, other_y, 2,
-                bounds, ctx.fp_sizes, ctx.best_positions,
-            )
-            _relay_realigned += count_other
-
-        # LED pairs in LEFT column below Q
-        led_r = sorted(r for r in led_members if r.startswith("R"))
-        led_d = sorted(r for r in led_members if r.startswith("D"))
-        led_other = sorted(
-            r for r in led_members
-            if not r.startswith("R") and not r.startswith("D")
-        )
-        # R_LED: below Q, pad 1 facing up (rot=0)
-        for ref in led_r:
-            old_x, old_y, _old_rot = ctx.best_positions[ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.5))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[ref] = (px, py, 0.0)
-        # D_LED: below R_LED, anode facing up (rot=180)
-        for ref in led_d:
-            old_x, old_y, _old_rot = ctx.best_positions[ref]
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 17.7))
-            if abs(old_x - px) > 1.0 or abs(old_y - py) > 1.0:
-                _relay_realigned += 1
-            ctx.best_positions[ref] = (px, py, 180.0)
-        if led_other:
-            count_led, _, _, _ = _place_grid_below_anchor(
-                led_other, kx, kw, ky + 19.5, 2,
-                bounds, ctx.fp_sizes, ctx.best_positions,
-            )
-            _relay_realigned += count_led
-
-    # Also re-align relay terminal connectors (J) to their relay X
-    from kicad_pipeline.optimization.ee_phases import _build_connector_to_relay_map
-    _conn_to_relay = _build_connector_to_relay_map(ctx.requirements)
-    min_x, min_y, max_x, max_y = bounds
-    terminal_y = min_y + 5.0
-    for j_ref, k_ref in _conn_to_relay.items():
-        if j_ref not in ctx.best_positions or k_ref not in ctx.best_positions:
-            continue
-        kx_late, _ky_late, _krot_late = ctx.best_positions[k_ref]
-        old_jx, old_jy, _old_jrot = ctx.best_positions[j_ref]
-        px = max(min_x + 2.0, min(max_x - 2.0, kx_late))
-        py = max(min_y + 2.0, min(max_y - 2.0, terminal_y))
-        if abs(old_jx - px) > 1.0 or abs(old_jy - py) > 1.0:
-            _relay_realigned += 1
-        ctx.best_positions[j_ref] = (px, py, 180.0)
-        _all_relay_refs.add(j_ref)
-
-    if _relay_realigned:
-        _log.info("    3b-late: re-aligned %d relay support components", _relay_realigned)
-        _post_relay_collisions = _count_collisions(ctx.best_positions, ctx.fp_sizes)
-        if _post_relay_collisions:
-            _log.info(
-                "    3b-late: %d post-alignment collisions — resolving",
-                len(_post_relay_collisions),
-            )
-            _relay_fixed = (ctx.fixed_refs
-                            | _all_relay_refs
-                            | ctx.top_edge_connector_refs
-                            | ctx.adc_channel_refs | ctx.adc_ic_refs
-                            | ctx.power_group_fixed)
-            ctx.best_positions = _resolve_collisions(
-                ctx.best_positions, ctx.fp_sizes, ctx.bounds, _relay_fixed,
-            )
+    relay_realigned += _place_relay_terminal_connectors(ctx, all_relay_refs)
+    _resolve_relay_post_alignment_collisions(ctx, all_relay_refs, relay_realigned)
 
 
 def _phase_mcu_decoupling_repull(ctx: PlacementContext) -> None:
@@ -1014,6 +1104,8 @@ def _filter_stale_violations(
     """Remove violations that no longer apply after final clamping."""
     from kicad_pipeline.optimization.review_agent import (
         PlacementReview as _PlacementReview,
+    )
+    from kicad_pipeline.optimization.review_agent import (
         PlacementRule,
         PlacementViolation,
         _check_board_edge_clearance,
@@ -1060,6 +1152,108 @@ def _filter_stale_violations(
     )
 
 
+def _refresh_antenna_keepout(pcb: PCBDesign) -> PCBDesign:
+    """Replace stale board-level antenna keepout with one based on final RF position.
+
+    ``build_pcb()`` creates the board-level antenna keepout from the
+    pre-optimisation footprint position.  After ``optimize_placement_ee``
+    moves the RF module to its final location the stored keepout is stale.
+    This function finds the RF module's actual placed position and rebuilds the
+    keepout so it tracks the antenna end of the module correctly.
+    """
+    from kicad_pipeline.pcb.keepout_builder import (
+        ANTENNA_KEEPOUT_HEIGHT_MM,
+        ANTENNA_KEEPOUT_WIDTH_MM,
+        make_antenna_keepout,
+        make_rf_module_body_keepout,
+    )
+
+    _rf_kw = ("esp32", "wroom", "nina", "w5500", "wifi", "ble", "nrf52")
+    rf_fp = next(
+        (fp for fp in pcb.footprints
+         if any(kw in (fp.value or "").lower() for kw in _rf_kw)),
+        None,
+    )
+    if rf_fp is None:
+        return pcb
+
+    # Remove stale board-level antenna keepout(s) — identified by having 4 corners,
+    # being sized like an antenna keepout (15 x 10 mm), and no mounting-hole tag.
+    board_w = max(pt.x for pt in pcb.outline.polygon)
+    board_h = max(pt.y for pt in pcb.outline.polygon)
+    fresh_keepouts: list[object] = []
+    for ko in pcb.keepouts:
+        xs = [pt.x for pt in ko.polygon]
+        ys = [pt.y for pt in ko.polygon]
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        is_antenna_ko = (
+            len(ko.polygon) == 4
+            and w >= ANTENNA_KEEPOUT_WIDTH_MM - 1.0
+            and h >= ANTENNA_KEEPOUT_HEIGHT_MM - 1.0
+            and getattr(ko, "tag", "") != "mounting_hole"
+        )
+        if not is_antenna_ko:
+            fresh_keepouts.append(ko)
+
+    # Build fresh keepout from final placed position and rotation
+    rf_pos = (rf_fp.position.x, rf_fp.position.y, rf_fp.rotation)
+    _log.info(
+        "refresh_antenna_keepout: RF %s final pos (%.1f,%.1f,rot=%.0f)",
+        rf_fp.ref, rf_fp.position.x, rf_fp.position.y, rf_fp.rotation,
+    )
+    layer_count = (
+        pcb.design_rules.layer_count
+        if hasattr(pcb.design_rules, "layer_count")
+        else 2
+    )
+    new_ko = make_antenna_keepout(
+        board_w, ANTENNA_KEEPOUT_WIDTH_MM, ANTENNA_KEEPOUT_HEIGHT_MM,
+        rf_position=rf_pos, layer_count=layer_count, board_height=board_h,
+    )
+    fresh_keepouts.append(new_ko)
+    body_ko = make_rf_module_body_keepout(
+        rf_pos, layer_count=layer_count,
+        board_width=board_w, board_height=board_h,
+    )
+    if body_ko is not None:
+        fresh_keepouts.append(body_ko)
+
+    # Also refresh the board-level via fence — the old vias were generated from
+    # the pre-optimisation RF position and are now at the wrong coordinates.
+    from kicad_pipeline.pcb.zone_builder import make_rf_via_fence
+
+    # Remove old antenna vias (GND net, drill 0.6mm, near old keepout position)
+    gnd_net = 1  # GND is typically net 1
+    old_antenna_vias = {
+        v for v in pcb.vias
+        if v.net_number == gnd_net and abs(v.drill - 0.6) < 0.01
+    }
+    fresh_vias = [v for v in pcb.vias if v not in old_antenna_vias]
+
+    # Generate new vias around the refreshed keepout
+    new_fence_vias = make_rf_via_fence(
+        tuple(fresh_keepouts),
+        gnd_net_num=gnd_net,
+        spacing_mm=2.0,
+        footprints=pcb.footprints,
+        board_width=board_w,
+        board_height=board_h,
+    )
+    fresh_vias.extend(new_fence_vias)
+
+    _log.info(
+        "refresh_antenna_keepout: replaced %d stale vias with %d fresh fence vias",
+        len(old_antenna_vias), len(new_fence_vias),
+    )
+
+    return replace(
+        pcb,
+        keepouts=tuple(fresh_keepouts),
+        vias=tuple(fresh_vias),
+    )  # type: ignore[arg-type]
+
+
 def _phase_build_final(
     ctx: PlacementContext,
 ) -> tuple[PCBDesign, PlacementReview]:
@@ -1086,6 +1280,11 @@ def _phase_build_final(
     else:
         positions_tuple = _dict_to_positions(ctx.best_positions)
         final_pcb = _apply_positions(ctx.initial_pcb, positions_tuple)
+
+    # Refresh the board-level antenna keepout using the final RF module position.
+    # build_pcb() creates the keepout from pre-optimisation positions; after the
+    # EE optimizer moves the RF module the stored keepout is stale.
+    final_pcb = _refresh_antenna_keepout(final_pcb)
 
     final_pcb = _post_apply_pad_extent_clamp(final_pcb, ctx.bounds, _edge_m)
 

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from kicad_pipeline.models.pcb import (
     BoardOutline,
-    DesignRules,
     Footprint,
-    NetEntry,
     Pad,
     PCBDesign,
     Point,
@@ -14,10 +12,8 @@ from kicad_pipeline.models.pcb import (
 from kicad_pipeline.models.requirements import (
     Component,
     FeatureBlock,
-    MechanicalConstraints,
     Net,
     NetConnection,
-    ProjectInfo,
     ProjectRequirements,
 )
 from kicad_pipeline.optimization.scoring import (
@@ -27,10 +23,8 @@ from kicad_pipeline.optimization.scoring import (
     _score_net_proximity,
     compute_fast_placement_score,
 )
-
 from tests.helpers import (
     make_board_outline,
-    make_footprint,
     make_pad,
     make_pcb_design,
     make_requirements,
@@ -325,7 +319,7 @@ class TestComputeFastPlacementScore:
         result = compute_fast_placement_score(pcb, req)
         assert 0.0 <= result.overall_score <= 1.0
         assert result.grade in ("A", "B", "C", "D", "F")
-        assert len(result.breakdown) == 11
+        assert len(result.breakdown) == 12  # 11 original + constraint_compliance
 
     def test_good_placement_scores_higher(self) -> None:
         """Components placed together near center should score higher."""

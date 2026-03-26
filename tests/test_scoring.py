@@ -15,11 +15,7 @@ from kicad_pipeline.models.pcb import (
     Point,
 )
 from kicad_pipeline.models.requirements import (
-    Component,
-    FeatureBlock,
-    MechanicalConstraints,
     Net,
-    ProjectInfo,
     ProjectRequirements,
 )
 from kicad_pipeline.optimization.scoring import (
@@ -30,7 +26,6 @@ from kicad_pipeline.optimization.scoring import (
     compute_quality_score,
     score_to_grade,
 )
-
 from tests.helpers import (
     make_board_outline,
     make_component,
