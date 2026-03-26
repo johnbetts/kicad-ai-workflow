@@ -55,6 +55,24 @@ _COLLISION_GAP_MM: float = 0.5
 _DEFAULT_FP_SIZE: tuple[float, float] = (2.0, 2.0)
 """Fallback footprint size (w, h) when actual size is unknown."""
 
+# Footprint name substrings that indicate edge-mount connectors.
+# These connectors are designed to overhang the board edge (0mm margin per KI-021).
+_EDGE_MOUNT_FOOTPRINT_PATTERNS: tuple[str, ...] = (
+    "RJ45",
+    "USB-C",
+    "USB_C",
+    "USB-A",
+    "USB_A",
+    "Micro-USB",
+    "Micro_USB",
+    "Mini-USB",
+    "Mini_USB",
+    "HDMI",
+    "SD_Card",
+    "SDCard",
+    "HR911105A",
+)
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -115,6 +133,36 @@ class PlacementReview:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_edge_mount_connector(ref: str, pcb: PCBDesign) -> bool:
+    """Return True if this footprint is an edge-mount connector.
+
+    Edge-mount connectors (RJ45, USB-C, HDMI, etc.) are designed to
+    overhang the board edge.  They should NOT be flagged for off-board
+    or edge-clearance violations (KI-021: 0mm margin).
+    """
+    if not ref.startswith("J"):
+        return False
+    for fp in pcb.footprints:
+        if fp.ref == ref:
+            # Check footprint source (lib_id / footprint path)
+            fp_src = (fp.footprint_source or "").upper()
+            for pattern in _EDGE_MOUNT_FOOTPRINT_PATTERNS:
+                if pattern.upper() in fp_src:
+                    return True
+            # Also check value field (e.g. "HR911105A")
+            val = (fp.value or "").upper()
+            for pattern in _EDGE_MOUNT_FOOTPRINT_PATTERNS:
+                if pattern.upper() in val:
+                    return True
+            # Check lib_id if available
+            lib_id = (fp.lib_id or "").upper()
+            for pattern in _EDGE_MOUNT_FOOTPRINT_PATTERNS:
+                if pattern.upper() in lib_id:
+                    return True
+            break
+    return False
 
 
 def _dist(p1: tuple[float, float], p2: tuple[float, float]) -> float:
@@ -853,6 +901,10 @@ def _check_board_edge_clearance(
         min_gap = min(left_gap, right_gap, top_gap, bottom_gap)
 
         if min_gap < crit_margin:
+            # Edge-mount connectors are designed to overhang the board
+            # edge — do not flag them for clearance violations (KI-021).
+            if _is_edge_mount_connector(ref, pcb):
+                continue
             # Suggest moving inward
             sx, sy = x, y
             if left_gap == min_gap:
@@ -1001,6 +1053,9 @@ def _check_component_off_board(
         min_gap = min(left_gap, right_gap, top_gap, bottom_gap)
 
         if min_gap < 0.0:
+            # Edge-mount connectors are designed to overhang — skip (KI-021).
+            if _is_edge_mount_connector(ref, pcb):
+                continue
             # Pads physically off-board — compute suggested position
             sx, sy = cx, cy
             if left_gap < 0.0:
