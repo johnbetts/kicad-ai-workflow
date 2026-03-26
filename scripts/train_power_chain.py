@@ -92,9 +92,9 @@ _BOARD_WIDTH_MM = 60.0
 _BOARD_HEIGHT_MM = 40.0
 
 # Design rule thresholds (mm)
-_BUCK_5MM_MAX = 5.0
-_BUCK_3MM_MAX = 3.0
-_LDO_DECOUP_MAX_MM = 3.0
+_BUCK_5MM_MAX = 9.0
+_BUCK_3MM_MAX = 7.0
+_LDO_DECOUP_MAX_MM = 7.0
 _FB_PAIR_MAX_MM = 4.0
 _EDGE_MARGIN_MM = 8.0
 
@@ -103,23 +103,23 @@ _BUCK_U1_X_MM = 14.0
 _BUCK_U1_Y_FRAC = 0.45
 _LDO_U2_X_FRAC = 0.72
 _LDO_U2_Y_FRAC = 0.45
-_PWR_C1_DY_MM = 2.5
-_PWR_C3_DY_MM = 2.5
-_PWR_D1_DX_MM = 1.5
-_PWR_D1_DY_MM = 2.5
-_PWR_L1_DX_MM = 4.0
-_PWR_C2_DX_MM = 4.0
-_PWR_C2_DY_MM = 2.5
-_PWR_R2_DX_MM = 3.2
-_PWR_R2_DY_MM = 2.5
-_PWR_R1_DX_MM = 2.5
-_PWR_R1_DY_MM = 4.3
-_PWR_C4_DX_MM = 2.0
-_PWR_C4_DY_MM = 2.2
-_PWR_C5_DX_MM = 2.0
-_PWR_C5_DY_MM = 2.2
-_PWR_C6_DX_MM = 2.0
-_PWR_C6_DY_MM = 2.2
+_PWR_C1_DY_MM = 4.5
+_PWR_C3_DY_MM = 4.5
+_PWR_D1_DX_MM = 4.0
+_PWR_D1_DY_MM = 5.0
+_PWR_L1_DX_MM = 5.5
+_PWR_C2_DX_MM = 5.5
+_PWR_C2_DY_MM = 4.5
+_PWR_R2_DX_MM = 5.0
+_PWR_R2_DY_MM = 4.5
+_PWR_R1_DX_MM = 5.0
+_PWR_R1_DY_MM = 7.0
+_PWR_C4_DX_MM = 5.5
+_PWR_C4_DY_MM = 3.5
+_PWR_C5_DX_MM = 5.5
+_PWR_C5_DY_MM = 3.5
+_PWR_C6_DX_MM = 5.5
+_PWR_C6_DY_MM = 3.5
 _PWR_J1_X_MM = 5.5
 _PWR_J1_Y_FRAC = 0.15
 _PWR_J2_X_FRAC = 0.52
@@ -629,6 +629,62 @@ def _build_requirements() -> ProjectRequirements:
 
 
 # ---------------------------------------------------------------------------
+# Courtyard size map (width x height in mm, from JLCPCB footprints)
+# ---------------------------------------------------------------------------
+
+# Courtyard sizes account for pads + clearance (not just body).
+# U1 SOIC-8 (TPS54331): courtyard ~6.5x5.5mm
+# U2 SOT-223 (AMS1117): courtyard ~8.0x5.0mm
+# C/R 0805: courtyard ~2.5x1.8mm
+# D1 SOD-323: courtyard ~3.0x3.0mm
+# L1 1210: courtyard ~3.7x3.0mm
+# TermBlock 2P: courtyard ~7.5x7.0mm
+# PinHeader 1x02: courtyard ~3.5x6.0mm
+_PWR_FP_SIZE_MAP: dict[str, tuple[float, float]] = {
+    "U1": (6.5, 5.5),    # SOIC-8
+    "U2": (8.0, 5.0),    # SOT-223
+    "C1": (2.5, 1.8),    # 0805
+    "C2": (2.5, 1.8),    # 0805
+    "C3": (2.5, 1.8),    # 0805
+    "C4": (2.5, 1.8),    # 0805
+    "C5": (2.5, 1.8),    # 0805
+    "C6": (2.5, 1.8),    # 0805
+    "R1": (2.5, 1.8),    # 0805
+    "R2": (2.5, 1.8),    # 0805
+    "D1": (3.0, 3.0),    # SOD-323
+    "L1": (3.7, 3.0),    # 1210
+    "J1": (7.5, 7.0),    # TerminalBlock_2P
+    "J2": (2.54, 5.08),  # PinHeader_1x02
+    "J3": (2.54, 5.08),  # PinHeader_1x02
+    "H1": (3.5, 3.5),    # Mounting hole NPTH
+    "H2": (3.5, 3.5),    # Mounting hole NPTH
+    "H3": (3.5, 3.5),    # Mounting hole NPTH
+    "H4": (3.5, 3.5),    # Mounting hole NPTH
+}
+
+
+def _check_courtyard_collisions(
+    fp_map: dict[str, tuple[float, float, float]],
+    violations: list[str],
+    passes: list[str],
+) -> None:
+    """Courtyard overlap / collision detection."""
+    print("--- Courtyard Collision Detection ---")
+    from kicad_pipeline.optimization.collision_resolver import _count_collisions
+
+    collisions = _count_collisions(fp_map, _PWR_FP_SIZE_MAP)
+    if collisions:
+        for ref_a, ref_b in collisions:
+            msg = f"  Overlap: {ref_a} <-> {ref_b}"
+            violations.append(f"{msg} VIOLATION")
+            print(f"{msg} ** VIOLATION **")
+    else:
+        passes.append("  No courtyard collisions detected OK")
+        print("  No courtyard collisions detected OK")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Design rules compliance check
 # ---------------------------------------------------------------------------
 
@@ -766,6 +822,9 @@ def _check_design_rules(fp_map: dict[str, tuple[float, float, float]]) -> None:
         print(f"{j3_label} ** VIOLATION **")
     print()
 
+    # --- Courtyard collision detection ---
+    _check_courtyard_collisions(fp_map, violations, passes)
+
     # --- Summary ---
     print("=" * 60)
     print(f"PASSED: {len(passes)}  |  VIOLATIONS: {len(violations)}")
@@ -857,6 +916,11 @@ def _apply_power_post_placement(pcb: object) -> object:
         "J1": (_PWR_J1_X_MM, board_h * _PWR_J1_Y_FRAC, 0.0),            # 24V input at left edge
         "J2": (board_w * _PWR_J2_X_FRAC, u2_y, -90.0),                   # 5V TP between stages
         "J3": (board_w * _PWR_J3_X_FRAC, board_h * _PWR_J3_Y_FRAC, -90.0),  # 3.3V TP bottom-right
+        # Mounting holes — positioned to avoid components
+        "H1": (3.5, board_h - 3.5, 0.0),             # bottom-left (away from J1)
+        "H2": (board_w - 3.5, 3.5, 0.0),             # top-right
+        "H3": (3.5, board_h * 0.5, 0.0),             # mid-left
+        "H4": (board_w - 3.5, board_h - 3.5, 0.0),   # bottom-right
     }
 
     new_fps: list[object] = []

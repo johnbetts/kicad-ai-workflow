@@ -88,14 +88,14 @@ _MCU_HEADER_MIN_X_MM = 50.0
 
 
 # Post-placement geometry constants (mm)
-_ANALOG_REF_J1_X_MM = 12.35
-_ANALOG_REF_J4_X_MM = 46.35
+_ANALOG_REF_J1_X_MM = 10.0
+_ANALOG_REF_J4_X_MM = 53.0
 _ANALOG_J_Y_MM = 3.5
 _ANALOG_STRIP_DY_MM = 8.3
 _ANALOG_U1_X_MM = 45.75
 _ANALOG_U1_Y_MM = 28.58
 _ANALOG_C1_X_MM = 45.61
-_ANALOG_C1_Y_MM = 29.5
+_ANALOG_C1_Y_MM = 32.0
 _ANALOG_R9_X_MM = 49.0
 _ANALOG_R9_Y_MM = 22.16
 _ANALOG_R10_X_MM = 49.0
@@ -593,14 +593,21 @@ def _apply_analog_post_placement(pcb: object) -> object:
     # Per-component dx offsets from connector center (averaged across channels)
     # and per-channel linear interpolation slopes (components shift right
     # for channels further right, toward U1)
+    #
+    # Courtyard sizes (from estimate_courtyard_mm, rotation-aware):
+    #   R (0805) at 90deg:  2.4mm wide x 4.1mm tall
+    #   D (SOD-323) at 0deg: 5.5mm wide x 4.5mm tall
+    #   C (0805) at 90deg:  2.4mm wide x 4.4mm tall
+    # Minimum center-to-center gaps: C-D = 3.95mm, D-R = 3.95mm, R-R = 2.4mm
+    # Added 0.3mm margin beyond minimum to each gap.
     comp_offsets: dict[str, tuple[float, float, float]] = {
         # (avg_dx, per_ch_slope_dx, rotation)
         # avg_dx: base offset from connector center
         # per_ch_slope_dx: additional dx per channel index (0-based)
-        "C_filt": (-4.64, 0.75, 90.0),    # leftmost in strip
-        "D_tvs":  (-1.77, 0.75, 0.0),     # second from left
-        "R_bot":  (+1.56, 0.76, 90.0),    # second from right
-        "R_top":  (+3.88, 0.76, -90.0),   # rightmost in strip
+        "C_filt": (-6.40, 0.75, 90.0),    # leftmost in strip
+        "D_tvs":  (-2.15, 0.75, 0.0),     # second from left (4.25mm from C_filt)
+        "R_bot":  (+2.10, 0.76, 90.0),    # second from right (4.25mm from D_tvs)
+        "R_top":  (+4.80, 0.76, -90.0),   # rightmost in strip (2.7mm from R_bot)
     }
 
     # --- Fixed component positions (reference-derived, scaled) ---

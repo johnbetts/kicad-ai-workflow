@@ -104,7 +104,7 @@ _HEADER_2P_FP = "PinHeader_1x02_P2.54mm_Vertical"
 # ---------------------------------------------------------------------------
 
 _BOARD_WIDTH_MM = 55.0
-_BOARD_HEIGHT_MM = 55.0
+_BOARD_HEIGHT_MM = 40.0
 
 # Design rule thresholds (mm)
 #
@@ -134,20 +134,20 @@ _DIFF_PAIR_MAX_MM = 4.0
 _ETH_J1_X_FRAC = 0.50
 _ETH_J1_Y_MM = 3.5
 _ETH_U1_X_FRAC = 0.50
-_ETH_U1_Y_MM = 15.5
-_ETH_R_DX_MM = 0.8
-_ETH_R_DY_MM = 2.87
-_ETH_CRYSTAL_DX_MM = 4.6
-_ETH_XTAL_CAP_DY_MM = 1.8
-_ETH_C2_DY_MM = 2.5
-_ETH_C1C3_DX_MM = 2.85
-_ETH_C1_DY_MM = 0.7
-_ETH_C3_DY_MM = 0.8
-_ETH_R3_DX_MM = 2.85
-_ETH_R3_DY_MM = 2.3
+_ETH_U1_Y_MM = 18.0
+_ETH_R_DX_MM = 1.5
+_ETH_R_DY_MM = 0.0
+_ETH_CRYSTAL_DX_MM = 8.5
+_ETH_XTAL_CAP_DY_MM = 4.0
+_ETH_C2_DY_MM = 7.5
+_ETH_C1C3_DX_MM = 8.5
+_ETH_C1_DY_MM = 0.0
+_ETH_C3_DY_MM = 3.0
+_ETH_R3_DX_MM = 8.5
+_ETH_R3_DY_MM = 6.0
 _ETH_J2_X_FRAC = 0.30
 _ETH_J3_X_FRAC = 0.70
-_ETH_HEADER_Y_OFFSET_MM = 3.5
+_ETH_HEADER_Y_OFFSET_MM = 8.5
 
 # ---------------------------------------------------------------------------
 # Component definitions
@@ -726,7 +726,7 @@ _ETH_REQUIRED_REFS: tuple[str, ...] = (
 )
 
 _ETH_FP_SIZE_MAP: dict[str, tuple[float, float]] = {
-    "U1": (3.5, 3.5),
+    "U1": (10.0, 10.0),
     "J1": (16.0, 14.0),
     "Y1": (3.6, 1.8),
     "C1": (2.2, 1.4), "C2": (2.2, 1.4), "C3": (2.2, 1.4),
@@ -1090,36 +1090,20 @@ def _apply_ethernet_post_placement(pcb: object) -> object:
     # J1 (16x14) to R(0805 rot90=1.4x2.2): min X = (16+1.4)/2 = 8.7, Y = (14+2.2)/2 = 8.1
     # 0805 to 0805: min X = 2.2, Y = 1.4
 
-    # R1/R2 (TX termination) — right of J1, above U1
-    # J1 right edge ~ j1_x + 8 = 26.0
-    # U1 top edge ~ u1_y - 3.75 = 11.75
-    # Place R1/R2 rotated 90 (1.4w x 2.2h) above U1 right side
-    # R to U1: min Y (rot90) = (7.5+2.2)/2 = 4.85
-    # So R_y < u1_y - 4.85 = 10.65
-    # R to J1: min X from J1 center = (16+1.4)/2 = 8.7
-    # R_x > j1_x + 8.7 = 26.7
-    # With U1 courtyard at 5.5x5.5:
-    # U1 to 0805: min X = (5.5+2.2)/2 = 3.85, min Y = (5.5+1.4)/2 = 3.45
-    # U1 to Crystal: min X = (5.5+3.6)/2 = 4.55, min Y = (5.5+1.8)/2 = 3.65
-    # U1 to R(rot90, 1.4x2.2): min X = (5.5+1.4)/2 = 3.45, min Y = (5.5+2.2)/2 = 3.85
-
-    # R1/R2 (TX termination) above U1, right side
-    # J1 at (18, 3.5), J1 right edge = 18+8 = 26.0
-    # R rot90 to J1: min X = (16+1.4)/2 = 8.7 from j1_x
-    # r1_x > 18 + 8.7 = 26.7
-    # R to U1: min Y(rot90) = 3.85, so r1_y < u1_y - 3.85 = 11.65
-    # Place R1/R2 above U1. rot90 => 1.4w x 2.2h
-    # Must be > 8.7mm X from J1 center (18.0): r1_x > 26.7
-    # R-R min X gap = (1.4+1.4)/2 = 1.4
-    # R1/R2 (TX termination) — above U1, symmetric. rot90 => effective (1.4, 2.2)
-    # U1 body 3.5x3.5: min Y = (3.5+2.2)/2 = 2.85
-    # At dx=±0.8, dy=2.85: dist=sqrt(0.64+8.12)=2.96 ≤3.0
-    # AABB: dx=0.8 < (3.5+1.4)/2=2.45 AND dy=2.85 = 2.85 => borderline
-    # R-R: dx=1.6 > (1.4+1.4)/2=1.4 => no collision
-    r1_x = u1_x - _ETH_R_DX_MM        # 24.2  left of U1 center
-    r1_y = u1_y - _ETH_R_DY_MM        # 12.63  above U1 (dy=2.87 > 2.85 collision, dist=2.98 ≤3.0)
-    r2_x = u1_x + _ETH_R_DX_MM        # 25.8  right of U1 center
-    r2_y = r1_y                        # 12.63
+    # R1/R2 (TX termination) — left of U1, between J1 and U1
+    # U1 courtyard ~10x10mm (half=5.0). J1 at top, 16x14mm (half_x=8, half_y=7).
+    # J1 bottom edge = j1_y + 7 = 10.5mm. U1 courtyard top = u1_y - 5.0 = 10.5mm.
+    # No vertical gap between J1 and U1 courtyard, so R1/R2 go to the LEFT side,
+    # outside both J1 and U1 X ranges.
+    # J1 left edge = j1_x - 8. Place R1/R2 left of that.
+    # R rotated 90 => effective (1.4w, 2.2h), half = (0.7, 1.1)
+    # R1/R2 X < j1_x - 8 - 0.7 - 0.5 (clearance)
+    # J1 left edge = j1_x - 9.5. R rotated 90 => (1.5w, 2.4h), half=(0.75, 1.2).
+    # Place R1/R2 left of J1 with clearance. Also clear of U1 (left=u1_x-5.5).
+    r1_x = j1_x - 9.5 - 0.75 - 1.0   # left of J1, with 1mm margin
+    r1_y = u1_y - 5.5 - 1.2 - 0.5    # above U1 courtyard top
+    r2_x = r1_x
+    r2_y = r1_y - 3.0                 # R2 above R1, 3mm apart
 
     # Y1 (crystal) right of U1 — min X collision-free = 4.55
     # Place at dx=4.6 for Euclidean ~4.6mm (under 5mm!)
