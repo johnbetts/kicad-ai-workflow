@@ -1702,14 +1702,33 @@ def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout]
 
 
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
-    """Return existing or new 3D model tuple for *fp* (idempotent)."""
+    """Return 3D model tuple with corrected offset for *fp*.
+
+    The KiCad standard ESP32-S3-WROOM-1.step model has its origin at the
+    module center, which is ~3.63mm north of the JLCPCB footprint's pad
+    centroid.  Always apply this offset, even if the cached footprint
+    already has a model with offset (0,0,0).
+    """
+    _ESP32_Y_OFFSET = 3.63  # mm, STEP origin vs pad centroid
+
+    # Use existing model path if available, but always correct the offset
     if fp.models:
-        return fp.models
+        base = fp.models[0]
+        if abs(base.offset[1] - _ESP32_Y_OFFSET) > 0.1:
+            # Offset needs correction
+            return (Footprint3DModel(
+                path=base.path,
+                offset=(base.offset[0], _ESP32_Y_OFFSET, base.offset[2]),
+                scale=base.scale,
+                rotate=base.rotate,
+            ),)
+        return fp.models  # already correct
+
     model = _model_for_package("RF_Module:ESP32-S3-WROOM-1", fp.layer)
     if model is None:
         model = Footprint3DModel(
             path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
-            offset=(0.0, 3.63, 0.0),
+            offset=(0.0, _ESP32_Y_OFFSET, 0.0),
         )
     return (model,)
 
