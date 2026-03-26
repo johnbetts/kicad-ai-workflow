@@ -5,9 +5,23 @@ Mechanically enforces: generate → render → review → fix → repeat.
 No single agent controls the loop — this script does.
 
 Usage:
-  python scripts/pcb-review-loop.py board.kicad_pcb [--max-iterations 20] [--human-every 5]
+  # Single board by path
   python scripts/pcb-review-loop.py output/train_mcu_core/train_mcu_core.kicad_pcb
+
+  # Single board by shorthand
+  python scripts/pcb-review-loop.py mcu
+  python scripts/pcb-review-loop.py relay --max-iterations 50 --human-every 10
+
+  # Multiple boards (comma-separated)
+  python scripts/pcb-review-loop.py relay,power,mcu
+
+  # All 5 training boards
+  python scripts/pcb-review-loop.py all
+
+  # Standalone project board
   python scripts/pcb-review-loop.py output/nl-s-3c-placement.kicad_pcb --human-every 10
+
+Board selectors: mcu, relay, power, analog, ethernet, all
 
 Human sign-off is required:
   - Every N iterations (--human-every, default 5)
@@ -35,6 +49,61 @@ RENDERS_DIR = Path(".claude/review-renders")
 EVIDENCE_FILE = Path(".claude/last_review.json")
 LOG_FILE = Path(".claude/review-loop.log")
 STATE_FILE = Path(".claude/review-loop-state.json")
+
+# Training board shorthand → path (relative to kicad-ai-workflow root)
+TRAINING_BOARDS: dict[str, str] = {
+    "mcu": "output/train_mcu_core/train_mcu_core.kicad_pcb",
+    "relay": "output/train_relay/train_relay.kicad_pcb",
+    "power": "output/train_power/train_power.kicad_pcb",
+    "analog": "output/train_analog_input/train_analog_input.kicad_pcb",
+    "ethernet": "output/train_ethernet/train_ethernet.kicad_pcb",
+}
+
+
+def resolve_boards(selector: str) -> list[str]:
+    """Resolve a board selector to a list of .kicad_pcb paths.
+
+    Accepts:
+      - 'all' → all 5 training boards
+      - 'mcu' → single training board
+      - 'relay,power,mcu' → multiple training boards
+      - 'output/foo/bar.kicad_pcb' → literal path
+    """
+    if selector == "all":
+        boards = list(TRAINING_BOARDS.values())
+        missing = [b for b in boards if not Path(b).exists()]
+        if missing:
+            print(f"WARNING: Missing boards: {missing}")
+            boards = [b for b in boards if Path(b).exists()]
+        return boards
+
+    # Comma-separated list of selectors
+    if "," in selector:
+        result: list[str] = []
+        for part in selector.split(","):
+            result.extend(resolve_boards(part.strip()))
+        return result
+
+    # Known shorthand
+    if selector in TRAINING_BOARDS:
+        path = TRAINING_BOARDS[selector]
+        if not Path(path).exists():
+            print(f"ERROR: Board not found: {path}")
+            sys.exit(1)
+        return [path]
+
+    # Literal path
+    if Path(selector).exists():
+        return [selector]
+
+    # Fuzzy match — check if selector is a substring of any known board
+    matches = [k for k in TRAINING_BOARDS if selector in k]
+    if len(matches) == 1:
+        return [TRAINING_BOARDS[matches[0]]]
+
+    print(f"ERROR: Unknown board selector '{selector}'")
+    print(f"Known boards: {', '.join(TRAINING_BOARDS.keys())}, all")
+    sys.exit(1)
 
 # Personas with specific review instructions
 FABRICATOR_PROMPT = """\
@@ -261,9 +330,12 @@ def render_board(board_path: str) -> dict[str, Path]:
     """Render 2D and 3D images directly via kicad-image-gen CLI.
 
     Returns dict of render type → file path.
+    Renders are placed in the board's own directory (next to the .kicad_pcb file).
     No Claude needed — deterministic CLI tool.
     """
-    RENDERS_DIR.mkdir(parents=True, exist_ok=True)
+    board_dir = Path(board_path).parent
+    render_dir = board_dir  # renders go alongside the .kicad_pcb
+    render_dir.mkdir(parents=True, exist_ok=True)
     renders: dict[str, Path] = {}
 
     views = [
@@ -275,7 +347,7 @@ def render_board(board_path: str) -> dict[str, Path]:
     ]
 
     for mode, extra_args, filename in views:
-        out_path = RENDERS_DIR / filename
+        out_path = render_dir / filename
         cmd = ["kicad-image-gen", mode, board_path, "-o", str(out_path)]
         cmd.extend(extra_args)
         log(f"  Rendering {filename}...")
@@ -316,10 +388,12 @@ def parse_json_from_response(response: str) -> dict:
     return {"error": "Could not parse JSON from response", "raw": response[:500]}
 
 
-def ask_human(iteration: int, result: IterationResult) -> str:
+def ask_human(iteration: int, result: IterationResult, board_path: str = "") -> str:
     """Present results and get human verdict."""
+    board_name = Path(board_path).stem if board_path else "unknown"
+    board_dir = Path(board_path).parent if board_path else RENDERS_DIR
     print("\n" + "=" * 60)
-    print(f"  HUMAN REVIEW REQUIRED — Iteration {iteration}")
+    print(f"  HUMAN REVIEW REQUIRED — {board_name} — Iteration {iteration}")
     print("=" * 60)
     print(f"\n  Fabricator: {'PASS' if result.fab_pass else 'FAIL'}"
           f" ({len(result.fab_issues)} issues)")
@@ -337,7 +411,7 @@ def ask_human(iteration: int, result: IterationResult) -> str:
             desc = issue.get("description", issue.get("type", "?"))
             print(f"    [{sev}] {ref}: {desc}")
 
-    print(f"\n  Renders saved to: {RENDERS_DIR}/")
+    print(f"\n  Renders saved to: {board_dir}/")
     print("  Open them to inspect the board visually.\n")
 
     while True:
@@ -465,29 +539,16 @@ def phase_fix(board_path: str, fab_issues: list[dict], ee_issues: list[dict],
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="PCB Review-Iterate Loop — mechanically enforced review workflow"
-    )
-    parser.add_argument("board", help="Path to .kicad_pcb file")
-    parser.add_argument("--max-iterations", type=int, default=20,
-                        help="Max iterations before stopping (default: 20)")
-    parser.add_argument("--human-every", type=int, default=5,
-                        help="Ask human every N iterations (default: 5)")
-    parser.add_argument("--resume", action="store_true",
-                        help="Resume from saved state")
-    parser.add_argument("--skip-3d", action="store_true",
-                        help="Skip component-by-component 3D verification")
-    args = parser.parse_args()
-
-    board_path = args.board
+def run_board(board_path: str, max_iterations: int, human_every: int,
+              resume: bool, skip_3d: bool) -> None:
+    """Run the review-iterate loop for a single board."""
     if not Path(board_path).exists():
-        print(f"Board file not found: {board_path}")
-        sys.exit(1)
+        log(f"ERROR: Board file not found: {board_path}")
+        return
 
     # Load or create state
     state: LoopState | None = None
-    if args.resume:
+    if resume:
         state = LoopState.load()
         if state:
             log(f"Resuming from iteration {state.iteration}")
@@ -495,8 +556,8 @@ def main() -> None:
     if state is None:
         state = LoopState(
             board_path=board_path,
-            max_iterations=args.max_iterations,
-            human_every=args.human_every,
+            max_iterations=max_iterations,
+            human_every=human_every,
             started=datetime.now().isoformat(),
         )
 
@@ -521,7 +582,7 @@ def main() -> None:
         ee_pass, ee_issues = phase_ee_review(renders)
 
         # Phase 4: 3D verification (optional)
-        if args.skip_3d:
+        if skip_3d:
             comp_pass, comp_issues = True, 0
         else:
             comp_pass, comp_issues = phase_3d_verify(renders)
@@ -558,7 +619,7 @@ def main() -> None:
             needs_human = True
 
         if needs_human:
-            verdict = ask_human(state.iteration, result)
+            verdict = ask_human(state.iteration, result, board_path)
             result.human_verdict = verdict
             state.last_human_iteration = state.iteration
 
@@ -613,9 +674,61 @@ def main() -> None:
             log("All reviews passed — will ask human next iteration")
 
     # Max iterations reached
-    log(f"\nMax iterations ({state.max_iterations}) reached.")
+    log(f"\nMax iterations ({state.max_iterations}) reached for {board_path}.")
     log("Run with --resume to continue, or review renders manually.")
     state.save()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="PCB Review-Iterate Loop — mechanically enforced review workflow"
+    )
+    parser.add_argument(
+        "board", nargs="?", default=None,
+        help="Board selector: path to .kicad_pcb, shorthand (mcu/relay/power/analog/ethernet), "
+             "comma list (relay,power), or 'all'",
+    )
+    parser.add_argument("--max-iterations", type=int, default=20,
+                        help="Max iterations per board (default: 20)")
+    parser.add_argument("--human-every", type=int, default=5,
+                        help="Ask human every N iterations (default: 5)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from saved state")
+    parser.add_argument("--skip-3d", action="store_true",
+                        help="Skip component-by-component 3D verification")
+    parser.add_argument("--list", action="store_true", dest="list_boards",
+                        help="List available training boards and exit")
+    args = parser.parse_args()
+
+    if args.list_boards:
+        print("Available training boards:")
+        for name, path in TRAINING_BOARDS.items():
+            exists = "OK" if Path(path).exists() else "MISSING"
+            print(f"  {name:10s} → {path}  [{exists}]")
+        return
+
+    if args.board is None:
+        parser.error("board selector is required (e.g., 'mcu', 'all', or a .kicad_pcb path)")
+
+    boards = resolve_boards(args.board)
+    log(f"Boards to process: {len(boards)}")
+    for b in boards:
+        log(f"  - {b}")
+
+    for i, board_path in enumerate(boards):
+        if len(boards) > 1:
+            log(f"\n{'#' * 60}")
+            log(f"# BOARD {i + 1}/{len(boards)}: {Path(board_path).stem}")
+            log(f"{'#' * 60}")
+        run_board(
+            board_path=board_path,
+            max_iterations=args.max_iterations,
+            human_every=args.human_every,
+            resume=args.resume,
+            skip_3d=args.skip_3d,
+        )
+
+    log(f"\nAll {len(boards)} board(s) processed.")
 
 
 if __name__ == "__main__":
