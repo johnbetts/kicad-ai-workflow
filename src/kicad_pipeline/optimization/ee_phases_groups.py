@@ -3191,8 +3191,9 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
     _eth_place_rj45_connectors(
         ctx, eth_connectors, eth_anchor_x, eth_grid, placed_eth, eth_zone_rect,
     )
-    # IC anchor: 2 mm below the lowest RJ45 pad, derived from actual geometry.
-    ic_anchor_y = _eth_connector_pad_bottom(ctx, eth_connectors, placed_eth, gap_mm=2.0)
+    # IC anchor: 5 mm below the lowest RJ45 pad, derived from actual geometry.
+    # 2mm was too tight — JLCPCB footprint courtyards extend beyond pads.
+    ic_anchor_y = _eth_connector_pad_bottom(ctx, eth_connectors, placed_eth, gap_mm=5.0)
     # Fallback if no connectors were placed (boards without RJ45).
     if not eth_connectors or not any(r in placed_eth for r in eth_connectors):
         max_conn_h = max(

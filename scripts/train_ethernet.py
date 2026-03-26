@@ -104,7 +104,7 @@ _HEADER_2P_FP = "PinHeader_1x02_P2.54mm_Vertical"
 # ---------------------------------------------------------------------------
 
 _BOARD_WIDTH_MM = 60.0
-_BOARD_HEIGHT_MM = 50.0
+_BOARD_HEIGHT_MM = 60.0
 
 # Design rule thresholds (mm)
 #
