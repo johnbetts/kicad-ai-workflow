@@ -1196,55 +1196,69 @@ def _refresh_antenna_keepout(pcb: PCBDesign) -> PCBDesign:
         if not is_antenna_ko:
             fresh_keepouts.append(ko)
 
-    # Build fresh keepout from final placed position and rotation
-    rf_pos = (rf_fp.position.x, rf_fp.position.y, rf_fp.rotation)
-    _log.info(
-        "refresh_antenna_keepout: RF %s final pos (%.1f,%.1f,rot=%.0f)",
-        rf_fp.ref, rf_fp.position.x, rf_fp.position.y, rf_fp.rotation,
-    )
-    layer_count = (
-        pcb.design_rules.layer_count
-        if hasattr(pcb.design_rules, "layer_count")
-        else 2
-    )
-    new_ko = make_antenna_keepout(
-        board_w, ANTENNA_KEEPOUT_WIDTH_MM, ANTENNA_KEEPOUT_HEIGHT_MM,
-        rf_position=rf_pos, layer_count=layer_count, board_height=board_h,
+    # Build fresh antenna-only keepout from the footprint's actual pad positions.
+    # The keepout covers ONLY the antenna section (below the bottom pad row),
+    # not the processor area.
+    import math
+    from kicad_pipeline.models.pcb import Keepout, Point
+
+    _ESP32_BODY_W = 18.0
+    _ESP32_BODY_H = 25.5
+    _ANTENNA_EXT = 3.5  # mm beyond module body
+
+    # Compute antenna keepout in board space from footprint pads
+    rot_rad = math.radians(rf_fp.rotation)
+    cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+    half_w = _ESP32_BODY_W / 2.0
+    half_h = _ESP32_BODY_H / 2.0
+
+    # Find which end is the antenna (furthest from pad centroid)
+    signal_ys = [p.position.y for p in rf_fp.pads if p.number not in ("41", "V1")]
+    if signal_ys:
+        pad_max_local_y = max(signal_ys)
+        # Keepout starts 0.5mm past the last pad row
+        ko_top_local = pad_max_local_y + 0.5
+    else:
+        ko_top_local = half_h - 5.0  # fallback
+
+    ko_bot_local = half_h + _ANTENNA_EXT
+
+    # Transform 4 corners from local to board space
+    corners_local = [
+        (-half_w, ko_top_local), (half_w, ko_top_local),
+        (half_w, ko_bot_local), (-half_w, ko_bot_local),
+    ]
+    corners_board = []
+    for lx, ly in corners_local:
+        bx = rf_fp.position.x + lx * cos_r - ly * sin_r
+        by = rf_fp.position.y + lx * sin_r + ly * cos_r
+        corners_board.append(Point(bx, by))
+
+    new_ko = Keepout(
+        polygon=tuple(corners_board),
+        layers=("F.Cu", "B.Cu"),
+        no_copper=True, no_vias=True, no_tracks=True,
     )
     fresh_keepouts.append(new_ko)
-    body_ko = make_rf_module_body_keepout(
-        rf_pos, layer_count=layer_count,
-        board_width=board_w, board_height=board_h,
-    )
-    if body_ko is not None:
-        fresh_keepouts.append(body_ko)
-
-    # Also refresh the board-level via fence — the old vias were generated from
-    # the pre-optimisation RF position and are now at the wrong coordinates.
-    from kicad_pipeline.pcb.zone_builder import make_rf_via_fence
-
-    # Remove old antenna vias (GND net, drill 0.6mm, near old keepout position)
-    gnd_net = 1  # GND is typically net 1
-    old_antenna_vias = {
-        v for v in pcb.vias
-        if v.net_number == gnd_net and abs(v.drill - 0.6) < 0.01
-    }
-    fresh_vias = [v for v in pcb.vias if v not in old_antenna_vias]
-
-    # Generate new vias around the refreshed keepout
-    new_fence_vias = make_rf_via_fence(
-        tuple(fresh_keepouts),
-        gnd_net_num=gnd_net,
-        spacing_mm=2.0,
-        footprints=pcb.footprints,
-        board_width=board_w,
-        board_height=board_h,
-    )
-    fresh_vias.extend(new_fence_vias)
 
     _log.info(
-        "refresh_antenna_keepout: replaced %d stale vias with %d fresh fence vias",
-        len(old_antenna_vias), len(new_fence_vias),
+        "refresh_antenna_keepout: RF %s at (%.1f,%.1f,rot=%.0f), "
+        "antenna keepout %.1fx%.1fmm",
+        rf_fp.ref, rf_fp.position.x, rf_fp.position.y, rf_fp.rotation,
+        _ESP32_BODY_W, ko_bot_local - ko_top_local,
+    )
+
+    # Strip any stale antenna vias — keepout zone only, no via fence.
+    gnd_net = 1
+    fresh_vias = [
+        v for v in pcb.vias
+        if not (v.net_number == gnd_net and abs(v.drill - 0.6) < 0.01)
+    ]
+
+    _log.info(
+        "refresh_antenna_keepout: updated keepout to final RF position, "
+        "%d keepouts, %d vias retained",
+        len(fresh_keepouts), len(fresh_vias),
     )
 
     return replace(
@@ -1281,9 +1295,7 @@ def _phase_build_final(
         positions_tuple = _dict_to_positions(ctx.best_positions)
         final_pcb = _apply_positions(ctx.initial_pcb, positions_tuple)
 
-    # Refresh the board-level antenna keepout using the final RF module position.
-    # build_pcb() creates the keepout from pre-optimisation positions; after the
-    # EE optimizer moves the RF module the stored keepout is stale.
+    # Refresh the board-level antenna keepout position (no via fence).
     final_pcb = _refresh_antenna_keepout(final_pcb)
 
     final_pcb = _post_apply_pad_extent_clamp(final_pcb, ctx.bounds, _edge_m)

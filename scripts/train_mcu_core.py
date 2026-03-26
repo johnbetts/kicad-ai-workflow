@@ -875,9 +875,11 @@ def main() -> None:
     # Pin 3 (EN)  board-space ≈ (43.75, 38.26)  — right column
     # Pin 38 (IO2) board-space ≈ (26.25, 38.26)  — left column
     _PLACEMENT_OVERRIDES: dict[str, tuple[float, float]] = {
-        # Issue 3: C1/C2 decoupling caps — within 3mm of 3V3 pin (right side)
-        "C1": (45.5, 38.5),
-        "C2": (45.5, 41.0),
+        # Issue 3: C1/C2 decoupling caps — near 3V3 pin but clear of U1 pads
+        # U1 rightmost pad edge ≈ x=44.5 (pad x=43.75 + half pad width 0.75)
+        # C1/C2 need x ≥ 46.0 to avoid overlap
+        "C1": (47.0, 38.5),
+        "C2": (47.0, 41.0),
         # Issue 4: R2 BOOT pull-up — within 5mm of IO0 pin (left side)
         "R2": (23.0, 24.3),
         # Issue 5: SW2 RESET — ~7mm from left edge

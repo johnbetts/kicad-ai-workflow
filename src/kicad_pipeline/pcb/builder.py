@@ -1084,18 +1084,14 @@ def _add_rf_via_fence(
     final_footprints: list[Footprint],
     all_vias: tuple[Via, ...],
 ) -> tuple[Via, ...]:
-    """Add RF via fence if an RF module is present."""
-    if _has_rf_module(requirements):
-        from kicad_pipeline.constants import RF_VIA_FENCE_SPACING_MM
-        gnd_net_num = ctx.net_lookup.get("GND", 1)
-        rf_fence_vias = _make_rf_via_fence(
-            tuple(ctx.keepouts), gnd_net_num, RF_VIA_FENCE_SPACING_MM,
-            footprints=tuple(final_footprints),
-            board_width=ctx.board_width_mm, board_height=ctx.board_height_mm,
-        )
-        if rf_fence_vias:
-            all_vias = all_vias + rf_fence_vias
-            log.info("build_pcb: added %d RF via fence vias", len(rf_fence_vias))
+    """Add RF via fence if an RF module is present.
+
+    Currently disabled — the antenna keepout zone provides sufficient
+    isolation.  Via fences are added manually during routing if needed.
+    """
+    # Via fence generation disabled: keepout zone is sufficient for
+    # pre-routing placement.  Vias should be added during routing
+    # when the ground plane topology is known.
     return all_vias
 
 
