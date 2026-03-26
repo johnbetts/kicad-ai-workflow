@@ -88,8 +88,8 @@ _HEADER_2P_FP = "PinHeader_1x02_P2.54mm_Vertical"
 # Board and design rule constants
 # ---------------------------------------------------------------------------
 
-_BOARD_WIDTH_MM = 65.0
-_BOARD_HEIGHT_MM = 45.0
+_BOARD_WIDTH_MM = 60.0
+_BOARD_HEIGHT_MM = 40.0
 
 # Design rule thresholds (mm)
 _BUCK_5MM_MAX = 5.0

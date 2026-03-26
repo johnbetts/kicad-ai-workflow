@@ -72,8 +72,8 @@ _PIN_HEADER_4P_FP = "PinHeader_1x04"
 # Board and design rule constants
 # ---------------------------------------------------------------------------
 
-_BOARD_WIDTH_MM = 70.0
-_BOARD_HEIGHT_MM = 50.0
+_BOARD_WIDTH_MM = 65.0
+_BOARD_HEIGHT_MM = 40.0
 
 # Design rule thresholds (mm)
 _CONNECTOR_ROW_ALIGN_TOL_MM = 1.0
