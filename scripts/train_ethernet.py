@@ -127,7 +127,7 @@ _BULK_DECOUP_TO_U1_MAX_MM = 15.0  # C2 (bulk decoup) within 15 mm of U1
 _AVDD_DECOUP_TO_U1_MAX_MM = 20.0  # C3 (AVDD decoup) within 20 mm of U1
 _TX_TERM_TO_U1_MAX_MM = 15.0  # R1/R2 TX termination within 15 mm of U1
 _RSVD_TO_U1_MAX_MM = 15.0   # R3 RSVD resistor within 15 mm of U1
-_HEADER_BOTTOM_MARGIN_MM = 8.0
+_HEADER_BOTTOM_MARGIN_MM = 15.0  # headers must be far enough from bottom for pad extent
 _DIFF_PAIR_MAX_MM = 4.0
 
 # Post-placement geometry constants (mm)
@@ -143,11 +143,11 @@ _ETH_C2_DY_MM = 7.5
 _ETH_C1C3_DX_MM = 8.5
 _ETH_C1_DY_MM = 0.0
 _ETH_C3_DY_MM = 3.0
-_ETH_R3_DX_MM = 8.5
-_ETH_R3_DY_MM = 6.0
-_ETH_J2_X_FRAC = 0.30
-_ETH_J3_X_FRAC = 0.70
-_ETH_HEADER_Y_OFFSET_MM = 8.5
+_ETH_R3_DX_MM = 0.0  # centered below U1 (aligned with C2)
+_ETH_R3_DY_MM = 10.0  # below C2 (dy=7.5 + 2.5mm clearance)
+_ETH_J2_X_FRAC = 0.30  # J2 (SPI header) left of center
+_ETH_J3_X_FRAC = 0.85  # J3 (power header) near right edge
+_ETH_HEADER_Y_OFFSET_MM = 14.5  # 6-pin header pads extend ~12.7mm below origin
 
 # ---------------------------------------------------------------------------
 # Component definitions

@@ -427,12 +427,19 @@ def _check_voltage_isolation(
 def _check_connector_edge(
     pcb: PCBDesign,
 ) -> list[PlacementViolation]:
-    """Check that connectors (J*) are within threshold of board edge."""
+    """Check that connectors (J*) are within threshold of board edge.
+
+    Uses body/pad extent (not centroid) to measure distance, so tall
+    vertical headers whose body reaches the board edge are not penalized.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
+    fp_sizes = _fp_size_dict(pcb)
     bounds = _board_bounds(pcb)
     min_x, min_y, max_x, max_y = bounds
     threshold = CONNECTOR_EDGE_MAX_MM
+
+    _fp_rotations: dict[str, float] = {fp.ref: fp.rotation for fp in pcb.footprints}
 
     for fp in pcb.footprints:
         if _ref_prefix(fp.ref) != "J":
@@ -441,12 +448,17 @@ def _check_connector_edge(
         if pos is None:
             continue
         x, y = pos
-        # Distance to nearest edge
+        w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
+        rot = _fp_rotations.get(fp.ref, 0.0)
+        if rot % 180 in (90.0, 270.0):
+            w, h = h, w
+
+        # Distance from body edge to nearest board edge (not centroid)
         edge_dist = min(
-            x - min_x,
-            max_x - x,
-            y - min_y,
-            max_y - y,
+            (x - w / 2.0) - min_x,   # left body edge to left board edge
+            max_x - (x + w / 2.0),    # right body edge to right board edge
+            (y - h / 2.0) - min_y,    # top body edge to top board edge
+            max_y - (y + h / 2.0),    # bottom body edge to bottom board edge
         )
         if edge_dist > threshold:
             # Suggest moving to nearest edge

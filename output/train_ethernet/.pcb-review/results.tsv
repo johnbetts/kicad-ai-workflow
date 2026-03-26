@@ -1,0 +1,2 @@
+HASH	GRADE	SCORE	DRC	VIOLATIONS	CRITICAL	STATUS	DESC
+bfebc64	A	-	0	0	0	KEPT	edge-mount exempt + connector edge body-dist + header pad bounds + R3 position

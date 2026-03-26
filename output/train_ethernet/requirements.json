@@ -1,0 +1,1257 @@
+{
+  "project": {
+    "name": "EthernetTraining",
+    "author": null,
+    "revision": "v1",
+    "description": null
+  },
+  "features": [
+    {
+      "name": "Ethernet",
+      "description": "W5500 SPI-to-Ethernet controller with 25MHz crystal, RJ45+magnetics (HR911105A), differential pair termination, RSVD bias, and SPI breakout",
+      "components": [
+        "U1",
+        "C1",
+        "C2",
+        "C3",
+        "Y1",
+        "C4",
+        "C5",
+        "J1",
+        "R1",
+        "R2",
+        "R3",
+        "J2",
+        "J3"
+      ],
+      "nets": [
+        "+3V3",
+        "+3V3_U1_DEC",
+        "AVDD_U1_DEC",
+        "GND",
+        "SPI_MOSI",
+        "SPI_MISO",
+        "SPI_SCK",
+        "SPI_CS",
+        "ETH_INT",
+        "ETH_RST",
+        "TX+",
+        "TX-",
+        "RX+",
+        "RX-",
+        "XTAL1",
+        "XTAL2",
+        "XTAL1_C4",
+        "XTAL2_C5",
+        "RSVD"
+      ],
+      "subcircuits": [
+        "crystal_osc",
+        "decoupling"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "ref": "U1",
+      "value": "W5500",
+      "footprint": "LQFP-48",
+      "lcsc": "C32843",
+      "description": "W5500 Hardwired TCP/IP Ethernet controller LQFP-48",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "2",
+          "name": "AVDD",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "3",
+          "name": "EXRES1",
+          "pin_type": "input",
+          "function": null,
+          "net": "RSVD"
+        },
+        {
+          "number": "4",
+          "name": "MOSI",
+          "pin_type": "input",
+          "function": "spi_mosi",
+          "net": "SPI_MOSI"
+        },
+        {
+          "number": "5",
+          "name": "MISO",
+          "pin_type": "output",
+          "function": "spi_miso",
+          "net": "SPI_MISO"
+        },
+        {
+          "number": "6",
+          "name": "SCLK",
+          "pin_type": "input",
+          "function": "spi_clk",
+          "net": "SPI_SCK"
+        },
+        {
+          "number": "7",
+          "name": "SCSn",
+          "pin_type": "input",
+          "function": "spi_cs",
+          "net": "SPI_CS"
+        },
+        {
+          "number": "8",
+          "name": "INTn",
+          "pin_type": "output",
+          "function": "interrupt",
+          "net": "ETH_INT"
+        },
+        {
+          "number": "9",
+          "name": "RSTn",
+          "pin_type": "input",
+          "function": "reset",
+          "net": "ETH_RST"
+        },
+        {
+          "number": "10",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "11",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "12",
+          "name": "LINKLED",
+          "pin_type": "output",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "13",
+          "name": "ACTLED",
+          "pin_type": "output",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "14",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "15",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "16",
+          "name": "TXP",
+          "pin_type": "output",
+          "function": null,
+          "net": "TX+"
+        },
+        {
+          "number": "17",
+          "name": "TXN",
+          "pin_type": "output",
+          "function": null,
+          "net": "TX-"
+        },
+        {
+          "number": "18",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "19",
+          "name": "RXP",
+          "pin_type": "input",
+          "function": null,
+          "net": "RX+"
+        },
+        {
+          "number": "20",
+          "name": "RXN",
+          "pin_type": "input",
+          "function": null,
+          "net": "RX-"
+        },
+        {
+          "number": "21",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "22",
+          "name": "AVDD2",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "23",
+          "name": "XI",
+          "pin_type": "input",
+          "function": null,
+          "net": "XTAL1"
+        },
+        {
+          "number": "24",
+          "name": "XO",
+          "pin_type": "output",
+          "function": null,
+          "net": "XTAL2"
+        },
+        {
+          "number": "25",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "26",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "27",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "28",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "29",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "30",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "31",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "32",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "33",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "34",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "35",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "36",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "37",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "38",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "39",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "40",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "41",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "42",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "43",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "44",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "45",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "46",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "47",
+          "name": "VCC",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "48",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "49",
+          "name": "PAD",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "C1",
+      "value": "100nF",
+      "footprint": "C_0805",
+      "lcsc": "C49678",
+      "description": "100nF VCC decoupling cap 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3_U1_DEC"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "C2",
+      "value": "10uF",
+      "footprint": "C_0805",
+      "lcsc": "C15850",
+      "description": "10uF bulk decoupling cap 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "C3",
+      "value": "100nF",
+      "footprint": "C_0805",
+      "lcsc": "C49678",
+      "description": "100nF AVDD decoupling cap 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "AVDD_U1_DEC"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "Y1",
+      "value": "25MHz",
+      "footprint": "Crystal_SMD_3215",
+      "lcsc": "C13738",
+      "description": "25MHz crystal oscillator SMD 3215",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "XTAL1"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "XTAL2"
+        }
+      ]
+    },
+    {
+      "ref": "C4",
+      "value": "22pF",
+      "footprint": "C_0805",
+      "lcsc": "C1804",
+      "description": "22pF crystal load cap 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "XTAL1_C4"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "C5",
+      "value": "22pF",
+      "footprint": "C_0805",
+      "lcsc": "C1804",
+      "description": "22pF crystal load cap 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "XTAL2_C5"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "J1",
+      "value": "HR911105A",
+      "footprint": "RJ45_HR911105A",
+      "lcsc": "C12074",
+      "description": "RJ45 connector with integrated magnetics",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "TD+",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "TX+"
+        },
+        {
+          "number": "2",
+          "name": "TD-",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "TX-"
+        },
+        {
+          "number": "3",
+          "name": "RD+",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "RX+"
+        },
+        {
+          "number": "4",
+          "name": "NC1",
+          "pin_type": "passive",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "5",
+          "name": "NC2",
+          "pin_type": "passive",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "6",
+          "name": "RD-",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "RX-"
+        },
+        {
+          "number": "7",
+          "name": "NC3",
+          "pin_type": "passive",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "8",
+          "name": "NC4",
+          "pin_type": "passive",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "9",
+          "name": "LED_G+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "10",
+          "name": "LED_G-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        },
+        {
+          "number": "11",
+          "name": "LED_Y+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "12",
+          "name": "LED_Y-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        },
+        {
+          "number": "13",
+          "name": "SHIELD1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        },
+        {
+          "number": "14",
+          "name": "SHIELD2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R1",
+      "value": "49.9R",
+      "footprint": "R_0805",
+      "lcsc": "C25129",
+      "description": "49.9 ohm TX+ termination resistor 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "TX+"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R2",
+      "value": "49.9R",
+      "footprint": "R_0805",
+      "lcsc": "C25129",
+      "description": "49.9 ohm TX- termination resistor 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "TX-"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R3",
+      "value": "12.1K",
+      "footprint": "R_0805",
+      "lcsc": "C17401",
+      "description": "12.1K RSVD bias resistor 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RSVD"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "J2",
+      "value": "SPI_Header",
+      "footprint": "PinHeader_1x06_P2.54mm_Vertical",
+      "lcsc": null,
+      "description": "6-pin 2.54mm header \u2014 SPI interface to MCU",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "MOSI",
+          "pin_type": "bidirectional",
+          "function": "spi_mosi",
+          "net": "SPI_MOSI"
+        },
+        {
+          "number": "2",
+          "name": "MISO",
+          "pin_type": "bidirectional",
+          "function": "spi_miso",
+          "net": "SPI_MISO"
+        },
+        {
+          "number": "3",
+          "name": "SCK",
+          "pin_type": "bidirectional",
+          "function": "spi_clk",
+          "net": "SPI_SCK"
+        },
+        {
+          "number": "4",
+          "name": "CS",
+          "pin_type": "bidirectional",
+          "function": "spi_cs",
+          "net": "SPI_CS"
+        },
+        {
+          "number": "5",
+          "name": "INT",
+          "pin_type": "bidirectional",
+          "function": "interrupt",
+          "net": "ETH_INT"
+        },
+        {
+          "number": "6",
+          "name": "RST",
+          "pin_type": "bidirectional",
+          "function": "reset",
+          "net": "ETH_RST"
+        }
+      ]
+    },
+    {
+      "ref": "J3",
+      "value": "PWR_Header",
+      "footprint": "PinHeader_1x02_P2.54mm_Vertical",
+      "lcsc": null,
+      "description": "2-pin 2.54mm header \u2014 3V3 + GND power input",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "+3V3",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3"
+        },
+        {
+          "number": "2",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        }
+      ]
+    }
+  ],
+  "nets": [
+    {
+      "name": "+3V3",
+      "connections": [
+        {
+          "ref": "J3",
+          "pin": "1"
+        },
+        {
+          "ref": "C2",
+          "pin": "1"
+        },
+        {
+          "ref": "U1",
+          "pin": "10"
+        },
+        {
+          "ref": "U1",
+          "pin": "15"
+        },
+        {
+          "ref": "U1",
+          "pin": "26"
+        },
+        {
+          "ref": "U1",
+          "pin": "29"
+        },
+        {
+          "ref": "U1",
+          "pin": "32"
+        },
+        {
+          "ref": "U1",
+          "pin": "35"
+        },
+        {
+          "ref": "U1",
+          "pin": "38"
+        },
+        {
+          "ref": "U1",
+          "pin": "41"
+        },
+        {
+          "ref": "U1",
+          "pin": "44"
+        },
+        {
+          "ref": "U1",
+          "pin": "47"
+        },
+        {
+          "ref": "J1",
+          "pin": "9"
+        },
+        {
+          "ref": "J1",
+          "pin": "11"
+        }
+      ]
+    },
+    {
+      "name": "+3V3_U1_DEC",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "2"
+        },
+        {
+          "ref": "C1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "AVDD_U1_DEC",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "22"
+        },
+        {
+          "ref": "C3",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "GND",
+      "connections": [
+        {
+          "ref": "J3",
+          "pin": "2"
+        },
+        {
+          "ref": "C1",
+          "pin": "2"
+        },
+        {
+          "ref": "C2",
+          "pin": "2"
+        },
+        {
+          "ref": "C3",
+          "pin": "2"
+        },
+        {
+          "ref": "C4",
+          "pin": "2"
+        },
+        {
+          "ref": "C5",
+          "pin": "2"
+        },
+        {
+          "ref": "R1",
+          "pin": "2"
+        },
+        {
+          "ref": "R2",
+          "pin": "2"
+        },
+        {
+          "ref": "R3",
+          "pin": "2"
+        },
+        {
+          "ref": "U1",
+          "pin": "1"
+        },
+        {
+          "ref": "U1",
+          "pin": "11"
+        },
+        {
+          "ref": "U1",
+          "pin": "14"
+        },
+        {
+          "ref": "U1",
+          "pin": "18"
+        },
+        {
+          "ref": "U1",
+          "pin": "21"
+        },
+        {
+          "ref": "U1",
+          "pin": "25"
+        },
+        {
+          "ref": "U1",
+          "pin": "27"
+        },
+        {
+          "ref": "U1",
+          "pin": "28"
+        },
+        {
+          "ref": "U1",
+          "pin": "30"
+        },
+        {
+          "ref": "U1",
+          "pin": "31"
+        },
+        {
+          "ref": "U1",
+          "pin": "33"
+        },
+        {
+          "ref": "U1",
+          "pin": "34"
+        },
+        {
+          "ref": "U1",
+          "pin": "36"
+        },
+        {
+          "ref": "U1",
+          "pin": "37"
+        },
+        {
+          "ref": "U1",
+          "pin": "39"
+        },
+        {
+          "ref": "U1",
+          "pin": "40"
+        },
+        {
+          "ref": "U1",
+          "pin": "42"
+        },
+        {
+          "ref": "U1",
+          "pin": "43"
+        },
+        {
+          "ref": "U1",
+          "pin": "45"
+        },
+        {
+          "ref": "U1",
+          "pin": "46"
+        },
+        {
+          "ref": "U1",
+          "pin": "48"
+        },
+        {
+          "ref": "U1",
+          "pin": "49"
+        },
+        {
+          "ref": "J1",
+          "pin": "10"
+        },
+        {
+          "ref": "J1",
+          "pin": "12"
+        },
+        {
+          "ref": "J1",
+          "pin": "13"
+        },
+        {
+          "ref": "J1",
+          "pin": "14"
+        }
+      ]
+    },
+    {
+      "name": "SPI_MOSI",
+      "connections": [
+        {
+          "ref": "J2",
+          "pin": "1"
+        },
+        {
+          "ref": "U1",
+          "pin": "4"
+        }
+      ]
+    },
+    {
+      "name": "SPI_MISO",
+      "connections": [
+        {
+          "ref": "J2",
+          "pin": "2"
+        },
+        {
+          "ref": "U1",
+          "pin": "5"
+        }
+      ]
+    },
+    {
+      "name": "SPI_SCK",
+      "connections": [
+        {
+          "ref": "J2",
+          "pin": "3"
+        },
+        {
+          "ref": "U1",
+          "pin": "6"
+        }
+      ]
+    },
+    {
+      "name": "SPI_CS",
+      "connections": [
+        {
+          "ref": "J2",
+          "pin": "4"
+        },
+        {
+          "ref": "U1",
+          "pin": "7"
+        }
+      ]
+    },
+    {
+      "name": "ETH_INT",
+      "connections": [
+        {
+          "ref": "J2",
+          "pin": "5"
+        },
+        {
+          "ref": "U1",
+          "pin": "8"
+        }
+      ]
+    },
+    {
+      "name": "ETH_RST",
+      "connections": [
+        {
+          "ref": "J2",
+          "pin": "6"
+        },
+        {
+          "ref": "U1",
+          "pin": "9"
+        }
+      ]
+    },
+    {
+      "name": "TX+",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "16"
+        },
+        {
+          "ref": "R1",
+          "pin": "1"
+        },
+        {
+          "ref": "J1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "TX-",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "17"
+        },
+        {
+          "ref": "R2",
+          "pin": "1"
+        },
+        {
+          "ref": "J1",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "RX+",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "3"
+        },
+        {
+          "ref": "U1",
+          "pin": "19"
+        }
+      ]
+    },
+    {
+      "name": "RX-",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "6"
+        },
+        {
+          "ref": "U1",
+          "pin": "20"
+        }
+      ]
+    },
+    {
+      "name": "XTAL1",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "23"
+        },
+        {
+          "ref": "Y1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "XTAL2",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "24"
+        },
+        {
+          "ref": "Y1",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "XTAL1_C4",
+      "connections": [
+        {
+          "ref": "Y1",
+          "pin": "1"
+        },
+        {
+          "ref": "C4",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "XTAL2_C5",
+      "connections": [
+        {
+          "ref": "Y1",
+          "pin": "2"
+        },
+        {
+          "ref": "C5",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RSVD",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "3"
+        },
+        {
+          "ref": "R3",
+          "pin": "1"
+        }
+      ]
+    }
+  ],
+  "pin_map": null,
+  "power_budget": null,
+  "mechanical": {
+    "board_width_mm": 55.0,
+    "board_height_mm": 55.0,
+    "enclosure": null,
+    "mounting_hole_diameter_mm": 3.2,
+    "mounting_hole_positions": [],
+    "notes": null
+  },
+  "recommendations": []
+}

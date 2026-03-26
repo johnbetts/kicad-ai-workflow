@@ -3132,7 +3132,12 @@ def _eth_place_headers_bottom(
     In the left→right signal-flow layout (J1→U1→headers) the SPI/power
     headers terminate the chain at the right edge.  Headers are stacked
     vertically near x_max, centered within the ethernet zone's y-range.
+
+    Pad extents are checked against the board boundary to ensure no pads
+    extend past the board edge.
     """
+    from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+
     bounds = ctx.bounds
     _ezx1, ezy1, ezx2, ezy2 = zone_rect
     unplaced = [r for r in eth_headers
@@ -3149,6 +3154,29 @@ def _eth_place_headers_bottom(
         w, h = ctx.fp_sizes.get(ref, (2.54, 5.08))
         x = _clamp(bounds[2] - w / 2.0 - 1.0, _ezx1 + w / 2.0 + 1.0, ezx2 - w / 2.0 - 1.0)
         y = _clamp(cy + h / 2.0, ezy1 + h / 2.0 + 1.0, ezy2 - h / 2.0 - 1.0)
+
+        # Check actual pad extents against board bounds and adjust if needed.
+        fp_match = None
+        for fp in ctx.initial_pcb.footprints:
+            if fp.ref == ref:
+                fp_match = fp
+                break
+        if fp_match is not None:
+            rot = ctx.positions.get(ref, (0.0, 0.0, 0.0))[2]
+            pad_min_x, pad_min_y, pad_max_x, pad_max_y = pad_extent_in_board_space(
+                fp_match, x, y, rot,
+            )
+            edge_margin = 1.0
+            # Pull inward if pads exceed board bounds
+            if pad_min_x < bounds[0] + edge_margin:
+                x += (bounds[0] + edge_margin - pad_min_x)
+            if pad_max_x > bounds[2] - edge_margin:
+                x -= (pad_max_x - bounds[2] + edge_margin)
+            if pad_min_y < bounds[1] + edge_margin:
+                y += (bounds[1] + edge_margin - pad_min_y)
+            if pad_max_y > bounds[3] - edge_margin:
+                y -= (pad_max_y - bounds[3] + edge_margin)
+
         ctx.positions[ref] = (x, y, 0.0)
         eth_grid.place(x, y, w, h)  # type: ignore[union-attr]
         ctx.ethernet_fixed.add(ref)
