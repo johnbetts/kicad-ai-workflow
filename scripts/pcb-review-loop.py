@@ -696,6 +696,8 @@ def main() -> None:
                         help="Resume from saved state")
     parser.add_argument("--skip-3d", action="store_true",
                         help="Skip component-by-component 3D verification")
+    parser.add_argument("--sequential", action="store_true",
+                        help="Run multiple boards sequentially (default: parallel)")
     parser.add_argument("--list", action="store_true", dest="list_boards",
                         help="List available training boards and exit")
     args = parser.parse_args()
@@ -715,18 +717,48 @@ def main() -> None:
     for b in boards:
         log(f"  - {b}")
 
-    for i, board_path in enumerate(boards):
-        if len(boards) > 1:
-            log(f"\n{'#' * 60}")
-            log(f"# BOARD {i + 1}/{len(boards)}: {Path(board_path).stem}")
-            log(f"{'#' * 60}")
-        run_board(
-            board_path=board_path,
-            max_iterations=args.max_iterations,
-            human_every=args.human_every,
-            resume=args.resume,
-            skip_3d=args.skip_3d,
-        )
+    if len(boards) == 1 or args.sequential:
+        # Single board or forced sequential
+        for i, board_path in enumerate(boards):
+            if len(boards) > 1:
+                log(f"\n{'#' * 60}")
+                log(f"# BOARD {i + 1}/{len(boards)}: {Path(board_path).stem}")
+                log(f"{'#' * 60}")
+            run_board(
+                board_path=board_path,
+                max_iterations=args.max_iterations,
+                human_every=args.human_every,
+                resume=args.resume,
+                skip_3d=args.skip_3d,
+            )
+    else:
+        # Multiple boards — run in parallel threads
+        # Each board gets its own claude subprocess, own renders dir, own state
+        import concurrent.futures
+
+        log(f"Launching {len(boards)} boards in PARALLEL")
+
+        def _run_one(board_path: str) -> str:
+            """Run review loop for one board (in a thread)."""
+            name = Path(board_path).stem
+            try:
+                run_board(
+                    board_path=board_path,
+                    max_iterations=args.max_iterations,
+                    human_every=args.human_every,
+                    resume=args.resume,
+                    skip_3d=args.skip_3d,
+                )
+                return f"{name}: completed"
+            except Exception as e:
+                return f"{name}: FAILED — {e}"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(boards)) as pool:
+            futures = {pool.submit(_run_one, bp): bp for bp in boards}
+            for future in concurrent.futures.as_completed(futures):
+                board = Path(futures[future]).stem
+                result = future.result()
+                log(f"  {result}")
 
     log(f"\nAll {len(boards)} board(s) processed.")
 
