@@ -90,17 +90,17 @@ _MCU_HEADER_MIN_X_MM = 50.0
 # Post-placement geometry constants (mm)
 _ANALOG_REF_J1_X_MM = 12.35
 _ANALOG_REF_J4_X_MM = 46.35
-_ANALOG_J_Y_MM = 4.5
+_ANALOG_J_Y_MM = 3.5
 _ANALOG_STRIP_DY_MM = 8.3
 _ANALOG_U1_X_MM = 45.75
 _ANALOG_U1_Y_MM = 28.58
 _ANALOG_C1_X_MM = 45.61
-_ANALOG_C1_Y_MM = 31.88
-_ANALOG_R9_X_MM = 52.86
+_ANALOG_C1_Y_MM = 29.5
+_ANALOG_R9_X_MM = 49.0
 _ANALOG_R9_Y_MM = 22.16
-_ANALOG_R10_X_MM = 52.86
+_ANALOG_R10_X_MM = 49.0
 _ANALOG_R10_Y_MM = 25.16
-_ANALOG_J5_X_MM = 57.00
+_ANALOG_J5_X_MM = 62.00
 _ANALOG_J5_Y_MM = 22.50
 
 # ---------------------------------------------------------------------------
@@ -598,8 +598,8 @@ def _apply_analog_post_placement(pcb: object) -> object:
         # avg_dx: base offset from connector center
         # per_ch_slope_dx: additional dx per channel index (0-based)
         "C_filt": (-4.64, 0.75, 90.0),    # leftmost in strip
-        "D_tvs":  (-1.77, 0.52, 0.0),     # second from left
-        "R_bot":  (+1.56, 0.57, 90.0),    # second from right
+        "D_tvs":  (-1.77, 0.75, 0.0),     # second from left
+        "R_bot":  (+1.56, 0.76, 90.0),    # second from right
         "R_top":  (+3.88, 0.76, -90.0),   # rightmost in strip
     }
 
@@ -1113,12 +1113,10 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — no longer needed; the connector-first
-    # strip layout rules are now encoded in the optimizer itself
-    # (ee_phases_groups.py:_phase_adc_channels).  The original
-    # _apply_analog_post_placement() function is kept below for reference.
-    # ---------------------------------------------------------------
+    # POST-PLACEMENT CORRECTIONS — re-enabled to fix remaining violations
+    # that the optimizer alone doesn't resolve (connector edge proximity,
+    # R divider alignment, D/C alignment, decoupling distance, J5/R9/R10).
+    optimized_pcb = _apply_analog_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")

@@ -131,7 +131,7 @@ _HEADER_BOTTOM_MARGIN_MM = 8.0
 _DIFF_PAIR_MAX_MM = 4.0
 
 # Post-placement geometry constants (mm)
-_ETH_J1_X_FRAC = 0.36
+_ETH_J1_X_FRAC = 0.50
 _ETH_J1_Y_MM = 3.5
 _ETH_U1_X_FRAC = 0.50
 _ETH_U1_Y_MM = 15.5
@@ -1075,7 +1075,7 @@ def _apply_ethernet_post_placement(pcb: object) -> object:
     # 2-pin header: ~2.54x5.08mm -> half_x=1.27, half_y=2.54
 
     # J1 (RJ45, 16x14mm body) flush at top edge, left-center area
-    j1_x = board_w * _ETH_J1_X_FRAC   # 18.0  left of center to leave room for R1/R2 on right
+    j1_x = board_w * _ETH_J1_X_FRAC   # 27.5  centered on board
     j1_y = _ETH_J1_Y_MM               # top edge
 
     # U1 (W5500, body 7.5x7.5 for courtyard) below J1
@@ -1223,11 +1223,13 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — no longer applied; layout rules are now
-    # encoded in the optimizer.  The original _apply_ethernet_post_placement()
-    # function is kept below for reference.
-    # ---------------------------------------------------------------
+    # Apply post-placement corrections for known layout violations
+    print("  Applying post-placement corrections...")
+    optimized_pcb = _apply_ethernet_post_placement(optimized_pcb)
+
+    # Re-run review after corrections
+    from kicad_pipeline.optimization.review_agent import review_placement
+    review = review_placement(optimized_pcb, requirements)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")

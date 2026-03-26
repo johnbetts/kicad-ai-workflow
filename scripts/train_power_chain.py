@@ -112,8 +112,8 @@ _PWR_C2_DX_MM = 4.0
 _PWR_C2_DY_MM = 2.5
 _PWR_R2_DX_MM = 3.2
 _PWR_R2_DY_MM = 2.5
-_PWR_R1_DX_MM = 3.2
-_PWR_R1_DY_MM = 3.6
+_PWR_R1_DX_MM = 2.5
+_PWR_R1_DY_MM = 4.3
 _PWR_C4_DX_MM = 2.0
 _PWR_C4_DY_MM = 2.2
 _PWR_C5_DX_MM = 2.0
@@ -887,7 +887,7 @@ def main() -> None:
     requirements = _build_requirements()
     print(f"Components: {len(requirements.components)}")
     print(f"Nets:       {len(requirements.nets)}")
-    print("Board:      50 x 40 mm")
+    print("Board:      60 x 40 mm")
     print()
 
     # 2. Build PCB (no routing)
@@ -900,15 +900,8 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS — disabled. The optimizer's
-    # _phase_power_chain_flow handles signal-flow ordering using
-    # _BUCK_PASSIVE_OFFSETS / _LDO_PASSIVE_OFFSETS which have
-    # correct clearances (no component overlaps).  The manual
-    # override positions below had R1/R2 at 1.1mm center-to-center
-    # (need ≥2.5mm) and C3/D1 at 1.5mm (need ≥2.4mm).
-    # ---------------------------------------------------------------
-    # optimized_pcb = _apply_power_post_placement(optimized_pcb)
+    # POST-PLACEMENT CORRECTIONS — re-enabled with collision-safe constants.
+    optimized_pcb = _apply_power_post_placement(optimized_pcb)
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
@@ -1042,15 +1035,15 @@ def _analyse_human_layout() -> None:
             print(f"  {loop_refs[i]} -> {loop_refs[i+1]}: {d:.1f}mm")
     print()
 
-    # Connector edge distances (board 50x40)
-    print("--- Connector Edge Distances (board 50x40) ---")
+    # Connector edge distances (board 60x40)
+    print("--- Connector Edge Distances (board 60x40) ---")
     for ref in ("J1", "J2", "J3"):
         if ref in positions:
             x, y, _ = positions[ref]
             left = x
-            right = 50.0 - x
+            right = _BOARD_WIDTH_MM - x
             top = y
-            bottom = 40.0 - y
+            bottom = _BOARD_HEIGHT_MM - y
             nearest = min(left, right, top, bottom)
             side = (
                 "left" if nearest == left else
