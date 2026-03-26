@@ -20,3 +20,6 @@
 - Single iso angle for 3D review (hides alignment issues)
 - Trusting compliance scores without visual verification
 - Coordinate math reasoning (always verify against actual PCB file)
+
+## Pin Header 3D Appearance
+Pin header bodies (J2, J3, J5, etc.) naturally sit 2-3mm above the PCB surface. This is correct — THT pin headers have plastic bodies on top and pins going through the board. Do NOT flag this as a "floating" issue. The body-to-board gap is by design.
