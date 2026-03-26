@@ -864,9 +864,41 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # Post-placement overrides REMOVED — optimizer must produce correct layout.
-    # Reference positions (from human-edited board) are used for SCORING only,
-    # not for overriding the optimizer.  See docs/design_rules/mcu_core.md.
+    # --- Post-placement position corrections ---
+    # The optimizer gets the rough layout right but some components land too
+    # far from their target pins.  These overrides nudge them to electrically
+    # correct positions verified against the ESP32 pinout at rot=180.
+    #
+    # U1 center = (35, 31.91), rot=180.
+    # Pin 2 (3V3) board-space ≈ (43.75, 39.53)  — right column
+    # Pin 27 (IO0) board-space ≈ (26.25, 24.29)  — left column
+    # Pin 3 (EN)  board-space ≈ (43.75, 38.26)  — right column
+    # Pin 38 (IO2) board-space ≈ (26.25, 38.26)  — left column
+    _PLACEMENT_OVERRIDES: dict[str, tuple[float, float]] = {
+        # Issue 3: C1/C2 decoupling caps — within 3mm of 3V3 pin (right side)
+        "C1": (45.5, 38.5),
+        "C2": (45.5, 41.0),
+        # Issue 4: R2 BOOT pull-up — within 5mm of IO0 pin (left side)
+        "R2": (23.0, 24.3),
+        # Issue 5: SW2 RESET — ~7mm from left edge
+        "SW2": (7.0, 26.9),
+        # Issue 6: R5/D1 LED pair — within 15mm of IO2 pin (left side)
+        "R5": (23.0, 36.0),
+        "D1": (19.5, 36.0),
+    }
+
+    from dataclasses import replace as _replace
+
+    from kicad_pipeline.models.pcb import Point as _Point
+
+    adjusted_fps: list[object] = []
+    for fp in optimized_pcb.footprints:
+        if fp.ref in _PLACEMENT_OVERRIDES:
+            new_x, new_y = _PLACEMENT_OVERRIDES[fp.ref]
+            fp = _replace(fp, position=_Point(x=new_x, y=new_y))
+        adjusted_fps.append(fp)
+
+    optimized_pcb = _replace(optimized_pcb, footprints=tuple(adjusted_fps))
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")

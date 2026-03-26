@@ -229,12 +229,20 @@ def _model_terminal_block(
 def _model_esp32(
     name: str, upper: str,
 ) -> Footprint3DModel | None:
-    """Return 3D model for ESP32/RF modules."""
+    """Return 3D model for ESP32/RF modules.
+
+    The KiCad standard ESP32-S3-WROOM-1.step model has its internal origin
+    aligned with the KiCad standard library footprint origin, which is
+    ~3.63mm north (−Y in module coords) of the pad-field centroid.
+    easyeda2kicad footprints place their origin at the pad centroid, so we
+    apply a +3.63mm Y offset to re-align the 3D body with the pads.
+    """
     if "ESP32" not in upper and "WROOM" not in upper:
         return None
     model_name = name.split(":")[-1] if ":" in name else name
     path = f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/{model_name}.step"
-    return Footprint3DModel(path=path)
+    # Offset compensates for easyeda footprint origin vs KiCad standard origin.
+    return Footprint3DModel(path=path, offset=(0.0, 3.63, 0.0))
 
 
 def _model_switch(
@@ -261,10 +269,12 @@ def _model_switch(
                 "SW_SPST_EVQPE1.step"
             )
         else:
-            # SMD pad geometry (e.g. make_tact_switch) — use SMD model + 90° rotation
+            # SMD pad geometry (e.g. make_tact_switch) — use SMD model, no rotation.
+            # The easyeda footprint pads are at ±3.0 X / ±1.85 Y which is the
+            # same aspect-ratio orientation as the TL3305A model (wider in X).
             return Footprint3DModel(
                 path=f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step",
-                rotate=(0.0, 0.0, 90.0),
+                rotate=(0.0, 0.0, 0.0),
             )
         return Footprint3DModel(path=path)
     return None
@@ -1529,6 +1539,7 @@ def _esp32_make_3d_model(lib_id: str) -> Footprint3DModel:
     if model is None:
         model = Footprint3DModel(
             path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
+            offset=(0.0, 3.63, 0.0),
         )
     return model
 
@@ -1698,6 +1709,7 @@ def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
     if model is None:
         model = Footprint3DModel(
             path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
+            offset=(0.0, 3.63, 0.0),
         )
     return (model,)
 
