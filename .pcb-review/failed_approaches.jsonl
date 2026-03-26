@@ -1,1 +1,2 @@
 {"timestamp":"2026-03-26","description":"proximity re-enforcement after all phases with collision resolver","reason":"created 5 new collisions — pulling components to IC proximity clusters them too tightly for resolver to separate","violations_affected":["COLLISION","proximity"]}
+{"timestamp":"2026-03-26","description":"horizontal ADC strip in late realignment","reason":"20 collisions — components wider than gap allows, overlapping screw terminals","violations_affected":["COLLISION"]}
