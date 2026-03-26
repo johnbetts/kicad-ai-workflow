@@ -431,8 +431,6 @@ def _make_5v_test_header() -> Component:
         footprint=_HEADER_2P_FP,
         lcsc="C124375",
         description="2-pin 2.54mm header — 5V test point",
-        placement_group="buck_stage",
-        placement_order=6,
         placement_near="C2",
         placement_near_max_mm=10.0,
         pins=(
@@ -455,8 +453,6 @@ def _make_3v3_test_header() -> Component:
         footprint=_HEADER_2P_FP,
         lcsc="C124375",
         description="2-pin 2.54mm header — 3.3V test point",
-        placement_group="ldo_stage",
-        placement_order=4,
         placement_near="C5",
         placement_near_max_mm=10.0,
         pins=(
