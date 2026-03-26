@@ -291,6 +291,35 @@ def optimize_placement_ee(
     _phase_mcu_decoupling_repull(ctx)
     _phase_final_clamp(ctx)
 
+    # Re-enforce proximity constraints after ALL phases are done.
+    # Earlier constraint enforcement uses intermediate positions (before
+    # power chain flow, MCU group, etc.). This final pass uses the real
+    # positions and pulls drifted components back to their targets.
+    if ctx.constraints and ctx.constraints.proximity:
+        import math as _m
+        _log.info("  Final constraint re-enforcement")
+        for prox in ctx.constraints.proximity:
+            if prox.ref not in ctx.positions or prox.target_ref not in ctx.positions:
+                continue
+            rx, ry, rrot = ctx.positions[prox.ref]
+            tx, ty, _ = ctx.positions[prox.target_ref]
+            dist = _m.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
+            if dist <= prox.max_distance_mm:
+                continue
+            ratio = prox.max_distance_mm / max(dist, 0.1)
+            nx = tx + (rx - tx) * ratio
+            ny = ty + (ry - ty) * ratio
+            b = ctx.bounds
+            w, h = ctx.fp_sizes.get(prox.ref, (2.0, 1.0))
+            nx = max(b[0] + w / 2 + 1, min(b[2] - w / 2 - 1, nx))
+            ny = max(b[1] + h / 2 + 1, min(b[3] - h / 2 - 1, ny))
+            ctx.positions[prox.ref] = (nx, ny, rrot)
+            # Also update best_positions if it exists (final clamp stores there)
+            if hasattr(ctx, "best_positions") and prox.ref in ctx.best_positions:
+                ctx.best_positions[prox.ref] = (nx, ny, rrot)
+            _log.info("    %s: re-pulled to (%.1f, %.1f) [near %s]",
+                      prox.ref, nx, ny, prox.target_ref)
+
     return _phase_build_final(ctx)
 
 
