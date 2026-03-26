@@ -2761,42 +2761,142 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
             continue  # drop the blob line
         cleaned.append(g)
 
-    # --- Step 2: compute isolation slot position from pad geometry ---
-    # SRD pinout: 1=Coil+, 4=Coil-, 5=COM (low-voltage side)
-    #             2=NC, 3=NO (high-voltage contact side)
-    coil_pins = {"1", "4", "5"}
-    contact_pins = {"2", "3"}
-
-    coil_xs: list[float] = []
-    contact_xs: list[float] = []
-    all_ys: list[float] = []
+    # --- Step 2: compute U-shaped isolation slot around coil pin ---
+    # The coil pins are low-voltage logic but sit physically adjacent to
+    # high-voltage contact pads (COM, NO, NC).  A small U-shaped
+    # Edge.Cuts routed slot around the coil pin closest to the contacts
+    # provides creepage isolation between mains and logic domains.
+    # The U opens toward the OTHER coil pin (same LV domain) and the
+    # closed wall faces the nearest contact pad.
+    #
+    # KiCad footprint pad semantics (Relay_SPDT_SANYOU_SRD):
+    #   Pad 1=COM, 3=NO, 4=NC  → contact/mains side (high voltage)
+    #   Pad 2=Coil-, 5=Coil+   → coil/logic side (low voltage)
+    contact_pads_xy: list[tuple[float, float]] = []
+    coil_pads_list: list[tuple[str, float, float, float]] = []  # (num, x, y, size)
     for pad in fp.pads:
-        all_ys.append(pad.position.y)
-        if pad.number in coil_pins:
-            coil_xs.append(pad.position.x)
-        elif pad.number in contact_pins:
-            contact_xs.append(pad.position.x)
+        if pad.number in ("1", "3", "4"):
+            contact_pads_xy.append((pad.position.x, pad.position.y))
+        elif pad.number in ("2", "5"):
+            coil_pads_list.append((
+                pad.number, pad.position.x, pad.position.y, pad.size_x,
+            ))
 
-    if coil_xs and contact_xs and all_ys:
-        coil_max_x = max(coil_xs)
-        contact_min_x = min(contact_xs)
-        slot_x = (coil_max_x + contact_min_x) / 2.0
-
-        # Slot spans slightly beyond the outermost pad Y positions.
-        pad_r = max((p.size_x for p in fp.pads), default=2.0) / 2.0
-        y_min = min(all_ys) - pad_r - 1.0
-        y_max = max(all_ys) + pad_r + 1.0
-
-        slot_line = FootprintLine(
-            start=Point(slot_x, y_min),
-            end=Point(slot_x, y_max),
-            layer=LAYER_EDGE_CUTS,
-            width=_RELAY_SLOT_WIDTH,
+    if contact_pads_xy and coil_pads_list:
+        # Find the coil pin closest to any contact pad — that's the one
+        # that needs isolation.
+        contact_cx = sum(x for x, _ in contact_pads_xy) / len(contact_pads_xy)
+        contact_cy = sum(y for _, y in contact_pads_xy) / len(contact_pads_xy)
+        best_coil = min(
+            coil_pads_list,
+            key=lambda c: (c[1] - contact_cx) ** 2 + (c[2] - contact_cy) ** 2,
         )
-        cleaned.append(slot_line)
+        coil_num, coil_x, coil_y, coil_size = best_coil
+        coil_r = coil_size / 2.0
+        clearance = 1.0  # mm from pad edge to slot center
+        u_half = coil_r + clearance
+
+        # The U opens TOWARD the safe side (board edge / other coil pin)
+        # and the arms extend TOWARD the contact pads to block top/bottom
+        # paths between the coil pin and contacts.
+        #
+        #  Contacts side          Coil pin          Safe side (board edge)
+        #       ←─── arms ────┐      ●       ┌──── open ────→
+        #                      │   (coil)     │
+        #       ←─── arms ────┘              └──── open ────→
+        #
+        # The vertical back wall is on the safe side; the arms reach
+        # toward the contacts to block copper paths.
+        if contact_cx > coil_x:
+            # Contacts to the RIGHT → arms extend right, arc on left
+            arc_apex_x = coil_x - u_half   # leftmost point of arc
+            arm_x = coil_x + u_half         # arm tips (toward contacts)
+        else:
+            # Contacts to the LEFT → arms extend left, arc on right
+            arc_apex_x = coil_x + u_half
+            arm_x = coil_x - u_half
+
+        # Routed slot: two nested U-shapes (inner + outer walls) with
+        # closed ends, forming a narrow milled channel in the PCB.
+        # The fabricator mills between the two Edge.Cuts outlines.
+        #
+        #   Outer wall ──╮  ╭── Inner wall
+        #                │  │
+        #     ┌──────────╯  ╰──────────┐  ← end cap (arc)
+        #     │    (channel ~1mm)       │
+        #     └──────────╮  ╭──────────┘  ← end cap (arc)
+        #                │  │
+        #   Outer wall ──╯  ╰── Inner wall
+        #
+        sw = _RELAY_SLOT_WIDTH / 2.0  # half slot width (channel half-width)
+
+        # Inner U (closer to coil pad)
+        inner_r = u_half - sw  # inner radius from coil center
+        inner_apex = arc_apex_x + sw if arc_apex_x < coil_x else arc_apex_x - sw
+        inner_arm = arm_x - sw if arm_x > coil_x else arm_x + sw
+
+        # Outer U (further from coil pad)
+        outer_r = u_half + sw
+        outer_apex = arc_apex_x - sw if arc_apex_x < coil_x else arc_apex_x + sw
+        outer_arm = arm_x + sw if arm_x > coil_x else arm_x - sw
+
+        _lw = 0.05  # thin line width for Edge.Cuts outlines
+
+        slot_lines: list[FootprintLine | FootprintArc] = [
+            # --- Outer wall ---
+            FootprintArc(
+                start=Point(coil_x, coil_y - outer_r),
+                mid=Point(outer_apex, coil_y),
+                end=Point(coil_x, coil_y + outer_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            FootprintLine(
+                start=Point(coil_x, coil_y - outer_r),
+                end=Point(arm_x, coil_y - outer_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            FootprintLine(
+                start=Point(coil_x, coil_y + outer_r),
+                end=Point(arm_x, coil_y + outer_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            # --- Inner wall ---
+            FootprintArc(
+                start=Point(coil_x, coil_y - inner_r),
+                mid=Point(inner_apex, coil_y),
+                end=Point(coil_x, coil_y + inner_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            FootprintLine(
+                start=Point(coil_x, coil_y - inner_r),
+                end=Point(arm_x, coil_y - inner_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            FootprintLine(
+                start=Point(coil_x, coil_y + inner_r),
+                end=Point(arm_x, coil_y + inner_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            # --- End caps (close the channel at arm tips) ---
+            FootprintArc(
+                start=Point(arm_x, coil_y - outer_r),
+                mid=Point(arm_x + sw if arm_x > coil_x else arm_x - sw, coil_y - u_half),
+                end=Point(arm_x, coil_y - inner_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+            FootprintArc(
+                start=Point(arm_x, coil_y + inner_r),
+                mid=Point(arm_x + sw if arm_x > coil_x else arm_x - sw, coil_y + u_half),
+                end=Point(arm_x, coil_y + outer_r),
+                layer=LAYER_EDGE_CUTS, width=_lw,
+            ),
+        ]
+        cleaned.extend(slot_lines)
         _log.info(
-            "Relay %s: added Edge.Cuts isolation slot at x=%.1f (y %.1f..%.1f)",
-            fp.ref, slot_x, y_min, y_max,
+            "Relay %s: U-shaped isolation slot around coil pad %s at (%.1f, %.1f), "
+            "closed wall toward contacts, opens %s",
+            fp.ref, coil_num, coil_x, coil_y,
+            "left" if contact_cx > coil_x else "right",
         )
     else:
         _log.warning(
