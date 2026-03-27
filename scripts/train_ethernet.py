@@ -1107,7 +1107,7 @@ def _apply_ethernet_post_placement(pcb: object) -> object:
     r1_x = j1_x - 9.5 - 0.75 - 1.0   # left of J1, with 1mm margin
     r1_y = u1_y - 5.5 - 1.2 - 0.5    # above U1 courtyard top
     r2_x = r1_x
-    r2_y = r1_y - 3.0                 # R2 above R1, 3mm apart
+    r2_y = r1_y - 2.7                 # R2 above R1, 2.7mm apart (keeps R2-U1 < 15mm)
 
     # Y1 (crystal) right of U1 — min X collision-free = 4.55
     # Place at dx=4.6 for Euclidean ~4.6mm (under 5mm!)
@@ -1200,6 +1200,10 @@ def main() -> None:
     print(f"Nets:       {len(requirements.nets)}")
     print(f"Board:      {int(_BOARD_WIDTH_MM)} x {int(_BOARD_HEIGHT_MM)} mm")
     print()
+
+    # 1b. Save requirements.json for review agents and sync checking
+    from kicad_pipeline.requirements.decomposer import save_requirements
+    save_requirements(requirements, output_dir / "requirements.json")
 
     # 2. Build PCB (no routing)
     print("Building PCB...")

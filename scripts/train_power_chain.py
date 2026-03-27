@@ -960,6 +960,10 @@ def main() -> None:
     print("Board:      60 x 40 mm")
     print()
 
+    # 1b. Save requirements.json for review agents and sync checking
+    from kicad_pipeline.requirements.decomposer import save_requirements
+    save_requirements(requirements, output_dir / "requirements.json")
+
     # 2. Build PCB (no routing)
     print("Building PCB...")
     pcb = build_pcb(requirements, auto_route=False, placement_mode="grouped")
