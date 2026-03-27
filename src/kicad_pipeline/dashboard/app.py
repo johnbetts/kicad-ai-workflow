@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Shared log buffer — API pushes here, log panel drains it.
 _log_buffer: list[str] = []
 
+# Shared notification buffer — API pushes here, panel timer drains it.
+# Each entry: {"message": str, "type": str} where type is positive/negative/warning/info.
+_notification_buffer: list[dict[str, str]] = []
+
 
 def _discover_boards(output_root: Path) -> list[str]:
     """Return sorted board directory names from the output/ folder."""
@@ -149,9 +153,11 @@ def main(
 
     from kicad_pipeline.dashboard.api import register_api_routes
     from kicad_pipeline.dashboard.panels import (
+        build_board_summary,
         build_context_panel,
         build_image_panel,
         build_log_panel,
+        start_notification_drain,
     )
 
     project_root = Path.cwd()
@@ -235,6 +241,12 @@ def main(
                 on_click=_open_kanban_for_board,
             ).props("flat dense no-caps size=sm")
 
+        # Board summary header (between selector and panels)
+        build_board_summary(current_board)
+
+        # Toast notifications for evidence events
+        start_notification_drain()
+
         # Three panel containers
         image_container = ui.element("div")
         log_container = ui.element("div")
@@ -269,25 +281,32 @@ def main(
 
         # Three-panel layout: Images (left) | Chat (center) | Context (right)
         with ui.row().classes("w-full gap-2").style(
-            "height: calc(100vh - 120px)"
+            "height: calc(100vh - 120px); flex-wrap: nowrap"
         ):
-            # LEFT PANEL — Images
+            # LEFT PANEL — Images (25%)
             with (
-                ui.card().classes("h-full").style("width: 25%; overflow-y: auto"),
+                ui.card().classes("h-full").style(
+                    "flex: 0 0 25%; max-width: 25%; "
+                    "overflow-y: auto; overflow-x: hidden"
+                ),
                 image_container,
             ):
                 build_image_panel(current_board)
 
-            # CENTER PANEL — CLI / Chat
+            # CENTER PANEL — CLI / Chat (45%)
             with (
-                ui.card().classes("h-full").style("width: 45%; overflow-y: auto"),
+                ui.card().classes("h-full").style(
+                    "flex: 0 0 45%; max-width: 45%; overflow-y: auto"
+                ),
                 log_container,
             ):
                 build_log_panel(board_dir=current_board)
 
-            # RIGHT PANEL — Context
+            # RIGHT PANEL — Context (30%)
             with (
-                ui.card().classes("h-full").style("width: 30%; overflow-y: auto"),
+                ui.card().classes("h-full").style(
+                    "flex: 0 0 30%; max-width: 30%; overflow-y: auto"
+                ),
                 context_container,
             ):
                 build_context_panel(
@@ -306,7 +325,9 @@ def main(
             VALID_STATUSES,
             VALID_TYPES,
             KanbanCard,
+            _relative_time,
             add_card,
+            add_note,
             delete_card,
             load_kanban,
             move_card,
@@ -393,11 +414,26 @@ def main(
                         card.priority,
                         color=priority_colors.get(card.priority, "grey"),
                     )
+                    if card.notes:
+                        ui.badge(
+                            f"{len(card.notes)} notes",
+                            color="teal",
+                        ).props("outline")
                 ui.label(card.title).classes("font-bold")
                 if card.description:
                     ui.label(card.description[:80]).classes(
                         "text-caption text-grey-5"
                     )
+                # Relative timestamps
+                updated_rel = _relative_time(card.updated)
+                created_rel = _relative_time(card.created)
+                time_label = (
+                    f"Updated {updated_rel}"
+                    if updated_rel != created_rel
+                    else f"Created {created_rel}"
+                )
+                ui.label(time_label).classes("text-caption text-grey-7")
+
                 if card.board_name:
                     with ui.row().classes("items-center gap-2"):
                         ui.label(f"Board: {card.board_name}").classes(
@@ -467,6 +503,49 @@ def main(
                     value=card.priority,
                     label="Priority",
                 ).classes("w-full")
+
+                # Full timestamps
+                ui.separator().classes("q-my-sm")
+                ui.label("Timestamps").classes("text-subtitle2 font-bold")
+                ui.label(f"Created: {card.created}").classes(
+                    "text-caption text-grey-5"
+                )
+                ui.label(f"Updated: {card.updated}").classes(
+                    "text-caption text-grey-5"
+                )
+
+                # Notes section
+                ui.separator().classes("q-my-sm")
+                ui.label("Notes").classes("text-subtitle2 font-bold")
+                if card.notes:
+                    with ui.scroll_area().classes("w-full").style(
+                        "max-height: 150px"
+                    ):
+                        for note in card.notes:
+                            ui.label(note).classes(
+                                "text-caption text-grey-4 q-mb-xs"
+                            )
+                else:
+                    ui.label("No notes yet").classes(
+                        "text-caption text-grey-6"
+                    )
+
+                with ui.row().classes("w-full items-center gap-2"):
+                    note_input = ui.input(
+                        placeholder="Add a note..."
+                    ).classes("flex-grow")
+
+                    def _add_note(_e: object) -> None:
+                        if note_input.value:
+                            add_note(
+                                project_root, card_id, note_input.value
+                            )
+                            dialog.close()
+                            _show_edit_dialog(card_id)
+
+                    ui.button(
+                        "Add Note", on_click=_add_note
+                    ).props("dense size=sm")
 
                 with ui.row().classes("justify-end gap-2 q-mt-md"):
 
@@ -588,6 +667,69 @@ def main(
                     ui.checkbox(ct.title(), value=True, on_change=_toggle)
 
                 _make_toggle()
+
+        # Stats bar
+        stats_container = ui.element("div")
+
+        def _rebuild_stats() -> None:
+            stats_container.clear()
+            kb = load_kanban(project_root)
+            level_cards = kb.filter_by_level(_current_level())
+            with stats_container, ui.row().classes(
+                "w-full q-px-md q-mb-sm items-center gap-3"
+            ):
+                # Cards per type
+                for ct in VALID_TYPES:
+                    count = sum(
+                        1 for c in level_cards if c.card_type == ct
+                    )
+                    if count > 0:
+                        ui.badge(
+                            f"{ct}: {count}",
+                            color=type_colors.get(ct, "grey"),
+                        )
+
+                ui.separator().props("vertical").classes("q-mx-sm")
+
+                # Open vs done
+                open_count = sum(
+                    1 for c in level_cards if c.status != "done"
+                )
+                done_count = sum(
+                    1 for c in level_cards if c.status == "done"
+                )
+                ui.label(
+                    f"Open: {open_count} | Done: {done_count}"
+                ).classes("text-caption")
+
+                # P0/P1 warnings
+                p0_count = sum(
+                    1
+                    for c in level_cards
+                    if c.priority == "P0" and c.status != "done"
+                )
+                p1_count = sum(
+                    1
+                    for c in level_cards
+                    if c.priority == "P1" and c.status != "done"
+                )
+                if p0_count > 0:
+                    ui.badge(
+                        f"P0: {p0_count}", color="red"
+                    ).props("outline")
+                if p1_count > 0:
+                    ui.badge(
+                        f"P1: {p1_count}", color="orange"
+                    ).props("outline")
+
+        # Wrap _rebuild_board to also rebuild stats
+        _original_rebuild = _rebuild_board
+
+        def _rebuild_board_with_stats() -> None:
+            _rebuild_stats()
+            _original_rebuild()
+
+        _rebuild_board = _rebuild_board_with_stats
 
         # Kanban columns
         _rebuild_board()

@@ -23,6 +23,57 @@ logger = logging.getLogger(__name__)
 _output_root: Path | None = None
 
 
+def _push_evidence_notification(record: EvidenceRecord) -> None:
+    """Map an evidence record to a toast notification and push to the buffer."""
+    from kicad_pipeline.dashboard.app import _notification_buffer
+
+    kind = record.kind
+    passed = record.passed
+
+    if kind == EvidenceKind.RENDER:
+        msg = "Board rendered successfully"
+        ntype = "positive" if passed else "negative"
+    elif kind == EvidenceKind.REVIEW:
+        if passed:
+            msg = "Review complete — no critical issues"
+            ntype = "positive"
+        else:
+            msg = "Review found issues — check findings"
+            ntype = "negative"
+    elif kind == EvidenceKind.VERIFICATION:
+        msg = "Verification confirmed"
+        ntype = "positive" if passed else "negative"
+    elif kind == EvidenceKind.HUMAN_APPROVAL:
+        stage = record.stage or "pcb"
+        msg = f"Human approved {stage}"
+        ntype = "positive"
+    elif kind == EvidenceKind.HUMAN_REJECTION:
+        stage = record.stage or "pcb"
+        msg = f"Human rejected {stage}"
+        ntype = "negative"
+    elif kind == EvidenceKind.GATE_RESULT:
+        details = record.details or {}
+        missing = details.get("missing", [])
+        missing_str = ", ".join(str(m) for m in missing) if isinstance(missing, list) else ""
+        if passed:
+            msg = "Gate passed"
+            ntype = "positive"
+        else:
+            msg = f"Gate blocked: missing {missing_str}" if missing_str else "Gate blocked"
+            ntype = "warning"
+    elif kind == EvidenceKind.SCORE:
+        details = record.details or {}
+        grade = details.get("grade", "?")
+        score = float(details.get("overall_score", 0.0))
+        msg = f"New score: {grade} ({score:.3f})"
+        ntype = "info"
+    else:
+        msg = f"Evidence recorded: {kind.value}"
+        ntype = "info"
+
+    _notification_buffer.append({"message": msg, "type": ntype})
+
+
 def _project_root() -> Path:
     """Return the project root (parent of the output directory)."""
     if _output_root is None:
@@ -105,6 +156,7 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         board_pcb = _board_pcb_path(record.board)
         append_record(board_pcb, record)
+        _push_evidence_notification(record)
         return JSONResponse({"status": "ok", "id": record.id}, status_code=201)
 
     async def post_log(request: Request) -> JSONResponse:

@@ -77,14 +77,26 @@ def _image_url(img_path: Path) -> str:
 
 
 def build_image_panel(board_dir: Path | None) -> None:
-    """Build the image gallery panel (left side)."""
+    """Build the image gallery panel (left side).
+
+    Thumbnails at top; clicking shows the image inline below (no popup).
+    """
     from nicegui import ui
 
     if board_dir is None or not board_dir.is_dir():
         ui.label("No board selected").classes("text-grey")
         return
 
-    image_column = ui.column().classes("w-full gap-2")
+    # Inline viewer — selected image shown here, not in a popup
+    selected_viewer = ui.column().classes("w-full")
+    image_column = ui.column().classes("w-full gap-1")
+
+    def _show_inline(img_path: Path) -> None:
+        selected_viewer.clear()
+        url = _image_url(img_path)
+        with selected_viewer:
+            ui.label(img_path.stem).classes("text-subtitle2 font-bold")
+            ui.image(url).style("width: 100%; max-width: 100%")
 
     def _refresh_images() -> None:
         image_column.clear()
@@ -96,38 +108,33 @@ def build_image_panel(board_dir: Path | None) -> None:
                 return
 
             if board_images:
-                ui.label("Board Views").classes("text-subtitle2 font-bold")
-                with ui.row().classes("flex-wrap gap-2"):
+                ui.label("Board Views").classes("text-caption font-bold")
+                with ui.row().classes("flex-wrap gap-1"):
                     for img_path in board_images:
                         _make_thumbnail(img_path)
 
             if crop_images:
-                ui.label("Component Crops").classes(
-                    "text-subtitle2 font-bold q-mt-md"
-                )
-                with ui.row().classes("flex-wrap gap-2"):
+                with (
+                    ui.expansion(
+                        f"Crops ({len(crop_images)})", icon="grid_view",
+                    ).classes("w-full"),
+                    ui.row().classes("flex-wrap gap-1"),
+                ):
                     for img_path in crop_images:
                         _make_thumbnail(img_path)
+
+        # Auto-select first board image on load
+        if board_images:
+            _show_inline(board_images[0])
 
     def _make_thumbnail(img_path: Path) -> None:
         from nicegui import ui
 
         url = _image_url(img_path)
-        with ui.card().classes("cursor-pointer").on(
-            "click", lambda _e=None, p=img_path: _show_fullsize(p)
-        ):
-            ui.image(url).classes("w-32 h-24 object-cover")
-            ui.label(img_path.stem).classes("text-caption text-center")
-
-    def _show_fullsize(img_path: Path) -> None:
-        from nicegui import ui
-
-        url = _image_url(img_path)
-        with ui.dialog() as dlg, ui.card().classes("w-full max-w-4xl"):
-            ui.label(img_path.stem).classes("text-h6")
-            ui.image(url).classes("w-full")
-            ui.button("Close", on_click=dlg.close)
-        dlg.open()
+        ui.image(url).classes("cursor-pointer").style(
+            "width: 60px; height: 45px; object-fit: cover; "
+            "border-radius: 4px; border: 1px solid #555"
+        ).on("click", lambda _e=None, p=img_path: _show_inline(p))
 
     _refresh_images()
     ui.timer(5.0, _refresh_images)
@@ -334,6 +341,135 @@ def build_log_panel(board_dir: Path | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Toast notification drain
+# ---------------------------------------------------------------------------
+
+
+def start_notification_drain() -> None:
+    """Start a 2-second timer that drains the notification buffer as toasts.
+
+    Call once per page to receive evidence-event notifications.
+    """
+    from nicegui import ui
+
+    from kicad_pipeline.dashboard.app import _notification_buffer
+
+    def _drain() -> None:
+        while _notification_buffer:
+            entry = _notification_buffer.pop(0)
+            ui.notify(
+                entry["message"],
+                type=entry.get("type", "info"),
+                position="top-right",
+                close_button=True,
+            )
+
+    ui.timer(2.0, _drain)
+
+
+# ---------------------------------------------------------------------------
+# Board summary header
+# ---------------------------------------------------------------------------
+
+
+def build_board_summary(board_dir: Path | None) -> None:
+    """Render a summary row: board name, grade, evidence count, stage, last activity.
+
+    Place between the board selector and the three-panel layout.
+    Auto-refreshes via a 3-second timer.
+    """
+    from datetime import datetime, timezone
+
+    from nicegui import ui
+
+    if board_dir is None or not board_dir.is_dir():
+        return
+
+    summary_row = ui.row().classes(
+        "w-full items-center gap-6 q-px-md q-py-xs"
+    ).style("background: rgba(255,255,255,0.03); border-radius: 4px")
+
+    def _refresh_summary() -> None:
+        from kicad_pipeline.evidence.ledger import load_ledger
+
+        board_pcb = _find_board_pcb(board_dir)
+        ledger = load_ledger(board_pcb)
+
+        # Latest grade
+        score = ledger.latest_score()
+        grade = score.grade if score else "?"
+        grade_colors = {
+            "A": "green", "B": "light-green", "C": "yellow",
+            "D": "orange", "F": "red",
+        }
+        color = grade_colors.get(grade, "grey")
+
+        # Latest stage from most recent record
+        latest_stage = "—"
+        if ledger.records:
+            latest_stage = ledger.records[-1].stage or "—"
+
+        # Time since last activity
+        time_ago = "—"
+        if ledger.records:
+            now = datetime.now(tz=timezone.utc)
+            delta = now - ledger.records[-1].timestamp
+            secs = delta.total_seconds()
+            if secs < 60:
+                time_ago = "just now"
+            elif secs < 3600:
+                time_ago = f"{int(secs // 60)}m ago"
+            elif secs < 86400:
+                time_ago = f"{int(secs // 3600)}h ago"
+            else:
+                time_ago = f"{int(secs // 86400)}d ago"
+
+        evidence_count = len(ledger.records)
+
+        summary_row.clear()
+        with summary_row:
+            # Board name
+            with ui.column().classes("items-center"):
+                ui.label("Board").classes("text-caption text-grey")
+                ui.label(board_dir.name).classes("text-subtitle1 font-bold")
+
+            ui.separator().props("vertical").classes("h-10")
+
+            # Grade (large colored letter)
+            with ui.column().classes("items-center"):
+                ui.label("Grade").classes("text-caption text-grey")
+                ui.label(grade).classes(
+                    f"text-h4 font-bold text-{color}"
+                )
+
+            ui.separator().props("vertical").classes("h-10")
+
+            # Evidence count
+            with ui.column().classes("items-center"):
+                ui.label("Evidence").classes("text-caption text-grey")
+                ui.label(str(evidence_count)).classes("text-h6 font-bold")
+
+            ui.separator().props("vertical").classes("h-10")
+
+            # Latest stage
+            with ui.column().classes("items-center"):
+                ui.label("Latest Stage").classes("text-caption text-grey")
+                ui.label(latest_stage.capitalize()).classes(
+                    "text-subtitle1 font-medium"
+                )
+
+            ui.separator().props("vertical").classes("h-10")
+
+            # Last activity
+            with ui.column().classes("items-center"):
+                ui.label("Last Activity").classes("text-caption text-grey")
+                ui.label(time_ago).classes("text-subtitle1 font-medium")
+
+    _refresh_summary()
+    ui.timer(3.0, _refresh_summary)
+
+
+# ---------------------------------------------------------------------------
 # Context panel (right) — role-aware
 # ---------------------------------------------------------------------------
 
@@ -378,6 +514,7 @@ def build_context_panel(
         with context_column:
             # Common cards for all roles
             _build_stage_status_card(board_dir)
+            _build_activity_feed_card(board_dir)
             _build_quality_score_card(board_dir)
 
             # Role-specific cards
@@ -386,6 +523,9 @@ def build_context_panel(
                 _build_requirements_status_card(board_dir)
 
             _build_review_findings_card(board_dir)
+
+            # DRC report — full detail for framework/deployment, badge for board
+            _build_drc_report_card(board_dir, role=role)
 
             if role == "framework":
                 _build_known_issues_card(board_dir)
@@ -702,6 +842,255 @@ def _build_review_findings_card(board_dir: Path) -> None:
                 count = sum(1 for i in sorted_issues if i.severity == sev)
                 if count > 0:
                     ui.badge(f"{sev.value}: {count}", color=severity_colors.get(sev, "grey"))
+
+        # "Report Issue" button — pre-fills a kanban card from selected finding
+        board_name = board_dir.name if board_dir else ""
+
+        def _report_issue_from_finding(issue_desc: str) -> None:
+            """Open the kanban add-card dialog pre-filled from a finding."""
+            from kicad_pipeline.dashboard.kanban import KanbanCard, add_card
+
+            project_root = board_dir.parent.parent
+            new_card = KanbanCard(
+                title=issue_desc[:80],
+                description=issue_desc,
+                card_type="bug",
+                level="board",
+                board_name=board_name,
+            )
+            add_card(project_root, new_card)
+            ui.notify(
+                f"Issue reported to kanban: {issue_desc[:50]}...",
+                type="positive",
+            )
+
+        with ui.row().classes("gap-2 q-mt-sm"):
+            for issue in sorted_issues:
+
+                def _make_report_btn(desc: str = issue.description) -> None:
+                    ui.button(
+                        f"Report: {desc[:40]}...",
+                        on_click=lambda _e=None, d=desc: (
+                            _report_issue_from_finding(d)
+                        ),
+                        icon="bug_report",
+                    ).props("flat dense no-caps size=xs color=red")
+
+                _make_report_btn()
+
+
+_KIND_ICONS: dict[str, str] = {
+    "render": "image",
+    "review": "rate_review",
+    "score": "speed",
+    "verification": "verified",
+    "human_approval": "thumb_up",
+    "human_rejection": "thumb_down",
+    "gate_result": "security",
+    "drc_report": "assignment",
+    "known_issue_check": "bug_report",
+}
+
+
+def _build_activity_feed_card(board_dir: Path) -> None:
+    """Card showing the last 10 evidence records chronologically (newest first)."""
+    from datetime import datetime, timezone
+
+    from nicegui import ui
+
+    from kicad_pipeline.evidence.ledger import load_ledger
+
+    board_pcb = _find_board_pcb(board_dir)
+    ledger = load_ledger(board_pcb)
+
+    with ui.card().classes("w-full"):
+        ui.label("Recent Activity").classes("text-subtitle1 font-bold")
+
+        if not ledger.records:
+            ui.label("No activity yet").classes("text-grey")
+            return
+
+        recent = list(reversed(ledger.records[-10:]))
+        now = datetime.now(tz=timezone.utc)
+
+        for rec in recent:
+            icon_name = _KIND_ICONS.get(rec.kind.value, "info")
+            delta = now - rec.timestamp
+            if delta.total_seconds() < 60:
+                ago = "just now"
+            elif delta.total_seconds() < 3600:
+                mins = int(delta.total_seconds() // 60)
+                ago = f"{mins}m ago"
+            elif delta.total_seconds() < 86400:
+                hours = int(delta.total_seconds() // 3600)
+                ago = f"{hours}h ago"
+            else:
+                days = int(delta.total_seconds() // 86400)
+                ago = f"{days}d ago"
+
+            ts_str = rec.timestamp.strftime("%H:%M:%S")
+            summary = rec.summary or rec.kind.value.replace("_", " ").title()
+
+            if rec.passed is True:
+                badge_color = "green"
+                badge_text = "pass"
+            elif rec.passed is False:
+                badge_color = "red"
+                badge_text = "fail"
+            else:
+                badge_color = "grey"
+                badge_text = "info"
+
+            with ui.expansion(
+                text=f"{ts_str}  {summary}",
+                icon=icon_name,
+            ).classes("w-full"):
+                with ui.row().classes("items-center gap-2 q-mb-xs"):
+                    ui.badge(badge_text, color=badge_color)
+                    ui.label(ago).classes("text-caption text-grey")
+                with ui.column().classes("gap-1"):
+                    ui.label(f"Kind: {rec.kind.value}").classes("text-caption")
+                    ui.label(f"Stage: {rec.stage}").classes("text-caption")
+                    ui.label(f"Step: {rec.step}").classes("text-caption")
+                    ui.label(f"Producer: {rec.producer}").classes("text-caption")
+                    if rec.feedback:
+                        ui.label(f"Feedback: {rec.feedback}").classes(
+                            "text-caption text-orange"
+                        )
+                    if rec.details:
+                        ui.label(f"Details: {rec.details}").classes(
+                            "text-caption text-grey"
+                        )
+                    if rec.artifacts:
+                        ui.label(
+                            f"Artifacts: {', '.join(rec.artifacts)}"
+                        ).classes("text-caption text-grey")
+
+
+def _load_drc_report(board_dir: Path) -> dict[str, object] | None:
+    """Load drc_report.json from a board directory, returning None if missing."""
+    import json as _json
+
+    drc_path = board_dir / "drc_report.json"
+    if not drc_path.exists():
+        return None
+    try:
+        return _json.loads(drc_path.read_text(encoding="utf-8"))
+    except (ValueError, KeyError):
+        return None
+
+
+def _build_drc_report_card(board_dir: Path, role: str = "framework") -> None:
+    """Card showing DRC report violations from drc_report.json.
+
+    For framework/deployment roles: full expandable detail view.
+    For board role: simplified badge showing error count.
+    """
+    from nicegui import ui
+
+    drc = _load_drc_report(board_dir)
+    if drc is None:
+        return  # No DRC report — skip the card entirely
+
+    violations: list[dict[str, object]] = drc.get("violations", [])  # type: ignore[assignment]
+    unconnected: list[dict[str, object]] = drc.get("unconnected_items", [])  # type: ignore[assignment]
+    all_items = [*violations, *unconnected]
+
+    error_count = sum(
+        1 for item in all_items if item.get("severity") == "error"
+    )
+    warning_count = sum(
+        1 for item in all_items if item.get("severity") == "warning"
+    )
+    total = len(all_items)
+
+    # Board users see a simplified badge only
+    if role == "board":
+        with (
+            ui.card().classes("w-full"),
+            ui.row().classes("items-center gap-2"),
+        ):
+            ui.icon("assignment").classes("text-lg")
+            if error_count == 0 and warning_count == 0:
+                ui.badge("DRC clean", color="green")
+            else:
+                ui.badge(
+                    f"DRC: {error_count} errors",
+                    color="red" if error_count > 0 else "green",
+                )
+        return
+
+    # Framework / deployment: full detail view
+    with ui.card().classes("w-full"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("DRC Report").classes("text-subtitle1 font-bold")
+            if total == 0:
+                ui.badge("DRC clean", color="green")
+            else:
+                if error_count > 0:
+                    ui.badge(f"{error_count} errors", color="red")
+                if warning_count > 0:
+                    ui.badge(f"{warning_count} warnings", color="orange")
+
+        if not all_items:
+            ui.label("No violations found").classes("text-green")
+            return
+
+        # Group by type for summary
+        type_counts: dict[str, int] = {}
+        for item in all_items:
+            vtype = str(item.get("type", "unknown"))
+            type_counts[vtype] = type_counts.get(vtype, 0) + 1
+
+        with ui.expansion(
+            f"Violations ({total})", icon="warning"
+        ).classes("w-full"):
+            # Summary by type
+            with ui.row().classes("gap-2 q-mb-sm flex-wrap"):
+                for vtype, count in sorted(
+                    type_counts.items(), key=lambda x: -x[1]
+                ):
+                    ui.badge(f"{vtype}: {count}", color="grey")
+
+            # Individual violations
+            columns = [
+                {"name": "type", "label": "Type", "field": "type"},
+                {
+                    "name": "severity",
+                    "label": "Severity",
+                    "field": "severity",
+                },
+                {
+                    "name": "description",
+                    "label": "Description",
+                    "field": "description",
+                },
+                {
+                    "name": "location",
+                    "label": "Location",
+                    "field": "location",
+                },
+            ]
+            rows: list[dict[str, str]] = []
+            for item in all_items:
+                # Extract first item's position for location
+                sub_items = item.get("items", [])
+                location = ""
+                if isinstance(sub_items, list) and sub_items:
+                    first = sub_items[0]
+                    if isinstance(first, dict):
+                        pos = first.get("pos", {})
+                        if isinstance(pos, dict):
+                            x = pos.get("x", "")
+                            y = pos.get("y", "")
+                            location = f"({x}, {y})"
+                rows.append({
+                    "type": str(item.get("type", "")),
+                    "severity": str(item.get("severity", "")),
+                    "description": str(item.get("description", "")),
+                    "location": location,
+                })
+            ui.table(columns=columns, rows=rows).classes("w-full")
 
 
 def _build_known_issues_card(board_dir: Path) -> None:

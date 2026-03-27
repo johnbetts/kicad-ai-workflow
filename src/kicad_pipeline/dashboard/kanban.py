@@ -52,8 +52,53 @@ class KanbanCard(BaseModel):
     level: str = "framework"
     board_name: str = ""
     status: str = "backlog"
+    notes: list[str] = Field(default_factory=list)
     created: str = Field(default_factory=_utc_now_iso)
     updated: str = Field(default_factory=_utc_now_iso)
+
+
+def _relative_time(iso_timestamp: str) -> str:
+    """Convert an ISO timestamp to a human-readable relative time string."""
+    try:
+        dt = datetime.fromisoformat(iso_timestamp)
+        now = datetime.now(tz=timezone.utc)
+        # Ensure both are timezone-aware
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = now - dt
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        if days < 30:
+            return f"{days}d ago"
+        months = days // 30
+        return f"{months}mo ago"
+    except (ValueError, TypeError):
+        return "unknown"
+
+
+def add_note(project_root: Path, card_id: str, note_text: str) -> KanbanCard:
+    """Add a timestamped note to a card. Returns the updated card."""
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    stamped_note = f"{timestamp} \u2014 {note_text}"
+    board = load_kanban(project_root)
+    for i, card in enumerate(board.cards):
+        if card.id == card_id:
+            new_notes = [*card.notes, stamped_note]
+            board.cards[i] = card.model_copy(
+                update={"notes": new_notes, "updated": _utc_now_iso()}
+            )
+            save_kanban(project_root, board)
+            return board.cards[i]
+    msg = f"Card {card_id} not found"
+    raise KeyError(msg)
 
 
 class KanbanBoard(BaseModel):

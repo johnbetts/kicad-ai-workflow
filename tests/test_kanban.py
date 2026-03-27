@@ -69,6 +69,7 @@ class TestKanbanCardCreation:
         assert card.status == "backlog"
         assert card.description == ""
         assert card.board_name == ""
+        assert card.notes == []
         assert card.id  # auto-generated
         assert card.created  # auto-generated
         assert card.updated  # auto-generated
@@ -90,6 +91,101 @@ class TestKanbanCardCreation:
         assert card.level == "board"
         assert card.board_name == "train_relay"
         assert card.status == "in_progress"
+
+
+class TestKanbanCardNotes:
+    """Notes field on KanbanCard."""
+
+    def test_notes_default_empty(self) -> None:
+        from kicad_pipeline.dashboard.kanban import KanbanCard
+
+        card = KanbanCard(title="No notes")
+        assert card.notes == []
+
+    def test_notes_initialized(self) -> None:
+        from kicad_pipeline.dashboard.kanban import KanbanCard
+
+        card = KanbanCard(
+            title="With notes",
+            notes=["2026-03-27 10:30 -- First note"],
+        )
+        assert len(card.notes) == 1
+        assert "First note" in card.notes[0]
+
+    def test_add_note(self, project_root: Path) -> None:
+        from kicad_pipeline.dashboard.kanban import KanbanCard, add_card, add_note
+
+        card = add_card(project_root, KanbanCard(title="Noted card"))
+        updated = add_note(project_root, card.id, "Fixed placement issue")
+        assert len(updated.notes) == 1
+        assert "Fixed placement issue" in updated.notes[0]
+        # Verify timestamp prefix
+        assert updated.notes[0].count("\u2014") >= 1
+
+    def test_add_multiple_notes(self, project_root: Path) -> None:
+        from kicad_pipeline.dashboard.kanban import KanbanCard, add_card, add_note, load_kanban
+
+        card = add_card(project_root, KanbanCard(title="Multi-note card"))
+        add_note(project_root, card.id, "Note one")
+        add_note(project_root, card.id, "Note two")
+        add_note(project_root, card.id, "Note three")
+        reloaded = load_kanban(project_root)
+        found = next(c for c in reloaded.cards if c.id == card.id)
+        assert len(found.notes) == 3
+
+    def test_add_note_not_found(self, project_root: Path) -> None:
+        from kicad_pipeline.dashboard.kanban import add_note
+
+        with pytest.raises(KeyError, match="not found"):
+            add_note(project_root, "nonexistent", "Orphan note")
+
+    def test_notes_roundtrip_persistence(self, project_root: Path) -> None:
+        from kicad_pipeline.dashboard.kanban import KanbanCard, add_card, add_note, load_kanban
+
+        card = add_card(project_root, KanbanCard(title="Persist test"))
+        add_note(project_root, card.id, "Survived reload")
+        reloaded = load_kanban(project_root)
+        found = next(c for c in reloaded.cards if c.id == card.id)
+        assert len(found.notes) == 1
+        assert "Survived reload" in found.notes[0]
+
+
+class TestRelativeTime:
+    """_relative_time helper produces human-readable relative timestamps."""
+
+    def test_just_now(self) -> None:
+        from kicad_pipeline.dashboard.kanban import _relative_time, _utc_now_iso
+
+        assert _relative_time(_utc_now_iso()) == "just now"
+
+    def test_minutes_ago(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from kicad_pipeline.dashboard.kanban import _relative_time
+
+        past = (datetime.now(tz=timezone.utc) - timedelta(minutes=5)).isoformat()
+        assert _relative_time(past) == "5m ago"
+
+    def test_hours_ago(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from kicad_pipeline.dashboard.kanban import _relative_time
+
+        past = (datetime.now(tz=timezone.utc) - timedelta(hours=3)).isoformat()
+        assert _relative_time(past) == "3h ago"
+
+    def test_days_ago(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from kicad_pipeline.dashboard.kanban import _relative_time
+
+        past = (datetime.now(tz=timezone.utc) - timedelta(days=7)).isoformat()
+        assert _relative_time(past) == "7d ago"
+
+    def test_invalid_timestamp(self) -> None:
+        from kicad_pipeline.dashboard.kanban import _relative_time
+
+        assert _relative_time("not-a-date") == "unknown"
 
 
 class TestLoadEmptyKanban:
