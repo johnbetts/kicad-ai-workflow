@@ -2970,6 +2970,28 @@ def _postprocess_esp32_thermal_pad(fp: Footprint) -> Footprint:
 # JLCPCB footprint loader integration
 # ---------------------------------------------------------------------------
 
+# Expected minimum pad counts for common package types.
+# Used to reject JLCPCB cached footprints that have wrong pad counts
+# (e.g. easyeda2kicad returning SOD-323 for an SOT-23 transistor).
+_EXPECTED_PAD_COUNTS: dict[str, int] = {
+    "SOT-23": 3, "SOT-23-3": 3, "SOT-23-5": 5, "SOT-23-6": 6,
+    "SOT-223": 4, "SOT-89": 3,
+    "SOIC-8": 8, "SOIC-14": 14, "SOIC-16": 16,
+    "MSOP-8": 8, "MSOP-10": 10, "MSOP-16": 16,
+    "TSSOP-8": 8, "TSSOP-14": 14, "TSSOP-16": 16, "TSSOP-20": 20,
+    "LQFP-32": 32, "LQFP-48": 48, "LQFP-64": 64, "LQFP-100": 100,
+    "QFN-16": 16, "QFN-20": 20, "QFN-24": 24, "QFN-32": 32, "QFN-48": 48,
+}
+
+
+def _expected_pad_count(footprint_id: str) -> int:
+    """Return expected minimum pad count for a footprint_id, or 0 if unknown."""
+    upper = footprint_id.strip().upper()
+    for pattern, count in _EXPECTED_PAD_COUNTS.items():
+        if pattern.upper() in upper:
+            return count
+    return 0
+
 
 def _try_jlcpcb_footprint(
     lcsc: str,
@@ -2995,6 +3017,16 @@ def _try_jlcpcb_footprint(
 
     try:
         fp = load_kicad_mod(mod_path, ref=ref, value=value, layer=layer, lcsc=lcsc)
+        # Validate pad count: if footprint_id implies a specific pin count
+        # (e.g. SOT-23 → 3 pads) but JLCPCB gives fewer, reject the bad footprint.
+        _expected_pads = _expected_pad_count(footprint_id)
+        if _expected_pads > 0 and len(fp.pads) < _expected_pads:
+            _log.warning(
+                "JLCPCB footprint for %s (%s) has %d pads but %s expects %d; "
+                "rejecting JLCPCB footprint",
+                ref, lcsc, len(fp.pads), footprint_id, _expected_pads,
+            )
+            return None
         # Tag source provenance for downstream verification tracking
         fp = Footprint(
             lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
