@@ -1,0 +1,22 @@
+{
+  "project": "KiCad AI Workflow — Project Management Framework",
+  "slug": "project-framework",
+  "created": "2026-03-26",
+  "last_session": "2026-03-26",
+  "current_phase": "PLAN",
+  "problem_statement": "Agents skip verification, repeat known mistakes, lose context, and claim false success. Human review loop bottlenecked by scattered CLI/file information. Need hardened stage-gate runner with evidence enforcement + NiceGUI review dashboard.",
+  "approaches_shortlisted": [
+    "Hardened Harness — take existing process_runner.py, make gates inescapable",
+    "Evidence Ledger — append-only proof chain with file hashes",
+    "NiceGUI Review Dashboard — three-panel layout for human review"
+  ],
+  "recommendation": "Unified Stage-Gate Runner + Evidence-First Dashboard, built in parallel sharing Pydantic evidence model. Custom runner borrowing patterns from Dagster (blocking checks), CrewAI (guardrail retry), Prefect (typed human input), GLEAN (evidence accumulation).",
+  "roadmap_initialized": true,
+  "sessions": [
+    {
+      "date": "2026-03-26",
+      "phase": "PLAN",
+      "summary": "Full problem-solving session: interrogated requirements, brainstormed 6 approaches, researched PCB design landscape + agent frameworks + dashboard frameworks, recommended hardened runner + NiceGUI dashboard, discussed sequencing (parallel), created detailed implementation plan with evidence model schema, ~47 tests, 3-phase delivery."
+    }
+  ]
+}
