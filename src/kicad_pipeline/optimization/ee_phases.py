@@ -1004,6 +1004,50 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
     ctx.top_edge_connector_refs = set(_top_refs)
 
 
+def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
+    """3f3: Pin ALL remaining connectors to nearest board edge.
+
+    Handles USB connectors, pin headers, and any J-prefix component
+    not already placed by ``_phase_top_edge_connectors``.  Each connector
+    is pushed to the nearest board edge within ``CONNECTOR_EDGE_MAX_MM``.
+    """
+    min_x, min_y, max_x, max_y = ctx.bounds
+    margin = 3.0  # small inset from edge (BOARD_EDGE_MARGIN_MM + 1.0)
+
+    already_placed = getattr(ctx, "top_edge_connector_refs", set())
+
+    for ref, (cx, cy, rot) in list(ctx.positions.items()):
+        if ref in ctx.fixed_refs or ref in already_placed:
+            continue
+        if not ref.startswith("J"):
+            continue
+
+        # Compute distance to each edge
+        d_left = cx - min_x
+        d_right = max_x - cx
+        d_top = cy - min_y
+        d_bottom = max_y - cy
+        min_dist = min(d_left, d_right, d_top, d_bottom)
+
+        # Already within 5mm of an edge — close enough
+        if min_dist <= 5.0:
+            continue
+
+        # Push to nearest edge
+        if min_dist == d_left:
+            new_x, new_y, new_rot = min_x + margin, cy, rot
+        elif min_dist == d_right:
+            new_x, new_y, new_rot = max_x - margin, cy, rot
+        elif min_dist == d_top:
+            new_x, new_y, new_rot = cx, min_y + margin, rot
+        else:
+            new_x, new_y, new_rot = cx, max_y - margin, rot
+
+        _log.info("  3f3: %s pushed to edge (%.1f,%.1f) -> (%.1f,%.1f)",
+                  ref, cx, cy, new_x, new_y)
+        ctx.positions[ref] = (new_x, new_y, new_rot)
+
+
 def _phase_template_refinement(ctx: PlacementContext) -> None:
     """3h: Template-guided refinement — apply subcircuit layout templates."""
     _log.info("  3h: Template-guided refinement")

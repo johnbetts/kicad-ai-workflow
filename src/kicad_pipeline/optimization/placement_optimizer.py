@@ -172,6 +172,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     phases["rf_edge"](ctx)  # type: ignore[operator]
     phases["connector_orient"](ctx)  # type: ignore[operator]
     phases["top_edge_connectors"](ctx)  # type: ignore[operator]
+    phases["all_connectors_to_edges"](ctx)  # type: ignore[operator]
     phases["mcu_group"](ctx)  # type: ignore[operator]
     phases["ethernet_group"](ctx)  # type: ignore[operator]
     phases["template_refinement"](ctx)  # type: ignore[operator]
@@ -240,6 +241,7 @@ def optimize_placement_ee(
         _phase_review_loop,
         _phase_rf_edge,
         _phase_template_refinement,
+        _phase_all_connectors_to_edges,
         _phase_top_edge_connectors,
         _phase_zone_partitioning,
     )
@@ -276,6 +278,7 @@ def optimize_placement_ee(
         rf_edge=_phase_rf_edge,
         connector_orient=_phase_connector_orientation,
         top_edge_connectors=_phase_top_edge_connectors,
+        all_connectors_to_edges=_phase_all_connectors_to_edges,
         mcu_group=_phase_mcu_group,
         ethernet_group=_phase_ethernet_group,
         template_refinement=_phase_template_refinement,  # 3h template

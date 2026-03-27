@@ -34,21 +34,25 @@ _WEIGHT_THERMAL: float = 0.10
 # Fast-path sub-dimension weights (EE-aligned, v4 — 14 dimensions)
 # Each original weight is scaled by 0.9 to make room for constraint compliance (0.10).
 # Original weights summed to 1.0; new 13 x 0.9 + 0.10 = 1.00 exactly.
-_FAST_WEIGHT_COLLISION: float = 0.135
-_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.045
-_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.135
-_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.09
-_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.09
-_FAST_WEIGHT_MCU_PERIPHERAL: float = 0.09
-_FAST_WEIGHT_RF_EDGE: float = 0.045
-_FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.045
-_FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.045
-_FAST_WEIGHT_GROUP_COHESION: float = 0.045
-_FAST_WEIGHT_SUBGROUP_COHESION: float = 0.045
-_FAST_WEIGHT_GROUP_ISOLATION: float = 0.045
-_FAST_WEIGHT_PAD_FACING: float = 0.045
-_FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.05
-_FAST_WEIGHT_HUMAN_FEEDBACK: float = 0.05
+# Fast-path sub-dimension weights (EE-aligned, v5 — 17 dimensions)
+# Added utilization + compactness to catch sprawling layouts.
+_FAST_WEIGHT_COLLISION: float = 0.12
+_FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.04
+_FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.12
+_FAST_WEIGHT_CONNECTOR_EDGE: float = 0.08
+_FAST_WEIGHT_DECOUPLING_PROXIMITY: float = 0.08
+_FAST_WEIGHT_MCU_PERIPHERAL: float = 0.08
+_FAST_WEIGHT_RF_EDGE: float = 0.04
+_FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.04
+_FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.04
+_FAST_WEIGHT_GROUP_COHESION: float = 0.04
+_FAST_WEIGHT_SUBGROUP_COHESION: float = 0.04
+_FAST_WEIGHT_GROUP_ISOLATION: float = 0.04
+_FAST_WEIGHT_PAD_FACING: float = 0.04
+_FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.04
+_FAST_WEIGHT_HUMAN_FEEDBACK: float = 0.04
+_FAST_WEIGHT_UTILIZATION: float = 0.04
+_FAST_WEIGHT_COMPACTNESS: float = 0.08
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -1267,13 +1271,107 @@ def _score_human_feedback(
     return earned_weight / total_weight, issues[:5]
 
 
+def _score_utilization(pcb: PCBDesign) -> tuple[float, list[str]]:
+    """Score board utilization — penalizes sprawling layouts with wasted space.
+
+    Target: 25-60% utilization is ideal.  Below 15% = sprawl.  Above 75% = packed.
+    """
+    from kicad_pipeline.pcb.footprints import estimate_footprint_size
+
+    # Board area from outline
+    if pcb.outline and pcb.outline.polygon:
+        xs = [p.x for p in pcb.outline.polygon]
+        ys = [p.y for p in pcb.outline.polygon]
+        board_area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    else:
+        board_area = 10000.0  # 100x100 fallback
+
+    # Component area (sum of footprint bboxes)
+    comp_area = 0.0
+    for fp in pcb.footprints:
+        if not fp.pads:
+            continue
+        w, h = estimate_footprint_size(fp.lib_id)
+        comp_area += w * h
+
+    if board_area < 1.0:
+        return 1.0, []
+
+    ratio = comp_area / board_area
+    issues: list[str] = []
+
+    if ratio < 0.10:
+        score = ratio / 0.10  # 0→1 as ratio goes 0→10%
+        issues.append(f"Board utilization {ratio:.0%} — very sparse layout")
+    elif ratio < 0.25:
+        score = 0.5 + 0.5 * (ratio - 0.10) / 0.15  # 0.5→1 as 10%→25%
+    elif ratio <= 0.65:
+        score = 1.0  # ideal range
+    else:
+        score = max(0.5, 1.0 - (ratio - 0.65) / 0.35)
+        issues.append(f"Board utilization {ratio:.0%} — very dense")
+
+    return score, issues
+
+
+def _score_compactness(pcb: PCBDesign) -> tuple[float, list[str]]:
+    """Score layout compactness — penalizes scattered component clusters.
+
+    Measures the ratio of component bounding box to board area.
+    A compact layout has all components in a tight cluster.
+    """
+    if not pcb.footprints:
+        return 1.0, []
+
+    # Get bounding box of all placed components (excluding mounting holes)
+    comp_xs: list[float] = []
+    comp_ys: list[float] = []
+    for fp in pcb.footprints:
+        if not fp.pads or fp.ref.startswith("H"):
+            continue
+        comp_xs.append(fp.position.x)
+        comp_ys.append(fp.position.y)
+
+    if len(comp_xs) < 2:
+        return 1.0, []
+
+    comp_bbox_w = max(comp_xs) - min(comp_xs)
+    comp_bbox_h = max(comp_ys) - min(comp_ys)
+    comp_bbox_area = max(comp_bbox_w * comp_bbox_h, 1.0)
+
+    # Board area
+    if pcb.outline and pcb.outline.polygon:
+        xs = [p.x for p in pcb.outline.polygon]
+        ys = [p.y for p in pcb.outline.polygon]
+        board_area = max((max(xs) - min(xs)) * (max(ys) - min(ys)), 1.0)
+    else:
+        board_area = 10000.0
+
+    ratio = comp_bbox_area / board_area
+    issues: list[str] = []
+
+    if ratio > 0.9:
+        score = 1.0  # components fill the board — very compact
+    elif ratio > 0.5:
+        score = 0.8 + 0.2 * (ratio - 0.5) / 0.4
+    elif ratio > 0.2:
+        score = 0.5 + 0.3 * (ratio - 0.2) / 0.3
+    else:
+        score = ratio / 0.2 * 0.5  # 0→0.5 as 0%→20%
+        issues.append(
+            f"Components use {ratio:.0%} of board — layout is scattered"
+        )
+
+    return score, issues
+
+
 def _gather_placement_subdimensions(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
     pcb_dir: str | Path | None = None,
     human_constraints: tuple[HumanConstraint, ...] | None = None,
 ) -> dict[str, tuple[float, tuple[str, ...]]]:
-    """Compute all 15 placement sub-dimension scores.
+    """Compute all 17 placement sub-dimension scores.
 
     Args:
         pcb: The PCB design to evaluate.
@@ -1300,6 +1398,8 @@ def _gather_placement_subdimensions(
     human_score, human_issues = _score_human_feedback(
         pos_2d, pcb_dir=pcb_dir, constraints=human_constraints,
     )
+    utilization_score, utilization_issues = _score_utilization(pcb)
+    compactness_score, compactness_issues = _score_compactness(pcb)
 
     return {
         "collision": (collision_score, tuple(collision_issues[:5])),
@@ -1316,6 +1416,8 @@ def _gather_placement_subdimensions(
         "pad_facing": (pad_facing_score, tuple(pad_facing_issues[:5])),
         "constraint_compliance": (constraint_score, tuple(constraint_issues[:5])),
         "human_feedback": (human_score, tuple(human_issues[:5])),
+        "utilization": (utilization_score, tuple(utilization_issues[:5])),
+        "compactness": (compactness_score, tuple(compactness_issues[:5])),
     }
 
 
@@ -1337,6 +1439,8 @@ def _build_fast_breakdown(
         ("pad_facing", "Pad Facing", _FAST_WEIGHT_PAD_FACING),
         ("constraint_compliance", "Constraint Compliance", _FAST_WEIGHT_CONSTRAINT_COMPLIANCE),
         ("human_feedback", "Human Feedback", _FAST_WEIGHT_HUMAN_FEEDBACK),
+        ("utilization", "Board Utilization", _FAST_WEIGHT_UTILIZATION),
+        ("compactness", "Layout Compactness", _FAST_WEIGHT_COMPACTNESS),
     )
     return tuple(
         ScoreDetail(
@@ -1357,7 +1461,7 @@ def compute_fast_placement_score(
 ) -> QualityScore:
     """Compute a placement-focused quality score without full validation.
 
-    Evaluates 15 EE-aligned placement sub-dimensions and returns a composite
+    Evaluates 17 EE-aligned placement sub-dimensions and returns a composite
     :class:`QualityScore`.  The 15th dimension scores compliance with human
     feedback constraints loaded from ``.pcb-review/human_constraints.json``.
 
@@ -1391,6 +1495,8 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_PAD_FACING * dims["pad_facing"][0]
         + _FAST_WEIGHT_CONSTRAINT_COMPLIANCE * dims["constraint_compliance"][0]
         + _FAST_WEIGHT_HUMAN_FEEDBACK * dims["human_feedback"][0]
+        + _FAST_WEIGHT_UTILIZATION * dims["utilization"][0]
+        + _FAST_WEIGHT_COMPACTNESS * dims["compactness"][0]
     )
 
     manufacturing_score = _clamp01(0.5 + 0.5 * dims["collision"][0])

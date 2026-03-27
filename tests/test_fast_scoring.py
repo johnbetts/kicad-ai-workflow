@@ -319,7 +319,7 @@ class TestComputeFastPlacementScore:
         result = compute_fast_placement_score(pcb, req)
         assert 0.0 <= result.overall_score <= 1.0
         assert result.grade in ("A", "B", "C", "D", "F")
-        assert len(result.breakdown) == 13  # 11 original + constraint + human_feedback
+        assert len(result.breakdown) == 15  # 11 original + constraint + human + util + compact
 
     def test_good_placement_scores_higher(self) -> None:
         """Components placed together near center should score higher."""

@@ -7,8 +7,10 @@ from kicad_pipeline.optimization.scoring import (
     _FAST_WEIGHT_CONNECTOR_EDGE,
     _FAST_WEIGHT_CONNECTOR_ORIENTATION,
     _FAST_WEIGHT_CONSTRAINT_COMPLIANCE,
+    _FAST_WEIGHT_COMPACTNESS,
     _FAST_WEIGHT_DECOUPLING_PROXIMITY,
     _FAST_WEIGHT_HUMAN_FEEDBACK,
+    _FAST_WEIGHT_UTILIZATION,
     _FAST_WEIGHT_GROUP_COHESION,
     _FAST_WEIGHT_GROUP_ISOLATION,
     _FAST_WEIGHT_MCU_PERIPHERAL,
@@ -151,7 +153,7 @@ def test_constraint_compliance_weight_in_breakdown() -> None:
 
 
 def test_weights_sum_to_one() -> None:
-    """All 15 fast-path placement weights must sum to 1.0."""
+    """All 17 fast-path placement weights must sum to 1.0."""
     all_weights = (
         _FAST_WEIGHT_COLLISION,
         _FAST_WEIGHT_SUBCIRCUIT_COHESION,
@@ -168,6 +170,8 @@ def test_weights_sum_to_one() -> None:
         _FAST_WEIGHT_PAD_FACING,
         _FAST_WEIGHT_CONSTRAINT_COMPLIANCE,
         _FAST_WEIGHT_HUMAN_FEEDBACK,
+        _FAST_WEIGHT_UTILIZATION,
+        _FAST_WEIGHT_COMPACTNESS,
     )
     total = sum(all_weights)
     assert abs(total - 1.0) < 1e-9, (
