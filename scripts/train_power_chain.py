@@ -105,23 +105,27 @@ _BUCK_U1_X_MM = 14.0
 _BUCK_U1_Y_FRAC = 0.45
 _LDO_U2_X_FRAC = 0.72
 _LDO_U2_Y_FRAC = 0.45
-_PWR_C1_DY_MM = 4.5
-_PWR_C3_DY_MM = 4.5
-_PWR_D1_DX_MM = 4.0
-_PWR_D1_DY_MM = 5.0
-_PWR_L1_DX_MM = 5.5
-_PWR_C2_DX_MM = 5.5
-_PWR_C2_DY_MM = 4.5
-_PWR_R2_DX_MM = 5.0
-_PWR_R2_DY_MM = 4.5
-_PWR_R1_DX_MM = 5.0
-_PWR_R1_DY_MM = 7.0
-_PWR_C4_DX_MM = 5.5
-_PWR_C4_DY_MM = 3.5
-_PWR_C5_DX_MM = 5.5
-_PWR_C5_DY_MM = 3.5
-_PWR_C6_DX_MM = 5.5
-_PWR_C6_DY_MM = 3.5
+# Offsets from anchor ICs — verified collision-free with rotation-aware sizes.
+# U1 SOIC-8 at -90°: physical extent 5.5w x 6.5h (rotated from 6.5x5.5).
+# U2 SOT-223 at 0°: physical extent 8.0w x 5.0h.
+# 0402 cap/res: 1.4x0.8mm courtyard.  0805: 2.5x1.8mm.  SOD-323: 3.0x3.0mm.
+_PWR_C1_DY_MM = 5.5       # was 4.5 — need ≥4.05 (U1_h/2+C_h/2+0.5)
+_PWR_C3_DY_MM = 5.5       # was 4.5 — same reason
+_PWR_D1_DX_MM = 5.0       # was 4.0 — need ≥4.25 (U1_w/2+D_w/2+0.5)
+_PWR_D1_DY_MM = 5.5       # was 5.0
+_PWR_L1_DX_MM = 6.5       # was 5.5 — need ≥4.6 (U1_w/2+L_w/2+0.5) + margin
+_PWR_C2_DX_MM = 6.5       # was 5.5 — aligned with L1
+_PWR_C2_DY_MM = 5.0       # was 4.5
+_PWR_R2_DX_MM = 6.0       # was 5.0
+_PWR_R2_DY_MM = 5.0       # was 4.5
+_PWR_R1_DX_MM = 6.0       # was 5.0
+_PWR_R1_DY_MM = 7.5       # was 7.0
+_PWR_C4_DX_MM = 6.5       # was 5.5 — need ≥4.95 (U2_w/2+C_w/2+0.5)
+_PWR_C4_DY_MM = 0.0       # was 3.5 — place inline with U2, left side
+_PWR_C5_DX_MM = 6.5       # was 5.5 — right of U2
+_PWR_C5_DY_MM = 0.0       # was 3.5 — place inline with U2, right side
+_PWR_C6_DX_MM = 6.5       # was 5.5
+_PWR_C6_DY_MM = 3.5       # keep below U2
 _PWR_J1_X_MM = 5.5
 _PWR_J1_Y_FRAC = 0.15
 _PWR_J2_X_FRAC = 0.52

@@ -82,9 +82,15 @@ _BOARD_WIDTH_MM = 100.0
 _BOARD_HEIGHT_MM = 60.0
 
 # Post-placement geometry constants (mm)
-_RELAY_LED_LEFT_DX_MM = 4.3
-_RELAY_R_LED_DY_MM = 16.8
-_RELAY_D_LED_DY_MM = 19.1
+# Driver column offsets from relay center (dx negative = left column)
+_RELAY_DRIVER_LEFT_DX_MM = 4.3     # left column X offset from relay center
+_RELAY_D_FLYBACK_DY_MM = 12.0      # flyback diode (D1-D4) below relay
+_RELAY_Q_DY_MM = 15.0              # transistor (Q1-Q4) below relay — was 14.1, widened for SOT-23
+_RELAY_R_LED_DY_MM = 17.5          # LED resistor (R5-R8) below relay — was 16.8
+_RELAY_D_LED_DY_MM = 20.0          # LED indicator (D5-D8) below relay — was 19.1
+_RELAY_R_GATE_DX_MM = 4.0          # right column X offset from relay center
+_RELAY_R_GATE_DY_MM = 15.4         # gate resistor (R1-R4) below relay
+_RELAY_LED_LEFT_DX_MM = _RELAY_DRIVER_LEFT_DX_MM  # backward compat
 _RELAY_LEFT_MARGIN_MM = 3.0
 
 # Power isolation cluster — placed clear of CH1 driver column (x≥5.85) and H4 keepout (x≤5.1)
@@ -544,8 +550,22 @@ def _apply_relay_post_placement(pcb: object) -> object:
         ref = fp.ref
         updated = fp
 
-        # --- Pattern 1: LED pair placement per channel ---
-        # D5-D8 are LED indicators for channels 1-4
+        # --- Pattern 1: ALL driver components per relay channel ---
+        # Each channel has: D_flyback, Q_transistor, R_gate, R_LED, D_LED
+        # All positioned relative to relay K[ch] center with collision-free spacing
+
+        # D1-D4 flyback diodes — left column
+        if ref.startswith("D") and ref[1:].isdigit():
+            idx = int(ref[1:])
+            if 1 <= idx <= 4:
+                k_ref = f"K{idx}"
+                if k_ref in fp_map:
+                    k_fp = fp_map[k_ref]
+                    new_x = k_fp.position.x - _RELAY_DRIVER_LEFT_DX_MM
+                    new_y = k_fp.position.y + _RELAY_D_FLYBACK_DY_MM
+                    updated = replace(fp, position=Point(new_x, new_y), rotation=0.0)
+
+        # D5-D8 LED indicators — left column, below R_LED
         if ref.startswith("D") and ref[1:].isdigit():
             idx = int(ref[1:])
             if 5 <= idx <= 8:
@@ -553,16 +573,33 @@ def _apply_relay_post_placement(pcb: object) -> object:
                 k_ref = f"K{ch}"
                 if k_ref in fp_map:
                     k_fp = fp_map[k_ref]
-                    # Left column, below R_LED
-                    new_x = k_fp.position.x - _RELAY_LED_LEFT_DX_MM
+                    new_x = k_fp.position.x - _RELAY_DRIVER_LEFT_DX_MM
                     new_y = k_fp.position.y + _RELAY_D_LED_DY_MM
-                    updated = replace(
-                        fp,
-                        position=Point(new_x, new_y),
-                        rotation=180.0,
-                    )
+                    updated = replace(fp, position=Point(new_x, new_y), rotation=0.0)
 
-        # R5-R8 are LED resistors for channels 1-4
+        # Q1-Q4 transistors — left column, below flyback diode
+        if ref.startswith("Q") and ref[1:].isdigit():
+            idx = int(ref[1:])
+            if 1 <= idx <= 4:
+                k_ref = f"K{idx}"
+                if k_ref in fp_map:
+                    k_fp = fp_map[k_ref]
+                    new_x = k_fp.position.x - _RELAY_DRIVER_LEFT_DX_MM
+                    new_y = k_fp.position.y + _RELAY_Q_DY_MM
+                    updated = replace(fp, position=Point(new_x, new_y), rotation=180.0)
+
+        # R1-R4 gate resistors — right column
+        if ref.startswith("R") and ref[1:].isdigit():
+            idx = int(ref[1:])
+            if 1 <= idx <= 4:
+                k_ref = f"K{idx}"
+                if k_ref in fp_map:
+                    k_fp = fp_map[k_ref]
+                    new_x = k_fp.position.x + _RELAY_R_GATE_DX_MM
+                    new_y = k_fp.position.y + _RELAY_R_GATE_DY_MM
+                    updated = replace(fp, position=Point(new_x, new_y), rotation=180.0)
+
+        # R5-R8 LED resistors — left column, below Q
         if ref.startswith("R") and ref[1:].isdigit():
             idx = int(ref[1:])
             if 5 <= idx <= 8:
@@ -570,14 +607,9 @@ def _apply_relay_post_placement(pcb: object) -> object:
                 k_ref = f"K{ch}"
                 if k_ref in fp_map:
                     k_fp = fp_map[k_ref]
-                    # Left column, below Q, above D_LED
-                    new_x = k_fp.position.x - _RELAY_LED_LEFT_DX_MM
+                    new_x = k_fp.position.x - _RELAY_DRIVER_LEFT_DX_MM
                     new_y = k_fp.position.y + _RELAY_R_LED_DY_MM
-                    updated = replace(
-                        fp,
-                        position=Point(new_x, new_y),
-                        rotation=0.0,
-                    )
+                    updated = replace(fp, position=Point(new_x, new_y), rotation=0.0)
 
         # --- Pattern 2: Power isolation cluster ---
         # Placed clear of H4 mounting hole (keepout to x≈5.1) and CH1 driver column (left
