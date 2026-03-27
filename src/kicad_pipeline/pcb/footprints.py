@@ -3027,6 +3027,26 @@ def _try_jlcpcb_footprint(
                 ref, lcsc, len(fp.pads), footprint_id, _expected_pads,
             )
             return None
+        # Validate pad SIZE: if footprint_id specifies a package size (0402/0603/0805)
+        # but JLCPCB pads are a different size, reject the bad footprint.
+        # This catches LCSC parts that return wrong-sized cached footprints.
+        _fid_upper = footprint_id.strip().upper()
+        if fp.pads:
+            max_pad = max(max(p.size_x, p.size_y) for p in fp.pads)
+            if ("0402" in _fid_upper or "_0402" in _fid_upper) and max_pad > 0.8:
+                _log.warning(
+                    "JLCPCB footprint for %s (%s) has %.2fmm pads but %s "
+                    "expects 0402 (<0.8mm); rejecting",
+                    ref, lcsc, max_pad, footprint_id,
+                )
+                return None
+            if ("0603" in _fid_upper or "_0603" in _fid_upper) and max_pad > 1.2:
+                _log.warning(
+                    "JLCPCB footprint for %s (%s) has %.2fmm pads but %s "
+                    "expects 0603 (<1.2mm); rejecting",
+                    ref, lcsc, max_pad, footprint_id,
+                )
+                return None
         # Tag source provenance for downstream verification tracking
         fp = Footprint(
             lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
