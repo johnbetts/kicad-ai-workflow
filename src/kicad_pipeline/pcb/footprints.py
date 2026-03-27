@@ -1684,14 +1684,36 @@ def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout]
 
 
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
-    """Always return the KiCad standard ESP32-S3-WROOM-1 3D model.
+    """Return the KiCad standard ESP32-S3-WROOM-1 3D model with computed offset.
 
     JLCPCB footprints embed ``WIRELM-SMD_ESP32-S3-WROOM-1.step`` which
     does not exist in KiCad's library.  Override unconditionally with the
     known-correct path.
+
+    The JLCPCB footprint origin is at pin 1, but KiCad's STEP model origin
+    is at the body center.  Compute the offset from the pad layout so the
+    3D body aligns with the pads regardless of footprint origin convention.
     """
+    # KiCad's STEP model aligns with KiCad's own footprint where pin 1
+    # is at (-8.75, -5.26).  JLCPCB/easyeda2kicad footprints place pin 1
+    # at (-8.75, -8.89) — a 3.63mm Y shift.  Compute the offset from the
+    # actual pin 1 position to compensate for any origin difference.
+    # KiCad STEP model expects pin 1 at (-8.75, -5.26) in footprint coords.
+    # JLCPCB has pin 1 at (-8.75, -8.89). The model needs to shift by the
+    # NEGATIVE of the difference so pin 1 in the model lands on pin 1 in pads.
+    _KICAD_PIN1_X = -8.75
+    _KICAD_PIN1_Y = -5.26
+    pin1_pad = next((p for p in fp.pads if p.number == "1"), None)
+    if pin1_pad is not None:
+        # offset = KiCad_origin - JLCPCB_origin (shifts model to match pads)
+        off_x = _KICAD_PIN1_X - pin1_pad.position.x
+        off_y = _KICAD_PIN1_Y - pin1_pad.position.y
+    else:
+        off_x, off_y = 0.0, 0.0
+
     return (Footprint3DModel(
         path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
+        offset=(off_x, off_y, 0.0),
     ),)
 
 
