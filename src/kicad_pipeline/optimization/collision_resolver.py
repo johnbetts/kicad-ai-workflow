@@ -155,8 +155,9 @@ def _count_collisions(
             if rot_b % 180 in (90.0, 270.0):
                 wb, hb = hb, wb
 
-            if (abs(xa - xb) < (wa + wb) / 2.0
-                    and abs(ya - yb) < (ha + hb) / 2.0):
+            gap = COMPONENT_CLEARANCE_GAP_MM
+            if (abs(xa - xb) < (wa + wb) / 2.0 + gap
+                    and abs(ya - yb) < (ha + hb) / 2.0 + gap):
                 collisions.append((ref_a, ref_b))
     return collisions
 
@@ -207,8 +208,9 @@ def _ref_has_collision(
         if other_ref == ref:
             continue
         ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
-        if (abs(rx - ox) < (w + ow) / 2.0
-                and abs(ry - oy) < (h + oh) / 2.0):
+        gap = COMPONENT_CLEARANCE_GAP_MM
+        if (abs(rx - ox) < (w + ow) / 2.0 + gap
+                and abs(ry - oy) < (h + oh) / 2.0 + gap):
             return True
     return False
 
@@ -250,15 +252,17 @@ def _compute_large_ic_push(
         ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
         if ow * oh < 100.0:
             continue
-        if (abs(rx - ox) < (w + ow) / 2.0
-                and abs(ry - oy) < (h + oh) / 2.0):
+        gap = COMPONENT_CLEARANCE_GAP_MM
+        if (abs(rx - ox) < (w + ow) / 2.0 + gap
+                and abs(ry - oy) < (h + oh) / 2.0 + gap):
             dx = rx - ox
             dy = ry - oy
+            push_gap = COMPONENT_CLEARANCE_GAP_MM + 1.0  # extra margin
             if abs(dx) * oh > abs(dy) * ow:
-                push_x = ow / 2.0 + w / 2.0 + 2.0
+                push_x = ow / 2.0 + w / 2.0 + push_gap
                 target_x = ox + push_x if dx >= 0 else ox - push_x
             else:
-                push_y = oh / 2.0 + h / 2.0 + 2.0
+                push_y = oh / 2.0 + h / 2.0 + push_gap
                 target_y = oy + push_y if dy >= 0 else oy - push_y
             break
     return target_x, target_y
@@ -309,6 +313,8 @@ def _group_rect(
             continue
         rx, ry, _rot = pos[r]
         w, h = fp_sizes.get(r, DEFAULT_FP_SIZE_MM)
+        if _rot % 180 in (90.0, 270.0):
+            w, h = h, w
         gmin_x = min(gmin_x, rx - w / 2)
         gmin_y = min(gmin_y, ry - h / 2)
         gmax_x = max(gmax_x, rx + w / 2)
