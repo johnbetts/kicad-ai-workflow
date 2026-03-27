@@ -571,4 +571,4 @@ def main(
         # Kanban columns
         _rebuild_board()
 
-    ui.run(port=port, title="KiCad Review Dashboard", reload=False)
+    ui.run(port=port, title="KiCad Review Dashboard", reload=True)
