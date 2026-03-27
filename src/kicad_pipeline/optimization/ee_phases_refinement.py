@@ -1212,22 +1212,49 @@ def _refresh_antenna_keepout(pcb: PCBDesign) -> PCBDesign:
     half_w = _ESP32_BODY_W / 2.0
     half_h = _ESP32_BODY_H / 2.0
 
-    # Find which end is the antenna (furthest from pad centroid)
+    # Find which end is the antenna by checking F.Fab/SilkS line density.
+    # The antenna meander has many short lines at one Y extreme.
+    # In easyeda2kicad ESP32 footprints, the antenna is at NEGATIVE local Y.
     signal_ys = [p.position.y for p in rf_fp.pads if p.number not in ("41", "V1")]
     if signal_ys:
+        pad_min_local_y = min(signal_ys)
         pad_max_local_y = max(signal_ys)
-        # Keepout starts 0.5mm past the last pad row
-        ko_top_local = pad_max_local_y + 0.5
     else:
-        ko_top_local = half_h - 5.0  # fallback
+        pad_min_local_y = -half_h + 5.0
+        pad_max_local_y = half_h - 5.0
 
-    ko_bot_local = half_h + _ANTENNA_EXT
+    # Detect antenna end from graphics: count F.Fab lines near each Y extreme
+    fab_ys: list[float] = []
+    for g in rf_fp.graphics:
+        if hasattr(g, "start") and hasattr(g, "end"):
+            fab_ys.extend([g.start.y, g.end.y])
+    if fab_ys:
+        min_fab_y = min(fab_ys)
+        max_fab_y = max(fab_ys)
+        lines_at_min = sum(1 for y in fab_ys if y < min_fab_y + 5.0)
+        lines_at_max = sum(1 for y in fab_ys if y > max_fab_y - 5.0)
+        antenna_at_min_y = lines_at_min > lines_at_max * 1.5
+    else:
+        antenna_at_min_y = True  # default for easyeda2kicad ESP32 footprints
+
+    if antenna_at_min_y:
+        # Antenna at negative Y — keepout extends below the min pad row
+        ko_edge_local = pad_min_local_y - 0.5
+        ko_far_local = -(half_h + _ANTENNA_EXT)
+        corners_local = [
+            (-half_w, ko_edge_local), (half_w, ko_edge_local),
+            (half_w, ko_far_local), (-half_w, ko_far_local),
+        ]
+    else:
+        # Antenna at positive Y — keepout extends above the max pad row
+        ko_edge_local = pad_max_local_y + 0.5
+        ko_far_local = half_h + _ANTENNA_EXT
+        corners_local = [
+            (-half_w, ko_edge_local), (half_w, ko_edge_local),
+            (half_w, ko_far_local), (-half_w, ko_far_local),
+        ]
 
     # Transform 4 corners from local to board space
-    corners_local = [
-        (-half_w, ko_top_local), (half_w, ko_top_local),
-        (half_w, ko_bot_local), (-half_w, ko_bot_local),
-    ]
     corners_board = []
     for lx, ly in corners_local:
         bx = rf_fp.position.x + lx * cos_r - ly * sin_r
@@ -1245,7 +1272,7 @@ def _refresh_antenna_keepout(pcb: PCBDesign) -> PCBDesign:
         "refresh_antenna_keepout: RF %s at (%.1f,%.1f,rot=%.0f), "
         "antenna keepout %.1fx%.1fmm",
         rf_fp.ref, rf_fp.position.x, rf_fp.position.y, rf_fp.rotation,
-        _ESP32_BODY_W, ko_bot_local - ko_top_local,
+        _ESP32_BODY_W, abs(ko_far_local - ko_edge_local),
     )
 
     # Strip any stale antenna vias — keepout zone only, no via fence.
