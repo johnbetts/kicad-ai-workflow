@@ -59,10 +59,14 @@ class _GroupGrid:
     Similar to _PlacementGrid but operates on group-sized rectangles.
     """
 
-    def __init__(self, bounds: tuple[float, float, float, float]) -> None:
+    def __init__(
+        self,
+        bounds: tuple[float, float, float, float],
+        margin: float = 3.0,
+    ) -> None:
         self.min_x, self.min_y, self.max_x, self.max_y = bounds
         self._placed: list[tuple[float, float, float, float]] = []
-        self._margin = 3.0  # mm clearance between groups
+        self._margin = margin  # mm clearance between groups
 
     def is_free(self, cx: float, cy: float, w: float, h: float) -> bool:
         """Check if placing a group here would overlap any existing one."""
@@ -304,7 +308,17 @@ def place_groups(
         List of PlacedGroup instances with absolute positions.
     """
     bx1, by1, bx2, by2 = board_bounds
-    grid = _GroupGrid(board_bounds)
+    # Adaptive inter-group margin based on average component size.
+    # Reference: 3.0mm margin was tuned for 0805 (avg ~2.0mm body).
+    # Scale proportionally so smaller packages get tighter groups.
+    if fp_sizes:
+        areas = [w * h for w, h in fp_sizes.values()]
+        avg_area = sum(areas) / len(areas)
+        ref_area = 2.0 * 1.25  # 0805 reference (2.0 x 1.25mm body)
+        margin = max(1.5, min(5.0, 3.0 * (avg_area / ref_area) ** 0.5))
+    else:
+        margin = 3.0
+    grid = _GroupGrid(board_bounds, margin=margin)
     placed: list[PlacedGroup] = []
 
     # Build zone lookup

@@ -153,7 +153,7 @@ def partition_board(
                    zone_component_count.get(zn, 0))
 
     # Step 2: Compute zone rects from default fractions, scaled by component count
-    sum(zone_component_count.values()) or 1
+    total_components = sum(zone_component_count.values()) or 1
     half_gap = _ZONE_GAP_MM / 2.0
 
     # When there's only one zone, give it the full board area
@@ -172,9 +172,15 @@ def partition_board(
 
         fx1, fy1, fx2, fy2 = fracs
 
-        # Use fixed zone fractions — scaling is disabled until proportional
-        # tiling is implemented properly (old scaling caused zone overlaps).
-        scale = 1.0
+        # Scale zone size proportionally to its share of total components.
+        # sqrt() prevents extreme sizing (a zone with 2x components gets
+        # ~1.4x area, not 2x).  Clamped to [0.7, 1.3] to avoid overlaps.
+        zone_count = zone_component_count.get(zone_name, 0)
+        if total_components > 0 and zone_count > 0 and not single_zone:
+            raw_scale = (zone_count / (total_components / len(zone_groups))) ** 0.5
+            scale = max(0.7, min(1.3, raw_scale))
+        else:
+            scale = 1.0
 
         # Apply scale (expand from center of default zone)
         cx = (fx1 + fx2) / 2.0

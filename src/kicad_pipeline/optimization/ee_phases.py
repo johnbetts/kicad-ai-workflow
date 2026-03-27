@@ -415,19 +415,36 @@ def _place_relay_left_column(
     bounds: tuple[float, float, float, float],
     ctx: PlacementContext,
 ) -> None:
-    """Place D_flyback and Q transistor in the relay driver left column."""
+    """Place D_flyback and Q transistor in the relay driver left column.
+
+    Y offsets are computed from actual component sizes to avoid collisions
+    regardless of package size (0402/0603/0805/SOT-23/SOD-123F).
+    """
+    # Compute Y offsets based on actual sizes: relay half-height + gap + component sizes
+    relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
+                  for r in ctx.positions if r.startswith("K")) if any(
+                      r.startswith("K") for r in ctx.positions) else 15.0
+    gap = 1.5  # mm between components in column
+    cursor_y = ky + relay_h / 2.0 + gap
+
     for d_ref in d_refs:
+        _dw, dh = ctx.fp_sizes.get(d_ref, (2.0, 2.0))
+        py = cursor_y + dh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 11.5))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[d_ref] = (px, py, 0.0)
         ctx.relay_support_refs.add(d_ref)
+        cursor_y = py + dh / 2.0 + gap
         _log.info("    D %s -> (%.1f, %.1f) LEFT col, rot=0", d_ref, px, py)
 
     for q_ref in q_refs:
+        _qw, qh = ctx.fp_sizes.get(q_ref, (2.0, 2.0))
+        py = cursor_y + qh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 14.1))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[q_ref] = (px, py, 180.0)
         ctx.relay_support_refs.add(q_ref)
+        cursor_y = py + qh / 2.0 + gap
         _log.info("    Q %s -> (%.1f, %.1f) LEFT col, rot=180", q_ref, px, py)
 
 
@@ -439,11 +456,19 @@ def _place_relay_right_column(
     ctx: PlacementContext,
 ) -> None:
     """Place R_gate resistors in the relay driver right column."""
+    relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
+                  for r in ctx.positions if r.startswith("K")) if any(
+                      r.startswith("K") for r in ctx.positions) else 15.0
+    gap = 1.5
+    cursor_y = ky + relay_h / 2.0 + gap
     for r_ref in r_refs:
+        _rw, rh = ctx.fp_sizes.get(r_ref, (2.0, 2.0))
+        py = cursor_y + rh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
-        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 15.4))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[r_ref] = (px, py, 180.0)
         ctx.relay_support_refs.add(r_ref)
+        cursor_y = py + rh / 2.0 + gap
         _log.info("    R %s -> (%.1f, %.1f) RIGHT col, rot=180", r_ref, px, py)
 
 
