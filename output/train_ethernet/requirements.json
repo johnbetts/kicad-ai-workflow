@@ -408,9 +408,9 @@
     {
       "ref": "C1",
       "value": "100nF",
-      "footprint": "C_0805",
+      "footprint": "C_0402",
       "lcsc": "C49678",
-      "description": "100nF VCC decoupling cap 0805",
+      "description": "100nF VCC decoupling cap 0402",
       "datasheet": null,
       "pins": [
         {
@@ -456,9 +456,9 @@
     {
       "ref": "C3",
       "value": "100nF",
-      "footprint": "C_0805",
+      "footprint": "C_0402",
       "lcsc": "C49678",
-      "description": "100nF AVDD decoupling cap 0805",
+      "description": "100nF AVDD decoupling cap 0402",
       "datasheet": null,
       "pins": [
         {
@@ -504,9 +504,9 @@
     {
       "ref": "C4",
       "value": "22pF",
-      "footprint": "C_0805",
+      "footprint": "C_0402",
       "lcsc": "C1804",
-      "description": "22pF crystal load cap 0805",
+      "description": "22pF crystal load cap 0402",
       "datasheet": null,
       "pins": [
         {
@@ -528,9 +528,9 @@
     {
       "ref": "C5",
       "value": "22pF",
-      "footprint": "C_0805",
+      "footprint": "C_0402",
       "lcsc": "C1804",
-      "description": "22pF crystal load cap 0805",
+      "description": "22pF crystal load cap 0402",
       "datasheet": null,
       "pins": [
         {
@@ -660,9 +660,9 @@
     {
       "ref": "R1",
       "value": "49.9R",
-      "footprint": "R_0805",
+      "footprint": "R_0603",
       "lcsc": "C25129",
-      "description": "49.9 ohm TX+ termination resistor 0805",
+      "description": "49.9 ohm TX+ termination resistor 0603",
       "datasheet": null,
       "pins": [
         {
@@ -684,9 +684,9 @@
     {
       "ref": "R2",
       "value": "49.9R",
-      "footprint": "R_0805",
+      "footprint": "R_0603",
       "lcsc": "C25129",
-      "description": "49.9 ohm TX- termination resistor 0805",
+      "description": "49.9 ohm TX- termination resistor 0603",
       "datasheet": null,
       "pins": [
         {
@@ -708,9 +708,9 @@
     {
       "ref": "R3",
       "value": "12.1K",
-      "footprint": "R_0805",
+      "footprint": "R_0402",
       "lcsc": "C17401",
-      "description": "12.1K RSVD bias resistor 0805",
+      "description": "12.1K RSVD bias resistor 0402",
       "datasheet": null,
       "pins": [
         {
@@ -1247,7 +1247,7 @@
   "power_budget": null,
   "mechanical": {
     "board_width_mm": 55.0,
-    "board_height_mm": 55.0,
+    "board_height_mm": 40.0,
     "enclosure": null,
     "mounting_hole_diameter_mm": 3.2,
     "mounting_hole_positions": [],

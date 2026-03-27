@@ -1,0 +1,1504 @@
+{
+  "project": {
+    "name": "RelayTraining",
+    "author": null,
+    "revision": "v2",
+    "description": null
+  },
+  "features": [
+    {
+      "name": "Relay Outputs",
+      "description": "4-channel relay output with flyback protection, LED indicators, and power isolation (ferrite + bulk caps)",
+      "components": [
+        "K1",
+        "Q1",
+        "D1",
+        "R1",
+        "D5",
+        "R5",
+        "J1",
+        "K2",
+        "Q2",
+        "D2",
+        "R2",
+        "D6",
+        "R6",
+        "J2",
+        "K3",
+        "Q3",
+        "D3",
+        "R3",
+        "D7",
+        "R7",
+        "J3",
+        "K4",
+        "Q4",
+        "D4",
+        "R4",
+        "D8",
+        "R8",
+        "J4",
+        "L1",
+        "L2",
+        "C1",
+        "C2"
+      ],
+      "nets": [
+        "GPIO1",
+        "RELAY_DRIVE1",
+        "RELAY_COIL1",
+        "RELAY_COM1",
+        "RELAY_NO1",
+        "RELAY_NC1",
+        "LED1_A",
+        "GPIO2",
+        "RELAY_DRIVE2",
+        "RELAY_COIL2",
+        "RELAY_COM2",
+        "RELAY_NO2",
+        "RELAY_NC2",
+        "LED2_A",
+        "GPIO3",
+        "RELAY_DRIVE3",
+        "RELAY_COIL3",
+        "RELAY_COM3",
+        "RELAY_NO3",
+        "RELAY_NC3",
+        "LED3_A",
+        "GPIO4",
+        "RELAY_DRIVE4",
+        "RELAY_COIL4",
+        "RELAY_COM4",
+        "RELAY_NO4",
+        "RELAY_NC4",
+        "LED4_A",
+        "+5V_LOGIC",
+        "+5V_RELAY",
+        "GND",
+        "GND_RELAY"
+      ],
+      "subcircuits": [
+        "relay_driver"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "ref": "K1",
+      "value": "SRD-05VDC-SL-C",
+      "footprint": "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C",
+      "lcsc": "C35449",
+      "description": "5V SPDT relay",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM1"
+        },
+        {
+          "number": "2",
+          "name": "COIL-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL1"
+        },
+        {
+          "number": "3",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO1"
+        },
+        {
+          "number": "4",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC1"
+        },
+        {
+          "number": "5",
+          "name": "COIL+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "Q1",
+      "value": "SS8050",
+      "footprint": "SOT-23",
+      "lcsc": "C727114",
+      "description": "NPN transistor SOT-23",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "B",
+          "pin_type": "input",
+          "function": null,
+          "net": "RELAY_DRIVE1"
+        },
+        {
+          "number": "2",
+          "name": "C",
+          "pin_type": "output",
+          "function": null,
+          "net": "RELAY_COIL1"
+        },
+        {
+          "number": "3",
+          "name": "E",
+          "pin_type": "passive",
+          "function": "gnd",
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "D1",
+      "value": "1N4148",
+      "footprint": "SOD-323",
+      "lcsc": "C81598",
+      "description": "Flyback diode SOD-323",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL1"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R1",
+      "value": "1K",
+      "footprint": "R_0402",
+      "lcsc": "C17513",
+      "description": "1K base resistor 0402",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GPIO1"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_DRIVE1"
+        }
+      ]
+    },
+    {
+      "ref": "D5",
+      "value": "LED",
+      "footprint": "LED_0603",
+      "lcsc": "C2286",
+      "description": "Red LED 0603 \u2014 Channel 1 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED1_A"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R5",
+      "value": "330R",
+      "footprint": "R_0603",
+      "lcsc": "C23138",
+      "description": "330R LED resistor 0603 \u2014 Channel 1 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL1"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED1_A"
+        }
+      ]
+    },
+    {
+      "ref": "J1",
+      "value": "Screw_Terminal_3P",
+      "footprint": "TerminalBlock_5.08mm_3P",
+      "lcsc": "C8465",
+      "description": "3-pin 5.08mm screw terminal \u2014 Channel 1",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM1"
+        },
+        {
+          "number": "2",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO1"
+        },
+        {
+          "number": "3",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC1"
+        }
+      ]
+    },
+    {
+      "ref": "K2",
+      "value": "SRD-05VDC-SL-C",
+      "footprint": "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C",
+      "lcsc": "C35449",
+      "description": "5V SPDT relay",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM2"
+        },
+        {
+          "number": "2",
+          "name": "COIL-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL2"
+        },
+        {
+          "number": "3",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO2"
+        },
+        {
+          "number": "4",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC2"
+        },
+        {
+          "number": "5",
+          "name": "COIL+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "Q2",
+      "value": "SS8050",
+      "footprint": "SOT-23",
+      "lcsc": "C727114",
+      "description": "NPN transistor SOT-23",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "B",
+          "pin_type": "input",
+          "function": null,
+          "net": "RELAY_DRIVE2"
+        },
+        {
+          "number": "2",
+          "name": "C",
+          "pin_type": "output",
+          "function": null,
+          "net": "RELAY_COIL2"
+        },
+        {
+          "number": "3",
+          "name": "E",
+          "pin_type": "passive",
+          "function": "gnd",
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "D2",
+      "value": "1N4148",
+      "footprint": "SOD-323",
+      "lcsc": "C81598",
+      "description": "Flyback diode SOD-323",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL2"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R2",
+      "value": "1K",
+      "footprint": "R_0402",
+      "lcsc": "C17513",
+      "description": "1K base resistor 0402",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GPIO2"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_DRIVE2"
+        }
+      ]
+    },
+    {
+      "ref": "D6",
+      "value": "LED",
+      "footprint": "LED_0603",
+      "lcsc": "C2286",
+      "description": "Red LED 0603 \u2014 Channel 2 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED2_A"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R6",
+      "value": "330R",
+      "footprint": "R_0603",
+      "lcsc": "C23138",
+      "description": "330R LED resistor 0603 \u2014 Channel 2 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL2"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED2_A"
+        }
+      ]
+    },
+    {
+      "ref": "J2",
+      "value": "Screw_Terminal_3P",
+      "footprint": "TerminalBlock_5.08mm_3P",
+      "lcsc": "C8465",
+      "description": "3-pin 5.08mm screw terminal \u2014 Channel 2",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM2"
+        },
+        {
+          "number": "2",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO2"
+        },
+        {
+          "number": "3",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC2"
+        }
+      ]
+    },
+    {
+      "ref": "K3",
+      "value": "SRD-05VDC-SL-C",
+      "footprint": "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C",
+      "lcsc": "C35449",
+      "description": "5V SPDT relay",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM3"
+        },
+        {
+          "number": "2",
+          "name": "COIL-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL3"
+        },
+        {
+          "number": "3",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO3"
+        },
+        {
+          "number": "4",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC3"
+        },
+        {
+          "number": "5",
+          "name": "COIL+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "Q3",
+      "value": "SS8050",
+      "footprint": "SOT-23",
+      "lcsc": "C727114",
+      "description": "NPN transistor SOT-23",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "B",
+          "pin_type": "input",
+          "function": null,
+          "net": "RELAY_DRIVE3"
+        },
+        {
+          "number": "2",
+          "name": "C",
+          "pin_type": "output",
+          "function": null,
+          "net": "RELAY_COIL3"
+        },
+        {
+          "number": "3",
+          "name": "E",
+          "pin_type": "passive",
+          "function": "gnd",
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "D3",
+      "value": "1N4148",
+      "footprint": "SOD-323",
+      "lcsc": "C81598",
+      "description": "Flyback diode SOD-323",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL3"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R3",
+      "value": "1K",
+      "footprint": "R_0402",
+      "lcsc": "C17513",
+      "description": "1K base resistor 0402",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GPIO3"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_DRIVE3"
+        }
+      ]
+    },
+    {
+      "ref": "D7",
+      "value": "LED",
+      "footprint": "LED_0603",
+      "lcsc": "C2286",
+      "description": "Red LED 0603 \u2014 Channel 3 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED3_A"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R7",
+      "value": "330R",
+      "footprint": "R_0603",
+      "lcsc": "C23138",
+      "description": "330R LED resistor 0603 \u2014 Channel 3 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL3"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED3_A"
+        }
+      ]
+    },
+    {
+      "ref": "J3",
+      "value": "Screw_Terminal_3P",
+      "footprint": "TerminalBlock_5.08mm_3P",
+      "lcsc": "C8465",
+      "description": "3-pin 5.08mm screw terminal \u2014 Channel 3",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM3"
+        },
+        {
+          "number": "2",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO3"
+        },
+        {
+          "number": "3",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC3"
+        }
+      ]
+    },
+    {
+      "ref": "K4",
+      "value": "SRD-05VDC-SL-C",
+      "footprint": "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C",
+      "lcsc": "C35449",
+      "description": "5V SPDT relay",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM4"
+        },
+        {
+          "number": "2",
+          "name": "COIL-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL4"
+        },
+        {
+          "number": "3",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO4"
+        },
+        {
+          "number": "4",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC4"
+        },
+        {
+          "number": "5",
+          "name": "COIL+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "Q4",
+      "value": "SS8050",
+      "footprint": "SOT-23",
+      "lcsc": "C727114",
+      "description": "NPN transistor SOT-23",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "B",
+          "pin_type": "input",
+          "function": null,
+          "net": "RELAY_DRIVE4"
+        },
+        {
+          "number": "2",
+          "name": "C",
+          "pin_type": "output",
+          "function": null,
+          "net": "RELAY_COIL4"
+        },
+        {
+          "number": "3",
+          "name": "E",
+          "pin_type": "passive",
+          "function": "gnd",
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "D4",
+      "value": "1N4148",
+      "footprint": "SOD-323",
+      "lcsc": "C81598",
+      "description": "Flyback diode SOD-323",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL4"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R4",
+      "value": "1K",
+      "footprint": "R_0402",
+      "lcsc": "C17513",
+      "description": "1K base resistor 0402",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GPIO4"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_DRIVE4"
+        }
+      ]
+    },
+    {
+      "ref": "D8",
+      "value": "LED",
+      "footprint": "LED_0603",
+      "lcsc": "C2286",
+      "description": "Red LED 0603 \u2014 Channel 4 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED4_A"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "R8",
+      "value": "330R",
+      "footprint": "R_0603",
+      "lcsc": "C23138",
+      "description": "330R LED resistor 0603 \u2014 Channel 4 indicator",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COIL4"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED4_A"
+        }
+      ]
+    },
+    {
+      "ref": "J4",
+      "value": "Screw_Terminal_3P",
+      "footprint": "TerminalBlock_5.08mm_3P",
+      "lcsc": "C8465",
+      "description": "3-pin 5.08mm screw terminal \u2014 Channel 4",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM4"
+        },
+        {
+          "number": "2",
+          "name": "NO",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NO4"
+        },
+        {
+          "number": "3",
+          "name": "NC",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_NC4"
+        }
+      ]
+    },
+    {
+      "ref": "L1",
+      "value": "600R@100MHz",
+      "footprint": "L_0805",
+      "lcsc": "C1015",
+      "description": "Ferrite bead 0805 \u2014 relay power isolation",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_LOGIC"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "L2",
+      "value": "600R@100MHz",
+      "footprint": "L_0805",
+      "lcsc": "C1015",
+      "description": "Ferrite bead 0805 \u2014 relay GND isolation",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "C1",
+      "value": "100uF",
+      "footprint": "C_0805",
+      "lcsc": null,
+      "description": "100uF MLCC 0805 \u2014 relay bulk decoupling",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "+",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        },
+        {
+          "number": "2",
+          "name": "-",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    },
+    {
+      "ref": "C2",
+      "value": "10uF",
+      "footprint": "C_0805",
+      "lcsc": "C15850",
+      "description": "10uF ceramic \u2014 relay high-freq decoupling",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+5V_RELAY"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND_RELAY"
+        }
+      ]
+    }
+  ],
+  "nets": [
+    {
+      "name": "GPIO1",
+      "connections": [
+        {
+          "ref": "R1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_DRIVE1",
+      "connections": [
+        {
+          "ref": "R1",
+          "pin": "2"
+        },
+        {
+          "ref": "Q1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COIL1",
+      "connections": [
+        {
+          "ref": "Q1",
+          "pin": "2"
+        },
+        {
+          "ref": "K1",
+          "pin": "4"
+        },
+        {
+          "ref": "D1",
+          "pin": "1"
+        },
+        {
+          "ref": "R5",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COM1",
+      "connections": [
+        {
+          "ref": "K1",
+          "pin": "5"
+        },
+        {
+          "ref": "J1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NO1",
+      "connections": [
+        {
+          "ref": "K1",
+          "pin": "3"
+        },
+        {
+          "ref": "J1",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NC1",
+      "connections": [
+        {
+          "ref": "K1",
+          "pin": "2"
+        },
+        {
+          "ref": "J1",
+          "pin": "3"
+        }
+      ]
+    },
+    {
+      "name": "LED1_A",
+      "connections": [
+        {
+          "ref": "R5",
+          "pin": "2"
+        },
+        {
+          "ref": "D5",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "GPIO2",
+      "connections": [
+        {
+          "ref": "R2",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_DRIVE2",
+      "connections": [
+        {
+          "ref": "R2",
+          "pin": "2"
+        },
+        {
+          "ref": "Q2",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COIL2",
+      "connections": [
+        {
+          "ref": "Q2",
+          "pin": "2"
+        },
+        {
+          "ref": "K2",
+          "pin": "4"
+        },
+        {
+          "ref": "D2",
+          "pin": "1"
+        },
+        {
+          "ref": "R6",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COM2",
+      "connections": [
+        {
+          "ref": "K2",
+          "pin": "5"
+        },
+        {
+          "ref": "J2",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NO2",
+      "connections": [
+        {
+          "ref": "K2",
+          "pin": "3"
+        },
+        {
+          "ref": "J2",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NC2",
+      "connections": [
+        {
+          "ref": "K2",
+          "pin": "2"
+        },
+        {
+          "ref": "J2",
+          "pin": "3"
+        }
+      ]
+    },
+    {
+      "name": "LED2_A",
+      "connections": [
+        {
+          "ref": "R6",
+          "pin": "2"
+        },
+        {
+          "ref": "D6",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "GPIO3",
+      "connections": [
+        {
+          "ref": "R3",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_DRIVE3",
+      "connections": [
+        {
+          "ref": "R3",
+          "pin": "2"
+        },
+        {
+          "ref": "Q3",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COIL3",
+      "connections": [
+        {
+          "ref": "Q3",
+          "pin": "2"
+        },
+        {
+          "ref": "K3",
+          "pin": "4"
+        },
+        {
+          "ref": "D3",
+          "pin": "1"
+        },
+        {
+          "ref": "R7",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COM3",
+      "connections": [
+        {
+          "ref": "K3",
+          "pin": "5"
+        },
+        {
+          "ref": "J3",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NO3",
+      "connections": [
+        {
+          "ref": "K3",
+          "pin": "3"
+        },
+        {
+          "ref": "J3",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NC3",
+      "connections": [
+        {
+          "ref": "K3",
+          "pin": "2"
+        },
+        {
+          "ref": "J3",
+          "pin": "3"
+        }
+      ]
+    },
+    {
+      "name": "LED3_A",
+      "connections": [
+        {
+          "ref": "R7",
+          "pin": "2"
+        },
+        {
+          "ref": "D7",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "GPIO4",
+      "connections": [
+        {
+          "ref": "R4",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_DRIVE4",
+      "connections": [
+        {
+          "ref": "R4",
+          "pin": "2"
+        },
+        {
+          "ref": "Q4",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COIL4",
+      "connections": [
+        {
+          "ref": "Q4",
+          "pin": "2"
+        },
+        {
+          "ref": "K4",
+          "pin": "4"
+        },
+        {
+          "ref": "D4",
+          "pin": "1"
+        },
+        {
+          "ref": "R8",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COM4",
+      "connections": [
+        {
+          "ref": "K4",
+          "pin": "5"
+        },
+        {
+          "ref": "J4",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NO4",
+      "connections": [
+        {
+          "ref": "K4",
+          "pin": "3"
+        },
+        {
+          "ref": "J4",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_NC4",
+      "connections": [
+        {
+          "ref": "K4",
+          "pin": "2"
+        },
+        {
+          "ref": "J4",
+          "pin": "3"
+        }
+      ]
+    },
+    {
+      "name": "LED4_A",
+      "connections": [
+        {
+          "ref": "R8",
+          "pin": "2"
+        },
+        {
+          "ref": "D8",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "+5V_LOGIC",
+      "connections": [
+        {
+          "ref": "L1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "+5V_RELAY",
+      "connections": [
+        {
+          "ref": "L1",
+          "pin": "2"
+        },
+        {
+          "ref": "C1",
+          "pin": "1"
+        },
+        {
+          "ref": "C2",
+          "pin": "1"
+        },
+        {
+          "ref": "K1",
+          "pin": "1"
+        },
+        {
+          "ref": "D1",
+          "pin": "2"
+        },
+        {
+          "ref": "K2",
+          "pin": "1"
+        },
+        {
+          "ref": "D2",
+          "pin": "2"
+        },
+        {
+          "ref": "K3",
+          "pin": "1"
+        },
+        {
+          "ref": "D3",
+          "pin": "2"
+        },
+        {
+          "ref": "K4",
+          "pin": "1"
+        },
+        {
+          "ref": "D4",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "GND",
+      "connections": [
+        {
+          "ref": "L2",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "GND_RELAY",
+      "connections": [
+        {
+          "ref": "L2",
+          "pin": "2"
+        },
+        {
+          "ref": "C1",
+          "pin": "2"
+        },
+        {
+          "ref": "C2",
+          "pin": "2"
+        },
+        {
+          "ref": "Q1",
+          "pin": "3"
+        },
+        {
+          "ref": "D5",
+          "pin": "2"
+        },
+        {
+          "ref": "Q2",
+          "pin": "3"
+        },
+        {
+          "ref": "D6",
+          "pin": "2"
+        },
+        {
+          "ref": "Q3",
+          "pin": "3"
+        },
+        {
+          "ref": "D7",
+          "pin": "2"
+        },
+        {
+          "ref": "Q4",
+          "pin": "3"
+        },
+        {
+          "ref": "D8",
+          "pin": "2"
+        }
+      ]
+    }
+  ],
+  "pin_map": null,
+  "power_budget": null,
+  "mechanical": {
+    "board_width_mm": 100.0,
+    "board_height_mm": 60.0,
+    "enclosure": null,
+    "mounting_hole_diameter_mm": 3.2,
+    "mounting_hole_positions": [],
+    "notes": null
+  },
+  "recommendations": []
+}

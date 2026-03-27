@@ -1,0 +1,4 @@
+iteration	grade	violations	critical	major	minor	notes
+0	D	6	5	1	0	baseline: U1-C1/C2/R2 collisions, R1-R2 collision, J2 far from edge, U1 RF far from edge
+1	D	4	4	0	0	moved U1 to right edge, fixed R1/R2 spread, J2 to left edge. Remaining: C1/C2 overlap U1, SW1-J2 collision, C5 far
+2	A	0	0	0	0	moved C1/C2 left of U1, C5 near U1, J2 lower to avoid SW1. All clear.

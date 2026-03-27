@@ -63,6 +63,16 @@
       (hide yes)
     )
   )
+  (property "Group" "MCU Core"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
   (fp_text user "%R"
     (at 0.0 0.0)
     (layer "F.Fab")
@@ -200,7 +210,7 @@
     (size 1.0 0.75)
     (layers "F.Cu" "F.Paste" "F.Mask")
   )
-  (model "${KICAD10_3DMODEL_DIR}/Button_Switch_THT.3dshapes/SW_PUSH_6mm.step"
+  (model "${KICAD10_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step"
     (offset
       (xyz 0.0 0.0 0.0)
     )

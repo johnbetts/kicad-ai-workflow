@@ -43,7 +43,7 @@
       (hide yes)
     )
   )
-  (property "Description" "100nF decoupling 0805"
+  (property "Description" "10uF bulk decoupling 0805"
     (at 0 0 0)
     (layer "F.Fab")
     (effects
@@ -53,7 +53,17 @@
       (hide yes)
     )
   )
-  (property "LCSC" "C49678"
+  (property "LCSC" "C15850"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Group" "MCU Core"
     (at 0 0 0)
     (layer "F.Fab")
     (effects

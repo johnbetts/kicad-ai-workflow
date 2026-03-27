@@ -43,7 +43,7 @@
       (hide yes)
     )
   )
-  (property "Description" "5.1K CC pull-down 0805 — CC1"
+  (property "Description" "5.1K CC pull-down 0402 — CC1"
     (at 0 0 0)
     (layer "F.Fab")
     (effects
@@ -54,6 +54,16 @@
     )
   )
   (property "LCSC" "C25905"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Group" "MCU Core"
     (at 0 0 0)
     (layer "F.Fab")
     (effects
@@ -124,7 +134,7 @@
     (size 0.57 0.54)
     (layers "F.Cu" "F.Paste" "F.Mask")
   )
-  (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0805_2012Metric.step"
+  (model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step"
     (offset
       (xyz 0.0 0.0 0.0)
     )

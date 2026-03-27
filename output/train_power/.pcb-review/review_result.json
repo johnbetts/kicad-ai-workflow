@@ -1,0 +1,25 @@
+{
+  "board": "train_power",
+  "timestamp": "2026-03-26T21:07:39.889829",
+  "iterations": 3,
+  "initial_grade": "F",
+  "initial_violations": 8,
+  "final_grade": "A",
+  "final_violations": 0,
+  "fixes_applied": [
+    "Moved mounting holes to proper corners (H1=TL, H2=TR, H3=BL, H4=BR)",
+    "Resolved J1/H1 overlap by repositioning mounting hole",
+    "Resolved U1/L1 collision by spacing inductor further from buck IC",
+    "Resolved C3/D1 overlap by repositioning bootstrap cap and diode",
+    "Resolved U2/C4/C5/C6 overlaps by spacing LDO caps with proper clearance",
+    "Moved J2/J3 test headers to right board edge (<8mm from edge)",
+    "Fixed J1 board edge clearance (>=0.3mm)",
+    "Corrected U1-C3 and U1-R1 collisions by accounting for rotation-aware bounding boxes"
+  ],
+  "rendered_views": [
+    "review_2d.png",
+    "review_3d_iso.png",
+    "review_3d_top.png",
+    "review_3d_isoback.png"
+  ]
+}

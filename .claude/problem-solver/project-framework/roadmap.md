@@ -61,12 +61,15 @@ Milestone: **ACHIEVED** — 8 dashboard tests passing, ruff clean, NiceGUI insta
 - [x] TASK-025b: Integration tests (11 tests) — HTTP posting, error resilience, CLI flags
 Milestone: **ACHIEVED** — 94 total tests passing. Runner POSTs to dashboard, dashboard writes approvals back, human gate detects them.
 
-### Phase 3: Polish — not started
-- [ ] TASK-026: Requirements tracking panel in dashboard
-- [ ] TASK-027: Scoring trend charts (ECharts via ui.chart)
-- [ ] TASK-028: Before/after diff view for iterations
-- [ ] TASK-029: Board selector dropdown for multi-board projects
-Milestone: Dashboard is the primary review interface, faster than CLI scrolling
+### Phase 3: Polish — COMPLETE
+- [x] TASK-026: Requirements tracking panel (reads requirements.json, derives status from evidence)
+- [x] TASK-027: Scoring trend chart (ECharts line chart with grade boundary lines, colored segments)
+- [x] TASK-028: Before/after diff view (side-by-side images, grade/score/issue deltas)
+- [x] TASK-029: Board selector with latest grade, defaults to boards with evidence
+- [x] TASK-030: Multi-level kanban board (Framework/Deployment/Board tabs, 4 columns, CRUD, roadmap import)
+- [x] TASK-031: Kanban API endpoints (6 routes: GET/POST/PUT/DELETE + move + import)
+- [x] TASK-032: Kanban tests (26 tests)
+Milestone: **ACHIEVED** — 120 total tests. Dashboard has requirements, scoring, diff view, and kanban.
 
 ## Wishlist
 - WISH-001: Real-time render preview via WebSocket — live image updates during kicad-image-gen

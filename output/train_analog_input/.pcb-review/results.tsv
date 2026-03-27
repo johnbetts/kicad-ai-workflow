@@ -1,0 +1,4 @@
+commit	grade	score	drc_errors	violations	critical	status	description
+88ecfd0	A	0.993	0	0	0	kept	baseline - already Grade A after post-placement
+6f76cd2	A	n/a	0	0	0	kept	fixed MSOP-10 pad dims (0.28x1.62→0.95x0.25) — DRC 45→0 errors, 11 silk warnings only
+post-pkg	A	0.993	0	0	0	kept	post package-size corrections (R→0402, C→0402, TVS→SOT-23) — Grade A, 0 violations, 0 DRC errors, 11 silk warnings

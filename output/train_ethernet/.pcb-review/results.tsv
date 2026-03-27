@@ -1,2 +1,5 @@
-HASH	GRADE	SCORE	DRC	VIOLATIONS	CRITICAL	STATUS	DESC
-bfebc64	A	-	0	0	0	KEPT	edge-mount exempt + connector edge body-dist + header pad bounds + R3 position
+iteration	grade	violations	changes
+0	B	2 major (J2 15.2mm from edge, J3 24.1mm from edge)	initial state
+1	C	1 critical (J2/H4 collision), 2 major (J2 spread, J2 MCU proximity)	moved J2 to left edge x=2.5, J3 to right edge x=53.0
+2	C	2 major (J2 spread, MCU prox), 2 critical (J2 off-board, edge clearance)	moved J2 to bottom edge y=37.5 (body extends past board)
+3	A	0 violations	J2 rotated 90deg at (20.0, 35.0), J3 at (53.0, 25.5)
