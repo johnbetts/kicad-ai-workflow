@@ -5,6 +5,7 @@ Multi-user, role-aware dashboard with:
 - Three-panel review page (Images | CLI/Chat | Context)
 - Multi-level kanban board (Framework / Deployment / Board)
 - Per-tab session state (multiple users/tabs supported)
+- Cross-navigation between review and kanban pages
 """
 
 from __future__ import annotations
@@ -172,17 +173,18 @@ def main(
     # Register FastAPI/Starlette API routes
     register_api_routes(nicegui_app, output_root)
 
-    # Enable per-tab storage (each browser tab gets its own state)
-    nicegui_app.storage.general["initialized"] = True
+    # Per-tab storage enabled via storage_secret in ui.run()
 
     # ------------------------------------------------------------------
     # Review page — three-panel layout
     # ------------------------------------------------------------------
 
     @ui.page("/")
-    def index() -> None:
-        # Per-tab session state
-        session: dict[str, object] = {}
+    def index(board: str = "") -> None:
+        # Per-tab session state (survives refresh, per-tab isolation)
+        session = nicegui_app.storage.tab
+        session.setdefault("role", "framework")
+        session.setdefault("board_dir", "")
 
         board_names = _discover_boards(output_root)
         board_options: dict[str, str] = {}
@@ -191,13 +193,16 @@ def main(
             label = f"{name} [{grade}]" if grade != "?" else name
             board_options[name] = label
 
-        # Determine initial board for this session
-        if initial_board_dir:
-            session["board_dir"] = str(initial_board_dir)
-        else:
-            default_name = _pick_default_board(output_root, board_names)
-            if default_name:
-                session["board_dir"] = str(output_root / default_name)
+        # Determine initial board: query param > session > CLI arg > auto
+        if board and board in board_names:
+            session["board_dir"] = str(output_root / board)
+        elif not session.get("board_dir"):
+            if initial_board_dir:
+                session["board_dir"] = str(initial_board_dir)
+            else:
+                default_name = _pick_default_board(output_root, board_names)
+                if default_name:
+                    session["board_dir"] = str(output_root / default_name)
 
         current_board = (
             Path(str(session["board_dir"]))
@@ -220,6 +225,16 @@ def main(
                 label="",
             ).classes("w-64")
 
+            # Cross-navigation: link to kanban for current board
+            def _open_kanban_for_board() -> None:
+                ui.navigate.to("/kanban")
+
+            ui.button(
+                "Board Issues",
+                icon="view_kanban",
+                on_click=_open_kanban_for_board,
+            ).props("flat dense no-caps size=sm")
+
         # Three panel containers
         image_container = ui.element("div")
         log_container = ui.element("div")
@@ -239,7 +254,7 @@ def main(
                 build_image_panel(bd)
             log_container.clear()
             with log_container:
-                build_log_panel()
+                build_log_panel(board_dir=bd)
             context_container.clear()
             with context_container:
                 build_context_panel(bd, output_root, role=_get_role())
@@ -268,7 +283,7 @@ def main(
                 ui.card().classes("h-full").style("width: 45%; overflow-y: auto"),
                 log_container,
             ):
-                build_log_panel()
+                build_log_panel(board_dir=current_board)
 
             # RIGHT PANEL — Context
             with (
@@ -298,9 +313,10 @@ def main(
             update_card,
         )
 
-        # Per-tab session state
-        session: dict[str, object] = {}
-        session["role"] = "framework"
+        # Per-tab session state (survives refresh, per-tab isolation)
+        session = nicegui_app.storage.tab
+        session.setdefault("role", "framework")
+        session.setdefault("board_dir", "")
 
         active_board_name: dict[str, str] = {"value": ""}
         active_type_filters: set[str] = set(VALID_TYPES)
@@ -383,9 +399,17 @@ def main(
                         "text-caption text-grey-5"
                     )
                 if card.board_name:
-                    ui.label(f"Board: {card.board_name}").classes(
-                        "text-caption text-grey-6"
-                    )
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"Board: {card.board_name}").classes(
+                            "text-caption text-grey-6"
+                        )
+                        if card.level == "board":
+                            ui.button(
+                                "Open Review",
+                                on_click=lambda bn=card.board_name: (
+                                    ui.navigate.to(f"/?board={bn}")
+                                ),
+                            ).props("flat dense no-caps size=xs color=accent")
 
                 with ui.row().classes("gap-2 q-mt-xs"):
                     other_statuses = [
@@ -568,4 +592,9 @@ def main(
         # Kanban columns
         _rebuild_board()
 
-    ui.run(port=port, title="KiCad Review Dashboard", reload=True)
+    ui.run(
+        port=port,
+        title="KiCad Review Dashboard",
+        reload=True,
+        storage_secret="kicad-dashboard",
+    )

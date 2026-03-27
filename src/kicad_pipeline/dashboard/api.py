@@ -51,6 +51,13 @@ class RejectRequest(BaseModel):
     feedback: str = ""
 
 
+class CommandRequest(BaseModel):
+    """Payload for POST /api/command."""
+
+    command: str
+    board: str = ""
+
+
 def _board_pcb_path(board_name: str) -> Path:
     """Resolve a board name to its .kicad_pcb path."""
 
@@ -231,10 +238,35 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
         count = import_from_roadmap(_project_root(), roadmap_path)
         return JSONResponse({"status": "ok", "imported": count})
 
+    async def post_command(request: Request) -> JSONResponse:
+        """Execute a dashboard command and return the response."""
+        body = await request.json()
+        req = CommandRequest.model_validate(body)
+        cmd_text = req.command.strip()
+        if not cmd_text.startswith("/"):
+            # Non-command text is echoed to the log buffer.
+            ts = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+            from kicad_pipeline.dashboard.app import _log_buffer
+
+            _log_buffer.append(f"[{ts}] > {cmd_text}")
+            return JSONResponse({"response": cmd_text})
+
+        board_dir: Path | None = None
+        if _output_root and req.board:
+            candidate = _output_root / req.board
+            if candidate.is_dir():
+                board_dir = candidate
+
+        from kicad_pipeline.dashboard.panels import _dispatch_command
+
+        response = _dispatch_command(cmd_text, board_dir, None)
+        return JSONResponse({"response": response})
+
     # Mount routes on the Starlette app
     api_routes = [
         Route("/api/evidence", post_evidence, methods=["POST"]),
         Route("/api/log", post_log, methods=["POST"]),
+        Route("/api/command", post_command, methods=["POST"]),
         Route("/api/ledger/{board_name}", get_ledger, methods=["GET"]),
         Route("/api/approve/{board_name}", post_approve, methods=["POST"]),
         Route("/api/reject/{board_name}", post_reject, methods=["POST"]),

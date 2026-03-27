@@ -145,11 +145,145 @@ def build_image_panel(board_dir: Path | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_log_panel() -> None:
+def _timestamp() -> str:
+    """Return a formatted timestamp string for log messages."""
+    from datetime import datetime, timezone
+
+    return datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+
+
+def _dispatch_command(
+    command: str,
+    board_dir: Path | None,
+    log_widget: object,
+) -> str:
+    """Dispatch a slash command and return the response text.
+
+    Args:
+        command: The raw command string (with leading ``/``).
+        board_dir: Path to the active board directory (may be ``None``).
+        log_widget: The ``ui.log`` widget to push messages to.
+
+    Returns:
+        A human-readable response string.
+    """
+    from kicad_pipeline.evidence.gates import ALL_STAGES, check_gate
+    from kicad_pipeline.evidence.ledger import append_record, load_ledger
+    from kicad_pipeline.evidence.models import EvidenceKind, EvidenceRecord
+
+    parts = command.strip().split(maxsplit=2)
+    cmd = parts[0].lower()
+    arg1 = parts[1] if len(parts) > 1 else ""
+    arg2 = parts[2] if len(parts) > 2 else ""
+
+    if cmd == "/help":
+        return (
+            "Available commands:\n"
+            "  /approve [stage]          - Approve the current stage\n"
+            "  /reject [stage] [feedback] - Reject with feedback\n"
+            "  /status                   - Show stage status summary\n"
+            "  /score                    - Show latest quality score\n"
+            "  /boards                   - List available boards\n"
+            "  /board <name>             - Switch to a different board\n"
+            "  /help                     - Show this help"
+        )
+
+    if cmd == "/boards":
+        from kicad_pipeline.dashboard.api import _discover_board_names
+
+        names = _discover_board_names()
+        if not names:
+            return "No boards found."
+        return "Boards: " + ", ".join(names)
+
+    if cmd == "/board":
+        # Board switching is handled by the caller; just acknowledge here.
+        if not arg1:
+            return "Usage: /board <name>"
+        return f"SWITCH_BOARD:{arg1}"
+
+    # Commands below require an active board_dir.
+    if board_dir is None or not board_dir.is_dir():
+        return "No board selected. Use /board <name> first."
+
+    board_pcb = _find_board_pcb(board_dir)
+    board_name = board_pcb.stem
+
+    if cmd == "/status":
+        lines: list[str] = [f"Stage status for {board_name}:"]
+        for stage in ALL_STAGES:
+            result = check_gate(board_pcb, stage)
+            if result.passed:
+                status = "PASS"
+            elif result.missing:
+                status = f"FAIL (missing: {', '.join(result.missing)})"
+            else:
+                status = "pending"
+            lines.append(f"  {stage:14s}  {status}")
+        return "\n".join(lines)
+
+    if cmd == "/score":
+        ledger = load_ledger(board_pcb)
+        score = ledger.latest_score()
+        if score is None:
+            return "No score data yet."
+        breakdown_lines = [
+            f"  {dim}: {val:.3f}" for dim, val in sorted(score.breakdown.items())
+        ]
+        return (
+            f"Quality score for {board_name}: "
+            f"{score.grade} ({score.overall_score:.3f})\n"
+            + "\n".join(breakdown_lines)
+        )
+
+    if cmd == "/approve":
+        stage = arg1 or "pcb"
+        if stage not in ALL_STAGES:
+            return f"Unknown stage '{stage}'. Valid: {', '.join(ALL_STAGES)}"
+        record = EvidenceRecord(
+            kind=EvidenceKind.HUMAN_APPROVAL,
+            stage=stage,
+            step="cli_approval",
+            board=board_name,
+            passed=True,
+            summary=f"Human approved {stage} via CLI",
+            producer="human",
+        )
+        append_record(board_pcb, record)
+        return f"Approved stage '{stage}'."
+
+    if cmd == "/reject":
+        stage = arg1 or "pcb"
+        feedback = arg2 or ""
+        if stage not in ALL_STAGES:
+            return f"Unknown stage '{stage}'. Valid: {', '.join(ALL_STAGES)}"
+        if not feedback:
+            return "Usage: /reject <stage> <feedback>"
+        record = EvidenceRecord(
+            kind=EvidenceKind.HUMAN_REJECTION,
+            stage=stage,
+            step="cli_rejection",
+            board=board_name,
+            passed=False,
+            summary=f"Human rejected {stage} via CLI",
+            feedback=feedback,
+            producer="human",
+        )
+        append_record(board_pcb, record)
+        return f"Rejected stage '{stage}' with feedback."
+
+    return f"Unknown command: {cmd}. Type /help for available commands."
+
+
+def build_log_panel(board_dir: Path | None = None) -> None:
     """Build the log stream panel (center).
 
     Includes a read-only log viewer that drains the shared buffer,
-    plus an input field for sending commands (future: Claude interaction).
+    plus an input field for executing dashboard commands.
+
+    Args:
+        board_dir: Path to the active board directory.  Used by commands
+            such as ``/status`` and ``/score`` to read board evidence.
     """
     from nicegui import ui
 
@@ -160,21 +294,42 @@ def build_log_panel() -> None:
     def _push_buffered() -> None:
         while _log_buffer:
             entry = _log_buffer.pop(0)
-            log_widget.push(entry)
+            log_widget.push(f"[{_timestamp()}] [agent] {entry}")
 
     ui.timer(1.0, _push_buffered)
 
-    # Command input (placeholder for future Claude chat integration)
+    # Command input
     with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
         cmd_input = ui.input(
-            placeholder="Send command (coming soon)..."
+            placeholder="Type a /command or message..."
         ).classes("flex-grow")
 
         def _send_cmd() -> None:
-            if cmd_input.value:
-                log_widget.push(f"> {cmd_input.value}")
-                cmd_input.value = ""
+            text = cmd_input.value.strip()
+            if not text:
+                return
+            cmd_input.value = ""
 
+            ts = _timestamp()
+
+            if text.startswith("/"):
+                log_widget.push(f"[{ts}] > {text}")
+                response = _dispatch_command(text, board_dir, log_widget)
+
+                # Handle board-switch sentinel.
+                if response.startswith("SWITCH_BOARD:"):
+                    target = response.split(":", 1)[1]
+                    log_widget.push(
+                        f"[{ts}] [system] Switching to board '{target}' "
+                        "(use the board selector dropdown)"
+                    )
+                else:
+                    for line in response.split("\n"):
+                        log_widget.push(f"[{ts}] [system] {line}")
+            else:
+                log_widget.push(f"[{ts}] > {text}")
+
+        cmd_input.on("keydown.enter", lambda _: _send_cmd())
         ui.button(icon="send", on_click=_send_cmd).props("flat dense round")
 
 
