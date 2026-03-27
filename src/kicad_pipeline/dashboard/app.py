@@ -229,6 +229,9 @@ def main(
             val = session.get("board_dir")
             return Path(str(val)) if val else None
 
+        def _get_role() -> str:
+            return str(session.get("role", "framework"))
+
         def _rebuild_panels() -> None:
             bd = _get_board_dir()
             image_container.clear()
@@ -239,7 +242,7 @@ def main(
                 build_log_panel()
             context_container.clear()
             with context_container:
-                build_context_panel(bd, output_root)
+                build_context_panel(bd, output_root, role=_get_role())
 
         def _on_board_change(e: object) -> None:
             value = getattr(e, "value", None)
@@ -250,37 +253,31 @@ def main(
         board_select.on_value_change(_on_board_change)
 
         # Three-panel layout: Images (left) | Chat (center) | Context (right)
-        with ui.row().classes("w-full gap-0").style("height: calc(100vh - 120px)"):
+        with ui.row().classes("w-full gap-2").style(
+            "height: calc(100vh - 120px)"
+        ):
             # LEFT PANEL — Images
-            with ui.card().classes("h-full").style("width: 25%; overflow-y: auto"):
-                ui.label("Images").classes(
-                    "text-subtitle1 font-bold q-mb-sm"
-                )
-                ui.separator()
-                with image_container:
-                    build_image_panel(current_board)
+            with (
+                ui.card().classes("h-full").style("width: 25%; overflow-y: auto"),
+                image_container,
+            ):
+                build_image_panel(current_board)
 
             # CENTER PANEL — CLI / Chat
-            with ui.card().classes("h-full").style(
-                "width: 45%; overflow-y: auto"
+            with (
+                ui.card().classes("h-full").style("width: 45%; overflow-y: auto"),
+                log_container,
             ):
-                ui.label("CLI / Agent Log").classes(
-                    "text-subtitle1 font-bold q-mb-sm"
-                )
-                ui.separator()
-                with log_container:
-                    build_log_panel()
+                build_log_panel()
 
             # RIGHT PANEL — Context
-            with ui.card().classes("h-full").style(
-                "width: 30%; overflow-y: auto"
+            with (
+                ui.card().classes("h-full").style("width: 30%; overflow-y: auto"),
+                context_container,
             ):
-                ui.label("Context").classes(
-                    "text-subtitle1 font-bold q-mb-sm"
+                build_context_panel(
+                    current_board, output_root, role=_get_role()
                 )
-                ui.separator()
-                with context_container:
-                    build_context_panel(current_board, output_root)
 
     # ------------------------------------------------------------------
     # Kanban page — multi-level board
