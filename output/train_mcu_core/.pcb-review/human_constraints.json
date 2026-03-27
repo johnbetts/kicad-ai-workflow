@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "constraints": [
+    {
+      "type": "collision",
+      "refs": [
+        "C1",
+        "U1"
+      ],
+      "description": "C1 decoupling cap crashing with U1 ESP32 courtyard",
+      "weight": 2.0,
+      "target_resolved": true,
+      "tolerance_mm": 3.0
+    },
+    {
+      "type": "collision",
+      "refs": [
+        "C2",
+        "U1"
+      ],
+      "description": "C2 decoupling cap crashing with U1 ESP32 courtyard",
+      "weight": 2.0,
+      "target_resolved": true,
+      "tolerance_mm": 3.0
+    },
+    {
+      "type": "position_lock",
+      "refs": [
+        "U1",
+        "SW1",
+        "SW2",
+        "R1",
+        "R2",
+        "C5",
+        "J1",
+        "R3",
+        "R4",
+        "D1",
+        "R5",
+        "J2"
+      ],
+      "description": "Production-ready positions \u2014 do NOT move these",
+      "weight": 3.0,
+      "target_resolved": true,
+      "tolerance_mm": 2.0,
+      "baseline_positions": [
+        {
+          "ref": "U1",
+          "x": 35.0,
+          "y": 31.9
+        },
+        {
+          "ref": "SW1",
+          "x": 8.6,
+          "y": 33.3
+        },
+        {
+          "ref": "SW2",
+          "x": 7.0,
+          "y": 26.9
+        },
+        {
+          "ref": "R1",
+          "x": 20.1,
+          "y": 22.5
+        },
+        {
+          "ref": "R2",
+          "x": 23.0,
+          "y": 24.3
+        },
+        {
+          "ref": "C5",
+          "x": 21.7,
+          "y": 26.9
+        },
+        {
+          "ref": "J1",
+          "x": 27.8,
+          "y": 5.0
+        },
+        {
+          "ref": "R3",
+          "x": 25.8,
+          "y": 10.1
+        },
+        {
+          "ref": "R4",
+          "x": 30.2,
+          "y": 10.1
+        },
+        {
+          "ref": "D1",
+          "x": 19.5,
+          "y": 36.0
+        },
+        {
+          "ref": "R5",
+          "x": 23.0,
+          "y": 36.0
+        },
+        {
+          "ref": "J2",
+          "x": 14.9,
+          "y": 47.1
+        }
+      ]
+    }
+  ]
+}

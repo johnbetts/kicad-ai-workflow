@@ -7,8 +7,11 @@ mean so that a single zero-dimension drags the composite down hard.
 
 from __future__ import annotations
 
+import json
+import logging
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -44,7 +47,8 @@ _FAST_WEIGHT_GROUP_COHESION: float = 0.045
 _FAST_WEIGHT_SUBGROUP_COHESION: float = 0.045
 _FAST_WEIGHT_GROUP_ISOLATION: float = 0.045
 _FAST_WEIGHT_PAD_FACING: float = 0.045
-_FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.10
+_FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.05
+_FAST_WEIGHT_HUMAN_FEEDBACK: float = 0.05
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -1083,11 +1087,199 @@ def _score_constraint_compliance(
     return score, issues[:5]
 
 
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Human feedback scoring
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HumanConstraint:
+    """A single scored constraint from human feedback.
+
+    Attributes:
+        constraint_type: One of ``"collision"``, ``"position_lock"``,
+            ``"proximity"``, ``"zone"``, ``"custom"``.
+        refs: Component references this constraint applies to.
+        description: Human-readable description of what to fix/preserve.
+        weight: Relative importance (positive = reward when met, negative = penalty when violated).
+        target_resolved: Whether the constraint should be resolved (True) or preserved (False).
+        tolerance_mm: Position lock tolerance in mm (for ``position_lock`` type).
+        baseline_positions: Original positions ``{ref: (x, y)}`` to lock against.
+    """
+
+    constraint_type: str
+    refs: tuple[str, ...]
+    description: str
+    weight: float = 1.0
+    target_resolved: bool = True
+    tolerance_mm: float = 1.0
+    baseline_positions: tuple[tuple[str, float, float], ...] = ()
+
+
+def load_human_constraints(pcb_dir: str | Path) -> tuple[HumanConstraint, ...]:
+    """Load human feedback constraints from ``.pcb-review/human_constraints.json``.
+
+    Returns an empty tuple if no file exists (no penalty, no reward).
+    """
+    path = Path(pcb_dir) / ".pcb-review" / "human_constraints.json"
+    if not path.exists():
+        return ()
+    try:
+        data = json.loads(path.read_text())
+        constraints: list[HumanConstraint] = []
+        for entry in data.get("constraints", []):
+            baseline = tuple(
+                (bp["ref"], bp["x"], bp["y"])
+                for bp in entry.get("baseline_positions", [])
+            )
+            constraints.append(HumanConstraint(
+                constraint_type=entry["type"],
+                refs=tuple(entry.get("refs", [])),
+                description=entry.get("description", ""),
+                weight=entry.get("weight", 1.0),
+                target_resolved=entry.get("target_resolved", True),
+                tolerance_mm=entry.get("tolerance_mm", 1.0),
+                baseline_positions=baseline,
+            ))
+        return tuple(constraints)
+    except Exception:
+        _log.warning("Failed to load human_constraints.json from %s", pcb_dir)
+        return ()
+
+
+def save_human_constraints(
+    pcb_dir: str | Path,
+    constraints: tuple[HumanConstraint, ...],
+) -> None:
+    """Write human feedback constraints to ``.pcb-review/human_constraints.json``."""
+    path = Path(pcb_dir) / ".pcb-review"
+    path.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": 1,
+        "constraints": [
+            {
+                "type": hc.constraint_type,
+                "refs": list(hc.refs),
+                "description": hc.description,
+                "weight": hc.weight,
+                "target_resolved": hc.target_resolved,
+                "tolerance_mm": hc.tolerance_mm,
+                "baseline_positions": [
+                    {"ref": r, "x": x, "y": y} for r, x, y in hc.baseline_positions
+                ],
+            }
+            for hc in constraints
+        ],
+    }
+    (path / "human_constraints.json").write_text(
+        json.dumps(data, indent=2) + "\n"
+    )
+
+
+def _score_human_feedback(
+    pos: dict[str, tuple[float, float]],
+    pcb_dir: str | Path | None = None,
+    constraints: tuple[HumanConstraint, ...] | None = None,
+) -> tuple[float, list[str]]:
+    """Score placement against human feedback constraints.
+
+    Args:
+        pos: Dict of ``{ref: (x, y)}`` current positions.
+        pcb_dir: Board directory containing ``.pcb-review/``.
+        constraints: Pre-loaded constraints (skips file load if provided).
+
+    Returns:
+        ``(score, issues)`` where score is [0, 1].
+        1.0 = all human constraints satisfied. 0.0 = all violated.
+        Returns (1.0, []) if no constraints exist.
+    """
+    if constraints is None:
+        if pcb_dir is None:
+            return 1.0, []
+        constraints = load_human_constraints(pcb_dir)
+    if not constraints:
+        return 1.0, []
+
+    total_weight = 0.0
+    earned_weight = 0.0
+    issues: list[str] = []
+
+    for hc in constraints:
+        total_weight += abs(hc.weight)
+
+        if hc.constraint_type == "position_lock":
+            # Check that locked refs haven't moved beyond tolerance
+            all_within = True
+            for ref, bx, by in hc.baseline_positions:
+                cx, cy = pos.get(ref, (bx, by))
+                dist = math.hypot(cx - bx, cy - by)
+                if dist > hc.tolerance_mm:
+                    all_within = False
+                    issues.append(
+                        f"LOCKED {ref} moved {dist:.1f}mm (max {hc.tolerance_mm}mm)"
+                    )
+            if all_within:
+                earned_weight += abs(hc.weight)
+
+        elif hc.constraint_type == "collision":
+            # Check that the named refs are NOT colliding
+            # (uses simple distance check — full courtyard check is in _score_collisions)
+            if len(hc.refs) >= 2:
+                r1, r2 = hc.refs[0], hc.refs[1]
+                p1 = pos.get(r1)
+                p2 = pos.get(r2)
+                if p1 and p2:
+                    dist = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                    # Collision resolved if components are > tolerance apart
+                    if dist > hc.tolerance_mm:
+                        earned_weight += abs(hc.weight)
+                    else:
+                        issues.append(
+                            f"COLLISION {r1}-{r2}: {dist:.1f}mm "
+                            f"(need >{hc.tolerance_mm}mm) — {hc.description}"
+                        )
+
+        elif hc.constraint_type == "proximity":
+            # Check that refs are within tolerance of each other
+            if len(hc.refs) >= 2:
+                r1, r2 = hc.refs[0], hc.refs[1]
+                p1 = pos.get(r1)
+                p2 = pos.get(r2)
+                if p1 and p2:
+                    dist = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                    if dist <= hc.tolerance_mm:
+                        earned_weight += abs(hc.weight)
+                    else:
+                        issues.append(
+                            f"PROXIMITY {r1}-{r2}: {dist:.1f}mm "
+                            f"(need <{hc.tolerance_mm}mm) — {hc.description}"
+                        )
+
+        else:
+            # Custom or unknown — score 1.0 (neutral) if target_resolved
+            earned_weight += abs(hc.weight) * (1.0 if hc.target_resolved else 0.0)
+
+    if total_weight == 0.0:
+        return 1.0, []
+    return earned_weight / total_weight, issues[:5]
+
+
 def _gather_placement_subdimensions(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
+    pcb_dir: str | Path | None = None,
+    human_constraints: tuple[HumanConstraint, ...] | None = None,
 ) -> dict[str, tuple[float, tuple[str, ...]]]:
-    """Compute all 14 placement sub-dimension scores.
+    """Compute all 15 placement sub-dimension scores.
+
+    Args:
+        pcb: The PCB design to evaluate.
+        requirements: Project requirements.
+        pcb_dir: Board directory for loading human feedback constraints.
+        human_constraints: Pre-loaded human constraints (skips file load).
 
     Returns a dict mapping dimension name to ``(score, issues)`` pairs.
     """
@@ -1105,6 +1297,9 @@ def _gather_placement_subdimensions(
     pad_facing_score, pad_facing_issues = _score_pad_facing(pcb, requirements)
     pos_2d = _fp_position_dict(pcb)
     constraint_score, constraint_issues = _score_constraint_compliance(pos_2d, requirements)
+    human_score, human_issues = _score_human_feedback(
+        pos_2d, pcb_dir=pcb_dir, constraints=human_constraints,
+    )
 
     return {
         "collision": (collision_score, tuple(collision_issues[:5])),
@@ -1120,6 +1315,7 @@ def _gather_placement_subdimensions(
         "grp_isolation": (grp_isolation_score, tuple(grp_isolation_issues[:5])),
         "pad_facing": (pad_facing_score, tuple(pad_facing_issues[:5])),
         "constraint_compliance": (constraint_score, tuple(constraint_issues[:5])),
+        "human_feedback": (human_score, tuple(human_issues[:5])),
     }
 
 
@@ -1140,6 +1336,7 @@ def _build_fast_breakdown(
         ("grp_isolation", "Group Isolation", _FAST_WEIGHT_GROUP_ISOLATION),
         ("pad_facing", "Pad Facing", _FAST_WEIGHT_PAD_FACING),
         ("constraint_compliance", "Constraint Compliance", _FAST_WEIGHT_CONSTRAINT_COMPLIANCE),
+        ("human_feedback", "Human Feedback", _FAST_WEIGHT_HUMAN_FEEDBACK),
     )
     return tuple(
         ScoreDetail(
@@ -1155,22 +1352,29 @@ def _build_fast_breakdown(
 def compute_fast_placement_score(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
+    pcb_dir: str | Path | None = None,
+    human_constraints: tuple[HumanConstraint, ...] | None = None,
 ) -> QualityScore:
     """Compute a placement-focused quality score without full validation.
 
-    Evaluates 14 EE-aligned placement sub-dimensions and returns a composite
-    :class:`QualityScore`.
+    Evaluates 15 EE-aligned placement sub-dimensions and returns a composite
+    :class:`QualityScore`.  The 15th dimension scores compliance with human
+    feedback constraints loaded from ``.pcb-review/human_constraints.json``.
 
     Args:
         pcb: The PCB design to evaluate.
         requirements: Project requirements with nets and feature blocks.
+        pcb_dir: Board directory for loading human feedback constraints.
+        human_constraints: Pre-loaded human constraints (skips file load).
 
     Returns:
         A :class:`QualityScore` with placement-derived scores.
     """
-    dims = _gather_placement_subdimensions(pcb, requirements)
+    dims = _gather_placement_subdimensions(
+        pcb, requirements, pcb_dir=pcb_dir, human_constraints=human_constraints,
+    )
 
-    # Weighted placement composite (14 dimensions)
+    # Weighted placement composite (15 dimensions)
     placement_score = (
         _FAST_WEIGHT_COLLISION * dims["collision"][0]
         + _FAST_WEIGHT_SUBCIRCUIT_COHESION * dims["cohesion"][0]
@@ -1186,6 +1390,7 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_GROUP_ISOLATION * dims["grp_isolation"][0]
         + _FAST_WEIGHT_PAD_FACING * dims["pad_facing"][0]
         + _FAST_WEIGHT_CONSTRAINT_COMPLIANCE * dims["constraint_compliance"][0]
+        + _FAST_WEIGHT_HUMAN_FEEDBACK * dims["human_feedback"][0]
     )
 
     manufacturing_score = _clamp01(0.5 + 0.5 * dims["collision"][0])
