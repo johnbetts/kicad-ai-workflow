@@ -80,6 +80,8 @@ _SOT223_FP = "SOT-223"
 _IND_1210_FP = "L_1210"
 _C0805_FP = "C_0805"
 _R0805_FP = "R_0805"
+_R0402_FP = "R_0402"
+_C0402_FP = "C_0402"
 _SOD323_FP = "SOD-323"
 _SCREW_TERM_2P_FP = "TerminalBlock_5.08mm_2P"
 _HEADER_2P_FP = "PinHeader_1x02_P2.54mm_Vertical"
@@ -236,9 +238,9 @@ def _make_bootstrap_cap() -> Component:
     return Component(
         ref="C3",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF bootstrap cap 0805",
+        description="100nF bootstrap cap 0402",
         placement_near="U1:BOOT",
         placement_near_max_mm=5.0,
         pins=(
@@ -256,9 +258,9 @@ def _make_fb_top_resistor() -> Component:
     return Component(
         ref="R1",
         value="100K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17407",
-        description="100K feedback top resistor 0805",
+        description="100K feedback top resistor 0402",
         placement_near="U1:VSNS",
         placement_near_max_mm=8.0,
         pins=(
@@ -276,9 +278,9 @@ def _make_fb_bottom_resistor() -> Component:
     return Component(
         ref="R2",
         value="33K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17390",
-        description="33K feedback bottom resistor 0805",
+        description="33K feedback bottom resistor 0402",
         placement_near="U1:VSNS",
         placement_near_max_mm=8.0,
         pins=(
@@ -390,9 +392,9 @@ def _make_ldo_hf_bypass_cap() -> Component:
     return Component(
         ref="C6",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF HF bypass cap for LDO output 0805",
+        description="100nF HF bypass cap for LDO output 0402",
         placement_near="U2:VOUT",
         placement_near_max_mm=5.0,
         pins=(

@@ -65,9 +65,12 @@ _RELAY_FP = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
 _SOT23_FP = "SOT-23"
 _SOD323_FP = "SOD-323"
 _R0805_FP = "R_0805"
+_R0603_FP = "R_0603"
+_R0402_FP = "R_0402"
 _LED0805_FP = "LED_0805"
+_LED0603_FP = "LED_0603"
 _SCREW_TERM_FP = "TerminalBlock_5.08mm_3P"
-_FERRITE_FP = "R_0805"  # Ferrite bead in 0805 package
+_FERRITE_FP = "L_0805"  # Ferrite bead in 0805 package
 _CAP_ELEC_FP = "C_0805"  # 100uF MLCC in 0805 (BUG-R04 fix)
 _CAP_0805_FP = "C_0805"  # 10uF ceramic
 
@@ -172,9 +175,9 @@ def _make_base_resistor(ch: int) -> Component:
     return Component(
         ref=f"R{ch}",
         value="1K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17513",
-        description="1K base resistor 0805",
+        description="1K base resistor 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=f"GPIO{ch}"),
             Pin("2", "2", PinType.PASSIVE, net=f"RELAY_DRIVE{ch}"),
@@ -197,9 +200,9 @@ def _make_led(ch: int) -> Component:
     return Component(
         ref=f"D{idx}",
         value="LED",
-        footprint=_LED0805_FP,
+        footprint=_LED0603_FP,
         lcsc="C2286",
-        description=f"Red LED 0805 — Channel {ch} indicator",
+        description=f"Red LED 0603 — Channel {ch} indicator",
         pins=(
             Pin("1", "A", PinType.PASSIVE, net=f"LED{ch}_A"),
             Pin("2", "K", PinType.PASSIVE, net="GND_RELAY"),
@@ -217,9 +220,9 @@ def _make_led_resistor(ch: int) -> Component:
     return Component(
         ref=f"R{idx}",
         value="330R",
-        footprint=_R0805_FP,
+        footprint=_R0603_FP,
         lcsc="C23138",
-        description=f"330R LED resistor 0805 — Channel {ch} indicator",
+        description=f"330R LED resistor 0603 — Channel {ch} indicator",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=f"RELAY_COIL{ch}"),
             Pin("2", "2", PinType.PASSIVE, net=f"LED{ch}_A"),

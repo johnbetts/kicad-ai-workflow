@@ -96,6 +96,9 @@ _RJ45_FP = "RJ45_HR911105A"
 _CRYSTAL_FP = "Crystal_SMD_3215"
 _C0805_FP = "C_0805"
 _R0805_FP = "R_0805"
+_R0402_FP = "R_0402"
+_R0603_FP = "R_0603"
+_C0402_FP = "C_0402"
 _HEADER_6P_FP = "PinHeader_1x06_P2.54mm_Vertical"
 _HEADER_2P_FP = "PinHeader_1x02_P2.54mm_Vertical"
 
@@ -115,7 +118,7 @@ _BOARD_HEIGHT_MM = 40.0
 #     rule therefore uses 10 mm (origin Y), not 5 mm.
 #   U1 W5500 LQFP-48: courtyard 11x11 mm (half = 5.5 mm).
 #   Y1 crystal HC49/SMD 3215: courtyard ~3.6x2.35 mm (half ~1.8 mm).
-#   C*/R* 0805: courtyard 4.41x2.35 mm.
+#   C*/R* 0805: courtyard 4.41x2.35 mm; 0603: ~3.4x1.9 mm; 0402: ~2.3x1.3 mm.
 #
 # Center-to-center distances are used throughout.
 _RJ45_EDGE_MAX_MM = 10.0    # J1 origin Y ≤ 10 mm (pads force origin ≥ 7.9 mm)
@@ -222,16 +225,16 @@ def _make_w5500() -> Component:
 
 
 def _make_vcc_decoupling() -> Component:
-    """C1: 100nF decoupling on VCC, 0805.
+    """C1: 100nF decoupling on VCC, 0402.
 
     Private subnet +3V3_U1_DEC forces C1 next to U1 VCC pin.
     """
     return Component(
         ref="C1",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF VCC decoupling cap 0805",
+        description="100nF VCC decoupling cap 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -255,16 +258,16 @@ def _make_bulk_decoupling() -> Component:
 
 
 def _make_avdd_decoupling() -> Component:
-    """C3: 100nF decoupling on AVDD, 0805.
+    """C3: 100nF decoupling on AVDD, 0402.
 
     Private subnet AVDD_U1_DEC forces C3 next to U1 AVDD pin.
     """
     return Component(
         ref="C3",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF AVDD decoupling cap 0805",
+        description="100nF AVDD decoupling cap 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="AVDD_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -288,16 +291,16 @@ def _make_crystal() -> Component:
 
 
 def _make_crystal_cap_1() -> Component:
-    """C4: 22pF load capacitor for crystal, 0805.
+    """C4: 22pF load capacitor for crystal, 0402.
 
     Private subnet XTAL1_C4 forces C4 next to Y1/U1 XI pin.
     """
     return Component(
         ref="C4",
         value="22pF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C1804",
-        description="22pF crystal load cap 0805",
+        description="22pF crystal load cap 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="XTAL1_C4"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -306,16 +309,16 @@ def _make_crystal_cap_1() -> Component:
 
 
 def _make_crystal_cap_2() -> Component:
-    """C5: 22pF load capacitor for crystal, 0805.
+    """C5: 22pF load capacitor for crystal, 0402.
 
     Private subnet XTAL2_C5 forces C5 next to Y1/U1 XO pin.
     """
     return Component(
         ref="C5",
         value="22pF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C1804",
-        description="22pF crystal load cap 0805",
+        description="22pF crystal load cap 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="XTAL2_C5"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -357,13 +360,13 @@ def _make_rj45() -> Component:
 
 
 def _make_tx_term_plus() -> Component:
-    """R1: 49.9 ohm TX+ termination resistor, 0805."""
+    """R1: 49.9 ohm TX+ termination resistor, 0603."""
     return Component(
         ref="R1",
         value="49.9R",
-        footprint=_R0805_FP,
+        footprint=_R0603_FP,
         lcsc="C25129",
-        description="49.9 ohm TX+ termination resistor 0805",
+        description="49.9 ohm TX+ termination resistor 0603",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="TX+"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -372,13 +375,13 @@ def _make_tx_term_plus() -> Component:
 
 
 def _make_tx_term_minus() -> Component:
-    """R2: 49.9 ohm TX- termination resistor, 0805."""
+    """R2: 49.9 ohm TX- termination resistor, 0603."""
     return Component(
         ref="R2",
         value="49.9R",
-        footprint=_R0805_FP,
+        footprint=_R0603_FP,
         lcsc="C25129",
-        description="49.9 ohm TX- termination resistor 0805",
+        description="49.9 ohm TX- termination resistor 0603",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="TX-"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -387,13 +390,13 @@ def _make_tx_term_minus() -> Component:
 
 
 def _make_rsvd_resistor() -> Component:
-    """R3: 12.1K RSVD bias resistor, 0805."""
+    """R3: 12.1K RSVD bias resistor, 0402."""
     return Component(
         ref="R3",
         value="12.1K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17401",
-        description="12.1K RSVD bias resistor 0805",
+        description="12.1K RSVD bias resistor 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="RSVD"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -937,7 +940,8 @@ def _eth_check_3d_model_coverage() -> None:
     """3D model coverage report (informational only, no violations)."""
     print("--- 3D Model Coverage ---")
     # Components with commonly available 3D models
-    has_3d = {"C_0805", "R_0805", "Crystal_SMD_3215", "LQFP-48"}
+    has_3d = {"C_0805", "C_0402", "R_0805", "R_0603", "R_0402",
+              "Crystal_SMD_3215", "LQFP-48"}
     # Components typically missing 3D models
     maybe_missing_3d = {"RJ45_HR911105A", "PinHeader_1x06_P2.54mm_Vertical",
                         "PinHeader_1x02_P2.54mm_Vertical"}

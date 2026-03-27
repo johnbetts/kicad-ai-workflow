@@ -113,8 +113,10 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("L_1210", "Inductor_SMD.3dshapes", "L_1210_3225Metric.step"),
     ("L_1206", "Inductor_SMD.3dshapes", "L_1206_3216Metric.step"),
     ("L_0805", "Inductor_SMD.3dshapes", "L_0805_2012Metric.step"),
-    # Crystals
+    # Crystals / Oscillators
     ("Crystal_SMD_3215", "Crystal.3dshapes", "Crystal_SMD_3215-2Pin_3.2x1.5mm.step"),
+    ("OSC-SMD_4P", "Oscillator.3dshapes",
+     "Oscillator_SMD_EuroQuartz_XO32-4Pin_3.2x2.5mm.step"),
 )
 
 
@@ -2992,9 +2994,11 @@ def _try_jlcpcb_footprint(
         # parametric offset that _model_terminal_block/etc. add (they assume
         # pin-1-at-origin pad layout).
         if not fp.models:
-            model = _model_for_package(footprint_id, layer)
+            # Prefer actual footprint lib_id (reflects real package from JLCPCB)
+            # over requirements footprint_id (may be a generic fallback like R_0805).
+            model = _model_for_package(fp.lib_id, layer)
             if model is None:
-                model = _model_for_package(fp.lib_id, layer)
+                model = _model_for_package(footprint_id, layer)
             if model is not None:
                 # JLCPCB footprints use body-center origin — zero the offset
                 # since the model is also body-centered.

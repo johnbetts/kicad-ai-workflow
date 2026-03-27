@@ -64,8 +64,12 @@ from _train_common import (  # noqa: E402
 
 _ESP32_FP = "RF_Module:ESP32-S3-WROOM-1"
 _R0805_FP = "R_0805"
+_R0603_FP = "R_0603"
+_R0402_FP = "R_0402"
 _C0805_FP = "C_0805"
+_C0402_FP = "C_0402"
 _LED0805_FP = "LED_0805"
+_LED0603_FP = "LED_0603"
 _USBC_FP = "USB-C"
 _SW_FP = "SW_Push_4.5x4.5mm"
 _HEADER_FP = "PinHeader_1x04_P2.54mm"
@@ -165,7 +169,7 @@ def _make_esp32() -> Component:
 
 
 def _make_decoupling_100nf() -> Component:
-    """C1: 100nF decoupling capacitor on 3V3 (0805).
+    """C1: 100nF decoupling capacitor on 3V3 (0402).
 
     Uses private subnet +3V3_U1_DEC so the optimizer places C1 right next to
     U1's 3V3 pin rather than routing through the shared +3V3 rail.
@@ -173,9 +177,9 @@ def _make_decoupling_100nf() -> Component:
     return Component(
         ref="C1",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF decoupling 0805",
+        description="100nF decoupling 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -239,9 +243,9 @@ def _make_en_pullup() -> Component:
     return Component(
         ref="R1",
         value="10K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17414",
-        description="10K pull-up 0805 — EN",
+        description="10K pull-up 0402 — EN",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3"),
             Pin("2", "2", PinType.PASSIVE, net="EN"),
@@ -254,9 +258,9 @@ def _make_boot_pullup() -> Component:
     return Component(
         ref="R2",
         value="10K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17414",
-        description="10K pull-up 0805 — BOOT/IO0",
+        description="10K pull-up 0402 — BOOT/IO0",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3"),
             Pin("2", "2", PinType.PASSIVE, net="BOOT"),
@@ -273,9 +277,9 @@ def _make_en_debounce_cap() -> Component:
     return Component(
         ref="C5",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF EN debounce 0805",
+        description="100nF EN debounce 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="EN_DEB"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -318,9 +322,9 @@ def _make_cc_resistor(num: int) -> Component:
     return Component(
         ref=f"R{num}",
         value="5.1K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C25905",
-        description=f"5.1K CC pull-down 0805 — {cc_net}",
+        description=f"5.1K CC pull-down 0402 — {cc_net}",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=cc_net),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -329,13 +333,13 @@ def _make_cc_resistor(num: int) -> Component:
 
 
 def _make_led() -> Component:
-    """D1: Status LED (0805)."""
+    """D1: Status LED (0603)."""
     return Component(
         ref="D1",
         value="LED",
-        footprint=_LED0805_FP,
+        footprint=_LED0603_FP,
         lcsc="C2286",
-        description="Red LED 0805 — status",
+        description="Red LED 0603 — status",
         pins=(
             Pin("1", "A", PinType.PASSIVE, net="LED_A"),
             Pin("2", "K", PinType.PASSIVE, net="GND"),
@@ -348,9 +352,9 @@ def _make_led_resistor() -> Component:
     return Component(
         ref="R5",
         value="330R",
-        footprint=_R0805_FP,
+        footprint=_R0603_FP,
         lcsc="C23138",
-        description="330R LED resistor 0805",
+        description="330R LED resistor 0603",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="LED"),
             Pin("2", "2", PinType.PASSIVE, net="LED_A"),

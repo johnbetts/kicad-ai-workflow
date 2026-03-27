@@ -64,6 +64,8 @@ from _train_common import (  # noqa: E402
 _MSOP10_FP = "MSOP-10"
 _R0805_FP = "R_0805"
 _C0805_FP = "C_0805"
+_R0402_FP = "R_0402"
+_C0402_FP = "C_0402"
 _SOD323_FP = "SOD-323"
 _SCREW_TERM_2P_FP = "TerminalBlock_5.08mm_2P"
 _PIN_HEADER_4P_FP = "PinHeader_1x04"
@@ -152,9 +154,9 @@ def _make_adc_decoupling() -> Component:
     return Component(
         ref="C1",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description="100nF ADC decoupling cap 0805",
+        description="100nF ADC decoupling cap 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3_U1_DEC"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -177,9 +179,9 @@ def _make_divider_top(ch: int) -> Component:
     return Component(
         ref=f"R{ref_num}",
         value="10K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17414",
-        description=f"10K voltage divider top 0805 — CH{ch}",
+        description=f"10K voltage divider top 0402 — CH{ch}",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_RAW"),
             Pin("2", "2", PinType.PASSIVE, net=f"AIN{ch}_DIV"),
@@ -197,9 +199,9 @@ def _make_divider_bot(ch: int) -> Component:
     return Component(
         ref=f"R{ref_num}",
         value="10K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17414",
-        description=f"10K voltage divider bottom 0805 — CH{ch}",
+        description=f"10K voltage divider bottom 0402 — CH{ch}",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_DIV"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -236,9 +238,9 @@ def _make_filter_cap(ch: int) -> Component:
     return Component(
         ref=f"C{ref_num}",
         value="100nF",
-        footprint=_C0805_FP,
+        footprint=_C0402_FP,
         lcsc="C49678",
-        description=f"100nF anti-aliasing filter 0805 — CH{ch}",
+        description=f"100nF anti-aliasing filter 0402 — CH{ch}",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_PROT"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
@@ -275,9 +277,9 @@ def _make_i2c_pullup_sda() -> Component:
     return Component(
         ref="R9",
         value="4.7K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17673",
-        description="4.7K I2C SDA pull-up 0805",
+        description="4.7K I2C SDA pull-up 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3"),
             Pin("2", "2", PinType.PASSIVE, net="SDA"),
@@ -290,9 +292,9 @@ def _make_i2c_pullup_scl() -> Component:
     return Component(
         ref="R10",
         value="4.7K",
-        footprint=_R0805_FP,
+        footprint=_R0402_FP,
         lcsc="C17673",
-        description="4.7K I2C SCL pull-up 0805",
+        description="4.7K I2C SCL pull-up 0402",
         pins=(
             Pin("1", "1", PinType.PASSIVE, net="+3V3"),
             Pin("2", "2", PinType.PASSIVE, net="SCL"),
