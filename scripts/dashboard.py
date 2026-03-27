@@ -18,5 +18,5 @@ def cli() -> None:
     main(board_path=args.board, port=args.port, output_dir=args.output_dir)
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     cli()
