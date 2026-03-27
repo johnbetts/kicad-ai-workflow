@@ -1,4 +1,11 @@
-"""NiceGUI review dashboard for the KiCad AI pipeline."""
+"""NiceGUI review dashboard for the KiCad AI pipeline.
+
+Multi-user, role-aware dashboard with:
+- Shared navigation header with role selector
+- Three-panel review page (Images | CLI/Chat | Context)
+- Multi-level kanban board (Framework / Deployment / Board)
+- Per-tab session state (multiple users/tabs supported)
+"""
 
 from __future__ import annotations
 
@@ -10,19 +17,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Shared log buffer that the API pushes to and the log panel reads from.
+# Shared log buffer — API pushes here, log panel drains it.
 _log_buffer: list[str] = []
-
-# Currently selected board directory (set by the selector).
-_current_board_dir: Path | None = None
 
 
 def _discover_boards(output_root: Path) -> list[str]:
-    """Return sorted board directory names from the output/ folder.
-
-    Includes both ``train_*`` directories and any other board directory
-    containing a ``.kicad_pcb`` file.
-    """
+    """Return sorted board directory names from the output/ folder."""
     if not output_root.is_dir():
         return []
     boards: list[str] = []
@@ -61,13 +61,78 @@ def _board_has_evidence(board_dir: Path) -> bool:
 
 
 def _pick_default_board(output_root: Path, boards: list[str]) -> str | None:
-    """Choose the best default board: first with evidence, else first alphabetically."""
+    """Choose the best default board."""
     if not boards:
         return None
     for name in boards:
         if _board_has_evidence(output_root / name):
             return name
     return boards[0]
+
+
+# ---------------------------------------------------------------------------
+# Shared navigation header
+# ---------------------------------------------------------------------------
+
+ROLE_LABELS: dict[str, str] = {
+    "framework": "Framework Developer",
+    "deployment": "Deployment Admin",
+    "board": "Board User",
+}
+
+
+def _build_nav_header(
+    current_page: str,
+    session: dict[str, object],
+) -> None:
+    """Shared navigation header with role selector.
+
+    Args:
+        current_page: "/" or "/kanban" — highlights the active page.
+        session: Per-tab session dict for storing role state.
+    """
+    from nicegui import ui
+
+    with ui.header().classes("items-center justify-between gap-4"):
+        # Left: title + nav links
+        with ui.row().classes("items-center gap-6"):
+            ui.label("KiCad AI Pipeline").classes("text-h5 font-bold")
+            ui.separator().props("vertical")
+
+            review_btn = ui.button(
+                "Review",
+                on_click=lambda: ui.navigate.to("/"),
+            ).props("flat no-caps")
+            if current_page == "/":
+                review_btn.props("color=primary")
+
+            kanban_btn = ui.button(
+                "Kanban",
+                on_click=lambda: ui.navigate.to("/kanban"),
+            ).props("flat no-caps")
+            if current_page == "/kanban":
+                kanban_btn.props("color=primary")
+
+        # Right: role selector
+        with ui.row().classes("items-center gap-2"):
+            ui.label("Role:").classes("text-subtitle2 text-grey-4")
+            role_select = ui.select(
+                options=ROLE_LABELS,
+                value=session.get("role", "framework"),
+                label="",
+            ).classes("w-52").props("dense borderless")
+
+            def _on_role_change(e: object) -> None:
+                val = getattr(e, "value", None)
+                if val:
+                    session["role"] = val
+
+            role_select.on_value_change(_on_role_change)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 
 def main(
@@ -88,93 +153,138 @@ def main(
         build_log_panel,
     )
 
-    global _current_board_dir
-
     project_root = Path.cwd()
     output_root = Path(output_dir) if output_dir else project_root / "output"
 
-    # Resolve initial board directory
+    # Resolve initial board from CLI arg
+    initial_board_dir: Path | None = None
     if board_path:
         bp = Path(board_path)
         if bp.is_dir():
-            _current_board_dir = bp
+            initial_board_dir = bp
         elif bp.is_file():
-            _current_board_dir = bp.parent
+            initial_board_dir = bp.parent
         else:
-            # Treat as board name
             candidate = output_root / board_path
             if candidate.is_dir():
-                _current_board_dir = candidate
+                initial_board_dir = candidate
 
-    # Register FastAPI routes
+    # Register FastAPI/Starlette API routes
     register_api_routes(nicegui_app, output_root)
+
+    # Enable per-tab storage (each browser tab gets its own state)
+    nicegui_app.storage.general["initialized"] = True
+
+    # ------------------------------------------------------------------
+    # Review page — three-panel layout
+    # ------------------------------------------------------------------
 
     @ui.page("/")
     def index() -> None:
-        global _current_board_dir
+        # Per-tab session state
+        session: dict[str, object] = {}
 
         board_names = _discover_boards(output_root)
-
-        # Build display labels with latest grade
         board_options: dict[str, str] = {}
         for name in board_names:
             grade = _latest_grade(output_root / name)
             label = f"{name} [{grade}]" if grade != "?" else name
             board_options[name] = label
 
-        # Auto-select default board
-        if _current_board_dir is None:
+        # Determine initial board for this session
+        if initial_board_dir:
+            session["board_dir"] = str(initial_board_dir)
+        else:
             default_name = _pick_default_board(output_root, board_names)
             if default_name:
-                _current_board_dir = output_root / default_name
+                session["board_dir"] = str(output_root / default_name)
+
+        current_board = (
+            Path(str(session["board_dir"]))
+            if session.get("board_dir")
+            else None
+        )
 
         ui.dark_mode(True)
-        with ui.header().classes("items-center justify-between"):
-            ui.label("KiCad Review Dashboard").classes("text-h5 font-bold")
+        _build_nav_header("/", session)
+
+        # Board selector toolbar
+        with ui.row().classes(
+            "w-full items-center gap-4 q-px-md q-pt-sm q-pb-xs"
+        ):
+            ui.icon("developer_board").classes("text-h6")
+            ui.label("Board:").classes("text-subtitle1")
             board_select = ui.select(
                 options=board_options,
-                value=_current_board_dir.name if _current_board_dir else None,
-                label="Board",
+                value=current_board.name if current_board else None,
+                label="",
             ).classes("w-64")
 
-        # Containers that get rebuilt when board changes
+        # Three panel containers
         image_container = ui.element("div")
         log_container = ui.element("div")
         context_container = ui.element("div")
 
+        def _get_board_dir() -> Path | None:
+            val = session.get("board_dir")
+            return Path(str(val)) if val else None
+
         def _rebuild_panels() -> None:
+            bd = _get_board_dir()
             image_container.clear()
             with image_container:
-                build_image_panel(_current_board_dir)
+                build_image_panel(bd)
             log_container.clear()
             with log_container:
                 build_log_panel()
             context_container.clear()
             with context_container:
-                build_context_panel(_current_board_dir, output_root)
+                build_context_panel(bd, output_root)
 
         def _on_board_change(e: object) -> None:
-            global _current_board_dir
-            # e is a ValueChangeEventArguments with .value
             value = getattr(e, "value", None)
-            _current_board_dir = output_root / value if value else None
+            if value:
+                session["board_dir"] = str(output_root / value)
             _rebuild_panels()
 
         board_select.on_value_change(_on_board_change)
 
-        with ui.splitter(value=25).classes("w-full h-full") as outer_splitter:
-            with outer_splitter.before, image_container:
-                build_image_panel(_current_board_dir)
+        # Three-panel layout: Images (left) | Chat (center) | Context (right)
+        with ui.row().classes("w-full gap-0").style("height: calc(100vh - 120px)"):
+            # LEFT PANEL — Images
+            with ui.card().classes("h-full").style("width: 25%; overflow-y: auto"):
+                ui.label("Images").classes(
+                    "text-subtitle1 font-bold q-mb-sm"
+                )
+                ui.separator()
+                with image_container:
+                    build_image_panel(current_board)
 
-            with (
-                outer_splitter.after,
-                ui.splitter(value=60).classes("w-full h-full") as inner_splitter,
+            # CENTER PANEL — CLI / Chat
+            with ui.card().classes("h-full").style(
+                "width: 45%; overflow-y: auto"
             ):
-                with inner_splitter.before, log_container:
+                ui.label("CLI / Agent Log").classes(
+                    "text-subtitle1 font-bold q-mb-sm"
+                )
+                ui.separator()
+                with log_container:
                     build_log_panel()
 
-                with inner_splitter.after, context_container:
-                    build_context_panel(_current_board_dir, output_root)
+            # RIGHT PANEL — Context
+            with ui.card().classes("h-full").style(
+                "width: 30%; overflow-y: auto"
+            ):
+                ui.label("Context").classes(
+                    "text-subtitle1 font-bold q-mb-sm"
+                )
+                ui.separator()
+                with context_container:
+                    build_context_panel(current_board, output_root)
+
+    # ------------------------------------------------------------------
+    # Kanban page — multi-level board
+    # ------------------------------------------------------------------
 
     @ui.page("/kanban")
     def kanban_page() -> None:
@@ -191,11 +301,11 @@ def main(
             update_card,
         )
 
-        ui.dark_mode(True)
+        # Per-tab session state
+        session: dict[str, object] = {}
+        session["role"] = "framework"
 
-        # ---- State ----
-        active_level = {"value": "framework"}
-        active_board_name = {"value": ""}
+        active_board_name: dict[str, str] = {"value": ""}
         active_type_filters: set[str] = set(VALID_TYPES)
 
         column_labels = {
@@ -220,42 +330,47 @@ def main(
             "P3": "grey",
         }
 
+        ui.dark_mode(True)
+        _build_nav_header("/kanban", session)
+
         board_container = ui.element("div")
 
+        def _current_level() -> str:
+            return str(session.get("role", "framework"))
+
         def _get_filtered_cards() -> list[KanbanCard]:
-            """Load and filter cards by active level, board, and type."""
             kb = load_kanban(project_root)
-            cards = kb.filter_by_level(active_level["value"])
-            if active_level["value"] == "board" and active_board_name["value"]:
+            cards = kb.filter_by_level(_current_level())
+            if _current_level() == "board" and active_board_name["value"]:
                 cards = [
-                    c for c in cards if c.board_name == active_board_name["value"]
+                    c
+                    for c in cards
+                    if c.board_name == active_board_name["value"]
                 ]
             cards = [c for c in cards if c.card_type in active_type_filters]
             return kb.sorted_by_priority(cards)
 
         def _rebuild_board() -> None:
-            """Rebuild the kanban columns."""
             board_container.clear()
             cards = _get_filtered_cards()
             with board_container, ui.row().classes("w-full gap-4"):
-                    for status in VALID_STATUSES:
-                        col_cards = [c for c in cards if c.status == status]
-                        with ui.card().classes("flex-1 min-w-64"):
-                            ui.label(column_labels[status]).classes(
-                                "text-h6 font-bold q-mb-sm"
+                for status in VALID_STATUSES:
+                    col_cards = [c for c in cards if c.status == status]
+                    with ui.card().classes("flex-1 min-w-64"):
+                        ui.label(column_labels[status]).classes(
+                            "text-h6 font-bold q-mb-sm"
+                        )
+                        ui.separator()
+                        with ui.scroll_area().classes("h-96"):
+                            for card in col_cards:
+                                _render_card(card, status)
+                        if not col_cards:
+                            ui.label("No cards").classes(
+                                "text-grey-6 text-center q-mt-md"
                             )
-                            ui.separator()
-                            with ui.scroll_area().classes("h-96"):
-                                for card in col_cards:
-                                    _render_card(card, status)
-                            if not col_cards:
-                                ui.label("No cards").classes(
-                                    "text-grey-6 text-center q-mt-md"
-                                )
 
         def _render_card(card: KanbanCard, current_status: str) -> None:
-            """Render a single kanban card with badges and actions."""
-            with ui.card().classes("w-full q-mb-sm cursor-pointer"):
+            with ui.card().classes("w-full q-mb-sm"):
                 with ui.row().classes("items-center gap-2"):
                     ui.badge(
                         card.card_type,
@@ -308,7 +423,6 @@ def main(
                     )
 
         def _show_edit_dialog(card_id: str) -> None:
-            """Show an edit dialog for a card."""
             kb = load_kanban(project_root)
             card = next((c for c in kb.cards if c.id == card_id), None)
             if card is None:
@@ -351,7 +465,6 @@ def main(
             dialog.open()
 
         def _show_add_dialog() -> None:
-            """Show a dialog to add a new card."""
             with ui.dialog() as dialog, ui.card().classes("w-96"):
                 ui.label("Add Card").classes("text-h6")
                 title_input = ui.input("Title").classes("w-full")
@@ -368,7 +481,7 @@ def main(
                 ).classes("w-full")
                 level_select = ui.select(
                     options=["framework", "deployment", "board"],
-                    value=active_level["value"],
+                    value=_current_level(),
                     label="Level",
                 ).classes("w-full")
                 board_input = ui.input(
@@ -382,7 +495,7 @@ def main(
                         if not title_input.value:
                             ui.notify("Title is required", type="warning")
                             return
-                        card = KanbanCard(
+                        new_card = KanbanCard(
                             title=title_input.value,
                             description=desc_input.value or "",
                             card_type=type_select.value or "feature",
@@ -390,27 +503,31 @@ def main(
                             level=level_select.value or "framework",
                             board_name=board_input.value or "",
                         )
-                        add_card(project_root, card)
+                        add_card(project_root, new_card)
                         dialog.close()
                         _rebuild_board()
 
                     ui.button("Cancel", on_click=dialog.close).props("flat")
-                    ui.button("Create", on_click=_create).props("color=primary")
+                    ui.button("Create", on_click=_create).props(
+                        "color=primary"
+                    )
             dialog.open()
 
-        # ---- Header ----
-        with ui.header().classes("items-center justify-between"):
-            ui.label("Kanban Board").classes("text-h5 font-bold")
+        # Toolbar: Add button + level tabs + board selector + type filters
+        with ui.row().classes(
+            "w-full q-mb-md items-center gap-4 q-px-md q-pt-sm"
+        ):
             ui.button("+ Add Card", on_click=_show_add_dialog).props(
                 "color=primary"
             )
 
-        # ---- Level tabs ----
-        with ui.row().classes("w-full q-mb-md items-center gap-4"):
             with ui.tabs().classes("w-auto") as level_tabs:
                 ui.tab("framework", label="Framework")
                 ui.tab("deployment", label="Deployment")
                 ui.tab("board", label="Board")
+
+            # Sync tabs with role selector
+            level_tabs.value = _current_level()
 
             boards = _discover_boards(output_root)
             board_selector = ui.select(
@@ -427,15 +544,14 @@ def main(
             board_selector.on_value_change(_on_board_select)
 
         def _on_level_change(e: object) -> None:
-            active_level["value"] = (
-                getattr(e, "value", "framework") or "framework"
-            )
+            val = getattr(e, "value", "framework") or "framework"
+            session["role"] = val
             _rebuild_board()
 
         level_tabs.on_value_change(_on_level_change)
 
-        # ---- Type filters ----
-        with ui.row().classes("q-mb-md gap-2"):
+        # Type filters
+        with ui.row().classes("q-mb-md gap-2 q-px-md"):
             ui.label("Filter:").classes("text-subtitle1")
             for card_type in VALID_TYPES:
 
@@ -452,7 +568,7 @@ def main(
 
                 _make_toggle()
 
-        # ---- Board columns ----
+        # Kanban columns
         _rebuild_board()
 
     ui.run(port=port, title="KiCad Review Dashboard", reload=False)
