@@ -23,6 +23,14 @@ logger = logging.getLogger(__name__)
 _output_root: Path | None = None
 
 
+def _project_root() -> Path:
+    """Return the project root (parent of the output directory)."""
+    if _output_root is None:
+        msg = "Output root not configured"
+        raise RuntimeError(msg)
+    return _output_root.parent
+
+
 class LogMessage(BaseModel):
     """Payload for the POST /api/log endpoint."""
 
@@ -151,6 +159,78 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
         boards = _discover_board_names()
         return JSONResponse({"boards": boards})
 
+    # -- Kanban endpoints --------------------------------------------------
+
+    async def get_kanban(request: Request) -> JSONResponse:
+        """Return the full kanban board as JSON."""
+        from kicad_pipeline.dashboard.kanban import load_kanban
+
+        board = load_kanban(_project_root())
+        return JSONResponse(board.model_dump())
+
+    async def post_kanban_card(request: Request) -> JSONResponse:
+        """Create a new kanban card."""
+        from kicad_pipeline.dashboard.kanban import KanbanCard, add_card
+
+        body = await request.json()
+        try:
+            card = KanbanCard.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = add_card(_project_root(), card)
+        return JSONResponse(result.model_dump(), status_code=201)
+
+    async def put_kanban_card(request: Request) -> JSONResponse:
+        """Update an existing kanban card."""
+        from kicad_pipeline.dashboard.kanban import update_card
+
+        card_id = request.path_params["card_id"]
+        body = await request.json()
+        try:
+            result = update_card(_project_root(), card_id, body)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse(result.model_dump())
+
+    async def put_kanban_card_move(request: Request) -> JSONResponse:
+        """Move a kanban card to a new status column."""
+        from kicad_pipeline.dashboard.kanban import move_card
+
+        card_id = request.path_params["card_id"]
+        body = await request.json()
+        new_status = body.get("status", "")
+        try:
+            result = move_card(_project_root(), card_id, new_status)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return JSONResponse(result.model_dump())
+
+    async def delete_kanban_card(request: Request) -> JSONResponse:
+        """Delete a kanban card by ID."""
+        from kicad_pipeline.dashboard.kanban import delete_card
+
+        card_id = request.path_params["card_id"]
+        try:
+            delete_card(_project_root(), card_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse({"status": "ok"})
+
+    async def post_kanban_import_roadmap(request: Request) -> JSONResponse:
+        """Import cards from a roadmap.md file."""
+        from pathlib import Path
+
+        from kicad_pipeline.dashboard.kanban import import_from_roadmap
+
+        body = await request.json()
+        roadmap_path = Path(body.get("roadmap_path", ""))
+        if not roadmap_path.exists():
+            raise HTTPException(status_code=404, detail=f"Roadmap not found: {roadmap_path}")
+        count = import_from_roadmap(_project_root(), roadmap_path)
+        return JSONResponse({"status": "ok", "imported": count})
+
     # Mount routes on the Starlette app
     api_routes = [
         Route("/api/evidence", post_evidence, methods=["POST"]),
@@ -159,5 +239,11 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
         Route("/api/approve/{board_name}", post_approve, methods=["POST"]),
         Route("/api/reject/{board_name}", post_reject, methods=["POST"]),
         Route("/api/boards", get_boards, methods=["GET"]),
+        Route("/api/kanban", get_kanban, methods=["GET"]),
+        Route("/api/kanban/cards", post_kanban_card, methods=["POST"]),
+        Route("/api/kanban/cards/{card_id}", put_kanban_card, methods=["PUT"]),
+        Route("/api/kanban/cards/{card_id}", delete_kanban_card, methods=["DELETE"]),
+        Route("/api/kanban/cards/{card_id}/move", put_kanban_card_move, methods=["PUT"]),
+        Route("/api/kanban/import-roadmap", post_kanban_import_roadmap, methods=["POST"]),
     ]
     app.routes.extend(api_routes)
