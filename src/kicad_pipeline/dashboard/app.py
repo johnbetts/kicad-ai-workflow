@@ -186,7 +186,9 @@ def main(
     # ------------------------------------------------------------------
 
     @ui.page("/")
-    def index(board: str = "") -> None:
+    async def index(board: str = "") -> None:
+        # Must await client connection before accessing storage.tab
+        await ui.context.client.connected()
         # Per-tab session state (survives refresh, per-tab isolation)
         session = nicegui_app.storage.tab
         session.setdefault("role", "framework")
@@ -318,8 +320,9 @@ def main(
     # ------------------------------------------------------------------
 
     @ui.page("/kanban")
-    def kanban_page() -> None:
+    async def kanban_page() -> None:
         """Multi-level kanban board for tracking bugs, features, and releases."""
+        await ui.context.client.connected()
         from kicad_pipeline.dashboard.kanban import (
             VALID_PRIORITIES,
             VALID_STATUSES,
