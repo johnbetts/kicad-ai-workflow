@@ -1834,6 +1834,13 @@ def _place_regulator_passives(
     Returns the set of role names that were placed.
     """
     zx1, zy1, zx2, zy2 = zone_bounds
+    # Scale offsets proportionally to actual zone size vs reference zone
+    zone_w = zx2 - zx1
+    zone_h = zy2 - zy1
+    _REF_ZONE_W = 35.0  # reference zone width offsets were tuned for
+    _REF_ZONE_H = 30.0  # reference zone height offsets were tuned for
+    sx = min(1.5, max(0.5, zone_w / _REF_ZONE_W))
+    sy = min(1.5, max(0.5, zone_h / _REF_ZONE_H))
     placed_roles: set[str] = set()
     for ref in sorted(ic_net_refs):
         if ref == ic_ref:
@@ -1845,8 +1852,8 @@ def _place_regulator_passives(
             continue
         placed_roles.add(role)
         dx, dy, rot = offsets[role]
-        px = _clamp(ic_x + dx, zx1 + 1.0, zx2 - 1.0)
-        py = _clamp(ic_y + dy, zy1 + 1.0, zy2 - 1.0)
+        px = _clamp(ic_x + dx * sx, zx1 + 1.0, zx2 - 1.0)
+        py = _clamp(ic_y + dy * sy, zy1 + 1.0, zy2 - 1.0)
         ctx.positions[ref] = (px, py, rot)
         ctx.power_group_fixed.add(ref)
     return placed_roles
@@ -2163,7 +2170,15 @@ def _phase_power_group(ctx: PlacementContext) -> None:
         return
 
     zx1, zy1, zx2, zy2 = power_zone_rect
-    strip_gap, col_spacing, sub_col_offset = 0.5, 8.0, 3.5
+    # Adaptive spacing derived from actual passive footprint heights
+    passive_heights = [
+        ctx.fp_sizes.get(r, (2.0, 2.0))[1]
+        for r in power_group_refs if r[0] in "CRDL"
+    ]
+    avg_h = sum(passive_heights) / len(passive_heights) if passive_heights else 2.0
+    strip_gap = max(0.3, avg_h * 0.3)   # 30% of avg height, min 0.3mm
+    col_spacing = max(5.0, avg_h * 4.0)  # proportional column spacing
+    sub_col_offset = max(2.0, avg_h * 1.75)  # proportional sub-column offset
     placed_in_col: set[str] = set()
 
     buck1_ic = power_ics[0] if power_ics else ""
@@ -2677,7 +2692,7 @@ def _phase_adc_channels(ctx: PlacementContext) -> None:
     ctx._r_top_connector_x = _r_top_connector_x  # type: ignore[attr-defined]
     ctx._occupied_x_ranges = _occupied_x_ranges  # type: ignore[attr-defined]
     ctx._CHANNEL_SPACING_MM = channel_spacing_mm  # type: ignore[attr-defined]
-    ctx._STRIP_GAP_MM = 1.5  # type: ignore[attr-defined]
+    ctx._STRIP_GAP_MM = 1.5 * sy  # type: ignore[attr-defined]  # scale by zone factor
 
 
 def _phase_adc_analog_cluster(ctx: PlacementContext) -> None:

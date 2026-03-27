@@ -172,15 +172,12 @@ def partition_board(
 
         fx1, fy1, fx2, fy2 = fracs
 
-        # Scale zone size proportionally to its share of total components.
-        # sqrt() prevents extreme sizing (a zone with 2x components gets
-        # ~1.4x area, not 2x).  Clamped to [0.7, 1.3] to avoid overlaps.
-        zone_count = zone_component_count.get(zone_name, 0)
-        if total_components > 0 and zone_count > 0 and not single_zone:
-            raw_scale = (zone_count / (total_components / len(zone_groups))) ** 0.5
-            scale = max(0.7, min(1.3, raw_scale))
-        else:
-            scale = 1.0
+        # Zone fractions are fixed — package-size adaptation happens via
+        # adaptive group margins (_GroupGrid) and collision resolution.
+        # Center-scaling was attempted but caused overlaps between adjacent
+        # zones (e.g., power and relay).  Component count is available for
+        # future proportional tiling but needs a non-overlapping algorithm.
+        scale = 1.0
 
         # Apply scale (expand from center of default zone)
         cx = (fx1 + fx2) / 2.0

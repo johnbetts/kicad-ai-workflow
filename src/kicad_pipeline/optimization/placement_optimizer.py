@@ -163,6 +163,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     phases["relay_connector_align"](ctx)  # type: ignore[operator]
     phases["relay_drivers"](ctx)  # type: ignore[operator]
     relay_leds, _relay_led_refs = phases["relay_leds"](ctx)  # type: ignore[operator]
+    phases["relay_power_isolation"](ctx)  # type: ignore[operator]
     phases["decoupling"](ctx)  # type: ignore[operator]
     phases["power_group"](ctx)  # type: ignore[operator]
     phases["power_chain_flow"](ctx)  # type: ignore[operator]
@@ -217,6 +218,7 @@ def optimize_placement_ee(
     from kicad_pipeline.optimization.ee_phases import (
         _phase_adc_analog_cluster,
         _phase_adc_channels,
+        _phase_all_connectors_to_edges,
         _phase_build_final,
         _phase_collision_resolution,
         _phase_connector_orientation,
@@ -237,11 +239,11 @@ def optimize_placement_ee(
         _phase_relay_connector_alignment,
         _phase_relay_drivers,
         _phase_relay_leds,
+        _phase_relay_power_isolation,
         _phase_relay_rows,
         _phase_review_loop,
         _phase_rf_edge,
         _phase_template_refinement,
-        _phase_all_connectors_to_edges,
         _phase_top_edge_connectors,
         _phase_zone_partitioning,
     )
@@ -269,6 +271,7 @@ def optimize_placement_ee(
         relay_connector_align=_phase_relay_connector_alignment,
         relay_drivers=_phase_relay_drivers,
         relay_leds=_phase_relay_leds,
+        relay_power_isolation=_phase_relay_power_isolation,
         decoupling=_phase_decoupling,
         power_group=_phase_power_group,
         power_chain_flow=_phase_power_chain_flow,

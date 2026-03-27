@@ -34,8 +34,8 @@ _WEIGHT_THERMAL: float = 0.10
 # Fast-path sub-dimension weights (EE-aligned, v4 — 14 dimensions)
 # Each original weight is scaled by 0.9 to make room for constraint compliance (0.10).
 # Original weights summed to 1.0; new 13 x 0.9 + 0.10 = 1.00 exactly.
-# Fast-path sub-dimension weights (EE-aligned, v5 — 17 dimensions)
-# Added utilization + compactness to catch sprawling layouts.
+# Fast-path sub-dimension weights (EE-aligned, v6 — 18 dimensions)
+# Added utilization + compactness + signal flow to catch sprawling/disordered layouts.
 _FAST_WEIGHT_COLLISION: float = 0.12
 _FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.04
 _FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.12
@@ -52,7 +52,8 @@ _FAST_WEIGHT_PAD_FACING: float = 0.04
 _FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.04
 _FAST_WEIGHT_HUMAN_FEEDBACK: float = 0.04
 _FAST_WEIGHT_UTILIZATION: float = 0.04
-_FAST_WEIGHT_COMPACTNESS: float = 0.08
+_FAST_WEIGHT_COMPACTNESS: float = 0.04
+_FAST_WEIGHT_SIGNAL_FLOW: float = 0.04
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -1365,13 +1366,82 @@ def _score_compactness(pcb: PCBDesign) -> tuple[float, list[str]]:
     return score, issues
 
 
+def _score_signal_flow(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score signal flow direction — power should flow left-to-right.
+
+    Checks that power chain components are ordered consistently:
+    input connectors on the left, regulators in the middle, output on the right.
+    Also checks relay boards: relays should be ordered K1->K2->K3->K4 left-to-right.
+
+    Returns (score, issues) where 1.0 = perfect ordering.
+    """
+    pos = _fp_position_dict(pcb)
+    if not pos:
+        return 1.0, []
+
+    checks = 0
+    passes = 0
+    issues: list[str] = []
+
+    # Check 1: Input connectors should be left of ICs
+    j_refs = {r for r in pos if r.startswith("J")}
+    u_refs = {r for r in pos if r.startswith("U")}
+    if j_refs and u_refs:
+        # Find leftmost connector and leftmost IC
+        j_xs = [pos[r][0] for r in j_refs]
+        u_xs = [pos[r][0] for r in u_refs]
+        # At least one connector should be to the left of (or above) the ICs
+        # This is a soft check — connectors at edges is already handled
+        checks += 1
+        if min(j_xs) <= min(u_xs) + 5.0:  # connector within 5mm of leftmost IC
+            passes += 1
+        else:
+            issues.append("No input connector near left/top edge of IC cluster")
+
+    # Check 2: If multiple regulators (U1, U2...), they should be ordered left-to-right
+    reg_refs = sorted(
+        [r for r in pos if r.startswith("U")],
+        key=lambda r: int(r[1:]) if r[1:].isdigit() else 99,
+    )
+    if len(reg_refs) >= 2:
+        checks += 1
+        xs = [pos[r][0] for r in reg_refs]
+        # Check if X coordinates are monotonically increasing (or close)
+        ordered = all(xs[i] <= xs[i + 1] + 3.0 for i in range(len(xs) - 1))
+        if ordered:
+            passes += 1
+        else:
+            issues.append(f"Regulators not ordered L-to-R: {reg_refs}")
+
+    # Check 3: If relays exist, they should be ordered K1->K2->... left-to-right
+    k_refs = sorted(
+        [r for r in pos if r.startswith("K")],
+        key=lambda r: int(r[1:]) if r[1:].isdigit() else 99,
+    )
+    if len(k_refs) >= 2:
+        checks += 1
+        xs = [pos[r][0] for r in k_refs]
+        ordered = all(xs[i] <= xs[i + 1] + 2.0 for i in range(len(xs) - 1))
+        if ordered:
+            passes += 1
+        else:
+            issues.append(f"Relays not ordered L-to-R: {k_refs}")
+
+    if checks == 0:
+        return 1.0, []
+    return passes / checks, issues[:5]
+
+
 def _gather_placement_subdimensions(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
     pcb_dir: str | Path | None = None,
     human_constraints: tuple[HumanConstraint, ...] | None = None,
 ) -> dict[str, tuple[float, tuple[str, ...]]]:
-    """Compute all 17 placement sub-dimension scores.
+    """Compute all 18 placement sub-dimension scores.
 
     Args:
         pcb: The PCB design to evaluate.
@@ -1400,6 +1470,7 @@ def _gather_placement_subdimensions(
     )
     utilization_score, utilization_issues = _score_utilization(pcb)
     compactness_score, compactness_issues = _score_compactness(pcb)
+    signal_flow_score, signal_flow_issues = _score_signal_flow(pcb, requirements)
 
     return {
         "collision": (collision_score, tuple(collision_issues[:5])),
@@ -1418,6 +1489,7 @@ def _gather_placement_subdimensions(
         "human_feedback": (human_score, tuple(human_issues[:5])),
         "utilization": (utilization_score, tuple(utilization_issues[:5])),
         "compactness": (compactness_score, tuple(compactness_issues[:5])),
+        "signal_flow": (signal_flow_score, tuple(signal_flow_issues[:5])),
     }
 
 
@@ -1441,6 +1513,7 @@ def _build_fast_breakdown(
         ("human_feedback", "Human Feedback", _FAST_WEIGHT_HUMAN_FEEDBACK),
         ("utilization", "Board Utilization", _FAST_WEIGHT_UTILIZATION),
         ("compactness", "Layout Compactness", _FAST_WEIGHT_COMPACTNESS),
+        ("signal_flow", "Signal Flow", _FAST_WEIGHT_SIGNAL_FLOW),
     )
     return tuple(
         ScoreDetail(
@@ -1461,7 +1534,7 @@ def compute_fast_placement_score(
 ) -> QualityScore:
     """Compute a placement-focused quality score without full validation.
 
-    Evaluates 17 EE-aligned placement sub-dimensions and returns a composite
+    Evaluates 18 EE-aligned placement sub-dimensions and returns a composite
     :class:`QualityScore`.  The 15th dimension scores compliance with human
     feedback constraints loaded from ``.pcb-review/human_constraints.json``.
 
@@ -1497,6 +1570,7 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_HUMAN_FEEDBACK * dims["human_feedback"][0]
         + _FAST_WEIGHT_UTILIZATION * dims["utilization"][0]
         + _FAST_WEIGHT_COMPACTNESS * dims["compactness"][0]
+        + _FAST_WEIGHT_SIGNAL_FLOW * dims["signal_flow"][0]
     )
 
     manufacturing_score = _clamp01(0.5 + 0.5 * dims["collision"][0])

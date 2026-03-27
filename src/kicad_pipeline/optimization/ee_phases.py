@@ -482,10 +482,20 @@ def _place_relay_others_grid(
     """Place remaining relay driver components in a 2-wide grid below the relay."""
     if not other_refs:
         return
-    other_y = ky + 20.5
+    # Derive grid position from relay footprint dimensions
+    anchor: str | None = None
+    for sc in ctx.subcircuits:
+        if (sc.circuit_type == SubCircuitType.RELAY_DRIVER
+                and sc.anchor_ref and sc.anchor_ref in ctx.positions):
+            anchor = sc.anchor_ref
+            break
+    relay_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))[1] if anchor else 15.0
+    k_w = ctx.fp_sizes.get(anchor, (15.0, 15.0))[0] if anchor else 15.0
+    other_y = ky + relay_h / 2.0 + 22.0  # below driver columns
+    grid_spacing_x = max(5.0, k_w / 2.0 + 2.0)
     for i, ref in enumerate(other_refs):
         _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        px = kx - 4.0 + (i % 2) * 8.0
+        px = kx - grid_spacing_x + (i % 2) * (grid_spacing_x * 2)
         py = other_y + (i // 2) * (h + 0.5)
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, px))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
@@ -544,9 +554,11 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         # LED resistors go to other_refs for generic grid placement
         other_refs.extend(r_other_refs)
 
-        # Two-column layout offsets (relative to K centroid)
-        left_x = kx - 4.3   # LEFT column: high-current signal chain
-        right_x = kx + 4.0  # RIGHT column: control
+        # Two-column layout offsets derived from relay footprint width
+        k_w, _k_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
+        avg_passive_w = 2.0  # typical for 0402-0805
+        left_x = kx - (k_w / 2.0 + avg_passive_w / 2.0 + 1.0)   # LEFT column
+        right_x = kx + (k_w / 2.0 + avg_passive_w / 2.0 + 1.0)  # RIGHT column
 
         _place_relay_left_column(d_refs, q_refs, left_x, ky, bounds, ctx)
         _place_relay_right_column(r_gate_refs, right_x, ky, bounds, ctx)
@@ -959,6 +971,43 @@ def _is_pin_header(ref: str, pcb: object) -> bool:
                 "CONNECTOR_PINHEADER",
             ))
     return False
+
+
+def _phase_relay_power_isolation(ctx: PlacementContext) -> None:
+    """3b3: Place relay power isolation components (ferrites, bulk caps) at board bottom.
+
+    Pattern: L1/L2 (ferrite beads) and C1/C2 (bulk caps) placed in a row
+    near the bottom-left of the board, clear of relay driver columns.
+    """
+    min_x, min_y, max_x, max_y = ctx.bounds
+
+    # Find ferrite beads and bulk caps not already placed by other phases
+    power_refs = [
+        r for r in ctx.positions
+        if (r.startswith("L") or (r.startswith("C") and r not in ctx.fixed_refs))
+        and r not in ctx.relay_support_refs
+        and r not in getattr(ctx, "top_edge_connector_refs", set())
+    ]
+
+    if not power_refs:
+        return
+
+    _log.info("  3b3: Relay power isolation (%s)", power_refs)
+    # Place in a row near bottom-left, clear of mounting holes
+    cursor_x = min_x + 10.0
+    row_y = max_y - 3.0  # near bottom edge
+    gap = 1.5
+
+    for ref in sorted(power_refs):
+        w, _h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        px = cursor_x + w / 2.0
+        py = row_y
+        # Clamp to board
+        px = max(min_x + 2.0, min(max_x - 2.0, px))
+        py = max(min_y + 2.0, min(max_y - 2.0, py))
+        ctx.positions[ref] = (px, py, 90.0 if ref.startswith("L") else 0.0)
+        cursor_x = px + w / 2.0 + gap
+        _log.info("    %s -> (%.1f, %.1f)", ref, px, py)
 
 
 def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
