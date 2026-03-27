@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,6 +52,45 @@ from kicad_pipeline.models.pcb import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 3D model path resolution & validation
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _resolve_3d_model_dir() -> Path | None:
+    """Resolve ``${KICAD10_3DMODEL_DIR}`` to a filesystem path.
+
+    Checks the environment variable first, then standard install locations.
+    Returns ``None`` if no 3D model directory is found (validation skipped).
+    """
+    env = os.environ.get("KICAD10_3DMODEL_DIR")
+    if env and Path(env).is_dir():
+        return Path(env)
+    # macOS KiCad 10
+    mac = Path("/Applications/KiCad 10/KiCad.app/Contents/SharedSupport/3dmodels")
+    if mac.is_dir():
+        return mac
+    # Linux
+    linux = Path("/usr/share/kicad/3dmodels")
+    if linux.is_dir():
+        return linux
+    return None
+
+
+def _step_file_exists(model_path: str) -> bool:
+    """Check whether a 3D model STEP file exists on disk.
+
+    Resolves the ``${KICAD10_3DMODEL_DIR}`` prefix to the actual directory.
+    Returns ``True`` if the directory cannot be resolved (fail-open).
+    """
+    base = _resolve_3d_model_dir()
+    if base is None:
+        return True  # Can't validate — assume OK
+    rel = model_path.replace("${KICAD10_3DMODEL_DIR}/", "")
+    return (base / rel).exists()
+
 
 # ---------------------------------------------------------------------------
 # Layer flip mapping (F↔B)
@@ -105,7 +146,7 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("SOT-23-6", "Package_TO_SOT_SMD.3dshapes", "SOT-23-6.step"),
     ("SOT-23-5", "Package_TO_SOT_SMD.3dshapes", "SOT-23-5.step"),
     ("SOT-23", "Package_TO_SOT_SMD.3dshapes", "SOT-23.step"),
-    ("SOT-223", "Package_TO_SOT_SMD.3dshapes", "SOT-223-3_TabPin2.step"),
+    ("SOT-223", "Package_TO_SOT_SMD.3dshapes", "SOT-223.step"),
     # Diodes
     ("SOD-323", "Diode_SMD.3dshapes", "D_SOD-323.step"),
     ("SOD-123", "Diode_SMD.3dshapes", "D_SOD-123.step"),
@@ -113,10 +154,8 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("L_1210", "Inductor_SMD.3dshapes", "L_1210_3225Metric.step"),
     ("L_1206", "Inductor_SMD.3dshapes", "L_1206_3216Metric.step"),
     ("L_0805", "Inductor_SMD.3dshapes", "L_0805_2012Metric.step"),
-    # Crystals / Oscillators
+    # Crystals
     ("Crystal_SMD_3215", "Crystal.3dshapes", "Crystal_SMD_3215-2Pin_3.2x1.5mm.step"),
-    ("OSC-SMD_4P", "Oscillator.3dshapes",
-     "Oscillator_SMD_EuroQuartz_XO32-4Pin_3.2x2.5mm.step"),
 )
 
 
@@ -176,6 +215,9 @@ def _model_pin_header_socket(
     else:
         dir_name = "Connector_PinHeader_2.54mm.3dshapes"
         model_name = name
+    # Ensure pitch is present (KiCad filenames require _P2.54mm)
+    if "_P" not in model_name and "2.54" not in model_name:
+        model_name += "_P2.54mm"
     if not any(s in model_name for s in ("_Vertical", "_Horizontal", "_SMD")):
         model_name += "_Vertical"
     path = f"{KICAD_3DMODEL_VAR}/{dir_name}/{model_name}.step"
@@ -1642,14 +1684,12 @@ def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout]
 
 
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
-    """Return existing 3D model or assign a default for *fp*.
+    """Always return the KiCad standard ESP32-S3-WROOM-1 3D model.
 
-    If the footprint already has a 3D model, preserve it as-is.
-    Otherwise assign the KiCad standard model with zero offset.
+    JLCPCB footprints embed ``WIRELM-SMD_ESP32-S3-WROOM-1.step`` which
+    does not exist in KiCad's library.  Override unconditionally with the
+    known-correct path.
     """
-    if fp.models:
-        return fp.models
-
     return (Footprint3DModel(
         path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
     ),)
@@ -2989,14 +3029,35 @@ def _try_jlcpcb_footprint(
 
         # JLCPCB .kicad_mod files may include 3D model references with
         # pre-computed offsets — these are preserved above (fp.models non-empty).
+        # However, easyeda2kicad often generates model paths that don't match
+        # KiCad's actual filenames.  Validate and discard if missing.
+        if fp.models and not _step_file_exists(fp.models[0].path):
+            _log.warning(
+                "JLCPCB 3D model does not exist: %s for %s; falling back",
+                fp.models[0].path.split("/")[-1], ref,
+            )
+            fp = Footprint(
+                lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+                position=fp.position, rotation=fp.rotation, layer=fp.layer,
+                pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+                lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+                models=(),  # discard invalid model
+                datasheet=fp.datasheet, description=fp.description,
+                footprint_source=fp.footprint_source, fp_zones=fp.fp_zones,
+            )
+
         # If no model is present, look up by package type.  JLCPCB cached
         # footprints typically have body-centered pads, so strip the
         # parametric offset that _model_terminal_block/etc. add (they assume
         # pin-1-at-origin pad layout).
         if not fp.models:
-            # Prefer actual footprint lib_id (reflects real package from JLCPCB)
-            # over requirements footprint_id (may be a generic fallback like R_0805).
+            # Try lib_id first (actual package from JLCPCB), then footprint_id
+            # (requirements).  Validate each candidate exists on disk before
+            # accepting — JLCPCB lib_ids often produce non-existent model names.
             model = _model_for_package(fp.lib_id, layer)
+            if model is not None and not _step_file_exists(model.path):
+                _log.debug("Model from lib_id does not exist: %s", model.path)
+                model = None
             if model is None:
                 model = _model_for_package(footprint_id, layer)
             if model is not None:
