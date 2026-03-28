@@ -374,7 +374,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 15.5 7.0 0.0)
+    (at 15.5 7.0 90.0)
     (attr smd)
     (uuid "83195bca-2ec6-46d8-aebe-d6070821010c")
     (property "Reference" "R1"
@@ -498,7 +498,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 15.5 14.5 0.0)
+    (at 15.5 14.5 90.0)
     (attr smd)
     (uuid "c1fb0b70-58da-4e19-92a1-dc9f623ef542")
     (property "Reference" "R2"
@@ -1159,7 +1159,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 26.8333 7.0 0.0)
+    (at 26.8333 7.0 90.0)
     (attr smd)
     (uuid "104991ce-f29d-421e-9347-dd00b6359a81")
     (property "Reference" "R3"
@@ -1283,7 +1283,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 26.8333 14.5 0.0)
+    (at 26.8333 14.5 90.0)
     (attr smd)
     (uuid "0d1eed80-0ed5-409d-b00b-bd79c6146d48")
     (property "Reference" "R4"
@@ -1944,7 +1944,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 38.1667 7.0 0.0)
+    (at 38.1667 7.0 90.0)
     (attr smd)
     (uuid "e36144d4-4411-46db-a1dc-85e552fde2c7")
     (property "Reference" "R5"
@@ -2068,7 +2068,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 38.1667 14.5 0.0)
+    (at 38.1667 14.5 90.0)
     (attr smd)
     (uuid "647ba25c-1005-4619-b6b5-088eaec37970")
     (property "Reference" "R6"
@@ -2739,7 +2739,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 49.5 7.0 0.0)
+    (at 49.5 7.0 90.0)
     (attr smd)
     (uuid "0d867dcb-49f5-4e22-96ff-a07381f04822")
     (property "Reference" "R7"
@@ -2863,7 +2863,7 @@
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
     (layer "F.Cu")
-    (at 49.5 14.5 0.0)
+    (at 49.5 14.5 90.0)
     (attr smd)
     (uuid "3e849c67-430a-4198-b457-84683ed6d316")
     (property "Reference" "R8"
