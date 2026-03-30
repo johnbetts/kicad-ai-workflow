@@ -239,8 +239,96 @@ def build_isolation_board(
     # -- Write to disk ------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_id = spec.component_id.replace("/", "_").replace(" ", "_")
-    pcb_path = output_dir / f"isolation_{safe_id}.kicad_pcb"
+    project_name = f"isolation_{safe_id}"
+    pcb_path = output_dir / f"{project_name}.kicad_pcb"
 
     logger.info("Writing isolation board to %s", pcb_path)
     write_pcb(design, pcb_path, fill_zones=False)
+
+    # -- Write schematic + project file so KiCad can open the full project ---
+    _write_isolation_project(spec, pins, output_dir, project_name)
+
     return pcb_path
+
+
+def _write_isolation_project(
+    spec: ComponentSpec,
+    pins: tuple[Pin, ...],
+    output_dir: Path,
+    project_name: str,
+) -> None:
+    """Write .kicad_sch and .kicad_pro alongside the .kicad_pcb.
+
+    Creates a minimal single-component schematic and a KiCad project file
+    so the isolation board can be opened as a full KiCad project.
+    """
+    from kicad_pipeline.models.requirements import (
+        Component,
+        FeatureBlock,
+        MechanicalConstraints,
+        Net,
+        NetConnection,
+        ProjectInfo,
+        ProjectRequirements,
+    )
+    from kicad_pipeline.project_file import write_project_file
+
+    try:
+        from kicad_pipeline.schematic.builder import build_schematic, write_schematic
+    except Exception:
+        logger.debug("Schematic builder not available — skipping .kicad_sch")
+        return
+
+    # Build minimal requirements for the single component
+    comp = Component(
+        ref=spec.ref,
+        value=spec.value,
+        footprint=spec.footprint_id,
+        lcsc=spec.lcsc,
+        pins=pins,
+    )
+    # Simple GND net connecting any power/ground pins
+    gnd_connections: list[NetConnection] = []
+    for pin in pins:
+        if pin.pin_type in (PinType.POWER_IN, PinType.POWER_OUT):
+            name_lower = pin.name.lower()
+            if "gnd" in name_lower or "vss" in name_lower:
+                gnd_connections.append(NetConnection(ref=spec.ref, pin=pin.number))
+
+    nets = (Net(name="GND", connections=tuple(gnd_connections)),) if gnd_connections else ()
+
+    requirements = ProjectRequirements(
+        project=ProjectInfo(
+            name=project_name,
+            description=f"Isolation test: {spec.component_id}",
+        ),
+        components=(comp,),
+        nets=nets,
+        features=(
+            FeatureBlock(
+                name="test",
+                description=f"Isolation test for {spec.component_id}",
+                components=(spec.ref,),
+                nets=(),
+                subcircuits=(),
+            ),
+        ),
+        mechanical=MechanicalConstraints(
+            board_width_mm=40.0,
+            board_height_mm=30.0,
+        ),
+    )
+
+    try:
+        sch = build_schematic(requirements, compact=True, project_name=project_name)
+        sch_path = output_dir / f"{project_name}.kicad_sch"
+        write_schematic(sch, sch_path, project_name=project_name)
+        logger.info("Schematic written: %s", sch_path)
+    except Exception:
+        logger.debug("Schematic generation failed — skipping", exc_info=True)
+
+    try:
+        write_project_file(project_name, output_dir)
+        logger.info("Project file written: %s/%s.kicad_pro", output_dir, project_name)
+    except Exception:
+        logger.debug("Project file generation failed — skipping", exc_info=True)
