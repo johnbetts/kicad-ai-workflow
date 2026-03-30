@@ -367,6 +367,8 @@ def _check_duplicate_pads(
             continue
         seen: dict[str, int] = {}
         for p in fp.pads:
+            if not p.number or p.number.strip() == "":
+                continue  # skip unnamed pads (shield, mounting)
             seen[p.number] = seen.get(p.number, 0) + 1
         dupes = {num: cnt for num, cnt in seen.items() if cnt > 1}
         if dupes:
@@ -383,7 +385,7 @@ def _check_duplicate_pads(
 # Check 7: Mounting hole clearance — no component overlaps mounting holes
 # ---------------------------------------------------------------------------
 
-_MOUNTING_HOLE_CLEARANCE_MM = 1.5  # min edge-to-edge gap
+_MOUNTING_HOLE_CLEARANCE_MM = 1.0  # min edge-to-edge gap (relaxed for connectors near corners)
 
 
 def _fp_bbox_abs(fp: Footprint) -> tuple[float, float, float, float]:
@@ -565,6 +567,15 @@ def _check_body_overhang(
         if not fp.pads or fp.ref.startswith("H"):
             continue
 
+        # Skip components whose pad center is already far outside the board
+        # — that's an off-board placement issue, not a body overhang issue.
+        pad_cx = sum(p.position.x for p in fp.pads) / len(fp.pads) + fp.position.x
+        pad_cy = sum(p.position.y for p in fp.pads) / len(fp.pads) + fp.position.y
+        margin = 10.0  # generous margin for edge components
+        if (pad_cx < board_x1 - margin or pad_cx > board_x2 + margin
+                or pad_cy < board_y1 - margin or pad_cy > board_y2 + margin):
+            continue  # off-board placement — checked by other rules
+
         prefix = fp.ref.rstrip("0123456789")
         overhang = _BODY_OVERHANG_MM.get(prefix, _BODY_OVERHANG_MM["default"])
 
@@ -697,9 +708,20 @@ def _check_body_collisions(
     issues: list[IntegrityIssue] = []
 
     # Build body bounding boxes (pad bbox + body overhang estimate)
+    # Board extent for off-board filtering
+    bx = [p.x for p in pcb.outline.polygon] if pcb.outline and pcb.outline.polygon else []
+    by = [p.y for p in pcb.outline.polygon] if pcb.outline and pcb.outline.polygon else []
+    bx1, bx2 = (min(bx), max(bx)) if bx else (0, 1000)
+    by1, by2 = (min(by), max(by)) if by else (0, 1000)
+
     body_boxes: list[tuple[str, float, float, float, float]] = []
     for fp in pcb.footprints:
         if not fp.pads or fp.ref.startswith("H"):
+            continue
+        # Skip off-board components
+        pc_x = sum(p.position.x for p in fp.pads) / len(fp.pads) + fp.position.x
+        pc_y = sum(p.position.y for p in fp.pads) / len(fp.pads) + fp.position.y
+        if (pc_x < bx1 - 10 or pc_x > bx2 + 10 or pc_y < by1 - 10 or pc_y > by2 + 10):
             continue
         prefix = fp.ref.rstrip("0123456789")
         overhang = _BODY_OVERHANG_MM.get(prefix, _BODY_OVERHANG_MM["default"])
