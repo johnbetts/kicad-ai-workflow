@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+:root {
+  /* Board colors */
+  --color-copper: #B87333;
+  --color-soldermask: #006400;
+  --color-silkscreen: #FFFFFF;
+  --color-substrate: #C2B280;
+
+  /* Grade colors */
+  --color-grade-a: #22C55E;
+  --color-grade-b: #84CC16;
+  --color-grade-c: #EAB308;
+  --color-grade-d: #F97316;
+  --color-grade-f: #EF4444;
+
+  /* Stage colors */
+  --color-stage-pending: #6B7280;
+  --color-stage-active: #3B82F6;
+  --color-stage-passed: #22C55E;
+  --color-stage-failed: #EF4444;
+  --color-stage-blocked: #F59E0B;
+
+  /* Backgrounds */
+  --background: #0A0A0A;
+  --foreground: #FAFAFA;
+  --card: #18181B;
+  --card-foreground: #FAFAFA;
+  --border: #27272A;
+  --muted: #27272A;
+  --muted-foreground: #A1A1AA;
+  --primary: #3B82F6;
+  --primary-foreground: #FFFFFF;
+  --accent: #22C55E;
+  --destructive: #EF4444;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+}
+
+/* Technical/monospace for refs, values, measurements */
+.font-technical {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
