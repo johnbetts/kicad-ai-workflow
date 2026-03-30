@@ -758,13 +758,22 @@ def _check_body_collisions(
                 overlap_x = min(ax2, bx2) - max(ax1, bx1)
                 overlap_y = min(ay2, by2) - max(ay1, by1)
                 if overlap_x > 0 and overlap_y > 0:
-                    # Small overlaps (<2mm in both dimensions) near connectors
-                    # are major, not critical — connector body estimates are
-                    # approximate and small overlaps are common in dense layouts.
+                    # Small overlaps near connectors or between small passives
+                    # are major, not critical — body estimates use pad bbox +
+                    # overhang which overestimates for small components.
                     is_connector = (ref_a.startswith(("J", "P", "K"))
                                     or ref_b.startswith(("J", "P", "K")))
                     small = overlap_x < 2.0 and overlap_y < 2.0
-                    sev = "major" if (is_connector or small) else "critical"
+                    # Marginal: one dimension < 1.5mm indicates near-miss,
+                    # not a solid stack — downgrade for small passives.
+                    marginal = min(overlap_x, overlap_y) < 1.5
+                    is_small_passive = all(
+                        r.rstrip("0123456789") in ("Q", "D", "R", "C", "L")
+                        for r in (ref_a, ref_b)
+                    )
+                    sev = ("major" if (is_connector or small
+                                       or (marginal and is_small_passive))
+                           else "critical")
                     issues.append(IntegrityIssue(
                         severity=sev,
                         category="body_collision",

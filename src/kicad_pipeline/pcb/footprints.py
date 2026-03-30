@@ -281,7 +281,9 @@ def _model_terminal_block(
         f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
         f"{model_name}.step"
     )
-    offset_x = (pin_count - 1) * pitch
+    # STEP model origin is at the center of the block; footprint pin 1 is at (0,0).
+    # Offset = half the total pad span to align model center with pad centroid.
+    offset_x = (pin_count - 1) * pitch / 2.0
     return Footprint3DModel(
         path=path,
         offset=(offset_x, 0.0, 0.0),
@@ -1148,6 +1150,48 @@ def _courtyard_rect(
             start=Point(cx + hw, cy + hh), end=Point(cx - hw, cy + hh), layer=layer, width=w),
         FootprintLine(
             start=Point(cx - hw, cy + hh), end=Point(cx - hw, cy - hh), layer=layer, width=w),
+    )
+
+
+def _ensure_courtyard(fp: Footprint) -> Footprint:
+    """Add courtyard graphics if the footprint has none.
+
+    Generates a rectangular courtyard from the pad bounding box plus
+    IPC clearance.  Returns the footprint unchanged if courtyard lines
+    already exist.
+    """
+    crtyd_layer = LAYER_F_COURTYARD if fp.layer == LAYER_F_CU else LAYER_B_COURTYARD
+    has_crtyd = any(
+        getattr(g, "layer", "") in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
+        for g in fp.graphics
+    )
+    if has_crtyd or not fp.pads:
+        return fp
+
+    # Compute pad bounding box
+    xs = [p.position.x for p in fp.pads]
+    ys = [p.position.y for p in fp.pads]
+    # Include half-pad size in the extent
+    half_pads = [max(p.size_x, p.size_y) / 2.0 for p in fp.pads]
+    pad_min_x = min(x - hp for x, hp in zip(xs, half_pads))
+    pad_max_x = max(x + hp for x, hp in zip(xs, half_pads))
+    pad_min_y = min(y - hp for y, hp in zip(ys, half_pads))
+    pad_max_y = max(y + hp for y, hp in zip(ys, half_pads))
+
+    cx = (pad_min_x + pad_max_x) / 2.0
+    cy = (pad_min_y + pad_max_y) / 2.0
+    body_w = pad_max_x - pad_min_x
+    body_h = pad_max_y - pad_min_y
+
+    crtyd = _courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy)
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=fp.pads, graphics=(*fp.graphics, *crtyd), texts=fp.texts,
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
+        datasheet=fp.datasheet, description=fp.description,
+        footprint_source=getattr(fp, "footprint_source", ""),
+        fp_zones=fp.fp_zones,
     )
 
 
@@ -2262,6 +2306,12 @@ def _parse_pin_count(footprint_id: str) -> int:
         n = int(m.group(1))
         if 2 <= n <= 100:
             return n * 2
+    # Match _NP pattern (terminal blocks: _3P = 3 positions)
+    m = re.search(r"[-_](\d{1,3})P(?:[-_]|$)", footprint_id)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 20:
+            return n
     # Match -N or _N where N looks like a pin count (2-200), allowing end-of-string
     m = re.search(r"[-_](\d{1,3})(?:[-_]|$)", footprint_id)
     if m:
@@ -3312,6 +3362,9 @@ _EXPECTED_PAD_COUNTS: dict[str, int] = {
     "TSSOP-8": 8, "TSSOP-14": 14, "TSSOP-16": 16, "TSSOP-20": 20,
     "LQFP-32": 32, "LQFP-48": 48, "LQFP-64": 64, "LQFP-100": 100,
     "QFN-16": 16, "QFN-20": 20, "QFN-24": 24, "QFN-32": 32, "QFN-48": 48,
+    "USB-C": 4,  # minimum: 4 power+CC pins; full USB-C has 9+
+    "ESP32-WROOM": 18,  # minimum 18 castellated pads
+    "ESP32-S3-WROOM": 18,
 }
 
 
@@ -3321,6 +3374,10 @@ def _expected_pad_count(footprint_id: str) -> int:
     for pattern, count in _EXPECTED_PAD_COUNTS.items():
         if pattern.upper() in upper:
             return count
+    # Fallback: try parsing pin count from footprint_id (e.g. _3P, _1x06)
+    parsed = _parse_pin_count(footprint_id)
+    if parsed > 2:
+        return parsed
     return 0
 
 
@@ -3358,10 +3415,25 @@ def _try_jlcpcb_footprint(
                 ref, lcsc, len(fp.pads), footprint_id, _expected_pads,
             )
             return None
+        # Validate pad TYPE: if footprint_id implies SMD but JLCPCB returns
+        # THT pads, reject the bad footprint.  Covers standard passives,
+        # ICs, and modules (ESP32, etc.) that should all be SMD.
+        _fid_upper = footprint_id.strip().upper()
+        _SMD_KEYWORDS = ("R_0", "C_0", "C_1", "L_0", "L_1", "LED_0", "SOT-", "SOD-",
+                         "SOIC", "MSOP", "TSSOP", "QFN", "QFP", "LQFP",
+                         "ESP32", "WROOM", "WROVER", "USB-C", "USB_C")
+        if any(kw in _fid_upper for kw in _SMD_KEYWORDS):
+            tht_pads = [p for p in fp.pads if p.pad_type == "thru_hole"]
+            if len(tht_pads) > 0:
+                _log.warning(
+                    "JLCPCB footprint for %s (%s) has %d THT pads but %s "
+                    "expects SMD; rejecting",
+                    ref, lcsc, len(tht_pads), footprint_id,
+                )
+                return None
         # Validate pad SIZE: if footprint_id specifies a package size (0402/0603/0805)
         # but JLCPCB pads are a different size, reject the bad footprint.
         # This catches LCSC parts that return wrong-sized cached footprints.
-        _fid_upper = footprint_id.strip().upper()
         if fp.pads:
             max_pad = max(max(p.size_x, p.size_y) for p in fp.pads)
             if ("0402" in _fid_upper or "_0402" in _fid_upper) and max_pad > 0.8:
@@ -3507,6 +3579,10 @@ def _try_jlcpcb_footprint(
         # Looks up the KiCad library pad 1 position and shifts the model
         # so it aligns with the actual (JLCPCB) pad positions.
         fp = _apply_jlcpcb_model_offset(fp, footprint_id)
+
+        # Ensure JLCPCB footprints have courtyard graphics.
+        # easyeda2kicad exports often omit F.CrtYd — generate from pad bbox.
+        fp = _ensure_courtyard(fp)
 
         _log.info(
             "Using JLCPCB footprint for %s (%s): %d pads from %s",

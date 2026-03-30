@@ -60,16 +60,23 @@ def _check_pad_count(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     JLCPCB footprints may include extra ground/shield pads not counted
     in the parametric footprint.  Allow the actual count to be >= expected
     when the footprint source is ``"jlcpcb"``.
+
+    Connectors (J, K refs) and RJ45 footprints also allow >= because they
+    may have additional shield/mounting pads beyond the signal pad count.
     """
     actual = len(fp.pads)
     is_jlcpcb = getattr(fp, "footprint_source", "") == "jlcpcb"
-    if is_jlcpcb:
+    fid = (spec.footprint_id or "").upper()
+    is_connector = spec.ref.startswith(("J", "K")) or any(
+        kw in fid for kw in ("RJ45", "TERMINAL", "CONNECTOR", "PINHEADER")
+    )
+    if is_jlcpcb or is_connector:
         ok = actual >= spec.expected_pads
     else:
         ok = actual == spec.expected_pads
     detail = f"expected {spec.expected_pads}, got {actual}"
-    if is_jlcpcb and actual > spec.expected_pads:
-        detail += f" (JLCPCB +{actual - spec.expected_pads} extra pads)"
+    if (is_jlcpcb or is_connector) and actual > spec.expected_pads:
+        detail += f" (+{actual - spec.expected_pads} extra pads)"
     return CheckResult(
         name="pad_count",
         passed=ok,
@@ -79,7 +86,19 @@ def _check_pad_count(fp: Footprint, spec: ComponentSpec) -> CheckResult:
 
 
 def _check_pad_type(fp: Footprint, spec: ComponentSpec) -> CheckResult:
-    """Verify all pads match expected type (smd/thru_hole)."""
+    """Verify all pads match expected type (smd/thru_hole).
+
+    Mixed-technology components (RJ45-SMD with THT signal pins + SMD shield,
+    buzzers, tactile switches) are exempt — they legitimately mix pad types.
+    """
+    fid = (spec.footprint_id or "").upper()
+    # Mixed-technology footprints: exempt from pad type check
+    _MIXED_TECH_KW = ("RJ45", "BUZZER", "SW_PUSH", "SW_SPST", "SWITCH", "BUTTON")
+    if any(kw in fid for kw in _MIXED_TECH_KW):
+        return CheckResult(
+            name="pad_type", passed=True,
+            detail="exempt (mixed-technology footprint)", severity="critical",
+        )
     wrong: list[str] = []
     for pad in fp.pads:
         if pad.pad_type == "np_thru_hole":
@@ -97,7 +116,7 @@ def _check_no_duplicate_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     Shield pads ("SH", "") and NPTH pads are exempt — connectors like RJ45
     legitimately have multiple shield/mounting pads with the same designation.
     """
-    _EXEMPT_PAD_NAMES = {"SH", "MP", ""}  # shield, mounting post, unnamed
+    _EXEMPT_PAD_NAMES = {"SH", "MP", "", "0"}  # shield, mounting post, unnamed, ground tab
     # Tact switches have paired pads (pin 1 and 2 each appear twice) — this
     # is the physical design, not a bug.  Only flag duplicates beyond 2x.
     is_switch = spec.ref.startswith("SW") or "switch" in spec.description.lower()
@@ -115,9 +134,10 @@ def _check_no_duplicate_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
 
 def _check_3d_model_present(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     """Verify at least one 3D model is attached."""
-    # Mounting holes, test points, and connectors without matching models
-    # are exempt (e.g. HR911105A RJ45 has no KiCad STEP model).
-    if spec.ref.startswith(("H", "TP")):
+    fid = (spec.footprint_id or "").upper()
+    # Mounting holes, test points — exempt by ref OR footprint_id
+    is_mounting_hole = spec.ref.startswith(("H", "TP")) or "MOUNTINGHOLE" in fid
+    if is_mounting_hole:
         return CheckResult(
             name="3d_model_present",
             passed=True,
@@ -125,9 +145,11 @@ def _check_3d_model_present(fp: Footprint, spec: ComponentSpec) -> CheckResult:
             severity="critical",
         )
     ok = len(fp.models) > 0
-    if not ok and spec.ref.startswith("J"):
-        # Connectors: downgrade from critical to minor — many JLCPCB
-        # connectors have no matching KiCad STEP model.
+    # Connectors: exempt by ref OR footprint_id (RJ45, terminal blocks, etc.)
+    is_connector = spec.ref.startswith(("J", "K")) or any(
+        kw in fid for kw in ("RJ45", "TERMINAL", "CONNECTOR")
+    )
+    if not ok and is_connector:
         return CheckResult(
             name="3d_model_present",
             passed=True,
@@ -332,42 +354,31 @@ def _check_3d_body_pad_alignment(fp: Footprint, spec: ComponentSpec) -> CheckRes
             severity="major",
         )
 
-    # Find pad "1" in the actual footprint
-    actual_pad1_x, actual_pad1_y = 0.0, 0.0
-    for pad in fp.pads:
-        if pad.number == "1":
-            actual_pad1_x = pad.position.x
-            actual_pad1_y = pad.position.y
-            break
-    else:
+    # Compute JLCPCB pad centroid — the offset application code uses
+    # -JLCPCB_centroid as the model offset (centroid-based, NOT pad-1-based).
+    if not fp.pads:
         return CheckResult(
             name="3d_body_pad_alignment",
             passed=True,
-            detail="skipped (no pad 1 in footprint)",
+            detail="skipped (no pads)",
             severity="major",
         )
 
-    # The 3D model offset should compensate for the difference between the
-    # reference pad-1 position (where the STEP model expects pin 1) and the
-    # actual pad-1 position in this footprint.
-    # Normal: offset = ref_pad1 - actual_pad1
-    # Mirrored (180° rot): offset = -ref_pad1 - actual_pad1
+    jxs = [p.position.x for p in fp.pads]
+    jys = [p.position.y for p in fp.pads]
+    j_cx = (min(jxs) + max(jxs)) / 2.0
+    j_cy = (min(jys) + max(jys)) / 2.0
+
+    # Expected offset = -JLCPCB_centroid (aligns body center with pad center)
+    expected_ox = -j_cx
+    expected_oy = -j_cy
+
     model = fp.models[0]
     model_ox = model.offset[0] if len(model.offset) > 0 else 0.0
     model_oy = model.offset[1] if len(model.offset) > 1 else 0.0
-    model_rz = model.rotate[2] if len(model.rotate) > 2 else 0.0
 
-    # Check both normal and mirrored expected offsets
-    expected_ox = spec.kicad_ref_pad1_x - actual_pad1_x
-    expected_oy = spec.kicad_ref_pad1_y - actual_pad1_y
-    diff_normal = math.sqrt((model_ox - expected_ox) ** 2 + (model_oy - expected_oy) ** 2)
+    diff = math.sqrt((model_ox - expected_ox) ** 2 + (model_oy - expected_oy) ** 2)
 
-    # Mirrored formula (when 180° rotation applied)
-    expected_ox_m = -spec.kicad_ref_pad1_x - actual_pad1_x
-    expected_oy_m = -spec.kicad_ref_pad1_y - actual_pad1_y
-    diff_mirror = math.sqrt((model_ox - expected_ox_m) ** 2 + (model_oy - expected_oy_m) ** 2)
-
-    diff = min(diff_normal, diff_mirror)
     # Tolerance: 2mm — enough for rounding and JLCPCB pad layout variations
     # Modules (ESP32) have body extending past pads (antenna) so the STEP
     # model origin may be offset from pad centroid by several mm.
@@ -397,7 +408,9 @@ def _check_body_covers_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
             name="body_covers_pads", passed=True,
             detail="skipped (no pads or no body dims)", severity="major",
         )
-    if spec.ref.startswith(("H", "TP")):
+    fid = (spec.footprint_id or "").upper()
+    is_mounting_hole = spec.ref.startswith(("H", "TP")) or "MOUNTINGHOLE" in fid
+    if is_mounting_hole:
         return CheckResult(
             name="body_covers_pads", passed=True,
             detail="exempt", severity="major",
@@ -422,15 +435,18 @@ def _check_body_covers_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     # Margin: pads extend past body for ICs (gull-wing, J-lead, QFP/QFN)
     # and connectors (shield pins, mounting posts).
     # IC pads typically extend 1-3mm past plastic body per side.
+    # THT components (pin headers, relays) have pads extending well past body.
     is_ic = (spec.ref.startswith("U")
              or (spec.expected_pad_type == "smd" and spec.expected_pads > 2))
-    is_connector = spec.ref.startswith(("J", "K"))
+    is_connector = spec.ref.startswith(("J", "K")) or any(
+        kw in fid for kw in ("TERMINAL", "PINHEADER", "PINSOCKET", "CONNECTOR", "RJ45")
+    )
+    is_relay = "RELAY" in fid
     is_jlcpcb = getattr(fp, "footprint_source", "") == "jlcpcb"
     if is_ic:
-        # JLCPCB footprints can have very different pad origins — larger margin
         margin = 8.0 if is_jlcpcb else 4.0
-    elif is_connector:
-        margin = 8.0 if is_jlcpcb else 5.0
+    elif is_connector or is_relay:
+        margin = 8.0 if is_jlcpcb else 6.0
     else:
         margin = 4.0 if is_jlcpcb else 2.0
 
@@ -465,7 +481,9 @@ def _check_pad_extent_vs_body(fp: Footprint, spec: ComponentSpec) -> CheckResult
             name="pad_extent_vs_body", passed=True,
             detail="skipped", severity="major",
         )
-    if spec.ref.startswith(("H", "TP")):
+    fid = (spec.footprint_id or "").upper()
+    is_mounting_hole = spec.ref.startswith(("H", "TP")) or "MOUNTINGHOLE" in fid
+    if is_mounting_hole:
         return CheckResult(
             name="pad_extent_vs_body", passed=True,
             detail="exempt", severity="major",
@@ -481,10 +499,14 @@ def _check_pad_extent_vs_body(fp: Footprint, spec: ComponentSpec) -> CheckResult
 
     # IC pads (gull-wing, QFP, QFN) extend 1-3mm past the plastic body per
     # side, so pad span can be up to ~200% of body width for small ICs.
-    # THT connectors have shield/mounting pins that extend further.
+    # SOT-223/SOT-89: large tab pad extends ~2x body height — use higher ratio.
+    # THT connectors/relays have shield/mounting pins that extend further.
     is_ic = spec.ref.startswith("U") or (spec.expected_pad_type == "smd" and spec.expected_pads > 4)
-    is_connector = spec.ref.startswith(("J", "K"))
-    max_ratio = 2.5 if is_ic else (3.0 if is_connector else 1.5)
+    is_connector = spec.ref.startswith(("J", "K")) or any(
+        kw in fid for kw in ("TERMINAL", "PINHEADER", "PINSOCKET", "CONNECTOR", "RJ45", "RELAY")
+    )
+    is_tab_package = any(kw in fid for kw in ("SOT-223", "SOT-89", "TO-252", "TO-263", "DPAK"))
+    max_ratio = 2.5 if is_tab_package else (2.5 if is_ic else (3.0 if is_connector else 1.5))
     min_ratio = 0.15
 
     issues: list[str] = []

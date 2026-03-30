@@ -15,3 +15,11 @@ htmlcov/
 *.kicad_pro
 production/
 .gitnexus
+output/_archive/eval_*/
+output/_archive/train_*-2026-*/
+output/eval_*/
+output/test_board/
+data/.DS_Store
+.DS_Store
+*.lck
+.claude/taskboard.jsonl
