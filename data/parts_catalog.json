@@ -1,0 +1,1933 @@
+{
+  "schema_version": 1,
+  "parts": {
+    "C1015": {
+      "part_id": "C1015",
+      "lcsc": "C1015",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "600R@100MHz",
+      "footprint_id": "L_0805",
+      "description": "600 ohm @ 100MHz ferrite bead, 0805",
+      "datasheet_url": null,
+      "ref_prefix": "L",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C118739": {
+      "part_id": "C118739",
+      "lcsc": "C118739",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "PESD3V3",
+      "footprint_id": "SOD-323",
+      "description": "3.3V ESD protection / TVS diode, SOD-323",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C12074": {
+      "part_id": "C12074",
+      "lcsc": "C12074",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "HR911105A",
+      "footprint_id": "RJ45",
+      "description": "RJ45 Ethernet connector with integrated magnetics (19.6 x 16.8 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [
+        {
+          "number": "1",
+          "name": "TD+",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "2",
+          "name": "TD-",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "3",
+          "name": "RD+",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "4",
+          "name": "NC1",
+          "pin_type": "passive"
+        },
+        {
+          "number": "5",
+          "name": "NC2",
+          "pin_type": "passive"
+        },
+        {
+          "number": "6",
+          "name": "RD-",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "7",
+          "name": "NC3",
+          "pin_type": "passive"
+        },
+        {
+          "number": "8",
+          "name": "NC4",
+          "pin_type": "passive"
+        },
+        {
+          "number": "9",
+          "name": "LED_G+",
+          "pin_type": "passive"
+        },
+        {
+          "number": "10",
+          "name": "LED_G-",
+          "pin_type": "passive"
+        },
+        {
+          "number": "11",
+          "name": "LED_Y+",
+          "pin_type": "passive"
+        },
+        {
+          "number": "12",
+          "name": "LED_Y-",
+          "pin_type": "passive"
+        },
+        {
+          "number": "13",
+          "name": "SHIELD1",
+          "pin_type": "passive"
+        },
+        {
+          "number": "14",
+          "name": "SHIELD2",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C123899": {
+      "part_id": "C123899",
+      "lcsc": "C123899",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "SS14",
+      "footprint_id": "SOD-323",
+      "description": "SS14 Schottky diode, SOD-323",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C124375": {
+      "part_id": "C124375",
+      "lcsc": "C124375",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "Pin_Header_2P",
+      "footprint_id": "PinHeader_1x02_P2.54mm_Vertical",
+      "description": "1x2 pin header for power output test point",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C131337": {
+      "part_id": "C131337",
+      "lcsc": "C131337",
+      "mpn": null,
+      "manufacturer": "Nexperia",
+      "value": "BAV99",
+      "footprint_id": "SOT-23",
+      "description": "BAV99 diode esd (SOT-23)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C134092": {
+      "part_id": "C134092",
+      "lcsc": "C134092",
+      "mpn": null,
+      "manufacturer": "DEALON",
+      "value": "RJ45 with magnetics",
+      "footprint_id": "RJ45",
+      "description": "RJ45 with magnetics connector rj45 (RJ45-SMD)",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C13738": {
+      "part_id": "C13738",
+      "lcsc": "C13738",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "25MHz",
+      "footprint_id": "Crystal_SMD_3215",
+      "description": "3215 SMD crystal oscillator (3.2 x 1.5 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "Y",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C14663": {
+      "part_id": "C14663",
+      "lcsc": "C14663",
+      "mpn": null,
+      "manufacturer": "Samsung",
+      "value": "4.7uF",
+      "footprint_id": "C_0805",
+      "description": "4.7uF capacitor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C1525": {
+      "part_id": "C1525",
+      "lcsc": "C1525",
+      "mpn": null,
+      "manufacturer": "Samsung",
+      "value": "1uF",
+      "footprint_id": "C_0805",
+      "description": "1uF capacitor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C15849": {
+      "part_id": "C15849",
+      "lcsc": "C15849",
+      "mpn": null,
+      "manufacturer": "Samsung",
+      "value": "10uF",
+      "footprint_id": "C_1206",
+      "description": "10uF capacitor (1206)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C15850": {
+      "part_id": "C15850",
+      "lcsc": "C15850",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "100nF",
+      "footprint_id": "C_0805",
+      "description": "0805 chip capacitor (2.0 x 1.25 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C159842": {
+      "part_id": "C159842",
+      "lcsc": "C159842",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "22uF",
+      "footprint_id": "C_0805",
+      "description": "22uF ceramic capacitor, 0805",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C165948": {
+      "part_id": "C165948",
+      "lcsc": "C165948",
+      "mpn": null,
+      "manufacturer": "Espressif",
+      "value": "ESP32-WROOM-32E",
+      "footprint_id": "ESP32-WROOM-32E",
+      "description": "ESP32-WROOM-32E mcu module (ESP32-WROOM-32E)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17390": {
+      "part_id": "C17390",
+      "lcsc": "C17390",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "33K",
+      "footprint_id": "R_0402",
+      "description": "33K feedback resistor (bottom), 0402",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17401": {
+      "part_id": "C17401",
+      "lcsc": "C17401",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "12.1K",
+      "footprint_id": "R_0402",
+      "description": "12.1K W5500 EXRES reference resistor, 0402",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17407": {
+      "part_id": "C17407",
+      "lcsc": "C17407",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "100K",
+      "footprint_id": "R_0402",
+      "description": "100K feedback resistor (top), 0402",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17414": {
+      "part_id": "C17414",
+      "lcsc": "C17414",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "10k",
+      "footprint_id": "R_0402",
+      "description": "0402 chip resistor (1.0 x 0.5 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17513": {
+      "part_id": "C17513",
+      "lcsc": "C17513",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "1K",
+      "footprint_id": "R_0402",
+      "description": "1K relay driver base resistor, 0402",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17515": {
+      "part_id": "C17515",
+      "lcsc": "C17515",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "1k",
+      "footprint_id": "R_0805",
+      "description": "1k resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17516": {
+      "part_id": "C17516",
+      "lcsc": "C17516",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "100R",
+      "footprint_id": "R_0805",
+      "description": "100R resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17519": {
+      "part_id": "C17519",
+      "lcsc": "C17519",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "100k",
+      "footprint_id": "R_0805",
+      "description": "100k resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17520": {
+      "part_id": "C17520",
+      "lcsc": "C17520",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "47k",
+      "footprint_id": "R_0805",
+      "description": "47k resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17523": {
+      "part_id": "C17523",
+      "lcsc": "C17523",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "22k",
+      "footprint_id": "R_0805",
+      "description": "22k resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17526": {
+      "part_id": "C17526",
+      "lcsc": "C17526",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "2.2k",
+      "footprint_id": "R_0805",
+      "description": "2.2k resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C1759": {
+      "part_id": "C1759",
+      "lcsc": "C1759",
+      "mpn": null,
+      "manufacturer": "Samsung",
+      "value": "10uF",
+      "footprint_id": "C_0805",
+      "description": "10uF capacitor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C17673": {
+      "part_id": "C17673",
+      "lcsc": "C17673",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "4.7K",
+      "footprint_id": "R_0402",
+      "description": "4.7K I2C pull-up resistor, 0402",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C1804": {
+      "part_id": "C1804",
+      "lcsc": "C1804",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "22pF",
+      "footprint_id": "C_0402",
+      "description": "22pF crystal load capacitor, 0402 (0603 body)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C21190": {
+      "part_id": "C21190",
+      "lcsc": "C21190",
+      "mpn": null,
+      "manufacturer": "DIODES",
+      "value": "S8050",
+      "footprint_id": "SOT-23",
+      "description": "S8050 transistor npn (SOT-23)",
+      "datasheet_url": null,
+      "ref_prefix": "Q",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C2146": {
+      "part_id": "C2146",
+      "lcsc": "C2146",
+      "mpn": null,
+      "manufacturer": "DIODES",
+      "value": "S9013",
+      "footprint_id": "SOT-23",
+      "description": "S9013 transistor npn (SOT-23)",
+      "datasheet_url": null,
+      "ref_prefix": "Q",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C2286": {
+      "part_id": "C2286",
+      "lcsc": "C2286",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "LED",
+      "footprint_id": "LED_0603",
+      "description": "0805 chip LED (2.0 x 1.25 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C2297": {
+      "part_id": "C2297",
+      "lcsc": "C2297",
+      "mpn": null,
+      "manufacturer": "Nexperia",
+      "value": "1N4148W",
+      "footprint_id": "SOD-123",
+      "description": "1N4148W diode switching (SOD-123)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C23138": {
+      "part_id": "C23138",
+      "lcsc": "C23138",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "10k",
+      "footprint_id": "R_0603",
+      "description": "330 ohm LED current limiting resistor, 0603",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C25129": {
+      "part_id": "C25129",
+      "lcsc": "C25129",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "49.9R",
+      "footprint_id": "R_0603",
+      "description": "49.9 ohm Ethernet termination resistor, 0603",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C25905": {
+      "part_id": "C25905",
+      "lcsc": "C25905",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "5.1K",
+      "footprint_id": "R_0402",
+      "description": "5.1K USB-C CC pull-down resistor, 0402",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C261942": {
+      "part_id": "C261942",
+      "lcsc": "C261942",
+      "mpn": null,
+      "manufacturer": "Korean Hroparts",
+      "value": "USB-C Connector",
+      "footprint_id": "USB-C",
+      "description": "USB-C Connector connector usb (USB-C-SMD)",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C26664": {
+      "part_id": "C26664",
+      "lcsc": "C26664",
+      "mpn": null,
+      "manufacturer": "Samsung",
+      "value": "100nF",
+      "footprint_id": "C_0805",
+      "description": "100nF capacitor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C2907721": {
+      "part_id": "C2907721",
+      "lcsc": "C2907721",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "5.1k",
+      "footprint_id": "R_0805",
+      "description": "5.1k resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C2913202": {
+      "part_id": "C2913202",
+      "lcsc": "C2913202",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "ESP32-S3-WROOM-1",
+      "footprint_id": "ESP32-S3-WROOM-1",
+      "description": "ESP32-S3-WROOM-1 WiFi+BLE module with antenna (18.0 x 25.5 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [
+        {
+          "number": "1",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "2",
+          "name": "3V3",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "3",
+          "name": "EN",
+          "pin_type": "input"
+        },
+        {
+          "number": "4",
+          "name": "IO4",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "5",
+          "name": "IO5",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "6",
+          "name": "IO6",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "7",
+          "name": "IO7",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "8",
+          "name": "IO15",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "9",
+          "name": "IO16",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "10",
+          "name": "IO17",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "11",
+          "name": "IO18",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "12",
+          "name": "IO8",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "13",
+          "name": "IO19",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "14",
+          "name": "IO20",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "15",
+          "name": "IO3",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "16",
+          "name": "IO46",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "17",
+          "name": "IO9",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "18",
+          "name": "IO10",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "19",
+          "name": "IO11",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "20",
+          "name": "IO12",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "21",
+          "name": "IO13",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "22",
+          "name": "IO14",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "23",
+          "name": "IO21",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "24",
+          "name": "IO47",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "25",
+          "name": "IO48",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "26",
+          "name": "IO45",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "27",
+          "name": "IO0",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "28",
+          "name": "IO35",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "29",
+          "name": "IO36",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "30",
+          "name": "IO37",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "31",
+          "name": "IO38",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "32",
+          "name": "IO39",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "33",
+          "name": "IO40",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "34",
+          "name": "IO41",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "35",
+          "name": "IO42",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "36",
+          "name": "RXD0",
+          "pin_type": "output"
+        },
+        {
+          "number": "37",
+          "name": "TXD0",
+          "pin_type": "input"
+        },
+        {
+          "number": "38",
+          "name": "IO2",
+          "pin_type": "output"
+        },
+        {
+          "number": "39",
+          "name": "IO1",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "40",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "41",
+          "name": "GND",
+          "pin_type": "power_in"
+        }
+      ],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C318884": {
+      "part_id": "C318884",
+      "lcsc": "C318884",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "RESET",
+      "footprint_id": "SW_Push_4.5x4.5mm",
+      "description": "6x6mm SMD tactile push switch (6.0 x 6.0 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "SW",
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C32843": {
+      "part_id": "C32843",
+      "lcsc": "C32843",
+      "mpn": "W5500",
+      "manufacturer": null,
+      "value": "W5500",
+      "footprint_id": "LQFP-48",
+      "description": "WIZnet W5500 hardwired TCP/IP Ethernet controller, LQFP-48",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [
+        {
+          "number": "1",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "2",
+          "name": "AVDD",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "3",
+          "name": "EXRES1",
+          "pin_type": "input"
+        },
+        {
+          "number": "4",
+          "name": "MOSI",
+          "pin_type": "input"
+        },
+        {
+          "number": "5",
+          "name": "MISO",
+          "pin_type": "output"
+        },
+        {
+          "number": "6",
+          "name": "SCLK",
+          "pin_type": "input"
+        },
+        {
+          "number": "7",
+          "name": "SCSn",
+          "pin_type": "input"
+        },
+        {
+          "number": "8",
+          "name": "INTn",
+          "pin_type": "output"
+        },
+        {
+          "number": "9",
+          "name": "RSTn",
+          "pin_type": "input"
+        },
+        {
+          "number": "10",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "11",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "12",
+          "name": "LINKLED",
+          "pin_type": "output"
+        },
+        {
+          "number": "13",
+          "name": "ACTLED",
+          "pin_type": "output"
+        },
+        {
+          "number": "14",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "15",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "16",
+          "name": "TXP",
+          "pin_type": "output"
+        },
+        {
+          "number": "17",
+          "name": "TXN",
+          "pin_type": "output"
+        },
+        {
+          "number": "18",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "19",
+          "name": "RXP",
+          "pin_type": "input"
+        },
+        {
+          "number": "20",
+          "name": "RXN",
+          "pin_type": "input"
+        },
+        {
+          "number": "21",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "22",
+          "name": "AVDD2",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "23",
+          "name": "XI",
+          "pin_type": "input"
+        },
+        {
+          "number": "24",
+          "name": "XO",
+          "pin_type": "output"
+        },
+        {
+          "number": "25",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "26",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "27",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "28",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "29",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "30",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "31",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "32",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "33",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "34",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "35",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "36",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "37",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "38",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "39",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "40",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "41",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "42",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "43",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "44",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "45",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "46",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "47",
+          "name": "VCC",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "48",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "49",
+          "name": "PAD",
+          "pin_type": "power_in"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C35449": {
+      "part_id": "C35449",
+      "lcsc": "C35449",
+      "mpn": "SRD-05VDC-SL-C",
+      "manufacturer": null,
+      "value": "SRD-05VDC-SL-C",
+      "footprint_id": "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C",
+      "description": "SANYOU SRD series 5V SPDT relay",
+      "datasheet_url": null,
+      "ref_prefix": "K",
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "COIL-",
+          "pin_type": "passive"
+        },
+        {
+          "number": "3",
+          "name": "NO",
+          "pin_type": "passive"
+        },
+        {
+          "number": "4",
+          "name": "NC",
+          "pin_type": "passive"
+        },
+        {
+          "number": "5",
+          "name": "COIL+",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C37593": {
+      "part_id": "C37593",
+      "lcsc": "C37593",
+      "mpn": "ADS1115IDGSR",
+      "manufacturer": null,
+      "value": "ADS1115",
+      "footprint_id": "MSOP-10",
+      "description": "MSOP-10 miniature small outline package (3.1 x 3.1 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [
+        {
+          "number": "1",
+          "name": "ADDR",
+          "pin_type": "input"
+        },
+        {
+          "number": "2",
+          "name": "ALERT",
+          "pin_type": "output"
+        },
+        {
+          "number": "3",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "4",
+          "name": "AIN0",
+          "pin_type": "input"
+        },
+        {
+          "number": "5",
+          "name": "AIN1",
+          "pin_type": "input"
+        },
+        {
+          "number": "6",
+          "name": "AIN2",
+          "pin_type": "input"
+        },
+        {
+          "number": "7",
+          "name": "AIN3",
+          "pin_type": "input"
+        },
+        {
+          "number": "8",
+          "name": "VDD",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "9",
+          "name": "SDA",
+          "pin_type": "bidirectional"
+        },
+        {
+          "number": "10",
+          "name": "SCL",
+          "pin_type": "input"
+        }
+      ],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C49678": {
+      "part_id": "C49678",
+      "lcsc": "C49678",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "100nF",
+      "footprint_id": "C_0402",
+      "description": "0402 chip capacitor (1.0 x 0.5 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C55482": {
+      "part_id": "C55482",
+      "lcsc": "C55482",
+      "mpn": null,
+      "manufacturer": "WCH",
+      "value": "CH340N",
+      "footprint_id": "SOIC-8",
+      "description": "CH340N usb uart (SOP-8)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C59023": {
+      "part_id": "C59023",
+      "lcsc": "C59023",
+      "mpn": null,
+      "manufacturer": "UNI-ROYAL",
+      "value": "33R",
+      "footprint_id": "R_0805",
+      "description": "33R resistor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C6186": {
+      "part_id": "C6186",
+      "lcsc": "C6186",
+      "mpn": "AMS1117-3.3",
+      "manufacturer": null,
+      "value": "AMS1117-3.3",
+      "footprint_id": "SOT-223",
+      "description": "SOT-223 voltage regulator package (6.5 x 3.5 mm, 3 small + tab)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [
+        {
+          "number": "1",
+          "name": "IN",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "2",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "3",
+          "name": "OUT",
+          "pin_type": "power_out"
+        },
+        {
+          "number": "4",
+          "name": "TAB",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C65114": {
+      "part_id": "C65114",
+      "lcsc": "C65114",
+      "mpn": null,
+      "manufacturer": "BOOMELE",
+      "value": "Tactile Switch",
+      "footprint_id": "SW_Push_SMD_6x6",
+      "description": "Tactile Switch switch (SW_SPST_B3U-1000P)",
+      "datasheet_url": null,
+      "ref_prefix": "SW",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C70187": {
+      "part_id": "C70187",
+      "lcsc": "C70187",
+      "mpn": null,
+      "manufacturer": "LCSC",
+      "value": "Green LED",
+      "footprint_id": "LED_0805",
+      "description": "Green LED led (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C72038": {
+      "part_id": "C72038",
+      "lcsc": "C72038",
+      "mpn": null,
+      "manufacturer": "LCSC",
+      "value": "Blue LED",
+      "footprint_id": "LED_0805",
+      "description": "Blue LED led (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C72043": {
+      "part_id": "C72043",
+      "lcsc": "C72043",
+      "mpn": null,
+      "manufacturer": "DIODES",
+      "value": "AP2112K-3.3TRG1",
+      "footprint_id": "SOT-23-5",
+      "description": "AP2112K-3.3TRG1 ldo (SOT-23-5)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C727114": {
+      "part_id": "C727114",
+      "lcsc": "C727114",
+      "mpn": "SS8050",
+      "manufacturer": null,
+      "value": "SS8050",
+      "footprint_id": "SOT-23",
+      "description": "SOT-23 3-pin transistor package (3.0 x 1.4 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "Q",
+      "pins": [
+        {
+          "number": "1",
+          "name": "B",
+          "pin_type": "input"
+        },
+        {
+          "number": "2",
+          "name": "C",
+          "pin_type": "output"
+        },
+        {
+          "number": "3",
+          "name": "E",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C7505": {
+      "part_id": "C7505",
+      "lcsc": "C7505",
+      "mpn": null,
+      "manufacturer": "AMS1117",
+      "value": "AMS1117-3.3",
+      "footprint_id": "SOT-223",
+      "description": "AMS1117-3.3 ldo (SOT-223)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C81598": {
+      "part_id": "C81598",
+      "lcsc": "C81598",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "1N4148",
+      "footprint_id": "SOD-323",
+      "description": "SOD-123 small outline diode (3.7 x 1.6 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C8269": {
+      "part_id": "C8269",
+      "lcsc": "C8269",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "Screw_Terminal_2P",
+      "footprint_id": "TerminalBlock_5.08mm_2P",
+      "description": "2-position screw terminal block (10.2 x 8.6 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [
+        {
+          "number": "1",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "2",
+          "name": "+24V",
+          "pin_type": "power_in"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C84256": {
+      "part_id": "C84256",
+      "lcsc": "C84256",
+      "mpn": null,
+      "manufacturer": "LCSC",
+      "value": "Red LED",
+      "footprint_id": "LED_0805",
+      "description": "Red LED led (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "D",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C8465": {
+      "part_id": "C8465",
+      "lcsc": "C8465",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "Screw_Terminal_3P",
+      "footprint_id": "TerminalBlock_5.08mm_3P",
+      "description": "3-position 5.08mm screw terminal block for relay output",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [
+        {
+          "number": "1",
+          "name": "COM",
+          "pin_type": "passive"
+        },
+        {
+          "number": "2",
+          "name": "NO",
+          "pin_type": "passive"
+        },
+        {
+          "number": "3",
+          "name": "NC",
+          "pin_type": "passive"
+        }
+      ],
+      "verification_status": "unverified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C84868": {
+      "part_id": "C84868",
+      "lcsc": "C84868",
+      "mpn": null,
+      "manufacturer": "Samsung",
+      "value": "22pF",
+      "footprint_id": "C_0805",
+      "description": "22pF capacitor (0805)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C96950": {
+      "part_id": "C96950",
+      "lcsc": "C96950",
+      "mpn": null,
+      "manufacturer": null,
+      "value": "10uH",
+      "footprint_id": "L_1210",
+      "description": "1210 chip inductor (3.2 x 2.5 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "L",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C9865": {
+      "part_id": "C9865",
+      "lcsc": "C9865",
+      "mpn": "TPS54331DR",
+      "manufacturer": null,
+      "value": "TPS54331",
+      "footprint_id": "SOIC-8",
+      "description": "SOIC-8 with exposed thermal pad for buck converters (5.0 x 4.0 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [
+        {
+          "number": "1",
+          "name": "BOOT",
+          "pin_type": "input"
+        },
+        {
+          "number": "2",
+          "name": "VIN",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "3",
+          "name": "EN",
+          "pin_type": "input"
+        },
+        {
+          "number": "4",
+          "name": "SS",
+          "pin_type": "input"
+        },
+        {
+          "number": "5",
+          "name": "VSNS",
+          "pin_type": "input"
+        },
+        {
+          "number": "6",
+          "name": "GND",
+          "pin_type": "power_in"
+        },
+        {
+          "number": "7",
+          "name": "PH",
+          "pin_type": "output"
+        },
+        {
+          "number": "8",
+          "name": "PAD",
+          "pin_type": "power_in"
+        }
+      ],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C9900003780": {
+      "part_id": "C9900003780",
+      "lcsc": "C9900003780",
+      "mpn": null,
+      "manufacturer": "KELIKING",
+      "value": "Buzzer 5V",
+      "footprint_id": "Buzzer_12x9.5mm",
+      "description": "Buzzer 5V buzzer (Buzzer_12x9.5mm)",
+      "datasheet_url": null,
+      "ref_prefix": "BZ",
+      "pins": [],
+      "verification_status": "unverified",
+      "last_verified_commit": null,
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "C_0603::100nF": {
+      "part_id": "C_0603::100nF",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "100nF",
+      "footprint_id": "C_0603",
+      "description": "0603 chip capacitor (1.6 x 0.8 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "C",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "DIP-8::NE555": {
+      "part_id": "DIP-8::NE555",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "NE555",
+      "footprint_id": "DIP-8",
+      "description": "DIP-8 dual inline package (9.5 x 6.4 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "MountingHole_3.2mm::MH": {
+      "part_id": "MountingHole_3.2mm::MH",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "MH",
+      "footprint_id": "MountingHole_3.2mm",
+      "description": "3.2mm mounting hole",
+      "datasheet_url": null,
+      "ref_prefix": "H",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "PinHeader_1x04_P2.54mm::GPIO": {
+      "part_id": "PinHeader_1x04_P2.54mm::GPIO",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "GPIO",
+      "footprint_id": "PinHeader_1x04_P2.54mm",
+      "description": "1x4 pin header, 2.54mm pitch (10.2 x 2.5 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "QFN-32::nRF52832": {
+      "part_id": "QFN-32::nRF52832",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "nRF52832",
+      "footprint_id": "QFN-32",
+      "description": "QFN-32 quad flat no-lead package with thermal pad (5.0 x 5.0 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "R_0805::10k": {
+      "part_id": "R_0805::10k",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "10k",
+      "footprint_id": "R_0805",
+      "description": "0805 chip resistor (2.0 x 1.25 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "R_1206::10k": {
+      "part_id": "R_1206::10k",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "10k",
+      "footprint_id": "R_1206",
+      "description": "1206 chip resistor (3.2 x 1.6 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "R",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "SOIC-8::ATtiny85": {
+      "part_id": "SOIC-8::ATtiny85",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "ATtiny85",
+      "footprint_id": "SOIC-8",
+      "description": "SOIC-8 small outline IC package (5.0 x 4.0 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "SOT-23-5::AO3400": {
+      "part_id": "SOT-23-5::AO3400",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "AO3400",
+      "footprint_id": "SOT-23-5",
+      "description": "SOT-23-5 5-pin IC package (3.0 x 1.7 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "Q",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "SOT-23-6::AO3401": {
+      "part_id": "SOT-23-6::AO3401",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "AO3401",
+      "footprint_id": "SOT-23-6",
+      "description": "SOT-23-6 6-pin IC package (3.0 x 1.7 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "Q",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "TSSOP-20::STM32F103": {
+      "part_id": "TSSOP-20::STM32F103",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "STM32F103",
+      "footprint_id": "TSSOP-20",
+      "description": "TSSOP-20 thin shrink small outline package (6.5 x 4.4 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "U",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    },
+    "USB-C-SMD::USB-C": {
+      "part_id": "USB-C-SMD::USB-C",
+      "lcsc": null,
+      "mpn": null,
+      "manufacturer": null,
+      "value": "USB-C",
+      "footprint_id": "USB-C-SMD",
+      "description": "USB Type-C SMD connector (9.0 x 7.3 mm)",
+      "datasheet_url": null,
+      "ref_prefix": "J",
+      "pins": [],
+      "verification_status": "verified",
+      "last_verified_commit": "19ae64d",
+      "known_issues": [],
+      "verified_fixes": []
+    }
+  }
+}
