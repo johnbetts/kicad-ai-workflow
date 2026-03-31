@@ -55,9 +55,6 @@ from kicad_pipeline.optimization.level3_phases import (
     _pin_rf_to_edge,
     _place_row_layout,
 )
-from kicad_pipeline.pcb.pin_map import (
-    origin_to_centroid,
-)
 
 _log = logging.getLogger(__name__)
 
@@ -1202,22 +1199,13 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
     for i, r in enumerate(_top_refs):
         tw = term_widths[i]
         origin_x = cursor_x + tw / 2.0
-        fp_match = None
-        for fp in ctx.initial_pcb.footprints:
-            if fp.ref == r:
-                fp_match = fp
-                break
-        if fp_match is not None:
-            cent_x, cent_y = origin_to_centroid(
-                fp_match, origin_x, origin_y_target, 0.0,
-            )
-        else:
-            cent_x, cent_y = origin_x, origin_y_target
         # Top edge — wire entry faces outward (rot=0)
-        ctx.positions[r] = (cent_x, cent_y, 0.0)
+        # Use origin position directly for top-edge placement.
+        # Centroid conversion would offset tall terminals (6-pin) far
+        # from the edge since centroid is at body center, not pin 1.
+        ctx.positions[r] = (origin_x, origin_y_target, 0.0)
         cursor_x += tw + term_gap
-        _log.info("    %s -> centroid(%.1f, %.1f) origin(%.1f, %.1f) rot=0",
-                  r, cent_x, cent_y, origin_x, origin_y_target)
+        _log.info("    %s -> origin(%.1f, %.1f) rot=0", r, origin_x, origin_y_target)
     ctx.top_edge_connector_refs = set(_top_refs)
 
 
