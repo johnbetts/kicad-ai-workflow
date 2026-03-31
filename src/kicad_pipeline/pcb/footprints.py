@@ -281,12 +281,11 @@ def _model_terminal_block(
         f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
         f"{model_name}.step"
     )
-    # STEP model origin is at the center of the block; footprint pin 1 is at (0,0).
-    # Offset = half the total pad span to align model center with pad centroid.
-    offset_x = (pin_count - 1) * pitch / 2.0
+    # STEP model origin is at the block center; pads are also centered at origin.
+    # No offset needed.
     return Footprint3DModel(
         path=path,
-        offset=(offset_x, 0.0, 0.0),
+        offset=(0.0, 0.0, 0.0),
         rotate=(0.0, 0.0, 180.0),
     )
 
@@ -1154,40 +1153,86 @@ def _courtyard_rect(
 
 
 def _ensure_courtyard(fp: Footprint) -> Footprint:
-    """Add courtyard graphics if the footprint has none.
+    """Ensure courtyard graphics cover all pads with IPC clearance.
 
-    Generates a rectangular courtyard from the pad bounding box plus
-    IPC clearance.  Returns the footprint unchanged if courtyard lines
-    already exist.
+    If no courtyard exists, generates one from the pad bounding box.
+    If an existing courtyard doesn't cover all pads (margin < 0.25mm),
+    replaces it with a pad-derived courtyard that does.
     """
-    crtyd_layer = LAYER_F_COURTYARD if fp.layer == LAYER_F_CU else LAYER_B_COURTYARD
-    has_crtyd = any(
-        getattr(g, "layer", "") in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
-        for g in fp.graphics
-    )
-    if has_crtyd or not fp.pads:
+    if not fp.pads:
         return fp
 
-    # Compute pad bounding box
-    xs = [p.position.x for p in fp.pads]
-    ys = [p.position.y for p in fp.pads]
-    # Include half-pad size in the extent
-    half_pads = [max(p.size_x, p.size_y) / 2.0 for p in fp.pads]
-    pad_min_x = min(x - hp for x, hp in zip(xs, half_pads))
-    pad_max_x = max(x + hp for x, hp in zip(xs, half_pads))
-    pad_min_y = min(y - hp for y, hp in zip(ys, half_pads))
-    pad_max_y = max(y + hp for y, hp in zip(ys, half_pads))
+    crtyd_layer = LAYER_F_COURTYARD if fp.layer == LAYER_F_CU else LAYER_B_COURTYARD
 
+    # Compute pad bounding box (including half-pad size)
+    pad_extents: list[tuple[float, float, float, float]] = []
+    for p in fp.pads:
+        hx = p.size_x / 2.0
+        hy = p.size_y / 2.0
+        pad_extents.append((p.position.x - hx, p.position.y - hy,
+                            p.position.x + hx, p.position.y + hy))
+    pad_min_x = min(e[0] for e in pad_extents)
+    pad_min_y = min(e[1] for e in pad_extents)
+    pad_max_x = max(e[2] for e in pad_extents)
+    pad_max_y = max(e[3] for e in pad_extents)
+
+    # Check existing courtyard coverage
+    existing_crtyd = [
+        g for g in fp.graphics
+        if getattr(g, "layer", "") in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
+    ]
+    needs_replacement = False
+    if existing_crtyd:
+        # Measure existing courtyard extent
+        crt_xs: list[float] = []
+        crt_ys: list[float] = []
+        for g in existing_crtyd:
+            for attr_name in ("start", "end"):
+                pt = getattr(g, attr_name, None)
+                if pt is not None:
+                    crt_xs.append(pt.x if hasattr(pt, "x") else pt[0])
+                    crt_ys.append(pt.y if hasattr(pt, "y") else pt[1])
+        if crt_xs:
+            margin = min(
+                min(crt_xs) - pad_min_x,  # left margin (should be negative = inward)
+                pad_max_x - max(crt_xs),   # right margin (should be negative)
+                min(crt_ys) - pad_min_y,   # top margin
+                pad_max_y - max(crt_ys),   # bottom margin
+            )
+            # Courtyard extends PAST pads, so margin should be negative.
+            # Flip sign: positive means courtyard extends past pad.
+            # We want courtyard_edge - pad_edge >= clearance on all sides.
+            margin_left = pad_min_x - min(crt_xs)
+            margin_right = max(crt_xs) - pad_max_x
+            margin_top = pad_min_y - min(crt_ys)
+            margin_bottom = max(crt_ys) - pad_max_y
+            min_margin = min(margin_left, margin_right, margin_top, margin_bottom)
+            if min_margin < PCB_COURTYARD_CLEARANCE_MM - 0.05:
+                needs_replacement = True
+        else:
+            needs_replacement = True
+    else:
+        needs_replacement = True
+
+    if not needs_replacement:
+        return fp
+
+    # Generate courtyard from pad bbox
     cx = (pad_min_x + pad_max_x) / 2.0
     cy = (pad_min_y + pad_max_y) / 2.0
     body_w = pad_max_x - pad_min_x
     body_h = pad_max_y - pad_min_y
-
     crtyd = _courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy)
+
+    # Remove old courtyard lines, add new ones
+    non_crtyd = tuple(
+        g for g in fp.graphics
+        if getattr(g, "layer", "") not in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
+    )
     return Footprint(
         lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
         position=fp.position, rotation=fp.rotation, layer=fp.layer,
-        pads=fp.pads, graphics=(*fp.graphics, *crtyd), texts=fp.texts,
+        pads=fp.pads, graphics=(*non_crtyd, *crtyd), texts=fp.texts,
         lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=fp.models,
         datasheet=fp.datasheet, description=fp.description,
         footprint_source=getattr(fp, "footprint_source", ""),
@@ -1598,18 +1643,26 @@ def make_relay_spdt(
     Returns:
         Fully constructed :class:`Footprint`.
     """
-    # Pad positions from KiCad's official footprint (origin at pin 1)
-    pads = (
-        _thru_pad("1", 0.0, 0.0, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),       # COM
-        _thru_pad("2", 1.95, 6.05, _RELAY_COIL_PAD_DIAM, _RELAY_COIL_DRILL),            # Coil-
-        _thru_pad("3", 14.15, 6.05, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),     # NO
-        _thru_pad("4", 14.2, -6.0, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),      # NC
-        _thru_pad("5", 1.95, -5.95, _RELAY_COIL_PAD_DIAM, _RELAY_COIL_DRILL),           # Coil+
+    # Pad positions from KiCad's official footprint, shifted to center at origin
+    _raw_pads = [
+        ("1", 0.0, 0.0, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),       # COM
+        ("2", 1.95, 6.05, _RELAY_COIL_PAD_DIAM, _RELAY_COIL_DRILL),           # Coil-
+        ("3", 14.15, 6.05, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),    # NO
+        ("4", 14.2, -6.0, _RELAY_CONTACT_PAD_DIAM, _RELAY_CONTACT_DRILL),     # NC
+        ("5", 1.95, -5.95, _RELAY_COIL_PAD_DIAM, _RELAY_COIL_DRILL),         # Coil+
+    ]
+    _xs = [p[1] for p in _raw_pads]
+    _ys = [p[2] for p in _raw_pads]
+    _sx = -(min(_xs) + max(_xs)) / 2.0
+    _sy = -(min(_ys) + max(_ys)) / 2.0
+    pads = tuple(
+        _thru_pad(n, x + _sx, y + _sy, d, dr)
+        for n, x, y, d, dr in _raw_pads
     )
     body_w = _RELAY_BODY_X_MAX - _RELAY_BODY_X_MIN
     body_h = _RELAY_BODY_Y_MAX - _RELAY_BODY_Y_MIN
-    cx = (_RELAY_BODY_X_MIN + _RELAY_BODY_X_MAX) / 2.0
-    cy = (_RELAY_BODY_Y_MIN + _RELAY_BODY_Y_MAX) / 2.0
+    cx = (_RELAY_BODY_X_MIN + _RELAY_BODY_X_MAX) / 2.0 + _sx
+    cy = (_RELAY_BODY_Y_MIN + _RELAY_BODY_Y_MAX) / 2.0 + _sy
     graphics = _relay_spdt_graphics(cx, cy, body_w, body_h)
     texts = (
         _ref_text(ref, cy - (body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
@@ -2487,13 +2540,18 @@ def make_pin_header_socket(
     cols = pin_count // max(rows, 1)
     row_pitch = pitch_mm if rows > 1 else 0.0
 
-    # KiCad convention: pin 1 at origin (0,0), rows along X-axis, cols along Y-axis
+    # Center pads at origin — pad centroid at (0, 0)
+    span_x = (rows - 1) * row_pitch
+    span_y = (cols - 1) * pitch_mm
+    x_offset = -span_x / 2.0
+    y_offset = -span_y / 2.0
+
     pads: list[Pad] = []
     pin_num = 1
     for col in range(cols):
         for row in range(rows):
-            x = row * row_pitch
-            y = col * pitch_mm
+            x = x_offset + row * row_pitch
+            y = y_offset + col * pitch_mm
             if row_swap:
                 x = -x
             pads.append(_thru_pad(str(pin_num), x, y, pad_diam, drill_mm))
@@ -2504,22 +2562,18 @@ def make_pin_header_socket(
     fab_layer = LAYER_B_FAB if is_back else LAYER_F_FAB
     crtyd_layer = LAYER_B_COURTYARD if is_back else LAYER_F_COURTYARD
 
-    span_x = (rows - 1) * row_pitch
-    span_y = (cols - 1) * pitch_mm
-    cx = span_x / 2.0  # center of pad span in X
-    cy = span_y / 2.0  # center of pad span in Y
     body_w = span_x + pad_diam + _TEXT_OFFSET_LARGE
     body_h = span_y + pad_diam + _TEXT_OFFSET_LARGE
     graphics: tuple[FootprintLine, ...] = (
-        *_courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy),
+        *_courtyard_rect(body_w, body_h, layer=crtyd_layer),
     )
-    ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
-    val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
         FootprintText(text_type="reference", text=ref,
-                      position=Point(cx, ref_y), layer=silk_layer, effects_size=1.0),
+                      position=Point(0.0, ref_y), layer=silk_layer, effects_size=1.0),
         FootprintText(text_type="value", text=value,
-                      position=Point(cx, val_y), layer=fab_layer, effects_size=1.0),
+                      position=Point(0.0, val_y), layer=fab_layer, effects_size=1.0),
     )
     if not lib_id:
         if is_back:
@@ -2597,30 +2651,29 @@ def make_terminal_block(
     drill_mm = _TB_DRILL
     pad_diam = _TB_PAD_DIAM
 
-    # Pin 1 at origin, extending right — matches KiCad MKDS convention
+    # Center pads at origin — pad centroid at (0, 0)
+    span = (pin_count - 1) * pitch_mm
+    x_offset = -span / 2.0
     pads = tuple(
         _thru_pad(
             str(i + 1),
-            i * pitch_mm,
+            x_offset + i * pitch_mm,
             0.0,
             pad_diam,
             drill_mm,
         )
         for i in range(pin_count)
     )
-    span = (pin_count - 1) * pitch_mm
     body_w = span + pad_diam + _TB_BODY_W_MARGIN
     body_h = pad_diam + _TB_BODY_H_MARGIN
-    # Center courtyard on the pad span
-    cx = span / 2.0
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx),)
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
         FootprintText(text_type="reference", text=ref,
-                      position=Point(cx, ref_y), layer=LAYER_F_SILKSCREEN, effects_size=1.0),
+                      position=Point(0.0, ref_y), layer=LAYER_F_SILKSCREEN, effects_size=1.0),
         FootprintText(text_type="value", text=value,
-                      position=Point(cx, val_y), layer=LAYER_F_FAB, effects_size=1.0),
+                      position=Point(0.0, val_y), layer=LAYER_F_FAB, effects_size=1.0),
     )
     lib_id = (
         f"TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-{pin_count}-"
@@ -2808,14 +2861,24 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
             )
         )
 
-    # Courtyard matches official KiCad RJHSE538X: (-6.22, -8.5) to (13.34, 8.25)
-    cx = _RJ45_COURTYARD_CX
-    cy = _RJ45_COURTYARD_CY
+    # Center all pads at origin
+    all_xs = [p.position.x for p in pads]
+    all_ys = [p.position.y for p in pads]
+    shift_x = -(min(all_xs) + max(all_xs)) / 2.0
+    shift_y = -(min(all_ys) + max(all_ys)) / 2.0
+    pads = [
+        Pad(number=p.number, pad_type=p.pad_type, shape=p.shape,
+            position=Point(p.position.x + shift_x, p.position.y + shift_y),
+            size_x=p.size_x, size_y=p.size_y, layers=p.layers,
+            drill_diameter=p.drill_diameter, roundrect_ratio=p.roundrect_ratio)
+        for p in pads
+    ]
+
     body_w = _RJ45_COURTYARD_W
     body_h = _RJ45_COURTYARD_H
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx, cy=cy),)
-    _rj45_ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
-    _rj45_val_y = cy + (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    _rj45_ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    _rj45_val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
         _ref_text(ref, _rj45_ref_y, LAYER_F_SILKSCREEN),
         _val_text(value, _rj45_val_y, LAYER_F_FAB),
@@ -4175,6 +4238,9 @@ def footprint_for_component(
     if "ESP32" in upper or "WROOM" in upper:
         fp = _postprocess_esp32_thermal_pad(fp)
         fp = _enrich_esp32_footprint(fp)
+
+    # Ensure courtyard exists and covers all pads with IPC clearance.
+    fp = _ensure_courtyard(fp)
 
     return fp
 

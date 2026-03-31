@@ -102,46 +102,44 @@ def _check_courtyard_size(
             severity=CheckSeverity.MINOR,
         )
 
-    pad_xs = [p.position.x for p in fp.pads]
-    pad_ys = [p.position.y for p in fp.pads]
-    pad_min_x = min(pad_xs)
-    pad_max_x = max(pad_xs)
-    pad_min_y = min(pad_ys)
-    pad_max_y = max(pad_ys)
+    # Compute pad bounding box including pad sizes
+    pad_min_x = min(p.position.x - p.size_x / 2.0 for p in fp.pads)
+    pad_max_x = max(p.position.x + p.size_x / 2.0 for p in fp.pads)
+    pad_min_y = min(p.position.y - p.size_y / 2.0 for p in fp.pads)
+    pad_max_y = max(p.position.y + p.size_y / 2.0 for p in fp.pads)
 
-    # Look for courtyard rectangles in graphics
-    crtyd_found = False
+    # Collect ALL courtyard points to form the overall bounding box
+    crtyd_xs: list[float] = []
+    crtyd_ys: list[float] = []
     for item in getattr(fp, "graphics", ()):
         layer = getattr(item, "layer", "")
         if "CrtYd" not in layer:
             continue
-        crtyd_found = True
-        # Check if courtyard bounds extend past pad bounds
-        # For rect/poly graphics, check start/end points
-        start = getattr(item, "start", None)
-        end = getattr(item, "end", None)
-        if start is not None and end is not None:
-            sx = start.x if hasattr(start, "x") else start[0]
-            sy = start.y if hasattr(start, "y") else start[1]
-            ex = end.x if hasattr(end, "x") else end[0]
-            ey = end.y if hasattr(end, "y") else end[1]
-            crt_min_x = min(sx, ex)
-            crt_max_x = max(sx, ex)
-            crt_min_y = min(sy, ey)
-            crt_max_y = max(sy, ey)
+        for attr_name in ("start", "end"):
+            pt = getattr(item, attr_name, None)
+            if pt is not None:
+                crtyd_xs.append(pt.x if hasattr(pt, "x") else pt[0])
+                crtyd_ys.append(pt.y if hasattr(pt, "y") else pt[1])
 
-            margin_left = pad_min_x - crt_min_x
-            margin_right = crt_max_x - pad_max_x
-            margin_top = pad_min_y - crt_min_y
-            margin_bottom = crt_max_y - pad_max_y
-            min_margin = min(margin_left, margin_right, margin_top, margin_bottom)
+    crtyd_found = len(crtyd_xs) > 0
+    if crtyd_found:
+        crt_min_x = min(crtyd_xs)
+        crt_max_x = max(crtyd_xs)
+        crt_min_y = min(crtyd_ys)
+        crt_max_y = max(crtyd_ys)
 
-            if min_margin < 0.20:  # 0.25mm target, 0.05mm tolerance
-                return CheckResult(
-                    item_id=f"PROG-COURTYARD-SIZE-{ref}",
-                    passed=False,
-                    detail=f"courtyard margin {min_margin:.2f}mm < 0.25mm IPC minimum",
-                    severity=CheckSeverity.MINOR,
+        margin_left = pad_min_x - crt_min_x
+        margin_right = crt_max_x - pad_max_x
+        margin_top = pad_min_y - crt_min_y
+        margin_bottom = crt_max_y - pad_max_y
+        min_margin = min(margin_left, margin_right, margin_top, margin_bottom)
+
+        if min_margin < 0.20:  # 0.25mm target, 0.05mm tolerance
+            return CheckResult(
+                item_id=f"PROG-COURTYARD-SIZE-{ref}",
+                passed=False,
+                detail=f"courtyard margin {min_margin:.2f}mm < 0.25mm IPC minimum",
+                severity=CheckSeverity.MINOR,
                 )
             return CheckResult(
                 item_id=f"PROG-COURTYARD-SIZE-{ref}",
@@ -185,8 +183,9 @@ def _check_pad_shape(
         shape = getattr(pad, "shape", "rect")
         pad_type = getattr(pad, "pad_type", "smd")
 
-        # THT pads should be oval or circle, not rect
-        if pad_type == "thru_hole" and shape == "rect":
+        # THT pads should be oval or circle, not rect.
+        # Exception: pad "1" is conventionally rect for polarity marking.
+        if pad_type == "thru_hole" and shape == "rect" and pad.number != "1":
             # Thermal pads on THT can be rect — only flag signal pads
             size = getattr(pad, "size", (0, 0))
             if size[0] < 3.0 and size[1] < 3.0:

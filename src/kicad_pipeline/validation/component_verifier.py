@@ -283,8 +283,18 @@ def _check_pad_centroid_near_origin(fp: Footprint, spec: ComponentSpec) -> Check
     cx = sum(p.position.x for p in fp.pads) / len(fp.pads)
     cy = sum(p.position.y for p in fp.pads) / len(fp.pads)
     dist = math.sqrt(cx * cx + cy * cy)
-    # Connectors and modules can have offset origins — relaxed threshold
-    max_dist = 5.0 if spec.ref.startswith(("J", "K", "SW")) else 2.0
+    # Connectors, relays, and modules with antennas have inherently
+    # off-center pad centroids — relaxed threshold.
+    fid = (spec.footprint_id or "").upper()
+    is_module = any(
+        kw in fid for kw in ("ESP32", "WROOM", "WROVER")
+    )
+    is_large_thru = spec.ref.startswith(("J", "K", "SW")) or any(
+        kw in fid for kw in ("RELAY", "RJ45", "TERMINAL", "PINHEADER", "PINSOCKET")
+    )
+    # Modules with antennas have asymmetric pad distributions — use 8mm.
+    # THT connectors/relays with centered pads — use 5mm.
+    max_dist = 8.0 if is_module else (5.0 if is_large_thru else 2.0)
     ok = dist <= max_dist
     return CheckResult(
         name="pad_centroid_near_origin",
