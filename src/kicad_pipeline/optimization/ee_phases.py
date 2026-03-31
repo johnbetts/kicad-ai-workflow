@@ -1276,27 +1276,55 @@ def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
         if min_dist <= 5.0:
             continue
 
-        # Determine target edge from group centroid (fall back to connector pos)
+        # Determine target edge based on connector type
+        comp = next(
+            (c for c in ctx.requirements.components if c.ref == ref), None,
+        )
+        fp_name = comp.footprint.upper() if comp else ""
+
+        # Screw terminals ALWAYS go to TOP edge (industrial wiring convention)
+        if "TERMINAL" in fp_name or "TB_" in fp_name:
+            target_edge = "top"
+        # RJ45 connectors go to RIGHT edge
+        elif "RJ45" in fp_name or "RJ45" in ref.upper():
+            target_edge = "right"
+        # USB-C goes to BOTTOM or LEFT edge (user-facing)
+        elif "USB" in fp_name:
+            target_edge = "bottom"
+        else:
+            # Other connectors: use group centroid to pick nearest edge
+            gname = ref_to_group.get(ref)
+            gcx, gcy = group_centroids.get(
+                gname, (cx, cy),
+            ) if gname else (cx, cy)
+            gd_left = gcx - min_x
+            gd_right = max_x - gcx
+            gd_top = gcy - min_y
+            gd_bottom = max_y - gcy
+            gd_min = min(gd_left, gd_right, gd_top, gd_bottom)
+            if gd_min == gd_left:
+                target_edge = "left"
+            elif gd_min == gd_right:
+                target_edge = "right"
+            elif gd_min == gd_top:
+                target_edge = "top"
+            else:
+                target_edge = "bottom"
+
+        # Get group centroid for along-edge positioning
         gname = ref_to_group.get(ref)
-        gcx, gcy = group_centroids.get(gname, (cx, cy)) if gname else (cx, cy)
+        gcx, gcy = group_centroids.get(
+            gname, (cx, cy),
+        ) if gname else (cx, cy)
 
-        # Distance from group centroid to each edge
-        gd_left = gcx - min_x
-        gd_right = max_x - gcx
-        gd_top = gcy - min_y
-        gd_bottom = max_y - gcy
-        gd_min = min(gd_left, gd_right, gd_top, gd_bottom)
-
-        # Push to the edge nearest the group centroid, aligning along
-        # that edge at the group centroid's coordinate.
-        # Clamp the along-edge coordinate to stay within board bounds.
-        if gd_min == gd_left:
+        # Push to target edge, aligned at group centroid coordinate
+        if target_edge == "left":
             along = max(min_y + margin, min(gcy, max_y - margin))
             new_x, new_y, new_rot = min_x + margin, along, rot
-        elif gd_min == gd_right:
+        elif target_edge == "right":
             along = max(min_y + margin, min(gcy, max_y - margin))
             new_x, new_y, new_rot = max_x - margin, along, rot
-        elif gd_min == gd_top:
+        elif target_edge == "top":
             along = max(min_x + margin, min(gcx, max_x - margin))
             new_x, new_y, new_rot = along, min_y + margin, rot
         else:
