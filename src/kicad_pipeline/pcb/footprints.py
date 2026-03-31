@@ -1616,8 +1616,11 @@ def make_smd_tact_switch(
         _val_text(value, court_h / 2.0 + _TEXT_MARGIN_MM, LAYER_F_FAB),
     )
     lib_id = "Button_Switch_SMD:SW_SPST_TL3305A"
+    # STEP model leads extend along Y axis; pads extend along X axis.
+    # 90° Z rotation aligns model leads with pad layout.
     model = Footprint3DModel(
         path=f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step",
+        rotate=(0.0, 0.0, 90.0),
     )
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),

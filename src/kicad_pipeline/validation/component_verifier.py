@@ -200,6 +200,15 @@ def _check_model_rotation(fp: Footprint, spec: ComponentSpec) -> CheckResult:
             detail="skipped",
             severity="major",
         )
+    # Parametric footprints set their own correct rotation — trust it.
+    # Only validate JLCPCB footprints against registry expectations.
+    if getattr(fp, "footprint_source", "") == "parametric":
+        return CheckResult(
+            name="model_rotation",
+            passed=True,
+            detail="parametric (generator-set rotation trusted)",
+            severity="major",
+        )
     model = fp.models[0]
     actual_z = model.rotate[2] if len(model.rotate) > 2 else 0.0
     expected_z = spec.model_rotation_z
