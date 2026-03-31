@@ -2696,19 +2696,78 @@ def _adc_group_by_ic(
     return ic_channels
 
 
+def _adc_pin_sort_key(ic_pin: str) -> tuple[int, str]:
+    """Extract a numeric sort key from an ADC IC pin name.
+
+    E.g. "AIN0" -> (0, "AIN0"), "AIN7" -> (7, "AIN7"), "A3" -> (3, "A3").
+    Falls back to (999, pin_name) if no trailing digits are found.
+    """
+    import re
+
+    m = re.search(r"(\d+)$", ic_pin)
+    if m:
+        return (int(m.group(1)), ic_pin)
+    return (999, ic_pin)
+
+
+def _adc_pre_move_to_zone(
+    adc_channels: list[tuple[str, str, list[str]]],
+    ctx: PlacementContext,
+) -> int:
+    """Move ADC-related components that are outside the analog zone to its center.
+
+    Returns the number of components moved.
+    """
+    analog_zone = _find_zone_rect(ctx, "analog")
+    if analog_zone is None:
+        return 0
+
+    az_x1, az_y1, az_x2, az_y2 = analog_zone
+    center_x = (az_x1 + az_x2) / 2.0
+    center_y = (az_y1 + az_y2) / 2.0
+    moved = 0
+
+    # Collect all refs involved in ADC channels (ICs, passives, connectors)
+    all_adc_refs: set[str] = set()
+    for ic_ref, _ic_pin, passives in adc_channels:
+        all_adc_refs.add(ic_ref)
+        all_adc_refs.update(passives)
+        j_ref = _find_channel_connector_ref(passives, ctx)
+        if j_ref:
+            all_adc_refs.add(j_ref)
+
+    for ref in all_adc_refs:
+        if ref not in ctx.positions:
+            continue
+        rx, ry, rrot = ctx.positions[ref]
+        if rx < az_x1 or rx > az_x2 or ry < az_y1 or ry > az_y2:
+            ctx.positions[ref] = (center_x, center_y, rrot)
+            moved += 1
+            _log.debug(
+                "    3c2: pre-moved %s from (%.1f, %.1f) to analog zone center",
+                ref, rx, ry,
+            )
+
+    return moved
+
+
 def _adc_build_channel_connector_list(
     adc_channels: list[tuple[str, str, list[str]]],
     ctx: PlacementContext,
 ) -> list[tuple[str | None, str, str, list[str]]]:
     """Build sorted (connector_ref, ic_ref, ic_pin, passives) list.
 
-    Sorted by connector ref so J1 < J2 < J3 < J4.
+    Sorted by IC pin number (AIN0 < AIN1 < ... < AIN7) for deterministic
+    left-to-right ordering.  Falls back to connector ref if pin numbers
+    are identical.
     """
     channel_with_connectors: list[tuple[str | None, str, str, list[str]]] = [
         (_find_channel_connector_ref(passives, ctx), ic_ref, ic_pin, passives)
         for ic_ref, ic_pin, passives in adc_channels
     ]
-    channel_with_connectors.sort(key=lambda t: (t[0] or "Z999",))
+    channel_with_connectors.sort(
+        key=lambda t: (_adc_pin_sort_key(t[2]), t[0] or "Z999"),
+    )
     return channel_with_connectors
 
 
@@ -2780,8 +2839,25 @@ def _adc_place_passive_strips(
     bounds: tuple[float, float, float, float],
     ctx: PlacementContext,
 ) -> None:
-    """Place each channel's passive components in a horizontal strip below its connector."""
-    strip_dy = _ADC_STRIP_DY_MM * sy
+    """Place each channel's passives in a vertical strip below its connector.
+
+    Vertical order (top to bottom): R_top, R_bot, D_tvs, C_filt.
+    Each passive is spaced *_ADC_VERTICAL_STRIP_DY* mm apart vertically,
+    centered on the connector's X position.
+    """
+    # Vertical spacing between passives within a strip (mm, before scaling)
+    vertical_dy = 2.5 * sy
+    # Vertical offset from connector to first passive
+    strip_start_dy = _ADC_STRIP_DY_MM * sy
+    # Vertical role order: signal flows from connector down through divider
+    vertical_role_order: list[str] = ["R_top", "R_bot", "D_tvs", "C_filt"]
+    vertical_role_rot: dict[str, float] = {
+        "R_top": 90.0,
+        "R_bot": 90.0,
+        "D_tvs": 0.0,
+        "C_filt": 90.0,
+    }
+
     for ch_idx, (j_ref, _ic_ref, _ic_pin, passives) in enumerate(
         channel_with_connectors,
     ):
@@ -2790,20 +2866,28 @@ def _adc_place_passive_strips(
         jx, jy, _jrot = ctx.positions[j_ref]
         r_refs = sorted(r for r in passives if r.startswith("R"))
 
+        # Build role -> ref mapping for this channel
+        role_to_ref: dict[str, str] = {}
         for ref in passives:
             if ref not in ctx.positions or ref in ctx.fixed_refs:
                 continue
             role = _adc_assign_passive_role(ref, r_refs)
-            if role is None or role not in _ADC_STRIP_OFFSETS:
+            if role is not None:
+                role_to_ref[role] = ref
+
+        # Place in vertical order below connector
+        for slot_idx, role in enumerate(vertical_role_order):
+            ref = role_to_ref.get(role)
+            if ref is None:
                 continue
-            avg_dx, slope_dx, rot = _ADC_STRIP_OFFSETS[role]
-            dx = (avg_dx + slope_dx * ch_idx) * sx
-            new_x, new_y = _clamp_to_bounds(jx + dx, jy + strip_dy, bounds)
-            ctx.positions[ref] = (new_x, new_y, rot)
+            rot = vertical_role_rot.get(role, 0.0)
+            new_y = jy + strip_start_dy + slot_idx * vertical_dy
+            new_x, new_y_clamped = _clamp_to_bounds(jx, new_y, bounds)
+            ctx.positions[ref] = (new_x, new_y_clamped, rot)
             ctx.adc_channel_refs.add(ref)
             ctx.fixed_refs.add(ref)
 
-        _log.info("    3c2: ch%d passives placed as strip below %s", ch_idx, j_ref)
+        _log.info("    3c2: ch%d passives placed as vertical strip below %s", ch_idx, j_ref)
 
 
 def _adc_place_ics_and_decoupling(
@@ -2900,28 +2984,38 @@ def _adc_build_occupied_x_ranges(
 
 
 def _phase_adc_channels(ctx: PlacementContext) -> None:
-    """3c2: ADC channel formation — connector-first horizontal strip layout.
+    """3c2: ADC channel formation — vertical strip layout within analog zone.
 
     Layout pattern learned from human-routed reference board:
 
-    1. Place ADC channel connectors at the top edge of the analog zone,
+    1. Pre-move any ADC-related components outside the analog zone to the
+       zone center so strip layout calculations use valid positions.
+
+    2. Sort channels by IC pin number (AIN0 < AIN1 < ... < AIN7) for
+       deterministic left-to-right ordering.
+
+    3. Place ADC channel connectors at the top edge of the analog zone,
        evenly spaced left-to-right, rotation=0 (wire entry faces outward/top).
 
-    2. For each channel, place passives in a horizontal strip ~8.3mm below
-       the connector. Left-to-right order: C_filt, D_tvs, R_bot, R_top.
-       Component dx offsets interpolate slightly per channel index.
+    4. For each channel, place passives in a vertical strip below the
+       connector: C_filt, D_tvs, R_bot, R_top spaced vertically.
 
-    3. Place ADC IC(s) below the channel strips, centered horizontally.
+    5. Place ADC IC(s) below the channel strips, centered horizontally.
 
-    4. Place I2C pull-up resistors near the ADC IC.
+    6. Place I2C pull-up resistors near the ADC IC.
     """
-    _log.info("  3c2: ADC channel formation (connector-first strips)")
+    _log.info("  3c2: ADC channel formation (vertical strips)")
 
     adc_channels = _detect_adc_channels(ctx)
     if not adc_channels:
         _log.info("    3c2: no ADC channels detected")
         _adc_init_ctx_defaults(ctx)
         return
+
+    # Pre-move scattered components into the analog zone before layout
+    moved_count = _adc_pre_move_to_zone(adc_channels, ctx)
+    if moved_count:
+        _log.info("    3c2: pre-moved %d components into analog zone", moved_count)
 
     ic_channels = _adc_group_by_ic(adc_channels, ctx)
     channel_with_connectors = _adc_build_channel_connector_list(adc_channels, ctx)
