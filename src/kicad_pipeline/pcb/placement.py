@@ -919,14 +919,14 @@ def layout_pcb(
 _GROUP_GAP_MM: float = 20.0
 _GROUP_START_OFFSET_MM: float = 25.0
 _GROUP_ROW_MAX_WIDTH_MM: float = 300.0
-_GROUP_PACKING_FACTOR: float = 2.5
-_GROUP_MARGIN_MM: float = 2.0
+_GROUP_PACKING_FACTOR: float = 1.8  # tighter packing (was 2.5)
+_GROUP_MARGIN_MM: float = 1.5  # tighter margin (was 2.0)
 
 
 _CLUSTER_GAP_MM: float = 1.5
 """Horizontal gap between components within a subcircuit cluster."""
 
-_CLUSTER_ROW_GAP_MM: float = 4.0
+_CLUSTER_ROW_GAP_MM: float = 2.5
 """Vertical gap between subcircuit cluster rows within a group."""
 
 # Anchor priority by ref prefix — lower number = higher priority anchor
@@ -1169,6 +1169,7 @@ def _place_primary_anchors(
     primary_anchors: list[str],
     footprint_sizes: dict[str, tuple[float, float]],
     is_relay_group: bool,
+    target_width: float = 0.0,
 ) -> tuple[dict[str, tuple[float, float, float]], float, float]:
     """Place primary anchors in rows, wrapping when row exceeds threshold.
 
@@ -1176,7 +1177,13 @@ def _place_primary_anchors(
         (layout, cursor_x, max_anchor_h) — layout dict and cursor state.
     """
     layout: dict[str, tuple[float, float, float]] = {}
-    max_row_width = 999.0 if is_relay_group else 120.0
+    if target_width > 10.0:
+        # Use zone-aware width: leave margin for passives on each side
+        max_row_width = target_width - 2 * _GROUP_MARGIN_MM
+    elif is_relay_group:
+        max_row_width = 999.0
+    else:
+        max_row_width = 60.0  # tighter default (was 120)
     cursor_x = _GROUP_MARGIN_MM
     anchor_y = _GROUP_MARGIN_MM
     row_h = 0.0
@@ -1573,6 +1580,7 @@ def _layout_group(
     all_constraints: tuple[object, ...],
     footprint_sizes: dict[str, tuple[float, float]],
     requirements: ProjectRequirements,
+    target_width: float = 0.0,
 ) -> dict[str, tuple[float, float, float]]:
     """Lay out a feature group using pin-aware spatial placement.
 
@@ -1625,6 +1633,7 @@ def _layout_group(
 
     layout, cursor_x, _max_anchor_h = _place_primary_anchors(
         primary_anchors, footprint_sizes, is_relay_group,
+        target_width=target_width,
     )
 
     _place_secondary_anchors(
@@ -1661,17 +1670,29 @@ def _compute_group_layouts(
     full_constraints: object,
     footprint_sizes: dict[str, tuple[float, float]],
     requirements: ProjectRequirements,
+    board_width: float = 160.0,
 ) -> tuple[dict[str, dict[str, tuple[float, float, float]]], dict[str, tuple[float, float]]]:
     """Build subcircuit-aware internal layouts and bounding boxes per group."""
     group_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
     group_dimensions: dict[str, tuple[float, float]] = {}
 
+    # Compute target width per group: share board width among groups
+    # with weight proportional to component count
+    total_comps = sum(len(refs) for refs in groups.values()) or 1
+    group_target_widths: dict[str, float] = {}
+    for gname, grefs in groups.items():
+        frac = len(grefs) / total_comps
+        # Each group gets proportional share, min 30mm
+        group_target_widths[gname] = max(30.0, board_width * frac)
+
     for group_name, group_refs in groups.items():
         if not group_refs:
             continue
 
+        tw = group_target_widths.get(group_name, 60.0)
         layout = _layout_group(
             group_refs, full_constraints, footprint_sizes, requirements,
+            target_width=tw,
         )
         group_layouts[group_name] = layout
 
@@ -1728,6 +1749,7 @@ def place_groups_off_board(
     board_height_mm: float,
     footprint_sizes: dict[str, tuple[float, float]],
     fixed_positions: dict[str, tuple[float, float, float]] | None = None,
+    board_width_mm: float = 160.0,
 ) -> LayoutResult:
     """Place component groups off-board with subcircuit-aware internal layout.
 
@@ -1791,6 +1813,7 @@ def place_groups_off_board(
     # 5. For each group, use subcircuit-aware layout
     group_layouts, group_dimensions = _compute_group_layouts(
         groups, full_constraints, footprint_sizes, requirements,
+        board_width=board_width_mm,
     )
 
     # 6. Arrange groups below the real board

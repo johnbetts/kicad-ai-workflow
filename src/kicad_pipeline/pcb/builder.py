@@ -783,6 +783,7 @@ def _run_placement(
             board_height_mm=ctx.board_height_mm,
             footprint_sizes=ctx.fp_sizes,
             fixed_positions=ctx.fixed_positions,
+            board_width_mm=ctx.board_width_mm,
         )
     else:
         layout_result = layout_pcb(
