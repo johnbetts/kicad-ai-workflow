@@ -1215,13 +1215,9 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # Apply post-placement corrections for known layout violations
-    print("  Applying post-placement corrections...")
-    optimized_pcb = _apply_ethernet_post_placement(optimized_pcb)
-
-    # Re-run review after corrections
-    from kicad_pipeline.optimization.review_agent import review_placement
-    review = review_placement(optimized_pcb, requirements)
+    # NOTE: Post-placement overrides removed — the framework optimizer handles
+    # all placement. Training scripts must NOT override the optimizer
+    # (see feedback: "post-placement scripts are framework bugs").
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
@@ -1260,7 +1256,7 @@ def main() -> None:
 
     # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_ethernet.kicad_pcb"
-    write_and_compare_pcb(optimized_pcb, pcb_path)
+    write_and_compare_pcb(optimized_pcb, pcb_path, requirements=requirements)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_ethernet", output_dir)

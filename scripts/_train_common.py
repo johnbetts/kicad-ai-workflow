@@ -56,6 +56,7 @@ from kicad_pipeline.optimization.placement_optimizer import optimize_placement_e
 from kicad_pipeline.optimization.scoring import compute_fast_placement_score  # noqa: E402
 from kicad_pipeline.pcb.builder import build_pcb, write_pcb  # noqa: E402
 from kicad_pipeline.project_file import write_project_file  # noqa: E402
+from kicad_pipeline.schematic.builder import build_schematic, write_schematic  # noqa: E402
 
 __all__ = [
     "DRIFT_WARN_MM",
@@ -71,12 +72,14 @@ __all__ = [
     "ProjectRequirements",
     "build_group_map",
     "build_pcb",
+    "build_schematic",
     "compute_fast_placement_score",
     "optimize_placement_ee",
     "print_component_positions",
     "write_and_compare_pcb",
     "write_pcb",
     "write_project_file",
+    "write_schematic",
 ]
 
 # ---------------------------------------------------------------------------
@@ -113,13 +116,16 @@ def write_and_compare_pcb(
     pcb: PCBDesign,
     pcb_path: Path,
     drift_warn_mm: float = DRIFT_WARN_MM,
+    requirements: ProjectRequirements | None = None,
 ) -> None:
-    """Write a KiCad PCB and compare positions against the most recent backup.
+    """Write a KiCad PCB + schematic and compare positions against backup.
 
     Procedure:
     1. Back up the existing file (if any) to ``training_reference_boards/``.
     2. Write *pcb* to *pcb_path*.
-    3. If a previous backup exists, compare component positions and report
+    3. Build and write schematic from *requirements* (same directory).
+    4. Write KiCad project file (.kicad_pro).
+    5. If a previous backup exists, compare component positions and report
        drift.  Components whose ref starts with ``"H"`` (mounting holes)
        are skipped.
 
@@ -128,6 +134,8 @@ def write_and_compare_pcb(
         pcb_path: Target ``.kicad_pcb`` file path.
         drift_warn_mm: Distance threshold above which a ``***`` marker is
             printed for a component (default :data:`DRIFT_WARN_MM`).
+        requirements: Project requirements for schematic generation.
+            When ``None``, schematic generation is skipped.
     """
     stem = pcb_path.stem  # e.g. "train_ethernet"
     ref_dir = pcb_path.parent / "training_reference_boards"
@@ -142,6 +150,22 @@ def write_and_compare_pcb(
     print(f"Writing KiCad PCB to {pcb_path} ...")
     write_pcb(pcb, pcb_path, fill_zones=False)
     print(f"  KiCad PCB: {pcb_path}")
+
+    # Generate schematic + project file so KiCad can open the full project
+    if requirements is not None:
+        sch_path = pcb_path.with_suffix(".kicad_sch")
+        pro_path = pcb_path.with_suffix(".kicad_pro")
+        try:
+            schematic = build_schematic(requirements, project_name=stem)
+            write_schematic(schematic, sch_path, project_name=stem)
+            print(f"  Schematic: {sch_path}")
+        except Exception as exc:
+            print(f"  WARNING: schematic generation failed: {exc}")
+        try:
+            write_project_file(stem, pcb_path.parent)
+            print(f"  Project:   {pcb_path.with_suffix('.kicad_pro')}")
+        except Exception as exc:
+            print(f"  WARNING: project file generation failed: {exc}")
 
     ref_files = sorted(ref_dir.glob(f"{stem}*.kicad_pcb"))
     if ref_files:

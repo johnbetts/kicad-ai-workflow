@@ -947,7 +947,7 @@ def main() -> None:
 
     # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_mcu_core.kicad_pcb"
-    write_and_compare_pcb(optimized_pcb, pcb_path)
+    write_and_compare_pcb(optimized_pcb, pcb_path, requirements=requirements)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_mcu_core", output_dir)

@@ -628,9 +628,8 @@ def _build_requirements() -> ProjectRequirements:
         features=(power_feature,),
         components=components,
         nets=nets,
-        mechanical=MechanicalConstraints(
-            board_width_mm=_BOARD_WIDTH_MM, board_height_mm=_BOARD_HEIGHT_MM,
-        ),
+        # Board size auto-computed from component area by build_pcb().
+        # Do NOT hardcode dimensions — let the framework right-size the board.
     )
 
 
@@ -957,7 +956,7 @@ def main() -> None:
     requirements = _build_requirements()
     print(f"Components: {len(requirements.components)}")
     print(f"Nets:       {len(requirements.nets)}")
-    print("Board:      60 x 40 mm")
+    print("Board:      auto-sized (no hardcoded dimensions)")
     print()
 
     # 1b. Save requirements.json for review agents and sync checking
@@ -974,8 +973,10 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # POST-PLACEMENT CORRECTIONS — re-enabled with collision-safe constants.
-    optimized_pcb = _apply_power_post_placement(optimized_pcb)
+    # NOTE: Post-placement overrides removed — the framework optimizer handles
+    # all placement including connector edge enforcement, power loop compactness,
+    # and decoupling proximity. Training scripts must NOT override the optimizer
+    # (see feedback: "post-placement scripts are framework bugs").
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
@@ -1014,7 +1015,7 @@ def main() -> None:
 
     # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_power.kicad_pcb"
-    write_and_compare_pcb(optimized_pcb, pcb_path)
+    write_and_compare_pcb(optimized_pcb, pcb_path, requirements=requirements)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_power", output_dir)

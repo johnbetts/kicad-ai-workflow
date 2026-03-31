@@ -1126,10 +1126,9 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # POST-PLACEMENT CORRECTIONS — re-enabled to fix remaining violations
-    # that the optimizer alone doesn't resolve (connector edge proximity,
-    # R divider alignment, D/C alignment, decoupling distance, J5/R9/R10).
-    optimized_pcb = _apply_analog_post_placement(optimized_pcb)
+    # NOTE: Post-placement overrides removed — the framework optimizer handles
+    # all placement. Training scripts must NOT override the optimizer
+    # (see feedback: "post-placement scripts are framework bugs").
 
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
@@ -1168,7 +1167,7 @@ def main() -> None:
 
     # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_analog_input.kicad_pcb"
-    write_and_compare_pcb(optimized_pcb, pcb_path)
+    write_and_compare_pcb(optimized_pcb, pcb_path, requirements=requirements)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_analog_input", output_dir)

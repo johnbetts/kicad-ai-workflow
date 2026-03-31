@@ -685,30 +685,9 @@ def main() -> None:
     print("Running EE placement optimizer...")
     optimized_pcb, review = optimize_placement_ee(requirements, pcb)
 
-    # ---------------------------------------------------------------
-    # POST-PLACEMENT CORRECTIONS
-    # Apply pattern-based rules learned from human reference layout.
-    #
-    # Pattern 1: LED indicators (D5-D8) and their resistors (R5-R8)
-    #   belong in the LEFT column of each relay channel, below Q.
-    #   Relative to K[ch] anchor:
-    #     D_flyback: dx=-4.3, dy=+11.5, rot=0   (above Q)
-    #     Q:         dx=-4.3, dy=+14.1, rot=180  (transistor)
-    #     R_LED:     dx=-4.3, dy=+16.8, rot=0    (LED resistor, below Q)
-    #     D_LED:     dx=-4.3, dy=+19.1, rot=180  (LED, below R_LED)
-    #   The optimizer already places D1-D4 and Q1-Q4 correctly but
-    #   scatters D5-D8 and R5-R8 to wrong channels.
-    #
-    # Pattern 2: Power isolation group (L1, L2, C1, C2) clear of H4 keepout
-    #   (extends to x≈5.1mm) and CH1 driver column (left edge ≈5.85mm).
-    #   L1/L2 rot=90 in a row at y=52; C1 above at y=47.5; C2 beside L2 at y=52.
-    #     L1: x~10, y~52, rot=90
-    #     L2: x~13, y~52, rot=90
-    #     C1: x~15.5, y~47.5, rot=180  [upper]
-    #     C2: x~16.5, y~52, rot=0
-    # ---------------------------------------------------------------
-
-    optimized_pcb = _apply_relay_post_placement(optimized_pcb)
+    # NOTE: Post-placement overrides removed — the framework optimizer handles
+    # all placement. Training scripts must NOT override the optimizer
+    # (see feedback: "post-placement scripts are framework bugs").
     print(f"  Review grade: {review.grade}")
     print(f"  Violations:   {len(review.violations)}")
     if review.violations:
@@ -751,7 +730,7 @@ def main() -> None:
 
     # 6. Write KiCad PCB file and compare against reference
     pcb_path = output_dir / "train_relay.kicad_pcb"
-    write_and_compare_pcb(optimized_pcb, pcb_path)
+    write_and_compare_pcb(optimized_pcb, pcb_path, requirements=requirements)
 
     # 7. Write KiCad project file
     pro_path = write_project_file("train_relay", output_dir)
