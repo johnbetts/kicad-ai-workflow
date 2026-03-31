@@ -1180,7 +1180,7 @@ def _place_relay_driver_columns(
 
     # Size-aware cursor placement for driver column (D then Q)
     # Gap between components must account for courtyard extents
-    gap = 1.5  # mm clearance between component edges
+    gap = 2.5  # mm clearance — SOD-323 + SOT-23 courtyards need >1.5mm
 
     # Anchor D at coil pin Y when available for minimal flyback loop area.
     # Place outside the relay body on the coil-pin side to avoid courtyard
@@ -1483,6 +1483,54 @@ def _post_apply_pad_extent_clamp(
     if clamped:
         final_pcb = replace(final_pcb, footprints=tuple(new_fps))
         _log.info("Post-apply board-edge clamp: %d components", clamped)
+
+    # Post-clamp collision resolution: clamping can push components together
+    from kicad_pipeline.validation.collisions import check_collisions
+    violations = check_collisions(final_pcb, min_gap_mm=0.15)
+    if violations:
+        _log.info(
+            "Post-clamp collisions detected: %d — nudging apart",
+            len(violations),
+        )
+        new_fps2 = list(final_pcb.footprints)
+        fp_by_ref = {fp.ref: i for i, fp in enumerate(new_fps2)}
+        for v in violations:
+            # Push the smaller component away from the larger one
+            ia = fp_by_ref.get(v.ref_a)
+            ib = fp_by_ref.get(v.ref_b)
+            if ia is None or ib is None:
+                continue
+            fa, fb = new_fps2[ia], new_fps2[ib]
+            area_a = sum(p.size_x * p.size_y for p in fa.pads)
+            area_b = sum(p.size_x * p.size_y for p in fb.pads)
+            # Move the smaller component
+            if area_a <= area_b:
+                mover_i, anchor = ia, fb
+            else:
+                mover_i, anchor = ib, fa
+            mover = new_fps2[mover_i]
+            dx = mover.position.x - anchor.position.x
+            dy = mover.position.y - anchor.position.y
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist < 0.01:
+                dy = 1.0
+                dist = 1.0
+            # Push apart by the overlap amount + 0.5mm margin
+            nudge = abs(v.gap_mm) + 0.5
+            nx = mover.position.x + dx / dist * nudge
+            ny = mover.position.y + dy / dist * nudge
+            # Keep within bounds
+            nx = max(min_x + edge_m, min(max_x - edge_m, nx))
+            ny = max(min_y + edge_m, min(max_y - edge_m, ny))
+            new_fps2[mover_i] = replace(
+                mover, position=Point(x=nx, y=ny),
+            )
+            _log.info(
+                "  Nudged %s away from %s by %.1fmm",
+                mover.ref, anchor.ref, nudge,
+            )
+        final_pcb = replace(final_pcb, footprints=tuple(new_fps2))
+
     return final_pcb
 
 

@@ -65,12 +65,16 @@ class EvalRunner:
 
     def _build_and_score(
         self, case: EvalCase, render_dir: Path,
-    ) -> tuple[object | None, object | None, list[object], object | None, str | None]:
+    ) -> tuple[
+        object | None, object | None, list[object],
+        object | None, str | None, object | None,
+    ]:
         pcb: object | None = None
         score: object | None = None
         build_error: str | None = None
         integrity_issues: list[object] = []
         review = None
+        requirements = None
         try:
             requirements = case.build_fn()
             from kicad_pipeline.pcb.builder import build_pcb
@@ -93,7 +97,7 @@ class EvalRunner:
         except Exception as exc:
             build_error = f"{type(exc).__name__}: {exc}"
             _log.error("Eval %s build failed: %s", case.case_id, build_error)
-        return pcb, score, integrity_issues, review, build_error
+        return pcb, score, integrity_issues, review, build_error, requirements
 
     def _extract_score_fields(
         self, score: object | None,
@@ -124,8 +128,8 @@ class EvalRunner:
         timestamp = datetime.now(timezone.utc).isoformat()
 
         render_dir = self._archive_render_dir(case)
-        pcb, score, integrity_issues, review, build_error = self._build_and_score(
-            case, render_dir,
+        pcb, score, integrity_issues, review, build_error, requirements = (
+            self._build_and_score(case, render_dir)
         )
 
         if pcb is not None:
@@ -135,6 +139,7 @@ class EvalRunner:
 
         gate_results = self._evaluate_hard_gates(
             case, pcb, integrity_issues, build_error, review,
+            requirements=requirements,
         )
 
         overall, grade, breakdown = self._extract_score_fields(score)
@@ -206,8 +211,11 @@ class EvalRunner:
         integrity_issues: list[object],
         build_error: str | None,
         review: object | None = None,
+        requirements: object | None = None,
     ) -> tuple[GateResult, ...]:
         """Check each hard gate against the build artifacts."""
+        from kicad_pipeline.evals.dfm_gates import ALL_DFM_GATES, evaluate_dfm_gate
+
         results: list[GateResult] = []
 
         for gate in case.hard_gates:
@@ -266,6 +274,22 @@ class EvalRunner:
                     else f"OK ({count} renders)"
                 )
                 results.append(GateResult(gate.name, passed, detail))
+
+            elif gate.name in ALL_DFM_GATES:
+                # DFM gates require both PCB and requirements
+                if pcb is None or requirements is None:
+                    results.append(GateResult(
+                        gate.name, False, "no PCB or requirements available",
+                    ))
+                else:
+                    try:
+                        result = evaluate_dfm_gate(gate.name, pcb, requirements)
+                        results.append(result)
+                    except Exception as exc:
+                        _log.error("DFM gate %s failed: %s", gate.name, exc)
+                        results.append(GateResult(
+                            gate.name, False, f"gate error: {exc}",
+                        ))
 
             else:
                 results.append(GateResult(gate.name, False, f"unknown gate: {gate.name}"))

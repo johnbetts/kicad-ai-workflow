@@ -75,11 +75,25 @@ def _ethernet_requirements() -> ProjectRequirements:
 # ---------------------------------------------------------------------------
 
 STANDARD_HARD_GATES: tuple[HardGate, ...] = (
+    # Original gates
     HardGate("build_succeeds", "build_pcb + optimize_placement_ee complete without exception"),
     HardGate("zero_critical_integrity", "No critical integrity issues"),
     HardGate("all_components_placed", "Every requirement component exists in PCB"),
     HardGate("all_on_board", "No component center outside board outline + 2mm margin"),
     HardGate("renders_generated", "2D + 3D renders (4 views) generated via kicad-image-gen"),
+    # DFM gates — defect taxonomy #1,3,4,6,7,8,9,10,11
+    HardGate("footprint_registry_match", "Pad count/type consistent per footprint type (#1)"),
+    HardGate("no_collisions", "No courtyard overlaps between components (#3)"),
+    HardGate("all_pads_within_board", "All component pads within board outline (#3)"),
+    HardGate("mounting_hole_clearance", "No components over mounting holes (#3)"),
+    HardGate("decoupling_proximity", "Decoupling caps within threshold of ICs (#6)"),
+    HardGate("subcircuit_spread", "Subcircuit components within spread limits (#6)"),
+    HardGate("zone_membership", "Components placed in assigned functional zones (#7)"),
+    HardGate("package_match", "PCB footprint matches requirements package spec (#8)"),
+    HardGate("subcircuit_completeness", "ICs have required companion components (#9)"),
+    HardGate("schematic_pcb_sync", "All requirements components present in PCB (#10)"),
+    HardGate("component_isolation_zones", "RF modules have antenna keepout zones (#11)"),
+    HardGate("board_sizing", "Board size appropriate for component count (#4)"),
 )
 
 

@@ -27,6 +27,7 @@ Every CORE pipeline fix MUST have an entry here and a corresponding test in
 | KI-019 | Orphan isolation zone at fixed board corner | `_make_antenna_keepout()` falls back to hardcoded top-right corner (board_width-15, 0) when ESP32 position not in `fixed_positions` — creates orphan zone regardless of actual placement | Post-placement keepout creation; regression test `TestKI019AntennaKeepoutPosition` | 2026-03-15 |
 | KI-020 | Mounting hole keepouts without NPTH holes | `_make_mounting_hole_keepouts()` creates keepout zones but `make_mounting_hole()` footprints only added when `template_mounting_positions` is set; `requirements.mechanical.mounting_hole_positions` path skips footprint creation | Unified footprint creation for all mounting position sources; regression test `TestKI020MountingHoleFootprints` | 2026-03-15 |
 | KI-021 | Connector mating face not flush with board edge | `_orient_connectors()` uses 3mm edge margin keeping ALL pads inside board; USB-C, RJ45, etc. need mating face flush/protruding past edge for cable access | Connector type detection via `edge_mount_keywords`; 0mm margin for edge-mount types, clamping exemption on mating side | 2026-03-15 |
+| KI-022 | JLCPCB footprint fallback selects wrong package size | When JLCPCB footprint lookup rejects a part (e.g. pad size mismatch), parametric fallback may select a different package size (R_0603→R_0402). DFM gate `package_match` detects this. | **OPEN — fix footprint fallback to respect requirements package spec** | Not yet fixed |
 
 ## Adding a New Entry
 
