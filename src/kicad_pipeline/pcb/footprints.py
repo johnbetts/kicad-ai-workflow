@@ -1669,7 +1669,16 @@ def make_relay_spdt(
         _val_text(value, cy + body_h / 2.0 + _TEXT_OFFSET_LARGE, LAYER_F_FAB),
     )
     lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
+    # STEP model has its origin at pin 1 (in the original KiCad footprint).
+    # After centering pads, pin 1 moved to (_sx, _sy). Place model there
+    # so its pin-1 origin aligns with the actual pin 1 pad.
     model = _model_for_package(lib_id)
+    if model is not None:
+        model = Footprint3DModel(
+            path=model.path, scale=model.scale,
+            offset=(_sx, _sy, 0.0),
+            rotate=model.rotate,
+        )
     models = (model,) if model is not None else ()
     return Footprint(
         lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
@@ -3892,6 +3901,36 @@ def _fp_tact_switch(
     return make_tact_switch(ref, value, size_mm=size_mm)
 
 
+def _fp_buzzer(
+    ref: str, value: str, fid: str, _upper: str, _layer: str,
+) -> Footprint:
+    """Build THT buzzer footprint (2 pins, ~6.5mm pitch)."""
+    dims = _parse_dimensions(fid)
+    diameter = dims[0] if dims else 12.0
+    pitch = 6.5  # standard buzzer pin pitch
+    drill_mm = 0.8
+    pad_diam = 1.5
+    pads = (
+        _thru_pad("1", -pitch / 2.0, 0.0, pad_diam, drill_mm, shape="rect"),
+        _thru_pad("2", pitch / 2.0, 0.0, pad_diam, drill_mm),
+    )
+    body_w = diameter
+    body_h = diameter
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    lib_id = f"Buzzer_Beeper:Buzzer_{diameter:.0f}mm"
+    model = _model_for_package(lib_id)
+    models = (model,) if model is not None else ()
+    texts = (
+        _ref_text(ref, -(body_h / 2.0 + _TEXT_MARGIN_MM), LAYER_F_SILKSCREEN),
+        _val_text(value, body_h / 2.0 + _TEXT_MARGIN_MM, LAYER_F_FAB),
+    )
+    return Footprint(
+        lib_id=lib_id, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=pads, graphics=graphics, texts=texts,
+        attr="through_hole", models=models,
+    )
+
+
 def _fp_crystal(
     ref: str, value: str, fid: str, _upper: str, _layer: str,
 ) -> Footprint:
@@ -3938,7 +3977,10 @@ _SWITCH_MISC_DISPATCH: list[
     (lambda _u, _f: _u.startswith(("SW_DIP", "DIP_SWITCH")), _fp_dip_switch),
     (lambda _u, _f: _u.startswith("RELAY"), _fp_relay),
     (lambda _u, _f: "ESP32" in _u or "WROOM" in _u, _fp_esp32),
-    (lambda _u, _f: _u.startswith("SW_") and "SMD" in _u, _fp_smd_tact_switch),
+    (lambda _u, _f: _u.startswith("BUZZER"), _fp_buzzer),
+    # SMD switches: explicit "SMD" in name, or small size (≤6mm) without "THT"
+    (lambda _u, _f: _u.startswith("SW_") and ("SMD" in _u or "SPST" in _u), _fp_smd_tact_switch),
+    (lambda _u, _f: _u.startswith("SW_PUSH") and "THT" not in _u, _fp_smd_tact_switch),
     (lambda _u, _f: _u.startswith("SW_"), _fp_tact_switch),
     (lambda _u, _f: _u.startswith("CRYSTAL"), _fp_crystal),
     (lambda _u, _f: _u.startswith(("TP_", "TESTPOINT")), _fp_test_point),

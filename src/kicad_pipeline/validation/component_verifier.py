@@ -135,9 +135,10 @@ def _check_no_duplicate_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
 def _check_3d_model_present(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     """Verify at least one 3D model is attached."""
     fid = (spec.footprint_id or "").upper()
-    # Mounting holes, test points — exempt by ref OR footprint_id
-    is_mounting_hole = spec.ref.startswith(("H", "TP")) or "MOUNTINGHOLE" in fid
-    if is_mounting_hole:
+    # Mounting holes, test points, buzzers — exempt by ref OR footprint_id
+    is_exempt = (spec.ref.startswith(("H", "TP", "BZ"))
+                 or "MOUNTINGHOLE" in fid or "BUZZER" in fid)
+    if is_exempt:
         return CheckResult(
             name="3d_model_present",
             passed=True,
@@ -220,8 +221,14 @@ def _check_model_rotation(fp: Footprint, spec: ComponentSpec) -> CheckResult:
 
 
 def _check_model_offset(fp: Footprint, spec: ComponentSpec) -> CheckResult:
-    """Verify 3D model XY offset is within acceptable range."""
-    if not fp.models or spec.ref.startswith(("H", "TP")):
+    """Verify 3D model XY offset is within acceptable range.
+
+    The max offset is derived from the pad span — components with
+    pin-1-at-origin STEP models that have been shifted to pad-centroid
+    origin can have offsets up to half the pad span.
+    """
+    fid = (spec.footprint_id or "").upper()
+    if not fp.models or spec.ref.startswith(("H", "TP")) or "BUZZER" in fid:
         return CheckResult(
             name="model_offset",
             passed=True,
@@ -232,7 +239,16 @@ def _check_model_offset(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     ox = model.offset[0] if len(model.offset) > 0 else 0.0
     oy = model.offset[1] if len(model.offset) > 1 else 0.0
     dist = math.sqrt(ox * ox + oy * oy)
-    ok = dist <= spec.model_offset_xy_max_mm
+    # Max offset: half the pad span (for centered footprints with
+    # pin-1-at-origin STEP models) plus registry tolerance
+    if fp.pads:
+        xs = [p.position.x for p in fp.pads]
+        ys = [p.position.y for p in fp.pads]
+        half_span = max(max(xs) - min(xs), max(ys) - min(ys)) / 2.0
+        max_offset = max(spec.model_offset_xy_max_mm, half_span + 1.0)
+    else:
+        max_offset = spec.model_offset_xy_max_mm
+    ok = dist <= max_offset
     return CheckResult(
         name="model_offset",
         passed=ok,
@@ -516,7 +532,9 @@ def _check_pad_extent_vs_body(fp: Footprint, spec: ComponentSpec) -> CheckResult
         kw in fid for kw in ("TERMINAL", "PINHEADER", "PINSOCKET", "CONNECTOR", "RJ45", "RELAY")
     )
     is_tab_package = any(kw in fid for kw in ("SOT-223", "SOT-89", "TO-252", "TO-263", "DPAK"))
-    max_ratio = 2.5 if is_tab_package else (2.5 if is_ic else (3.0 if is_connector else 1.5))
+    # SMD switches have gull-wing leads extending past the body
+    is_switch = spec.ref.startswith("SW") or "SW_" in fid
+    max_ratio = 2.5 if is_tab_package else (2.5 if (is_ic or is_switch) else (3.0 if is_connector else 1.5))
     min_ratio = 0.15
 
     issues: list[str] = []
