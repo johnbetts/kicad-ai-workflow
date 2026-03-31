@@ -190,6 +190,7 @@ def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
     max_review_passes: int = 5,
+    level3: str = "simple",
 ) -> tuple[PCBDesign, PlacementReview]:
     """3-level hierarchical placement optimizer (v5).
 
@@ -282,8 +283,16 @@ def optimize_placement_ee(
     _log.info("  Pre-protected %d subcircuit refs from collision scatter",
               _preprotect_count)
 
-    # Level 3: Intra-Group Refinement
-    _log.info("=== Level 3: Intra-Group Refinement ===")
+    # Level 3: Placement
+    if level3 == "simple":
+        # Simple 3-pass placement — replaces 25 broken phases
+        from kicad_pipeline.optimization.placement_simple import run_simple_placement
+        _log.info("=== Level 3: Simple 3-Pass Placement ===")
+        run_simple_placement(ctx)
+        ctx.best_positions = dict(ctx.positions)
+        return _phase_build_final(ctx)
+
+    _log.info("=== Level 3: Intra-Group Refinement (legacy 25-phase) ===")
     _relay_leds = _run_level3_phases(
         ctx,
         subnet_placement=_phase_subnet_placement,
