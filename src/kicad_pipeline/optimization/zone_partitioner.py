@@ -152,43 +152,88 @@ def partition_board(
         _log.info("  Zone '%s': %s (%d components)", zn, gnames,
                    zone_component_count.get(zn, 0))
 
-    # Step 2: Compute zone rects from default fractions, scaled by component count
+    # Step 2: Compute zone rects — scale default fractions by component area
     half_gap = _ZONE_GAP_MM / 2.0
 
     # When there's only one zone, give it the full board area
     single_zone = len(zone_groups) == 1
 
+    # Compute area-proportional scaling per row.
+    # The default layout has 3 rows:
+    #   Row 0: input_connectors (full width)
+    #   Row 1: power (left) + relay (right)
+    #   Row 2: analog (left) + ethernet (center) + mcu (right)
+    # Within each row, redistribute width proportionally to component count.
+    row_groups: dict[str, list[str]] = {
+        "row0": ["input_connectors"],
+        "row1": ["power", "relay"],
+        "row2": ["analog", "ethernet", "mcu"],
+    }
+
+    # Build adjusted fractions based on component counts within each row
+    adjusted_fracs: dict[str, tuple[float, float, float, float]] = {}
+    for _row_name, row_zones in row_groups.items():
+        # Only consider zones that have assigned groups
+        active = [z for z in row_zones if z in zone_groups]
+        if not active:
+            continue
+        if len(active) == 1:
+            # Single zone in row — give it the full row width
+            base = _DEFAULT_ZONE_FRACTIONS.get(active[0])
+            if base:
+                # Find row Y span from any zone in this row
+                row_ys = [
+                    _DEFAULT_ZONE_FRACTIONS[z]
+                    for z in row_zones
+                    if z in _DEFAULT_ZONE_FRACTIONS
+                ]
+                y1 = min(f[1] for f in row_ys)
+                y2 = max(f[3] for f in row_ys)
+                adjusted_fracs[active[0]] = (0.0, y1, 1.0, y2)
+            continue
+
+        # Multiple zones in row — distribute width by component count
+        counts = [zone_component_count.get(z, 1) for z in active]
+        total = sum(counts) or 1
+
+        # Get row Y span
+        row_ys = [
+            _DEFAULT_ZONE_FRACTIONS[z]
+            for z in active
+            if z in _DEFAULT_ZONE_FRACTIONS
+        ]
+        if not row_ys:
+            continue
+        y1 = min(f[1] for f in row_ys)
+        y2 = max(f[3] for f in row_ys)
+
+        # Distribute X proportionally with minimum 15% per zone
+        min_frac = 0.15
+        remaining = 1.0 - min_frac * len(active)
+        x_cursor = 0.0
+        for i, z in enumerate(active):
+            frac = min_frac + remaining * (counts[i] / total)
+            adjusted_fracs[z] = (x_cursor, y1, x_cursor + frac, y2)
+            x_cursor += frac
+
     zones: list[BoardZone] = []
     for zone_name, group_names in zone_groups.items():
         if single_zone:
-            # Single-zone boards (training boards, small designs): use full board
             fracs = (0.0, 0.0, 1.0, 1.0)
+        elif zone_name in adjusted_fracs:
+            fracs = adjusted_fracs[zone_name]
         else:
             fracs = _DEFAULT_ZONE_FRACTIONS.get(zone_name)
             if fracs is None:
-                # Unknown zone — assign a center region
                 fracs = (0.30, 0.30, 0.70, 0.70)
 
         fx1, fy1, fx2, fy2 = fracs
 
-        # Zone fractions are fixed — package-size adaptation happens via
-        # adaptive group margins (_GroupGrid) and collision resolution.
-        # Center-scaling was attempted but caused overlaps between adjacent
-        # zones (e.g., power and relay).  Component count is available for
-        # future proportional tiling but needs a non-overlapping algorithm.
-        scale = 1.0
-
-        # Apply scale (expand from center of default zone)
-        cx = (fx1 + fx2) / 2.0
-        cy = (fy1 + fy2) / 2.0
-        half_w = (fx2 - fx1) / 2.0 * scale
-        half_h = (fy2 - fy1) / 2.0 * scale
-
-        # Clamp to [0, 1] range
-        zx1 = max(0.0, cx - half_w)
-        zy1 = max(0.0, cy - half_h)
-        zx2 = min(1.0, cx + half_w)
-        zy2 = min(1.0, cy + half_h)
+        # No additional scaling needed — fractions already proportional
+        zx1 = max(0.0, fx1)
+        zy1 = max(0.0, fy1)
+        zx2 = min(1.0, fx2)
+        zy2 = min(1.0, fy2)
 
         # Convert fractions to absolute coordinates with gap inset
         abs_x1 = bx1 + zx1 * board_w + half_gap

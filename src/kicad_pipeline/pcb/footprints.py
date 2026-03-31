@@ -4081,12 +4081,16 @@ def _route_footprint(
     if fp is not None:
         return fp, _source
 
-    _log.warning(
-        "footprint_for_component: unknown footprint_id '%s' for ref %s; using 0805 fallback",
-        footprint_id,
-        ref,
+    # KI-022: Fail loudly instead of silently substituting 0805.
+    # A wrong footprint that errors is better than a wrong footprint that ships.
+    from kicad_pipeline.exceptions import KiCadPipelineError
+    msg = (
+        f"No footprint generator for '{footprint_id}' (ref {ref}). "
+        f"Add a generator or fix the footprint_id. "
+        f"Tried dispatch chains: passive/LED, connector, switch/misc, SMD IC."
     )
-    return make_smd_resistor_capacitor(ref, value, package="0805"), "parametric-fallback"
+    _log.error("footprint_for_component: %s", msg)
+    raise KiCadPipelineError(msg)
 
 
 def footprint_for_component(
