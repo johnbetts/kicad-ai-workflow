@@ -1167,10 +1167,11 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
             _mcu_peripheral_sc_refs.update(sc.refs)
 
     top_edge_order = ["J6", "J5", "J4", "J3", "J2", "J1"]
+    # Terminal blocks MUST go to top edge regardless of fixed_refs —
+    # earlier phases may have fixed them in wrong positions.
     _top_refs = [
         r for r in top_edge_order
         if r in ctx.positions
-        and r not in ctx.fixed_refs
         and r not in _mcu_peripheral_sc_refs
         and not _is_usb_connector(r, ctx.initial_pcb)
         and not _is_pin_header(r, ctx.initial_pcb)
