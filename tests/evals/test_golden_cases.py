@@ -1,6 +1,7 @@
 """Golden case eval tests — each training board must pass hard gates and soft targets."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ _ENFORCED_DFM_GATES = frozenset({
     "mounting_hole_clearance",
     "schematic_pcb_sync",
     "board_sizing",
+    "package_match",  # enforced after KI-022 fix
 })
 
 # Placement DFM gates — tracked (non-blocking) with promotion deadlines.
@@ -33,7 +35,7 @@ _TRACKED_DFM_GATES = frozenset({
     "zone_membership",  # target: enforce by 2026-04-30
     "subcircuit_completeness",  # target: enforce by 2026-04-15
     "component_isolation_zones",  # target: enforce by 2026-04-30
-    "package_match",  # blocked by KI-022 (JLCPCB fallback bug) — enforce after fix
+    # package_match — ENFORCED after KI-022 fix (moved to _ENFORCED_DFM_GATES)
 })
 
 
@@ -80,6 +82,38 @@ def test_dfm_gates_report(case: EvalCase, eval_runner: EvalRunner) -> None:
         )
     # Always passes — this is a diagnostic test
     assert True
+
+
+# Promotion deadlines — tracked gates MUST be promoted to enforced by these dates.
+# If a deadline passes and the gate is still tracked, test_tracked_gate_deadlines fails.
+_GATE_DEADLINES: dict[str, str] = {
+    "decoupling_proximity": "2026-04-15",
+    "subcircuit_spread": "2026-04-15",
+    "zone_membership": "2026-04-30",
+    "subcircuit_completeness": "2026-04-15",
+    "component_isolation_zones": "2026-04-30",
+}
+
+
+def test_tracked_gate_deadlines() -> None:
+    """Tracked gates must be promoted to enforced by their deadline date.
+
+    If a deadline has passed and the gate is still in _TRACKED_DFM_GATES,
+    either promote it or explicitly extend the deadline with justification.
+    """
+    today = date.today()
+    overdue: list[str] = []
+    for gate_name, deadline_str in _GATE_DEADLINES.items():
+        deadline = date.fromisoformat(deadline_str)
+        if today > deadline and gate_name in _TRACKED_DFM_GATES:
+            overdue.append(
+                f"{gate_name} deadline was {deadline_str}"
+            )
+    assert not overdue, (
+        "Tracked gates past promotion deadline — promote to enforced "
+        "or update deadline with justification:\n  "
+        + "\n  ".join(overdue)
+    )
 
 
 @pytest.mark.slow

@@ -38,7 +38,9 @@ from kicad_pipeline.pcb.pin_map import (
 )
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.pcb import PCBDesign
+    from collections.abc import Callable
+
+    from kicad_pipeline.models.pcb import Footprint, PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.review_agent import PlacementReview
 
@@ -1450,17 +1452,100 @@ def _phase_final_clamp(ctx: PlacementContext) -> None:
     )
 
 
+def _aabbs_overlap(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+    min_gap: float,
+) -> bool:
+    """Return True if two AABBs overlap (or are within *min_gap* mm)."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return (
+        ax0 - min_gap < bx1
+        and ax1 + min_gap > bx0
+        and ay0 - min_gap < by1
+        and ay1 + min_gap > by0
+    )
+
+
+def _find_safe_shift(
+    fp: Footprint,
+    ox: float,
+    oy: float,
+    shift_x: float,
+    shift_y: float,
+    self_idx: int,
+    aabbs: list[tuple[float, float, float, float] | None],
+    min_gap: float,
+    compute_aabb: Callable[[Footprint], tuple[float, float, float, float] | None],
+) -> tuple[float, float]:
+    """Binary-search for the largest fraction of (shift_x, shift_y) that is collision-free.
+
+    Tests fractions from 1.0 down to 0.0 in ~10 steps.  Returns the
+    largest safe (shift_x * f, shift_y * f) pair, or (0, 0) if even zero
+    shift would collide (shouldn't happen -- zero shift is the original
+    position).
+    """
+    from kicad_pipeline.models.pcb import Point
+
+    best_f = 0.0
+    # 10 binary-search iterations gives ~0.1% precision on the shift
+    lo, hi = 0.0, 1.0
+    for _ in range(10):
+        mid = (lo + hi) / 2.0
+        candidate_fp = replace(
+            fp, position=Point(x=ox + shift_x * mid, y=oy + shift_y * mid),
+        )
+        candidate_box = compute_aabb(candidate_fp)
+        if candidate_box is None:
+            lo = mid
+            best_f = mid
+            continue
+        collides = False
+        for j, other_box in enumerate(aabbs):
+            if j == self_idx or other_box is None:
+                continue
+            if _aabbs_overlap(candidate_box, other_box, min_gap):
+                collides = True
+                break
+        if collides:
+            hi = mid  # reduce shift
+        else:
+            lo = mid  # try more shift
+            best_f = mid
+
+    return shift_x * best_f, shift_y * best_f
+
+
 def _post_apply_pad_extent_clamp(
     final_pcb: PCBDesign,
     bounds: tuple[float, float, float, float],
     edge_m: float,
 ) -> PCBDesign:
-    """Clamp footprints so pad extents stay within board bounds."""
+    """Clamp footprints so pad extents stay within board bounds.
+
+    Collision-aware: before applying a clamp shift, checks whether the new
+    position would overlap another footprint's AABB.  If so, reduces the
+    shift to the largest amount that doesn't create a collision.  This
+    prevents the Q2-on-D2 class of bugs at the source rather than relying
+    on post-clamp nudging.
+    """
     from kicad_pipeline.pcb.pin_map import pad_extent_in_board_space
+    from kicad_pipeline.validation.collisions import (
+        _footprint_aabb as _compute_aabb,
+    )
 
     min_x, min_y, max_x, max_y = bounds
+    _min_clearance = 0.15  # mm — minimum gap to preserve between AABBs
+
     clamped = 0
     new_fps = list(final_pcb.footprints)
+
+    # Pre-compute AABBs for all footprints (updated as we clamp)
+    aabbs: list[tuple[float, float, float, float] | None] = [
+        _compute_aabb(fp) for fp in new_fps
+    ]
+
     for i, fp in enumerate(new_fps):
         if not fp.pads:
             continue
@@ -1476,10 +1561,44 @@ def _post_apply_pad_extent_clamp(
             shift_y = (min_y + edge_m) - py0
         elif py1 > max_y - edge_m:
             shift_y = (max_y - edge_m) - py1
-        if shift_x != 0.0 or shift_y != 0.0:
-            new_fps[i] = replace(fp, position=Point(x=ox + shift_x, y=oy + shift_y))
-            clamped += 1
-            _log.info("  Post-apply clamp %s: shifted (%.1f, %.1f)", fp.ref, shift_x, shift_y)
+
+        if shift_x == 0.0 and shift_y == 0.0:
+            continue
+
+        # --- Collision-aware shift reduction ---
+        # Build a candidate AABB at the fully-shifted position and check
+        # whether it would overlap any other footprint.
+        candidate_fp = replace(fp, position=Point(x=ox + shift_x, y=oy + shift_y))
+        candidate_box = _compute_aabb(candidate_fp)
+        if candidate_box is not None:
+            has_collision = False
+            for j, other_box in enumerate(aabbs):
+                if j == i or other_box is None:
+                    continue
+                if _aabbs_overlap(candidate_box, other_box, _min_clearance):
+                    has_collision = True
+                    break
+
+            if has_collision:
+                # Binary-search for the largest safe fraction of the shift
+                safe_shift_x, safe_shift_y = _find_safe_shift(
+                    fp, ox, oy, shift_x, shift_y,
+                    i, aabbs, _min_clearance, _compute_aabb,
+                )
+                if safe_shift_x == 0.0 and safe_shift_y == 0.0:
+                    _log.warning(
+                        "  Pad-extent clamp %s: cannot shift (%.1f, %.1f) "
+                        "without collision — skipping to avoid overlap",
+                        fp.ref, shift_x, shift_y,
+                    )
+                    continue
+                shift_x, shift_y = safe_shift_x, safe_shift_y
+
+        new_fps[i] = replace(fp, position=Point(x=ox + shift_x, y=oy + shift_y))
+        # Update the cached AABB so subsequent footprints see correct boxes
+        aabbs[i] = _compute_aabb(new_fps[i])
+        clamped += 1
+        _log.info("  Post-apply clamp %s: shifted (%.1f, %.1f)", fp.ref, shift_x, shift_y)
     if clamped:
         final_pcb = replace(final_pcb, footprints=tuple(new_fps))
         _log.info("Post-apply board-edge clamp: %d components", clamped)

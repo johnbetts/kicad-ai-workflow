@@ -3475,6 +3475,23 @@ def _try_jlcpcb_footprint(
                     ref, lcsc, max_pad, footprint_id,
                 )
                 return None
+        # KI-022: Validate package CODE match — reject JLCPCB footprint
+        # if its name contains a different package size than requested.
+        # Example: requirements say R_0603 but JLCPCB returns R0402.
+        _pkg_codes = ("0201", "0402", "0603", "0805", "1206", "1210", "2512")
+        req_pkg = next((p for p in _pkg_codes if p in _fid_upper), None)
+        if req_pkg and fp.lib_id:
+            jlc_name_upper = fp.lib_id.upper()
+            jlc_pkg = next(
+                (p for p in _pkg_codes if p in jlc_name_upper), None,
+            )
+            if jlc_pkg and jlc_pkg != req_pkg:
+                _log.warning(
+                    "JLCPCB footprint for %s (%s) is %s but %s "
+                    "expects %s; rejecting package mismatch",
+                    ref, lcsc, jlc_pkg, footprint_id, req_pkg,
+                )
+                return None
         # Reject JLCPCB SOIC/MSOP/TSSOP/SOP with wrong pad orientation.
         # EasyEDA exports sometimes rotate the entire footprint 90 degrees
         # from standard KiCad convention: pads form horizontal rows (top/bottom)
