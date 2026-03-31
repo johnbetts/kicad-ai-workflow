@@ -65,7 +65,27 @@ def main() -> int:
         default=_REPO_ROOT / "data" / "component_evidence",
         help="Directory for evidence images",
     )
+    parser.add_argument(
+        "--visual",
+        action="store_true",
+        help="Enable AI visual inspection via Claude API",
+    )
+    parser.add_argument(
+        "--promote-baseline",
+        action="store_true",
+        help="Promote passing components to golden baselines",
+    )
+    parser.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="Skip golden baseline comparison",
+    )
     args = parser.parse_args()
+
+    import os
+
+    if args.visual:
+        os.environ["VISUAL_INSPECT_ENABLED"] = "1"
 
     registry = ComponentRegistry()
     commit = _git_short_hash()
@@ -125,6 +145,23 @@ def main() -> int:
         if result.render_paths:
             for view_name, path in result.render_paths:
                 print(f"         render: {view_name} → {path}")
+
+        # Promote to golden baseline if requested and passed
+        if args.promote_baseline and result.passed:
+            from kicad_pipeline.validation.golden_baseline import (
+                promote_to_baseline,
+            )
+
+            baselines_dir = _REPO_ROOT / "data" / "component_baselines"
+            try:
+                manifest = promote_to_baseline(
+                    spec.component_id, evidence_dir, baselines_dir,
+                )
+                print(
+                    f"         baseline: promoted {len(manifest.views)} views"
+                )
+            except FileNotFoundError:
+                print("         baseline: no renders to promote")
 
     # Save updated registry
     registry.save()

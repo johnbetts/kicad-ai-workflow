@@ -780,6 +780,45 @@ def _run_persona_checks(
         # EE: are pads visible in 2D?
         _check_2d_pads_visible(render_paths, spec),
     ]
+
+    # AI visual inspection (opt-in via VISUAL_INSPECT_ENABLED env var)
+    from kicad_pipeline.validation import visual_inspector
+
+    if visual_inspector.is_enabled():
+        result = visual_inspector.inspect_component(render_paths, spec)
+        if not result.skipped:
+            for finding in result.findings:
+                checks.append(CheckResult(
+                    name=f"visual_{finding.check}",
+                    passed=finding.passed,
+                    detail=finding.detail,
+                    severity="major",
+                ))
+
+    # Golden baseline comparison (auto-runs if baseline exists)
+    import pathlib
+
+    from kicad_pipeline.validation import golden_baseline
+
+    _repo = pathlib.Path(__file__).resolve().parents[3]
+    baselines_dir = _repo / "data" / "component_baselines"
+    evidence_dir = _repo / "data" / "component_evidence" / spec.component_id
+    if baselines_dir.exists() and evidence_dir.exists():
+        bl_result = golden_baseline.compare_to_baseline(
+            spec.component_id, evidence_dir, baselines_dir,
+        )
+        if bl_result.has_baseline:
+            for view, matched in bl_result.matches:
+                checks.append(CheckResult(
+                    name=f"baseline_{view}",
+                    passed=matched,
+                    detail=(
+                        f"{view} matches golden baseline"
+                        if matched else f"{view} REGRESSION: differs from baseline"
+                    ),
+                    severity="major",
+                ))
+
     return tuple(checks)
 
 
