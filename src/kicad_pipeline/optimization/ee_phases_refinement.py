@@ -654,8 +654,13 @@ def _enforce_tht_connectors_to_edge(ctx: PlacementContext) -> None:
     was_fixed = tht_connector_refs & ctx.fixed_refs
     ctx.fixed_refs -= was_fixed
 
+    # Skip connectors already placed at top edge by phase 3f2 — don't override
+    top_placed = getattr(ctx, "top_edge_connector_refs", set())
+
     for ref in sorted(tht_connector_refs):
         if ref not in ctx.positions or ref in ctx.fixed_refs:
+            continue
+        if ref in top_placed:
             continue
 
         cx, cy, rot = ctx.positions[ref]
