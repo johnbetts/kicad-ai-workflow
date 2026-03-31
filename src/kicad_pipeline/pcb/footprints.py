@@ -297,7 +297,7 @@ def _model_esp32(
 
     The KiCad standard ESP32-S3-WROOM-1.step model has its internal origin
     aligned with the KiCad standard library footprint origin, which is
-    ~3.63mm north (−Y in module coords) of the pad-field centroid.
+    ~3.63mm north (-Y in module coords) of the pad-field centroid.
     easyeda2kicad footprints place their origin at the pad centroid, so we
     apply a +3.63mm Y offset to re-align the 3D body with the pads.
     """
@@ -527,7 +527,7 @@ _REGISTRY_CACHE: object = None  # lazy ComponentRegistry
 
 def _get_component_registry() -> object:
     """Lazy-load the component registry (singleton)."""
-    global _REGISTRY_CACHE  # noqa: PLW0603
+    global _REGISTRY_CACHE
     if _REGISTRY_CACHE is None:
         from kicad_pipeline.validation.component_registry import ComponentRegistry
         _REGISTRY_CACHE = ComponentRegistry()
@@ -1152,6 +1152,49 @@ def _courtyard_rect(
     )
 
 
+def _pad_bounding_box(
+    pads: tuple[Pad, ...],
+) -> tuple[float, float, float, float]:
+    extents = [
+        (p.position.x - p.size_x / 2.0, p.position.y - p.size_y / 2.0,
+         p.position.x + p.size_x / 2.0, p.position.y + p.size_y / 2.0)
+        for p in pads
+    ]
+    return (
+        min(e[0] for e in extents), min(e[1] for e in extents),
+        max(e[2] for e in extents), max(e[3] for e in extents),
+    )
+
+
+def _courtyard_needs_replacement(
+    graphics: tuple[FootprintLine | FootprintArc | FootprintCircle, ...],
+    pad_min_x: float, pad_min_y: float, pad_max_x: float, pad_max_y: float,
+) -> bool:
+    existing = [
+        g for g in graphics
+        if getattr(g, "layer", "") in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
+    ]
+    if not existing:
+        return True
+    crt_xs: list[float] = []
+    crt_ys: list[float] = []
+    for g in existing:
+        for attr_name in ("start", "end"):
+            pt = getattr(g, attr_name, None)
+            if pt is not None:
+                crt_xs.append(pt.x if hasattr(pt, "x") else pt[0])
+                crt_ys.append(pt.y if hasattr(pt, "y") else pt[1])
+    if not crt_xs:
+        return True
+    min_margin = min(
+        pad_min_x - min(crt_xs),
+        max(crt_xs) - pad_max_x,
+        pad_min_y - min(crt_ys),
+        max(crt_ys) - pad_max_y,
+    )
+    return min_margin < PCB_COURTYARD_CLEARANCE_MM - 0.05
+
+
 def _ensure_courtyard(fp: Footprint) -> Footprint:
     """Ensure courtyard graphics cover all pads with IPC clearance.
 
@@ -1163,68 +1206,17 @@ def _ensure_courtyard(fp: Footprint) -> Footprint:
         return fp
 
     crtyd_layer = LAYER_F_COURTYARD if fp.layer == LAYER_F_CU else LAYER_B_COURTYARD
+    pad_min_x, pad_min_y, pad_max_x, pad_max_y = _pad_bounding_box(fp.pads)
 
-    # Compute pad bounding box (including half-pad size)
-    pad_extents: list[tuple[float, float, float, float]] = []
-    for p in fp.pads:
-        hx = p.size_x / 2.0
-        hy = p.size_y / 2.0
-        pad_extents.append((p.position.x - hx, p.position.y - hy,
-                            p.position.x + hx, p.position.y + hy))
-    pad_min_x = min(e[0] for e in pad_extents)
-    pad_min_y = min(e[1] for e in pad_extents)
-    pad_max_x = max(e[2] for e in pad_extents)
-    pad_max_y = max(e[3] for e in pad_extents)
-
-    # Check existing courtyard coverage
-    existing_crtyd = [
-        g for g in fp.graphics
-        if getattr(g, "layer", "") in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
-    ]
-    needs_replacement = False
-    if existing_crtyd:
-        # Measure existing courtyard extent
-        crt_xs: list[float] = []
-        crt_ys: list[float] = []
-        for g in existing_crtyd:
-            for attr_name in ("start", "end"):
-                pt = getattr(g, attr_name, None)
-                if pt is not None:
-                    crt_xs.append(pt.x if hasattr(pt, "x") else pt[0])
-                    crt_ys.append(pt.y if hasattr(pt, "y") else pt[1])
-        if crt_xs:
-            margin = min(
-                min(crt_xs) - pad_min_x,  # left margin (should be negative = inward)
-                pad_max_x - max(crt_xs),   # right margin (should be negative)
-                min(crt_ys) - pad_min_y,   # top margin
-                pad_max_y - max(crt_ys),   # bottom margin
-            )
-            # Courtyard extends PAST pads, so margin should be negative.
-            # Flip sign: positive means courtyard extends past pad.
-            # We want courtyard_edge - pad_edge >= clearance on all sides.
-            margin_left = pad_min_x - min(crt_xs)
-            margin_right = max(crt_xs) - pad_max_x
-            margin_top = pad_min_y - min(crt_ys)
-            margin_bottom = max(crt_ys) - pad_max_y
-            min_margin = min(margin_left, margin_right, margin_top, margin_bottom)
-            if min_margin < PCB_COURTYARD_CLEARANCE_MM - 0.05:
-                needs_replacement = True
-        else:
-            needs_replacement = True
-    else:
-        needs_replacement = True
-
-    if not needs_replacement:
+    if not _courtyard_needs_replacement(fp.graphics, pad_min_x, pad_min_y, pad_max_x, pad_max_y):
         return fp
 
-    # Generate courtyard from pad bbox
     cx = (pad_min_x + pad_max_x) / 2.0
     cy = (pad_min_y + pad_max_y) / 2.0
     body_w = pad_max_x - pad_min_x
     body_h = pad_max_y - pad_min_y
     crtyd = _courtyard_rect(body_w, body_h, layer=crtyd_layer, cx=cx, cy=cy)
 
-    # Remove old courtyard lines, add new ones
     non_crtyd = tuple(
         g for g in fp.graphics
         if getattr(g, "layer", "") not in (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
@@ -2262,7 +2254,10 @@ def make_sot223(
     )
 
     body_w = 2 * _SOT223_PITCH + _SOT223_SMALL_PAD_W + _SOT23_BODY_PADDING_MM
-    body_h = _SOT223_ROW_SPAN + max(_SOT223_SMALL_PAD_H, _SOT223_TAB_PAD_H) + _SOT23_BODY_PADDING_MM
+    body_h = (
+        _SOT223_ROW_SPAN + max(_SOT223_SMALL_PAD_H, _SOT223_TAB_PAD_H)
+        + _SOT23_BODY_PADDING_MM
+    )
 
     graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
     ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
@@ -2826,6 +2821,42 @@ def make_usbc_connector(ref: str, value: str = "USB-C") -> Footprint:
     )
 
 
+def _rj45_build_pads() -> list[Pad]:
+    pads: list[Pad] = []
+    for i, (x, y) in enumerate(_RJ45_SIGNAL_POSITIONS):
+        shape = "roundrect" if i == 0 else "circle"
+        pads.append(
+            _thru_pad(str(i + 1), x, y, _RJ45_SIGNAL_PAD_MM, _RJ45_SIGNAL_DRILL_MM, shape=shape)
+        )
+    for i, (x, y) in enumerate(_RJ45_LED_POSITIONS):
+        pads.append(_thru_pad(str(9 + i), x, y, _RJ45_LED_PAD_MM, _RJ45_LED_DRILL_MM))
+    for x, y in _RJ45_SHIELD_POSITIONS:
+        pads.append(_thru_pad("SH", x, y, _RJ45_SHIELD_PAD_MM, _RJ45_SHIELD_DRILL_MM))
+    for mx, my in _RJ45_NPTH_POSITIONS:
+        pads.append(Pad(
+            number="", pad_type="np_thru_hole", shape="circle",
+            position=Point(mx, my),
+            size_x=_RJ45_NPTH_DIAM_MM, size_y=_RJ45_NPTH_DIAM_MM,
+            layers=(LAYER_F_CU, LAYER_B_CU),
+            drill_diameter=_RJ45_NPTH_DIAM_MM,
+        ))
+    return pads
+
+
+def _center_pads(pads: list[Pad]) -> list[Pad]:
+    all_xs = [p.position.x for p in pads]
+    all_ys = [p.position.y for p in pads]
+    shift_x = -(min(all_xs) + max(all_xs)) / 2.0
+    shift_y = -(min(all_ys) + max(all_ys)) / 2.0
+    return [
+        Pad(number=p.number, pad_type=p.pad_type, shape=p.shape,
+            position=Point(p.position.x + shift_x, p.position.y + shift_y),
+            size_x=p.size_x, size_y=p.size_y, layers=p.layers,
+            drill_diameter=p.drill_diameter, roundrect_ratio=p.roundrect_ratio)
+        for p in pads
+    ]
+
+
 def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     """RJ45 with integrated magnetics footprint (Hanrun HR911105A, through-hole).
 
@@ -2841,50 +2872,7 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
         Fully constructed :class:`Footprint`.
     """
     _log.debug("make_rj45 ref=%s", ref)
-    pads: list[Pad] = []
-
-    # 8 signal pins — staggered zigzag layout
-    for i, (x, y) in enumerate(_RJ45_SIGNAL_POSITIONS):
-        shape = "roundrect" if i == 0 else "circle"
-        pads.append(
-            _thru_pad(str(i + 1), x, y, _RJ45_SIGNAL_PAD_MM, _RJ45_SIGNAL_DRILL_MM, shape=shape)
-        )
-
-    # 4 LED pins
-    for i, (x, y) in enumerate(_RJ45_LED_POSITIONS):
-        pads.append(_thru_pad(str(9 + i), x, y, _RJ45_LED_PAD_MM, _RJ45_LED_DRILL_MM))
-
-    # 2 shield pads
-    for x, y in _RJ45_SHIELD_POSITIONS:
-        pads.append(_thru_pad("SH", x, y, _RJ45_SHIELD_PAD_MM, _RJ45_SHIELD_DRILL_MM))
-
-    # 2 NPTH mounting holes (no copper)
-    for mx, my in _RJ45_NPTH_POSITIONS:
-        pads.append(
-            Pad(
-                number="",
-                pad_type="np_thru_hole",
-                shape="circle",
-                position=Point(mx, my),
-                size_x=_RJ45_NPTH_DIAM_MM,
-                size_y=_RJ45_NPTH_DIAM_MM,
-                layers=(LAYER_F_CU, LAYER_B_CU),
-                drill_diameter=_RJ45_NPTH_DIAM_MM,
-            )
-        )
-
-    # Center all pads at origin
-    all_xs = [p.position.x for p in pads]
-    all_ys = [p.position.y for p in pads]
-    shift_x = -(min(all_xs) + max(all_xs)) / 2.0
-    shift_y = -(min(all_ys) + max(all_ys)) / 2.0
-    pads = [
-        Pad(number=p.number, pad_type=p.pad_type, shape=p.shape,
-            position=Point(p.position.x + shift_x, p.position.y + shift_y),
-            size_x=p.size_x, size_y=p.size_y, layers=p.layers,
-            drill_diameter=p.drill_diameter, roundrect_ratio=p.roundrect_ratio)
-        for p in pads
-    ]
+    pads = _center_pads(_rj45_build_pads())
 
     body_w = _RJ45_COURTYARD_W
     body_h = _RJ45_COURTYARD_H
@@ -2899,16 +2887,10 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     model = _model_for_package(lib_id)
     models = (model,) if model is not None else ()
     return Footprint(
-        lib_id=lib_id,
-        ref=ref,
-        value=value,
-        position=Point(0.0, 0.0),
-        layer=LAYER_F_CU,
-        pads=tuple(pads),
-        graphics=graphics,
-        texts=texts,
-        attr="through_hole",
-        models=models,
+        lib_id=lib_id, ref=ref, value=value,
+        position=Point(0.0, 0.0), layer=LAYER_F_CU,
+        pads=tuple(pads), graphics=graphics, texts=texts,
+        attr="through_hole", models=models,
     )
 
 
@@ -3216,6 +3198,66 @@ def _is_relay_footprint(fp: Footprint) -> bool:
     return "RELAY" in upper_id and len(fp.pads) == 5
 
 
+def _strip_relay_fab_blob(
+    graphics: tuple[FootprintLine | FootprintArc | FootprintCircle, ...],
+) -> list[FootprintLine | FootprintArc | FootprintCircle]:
+    return [
+        g for g in graphics
+        if not (isinstance(g, FootprintLine) and "Fab" in g.layer
+                and g.width >= _RELAY_FAB_BLOB_MIN_WIDTH)
+    ]
+
+
+def _classify_relay_pads(
+    pads: tuple[Pad, ...],
+) -> tuple[list[tuple[float, float]], list[tuple[str, float, float, float]]]:
+    # Pad 1=COM, 3=NO, 4=NC → contact/mains side; Pad 2=Coil-, 5=Coil+ → coil/logic side
+    contact_pads_xy: list[tuple[float, float]] = []
+    coil_pads_list: list[tuple[str, float, float, float]] = []
+    for pad in pads:
+        if pad.number in ("1", "3", "4"):
+            contact_pads_xy.append((pad.position.x, pad.position.y))
+        elif pad.number in ("2", "5"):
+            coil_pads_list.append((pad.number, pad.position.x, pad.position.y, pad.size_x))
+    return contact_pads_xy, coil_pads_list
+
+
+def _build_relay_isolation_slot(
+    coil_x: float, coil_y: float, coil_size: float, contact_cx: float,
+) -> list[FootprintLine | FootprintArc]:
+    coil_r = coil_size / 2.0
+    u_half = coil_r + 1.0  # 1mm clearance from pad edge to slot center
+    if contact_cx > coil_x:
+        closed_x, open_x = coil_x - u_half, coil_x + u_half
+    else:
+        closed_x, open_x = coil_x + u_half, coil_x - u_half
+    sw = _RELAY_SLOT_WIDTH / 2.0
+    lw = 0.05
+    outer_r, inner_r = u_half + sw, u_half - sw
+    b = Point(open_x, coil_y - u_half - sw)
+    c = Point(open_x, coil_y - u_half + sw)
+    f = Point(open_x, coil_y + u_half - sw)
+    g = Point(open_x, coil_y + u_half + sw)
+    outer_top = Point(coil_x, coil_y - outer_r)
+    outer_bot = Point(coil_x, coil_y + outer_r)
+    outer_mid = Point(closed_x - sw if closed_x < coil_x else closed_x + sw, coil_y)
+    inner_top = Point(coil_x, coil_y - inner_r)
+    inner_bot = Point(coil_x, coil_y + inner_r)
+    inner_mid = Point(closed_x + sw if closed_x < coil_x else closed_x - sw, coil_y)
+    return [
+        FootprintLine(start=outer_top, end=b, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintLine(start=b, end=c, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintLine(start=c, end=inner_top, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintArc(
+            start=inner_top, mid=inner_mid, end=inner_bot, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintLine(start=inner_bot, end=f, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintLine(start=f, end=g, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintLine(start=g, end=outer_bot, layer=LAYER_EDGE_CUTS, width=lw),
+        FootprintArc(
+            start=outer_bot, mid=outer_mid, end=outer_top, layer=LAYER_EDGE_CUTS, width=lw),
+    ]
+
+
 def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
     """Remove the EasyEDA coil-symbol F.Fab blob and add an Edge.Cuts isolation slot.
 
@@ -3227,41 +3269,10 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
        the contact-side pads (pins 2, 3) to place a vertical Edge.Cuts slot
        for creepage isolation between low-voltage coil and mains/load contacts.
     """
-    # --- Step 1: remove thick F.Fab blob lines ---
-    cleaned: list[FootprintLine | FootprintArc | FootprintCircle] = []
-    for g in fp.graphics:
-        if (
-            isinstance(g, FootprintLine)
-            and "Fab" in g.layer
-            and g.width >= _RELAY_FAB_BLOB_MIN_WIDTH
-        ):
-            continue  # drop the blob line
-        cleaned.append(g)
-
-    # --- Step 2: compute U-shaped isolation slot around coil pin ---
-    # The coil pins are low-voltage logic but sit physically adjacent to
-    # high-voltage contact pads (COM, NO, NC).  A small U-shaped
-    # Edge.Cuts routed slot around the coil pin closest to the contacts
-    # provides creepage isolation between mains and logic domains.
-    # The U opens toward the OTHER coil pin (same LV domain) and the
-    # closed wall faces the nearest contact pad.
-    #
-    # KiCad footprint pad semantics (Relay_SPDT_SANYOU_SRD):
-    #   Pad 1=COM, 3=NO, 4=NC  → contact/mains side (high voltage)
-    #   Pad 2=Coil-, 5=Coil+   → coil/logic side (low voltage)
-    contact_pads_xy: list[tuple[float, float]] = []
-    coil_pads_list: list[tuple[str, float, float, float]] = []  # (num, x, y, size)
-    for pad in fp.pads:
-        if pad.number in ("1", "3", "4"):
-            contact_pads_xy.append((pad.position.x, pad.position.y))
-        elif pad.number in ("2", "5"):
-            coil_pads_list.append((
-                pad.number, pad.position.x, pad.position.y, pad.size_x,
-            ))
+    cleaned = _strip_relay_fab_blob(fp.graphics)
+    contact_pads_xy, coil_pads_list = _classify_relay_pads(fp.pads)
 
     if contact_pads_xy and coil_pads_list:
-        # Find the coil pin closest to any contact pad — that's the one
-        # that needs isolation.
         contact_cx = sum(x for x, _ in contact_pads_xy) / len(contact_pads_xy)
         contact_cy = sum(y for _, y in contact_pads_xy) / len(contact_pads_xy)
         best_coil = min(
@@ -3269,66 +3280,7 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
             key=lambda c: (c[1] - contact_cx) ** 2 + (c[2] - contact_cy) ** 2,
         )
         coil_num, coil_x, coil_y, coil_size = best_coil
-        coil_r = coil_size / 2.0
-        clearance = 1.0  # mm from pad edge to slot center
-        u_half = coil_r + clearance
-
-        # U-shaped isolation cutout — arms are straight parallel lines,
-        # closed end is an arc curving around the coil pin.
-        if contact_cx > coil_x:
-            # Contacts to the RIGHT → closed arc on left, open on right
-            closed_x = coil_x - u_half
-            open_x = coil_x + u_half
-        else:
-            # Contacts to the LEFT → closed arc on right, open on left
-            closed_x = coil_x + u_half
-            open_x = coil_x - u_half
-
-        sw = _RELAY_SLOT_WIDTH / 2.0  # half channel width
-        _lw = 0.05  # thin line width
-
-        outer_r = u_half + sw
-        inner_r = u_half - sw
-
-        # Arm endpoints (straight segments)
-        b = Point(open_x, coil_y - u_half - sw)   # top arm outer end
-        c = Point(open_x, coil_y - u_half + sw)   # top arm inner end
-        f = Point(open_x, coil_y + u_half - sw)   # bottom arm inner end
-        g = Point(open_x, coil_y + u_half + sw)   # bottom arm outer end
-
-        # Arc endpoints centered on coil pin
-        outer_top = Point(coil_x, coil_y - outer_r)
-        outer_bot = Point(coil_x, coil_y + outer_r)
-        outer_mid = Point(closed_x - sw if closed_x < coil_x else closed_x + sw, coil_y)
-        inner_top = Point(coil_x, coil_y - inner_r)
-        inner_bot = Point(coil_x, coil_y + inner_r)
-        inner_mid = Point(closed_x + sw if closed_x < coil_x else closed_x - sw, coil_y)
-
-        slot_lines: list[FootprintLine | FootprintArc] = [
-            # Top arm outer
-            FootprintLine(start=outer_top, end=b, layer=LAYER_EDGE_CUTS, width=_lw),
-            # Open end top
-            FootprintLine(start=b, end=c, layer=LAYER_EDGE_CUTS, width=_lw),
-            # Top arm inner
-            FootprintLine(start=c, end=inner_top, layer=LAYER_EDGE_CUTS, width=_lw),
-            # Inner arc (closed end, curves around coil pin)
-            FootprintArc(
-                start=inner_top, mid=inner_mid, end=inner_bot,
-                layer=LAYER_EDGE_CUTS, width=_lw,
-            ),
-            # Bottom arm inner
-            FootprintLine(start=inner_bot, end=f, layer=LAYER_EDGE_CUTS, width=_lw),
-            # Open end bottom
-            FootprintLine(start=f, end=g, layer=LAYER_EDGE_CUTS, width=_lw),
-            # Bottom arm outer
-            FootprintLine(start=g, end=outer_bot, layer=LAYER_EDGE_CUTS, width=_lw),
-            # Outer arc (closed end, curves around coil pin)
-            FootprintArc(
-                start=outer_bot, mid=outer_mid, end=outer_top,
-                layer=LAYER_EDGE_CUTS, width=_lw,
-            ),
-        ]
-        cleaned.extend(slot_lines)
+        cleaned.extend(_build_relay_isolation_slot(coil_x, coil_y, coil_size, contact_cx))
         _log.info(
             "Relay %s: U-shaped isolation slot around coil pad %s at (%.1f, %.1f), "
             "closed wall toward contacts, opens %s",
@@ -3336,9 +3288,7 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
             "left" if contact_cx > coil_x else "right",
         )
     else:
-        _log.warning(
-            "Relay %s: could not determine pad groups for isolation slot", fp.ref,
-        )
+        _log.warning("Relay %s: could not determine pad groups for isolation slot", fp.ref)
 
     return Footprint(
         lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
@@ -3494,10 +3444,10 @@ def _try_jlcpcb_footprint(
         # THT pads, reject the bad footprint.  Covers standard passives,
         # ICs, and modules (ESP32, etc.) that should all be SMD.
         _fid_upper = footprint_id.strip().upper()
-        _SMD_KEYWORDS = ("R_0", "C_0", "C_1", "L_0", "L_1", "LED_0", "SOT-", "SOD-",
-                         "SOIC", "MSOP", "TSSOP", "QFN", "QFP", "LQFP",
-                         "ESP32", "WROOM", "WROVER", "USB-C", "USB_C")
-        if any(kw in _fid_upper for kw in _SMD_KEYWORDS):
+        smd_keywords = ("R_0", "C_0", "C_1", "L_0", "L_1", "LED_0", "SOT-", "SOD-",
+                        "SOIC", "MSOP", "TSSOP", "QFN", "QFP", "LQFP",
+                        "ESP32", "WROOM", "WROVER", "USB-C", "USB_C")
+        if any(kw in _fid_upper for kw in smd_keywords):
             tht_pads = [p for p in fp.pads if p.pad_type == "thru_hole"]
             if len(tht_pads) > 0:
                 _log.warning(

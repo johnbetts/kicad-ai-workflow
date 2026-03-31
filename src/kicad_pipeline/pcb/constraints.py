@@ -1282,6 +1282,139 @@ def _solve_near_placement(
 
 
 # ---------------------------------------------------------------------------
+# Post-placement collision resolution
+# ---------------------------------------------------------------------------
+
+_COLLISION_RESOLUTION_GAP_MM: float = 0.5
+"""Clearance gap when pushing colliding components apart."""
+
+_COLLISION_MAX_PASSES: int = 5
+"""Maximum number of collision resolution passes."""
+
+
+def _rotated_size(
+    ref: str,
+    sizes: dict[str, tuple[float, float]],
+    rotations: dict[str, float],
+) -> tuple[float, float]:
+    """Return (w, h) for *ref* accounting for rotation."""
+    w, h = sizes.get(ref, (2.0, 2.0))
+    rot = rotations.get(ref, 0.0) % 360.0
+    if 45.0 < rot < 135.0 or 225.0 < rot < 315.0:
+        w, h = h, w
+    return w, h
+
+
+def _resolve_post_placement_collisions(
+    state: _PlacementState,
+    footprint_bboxes: dict[str, FootprintBBox] | None,
+) -> None:
+    """Nudge overlapping components apart after all placement phases.
+
+    Iterates up to ``_COLLISION_MAX_PASSES`` times.  On each pass, detects
+    courtyard collisions and pushes the *smaller* component away from the
+    larger one along the line connecting their centers.  The push distance
+    equals half-widths of both components plus ``_COLLISION_RESOLUTION_GAP_MM``.
+
+    Components are kept within board bounds after each nudge.
+    """
+    refs = list(state.positions.keys())
+    if len(refs) < 2:
+        return
+
+    for pass_idx in range(_COLLISION_MAX_PASSES):
+        found_collision = False
+        for i, ref_a in enumerate(refs):
+            pos_a = state.positions[ref_a]
+            wa, ha = _rotated_size(ref_a, state.footprint_sizes, state.rotations)
+            a_x0 = pos_a.x - wa / 2.0
+            a_y0 = pos_a.y - ha / 2.0
+            a_x1 = pos_a.x + wa / 2.0
+            a_y1 = pos_a.y + ha / 2.0
+
+            for ref_b in refs[i + 1:]:
+                pos_b = state.positions[ref_b]
+                wb, hb = _rotated_size(ref_b, state.footprint_sizes, state.rotations)
+                b_x0 = pos_b.x - wb / 2.0
+                b_y0 = pos_b.y - hb / 2.0
+                b_x1 = pos_b.x + wb / 2.0
+                b_y1 = pos_b.y + hb / 2.0
+
+                # Check AABB overlap
+                if not (a_x0 < b_x1 and a_x1 > b_x0 and a_y0 < b_y1 and a_y1 > b_y0):
+                    continue
+
+                found_collision = True
+
+                # Move the smaller component
+                area_a = wa * ha
+                area_b = wb * hb
+                if area_a <= area_b:
+                    to_move, anchor = ref_b, ref_a  # keep larger in place
+                    mw, mh = wb, hb
+                    _aw, _ah = wa, ha
+                else:
+                    to_move, anchor = ref_a, ref_b
+                    mw, mh = wa, ha
+                    _aw, _ah = wb, hb
+
+                m_pos = state.positions[to_move]
+                a_pos = state.positions[anchor]
+                dx = m_pos.x - a_pos.x
+                dy = m_pos.y - a_pos.y
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist < 0.01:
+                    dx, dy, dist = 1.0, 0.0, 1.0
+
+                # Required separation along push direction
+                # Use the axis with maximum overlap to determine push
+                overlap_x = min(a_x1, b_x1) - max(a_x0, b_x0)
+                overlap_y = min(a_y1, b_y1) - max(a_y0, b_y0)
+
+                if overlap_x < overlap_y:
+                    # Push along X (less overlap to resolve)
+                    push_dist = overlap_x + _COLLISION_RESOLUTION_GAP_MM
+                    push_dx = push_dist * (1.0 if dx >= 0 else -1.0)
+                    push_dy = 0.0
+                else:
+                    # Push along Y
+                    push_dist = overlap_y + _COLLISION_RESOLUTION_GAP_MM
+                    push_dx = 0.0
+                    push_dy = push_dist * (1.0 if dy >= 0 else -1.0)
+
+                new_x = m_pos.x + push_dx
+                new_y = m_pos.y + push_dy
+
+                # Clamp to board bounds
+                half_mw = mw / 2.0
+                half_mh = mh / 2.0
+                new_x = max(state.origin_x + half_mw,
+                            min(new_x, state.origin_x + state.board_w - half_mw))
+                new_y = max(state.origin_y + half_mh,
+                            min(new_y, state.origin_y + state.board_h - half_mh))
+
+                state.positions[to_move] = Point(x=new_x, y=new_y)
+                log.info(
+                    "Collision resolution pass %d: moved %s by (%.1f, %.1f) "
+                    "away from %s",
+                    pass_idx + 1, to_move, push_dx, push_dy, anchor,
+                )
+
+        if not found_collision:
+            if pass_idx > 0:
+                log.info(
+                    "Collision resolution: all collisions resolved in %d passes",
+                    pass_idx,
+                )
+            break
+    else:
+        log.warning(
+            "Collision resolution: still has collisions after %d passes",
+            _COLLISION_MAX_PASSES,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Constraint solver
 # ---------------------------------------------------------------------------
 
@@ -1345,6 +1478,13 @@ def solve_placement(
             state.positions, state.rotations, requirements, state.footprint_sizes,
             state.board_w, state.board_h, state.origin_x, state.origin_y,
         )
+
+    # 8. Post-placement collision resolution — nudge overlapping components apart.
+    #    This is especially important when fixed positions from preserve_from
+    #    have collisions that the solver didn't get a chance to resolve.
+    _resolve_post_placement_collisions(
+        state, footprint_bboxes,
+    )
 
     return PlacementResult(
         positions=state.positions,

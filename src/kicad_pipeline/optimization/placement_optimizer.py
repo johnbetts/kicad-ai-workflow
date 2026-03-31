@@ -53,6 +53,7 @@ from kicad_pipeline.optimization.placement_guard import (
 from kicad_pipeline.optimization.placement_types import (
     OptimizationConfig,  # noqa: F401 - re-exported
     PlacementCandidate,  # noqa: F401 - re-exported
+    PlacementContext,
     _apply_positions,  # noqa: F401 - re-exported
     _board_bounds,
     _dict_to_positions,  # noqa: F401 - re-exported
@@ -178,6 +179,7 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     phases["ethernet_group"](ctx)  # type: ignore[operator]
     phases["template_refinement"](ctx)  # type: ignore[operator]
     phases["late_decoupling"](ctx)  # type: ignore[operator]
+    phases["pad_facing"](ctx)  # type: ignore[operator]
     phases["collision"](ctx)  # type: ignore[operator]
     phases["first_clamp"](ctx)  # type: ignore[operator]
     phases["review_loop"](ctx)  # type: ignore[operator]
@@ -234,6 +236,7 @@ def optimize_placement_ee(
         _phase_late_relay_realignment,
         _phase_mcu_decoupling_repull,
         _phase_mcu_group,
+        _phase_pad_facing_optimization,
         _phase_power_chain_flow,
         _phase_power_group,
         _phase_relay_connector_alignment,
@@ -286,6 +289,7 @@ def optimize_placement_ee(
         ethernet_group=_phase_ethernet_group,
         template_refinement=_phase_template_refinement,  # 3h template
         late_decoupling=_phase_late_decoupling,  # 3c-late Late decoupling
+        pad_facing=_phase_pad_facing_optimization,  # 3i pad-facing rotation
         collision=_phase_collision_resolution,
         first_clamp=_phase_first_clamp,
         review_loop=_phase_review_loop,
@@ -297,7 +301,105 @@ def optimize_placement_ee(
     _phase_mcu_decoupling_repull(ctx)
     _phase_final_clamp(ctx)
 
+    # FINAL enforcement: THT connectors MUST be at board edges.
+    # Earlier enforcement (in phase 3g) gets undone by the review loop and
+    # late phases.  This is the last word — no phase runs after this.
+    from kicad_pipeline.optimization.ee_phases_refinement import (
+        _enforce_tht_connectors_to_edge,
+    )
+    _enforce_tht_connectors_to_edge(ctx)
+
+    # FINAL: push apart any components whose bodies still overlap.
+    # NOTE: _phase_build_final reads from ctx.best_positions, not ctx.positions.
+    # After all final fixes, sync positions → best_positions.
+    # The connector enforcement and collision resolver check courtyard (pads)
+    # but miss 3D body collisions — especially connector bodies extending
+    # beyond their pads.
+    _final_body_collision_fix(ctx)
+
+    # Sync final positions to best_positions — _phase_build_final reads best_positions
+    ctx.best_positions = dict(ctx.positions)
+
     return _phase_build_final(ctx)
+
+
+_BODY_OVERHANG: dict[str, float] = {"J": 3.0, "P": 3.0, "K": 2.0}
+
+
+def _body_half_extents(
+    ref: str, ctx: PlacementContext, rot: float,
+) -> tuple[float, float]:
+    w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+    if abs(rot % 180 - 90) < 10:
+        w, h = h, w
+    oh = _BODY_OVERHANG.get(ref.rstrip("0123456789"), 0.0)
+    return w / 2.0 + oh, h / 2.0 + oh
+
+
+def _resolve_body_pair(
+    ctx: PlacementContext,
+    ref_a: str, ref_b: str,
+    ax: float, ay: float, bx: float, by: float,
+    a_hw: float, a_hh: float, b_hw: float, b_hh: float,
+    min_x: float, min_y: float, max_x: float, max_y: float,
+) -> bool:
+    gap = 0.5
+    overlap_x = (a_hw + b_hw + gap) - abs(ax - bx)
+    overlap_y = (a_hh + b_hh + gap) - abs(ay - by)
+    if not (overlap_x > 0 and overlap_y > 0):
+        return False
+    is_a_conn = ref_a.startswith(("J", "P", "H"))
+    is_b_conn = ref_b.startswith(("J", "P", "H"))
+    if is_a_conn and is_b_conn:
+        return False
+    mover = ref_b if is_a_conn else ref_a
+    if mover.startswith(("J", "P")):
+        return False
+    mx, my, mrot = ctx.positions[mover]
+    if overlap_x < overlap_y:
+        push = overlap_x + 0.5
+        nx = mx + push if mx > (ax + bx) / 2.0 else mx - push
+        ctx.positions[mover] = (max(min_x + 2.0, min(max_x - 2.0, nx)), my, mrot)
+    else:
+        push = overlap_y + 0.5
+        ny = my + push if my > (ay + by) / 2.0 else my - push
+        ctx.positions[mover] = (mx, max(min_y + 2.0, min(max_y - 2.0, ny)), mrot)
+    _log.info("  Final body fix: pushed %s away from %s (overlap %.1fx%.1f)",
+               mover, ref_a if mover == ref_b else ref_b, overlap_x, overlap_y)
+    return True
+
+
+def _final_body_collision_fix(ctx: PlacementContext) -> None:
+    """Push apart components whose estimated 3D bodies overlap.
+
+    Connectors have bodies extending 3mm+ beyond pads.  After all placement
+    phases complete, check for body-to-body overlap and push the smaller
+    component away from the larger one.
+    """
+    min_x, min_y, max_x, max_y = ctx.bounds
+
+    for _pass in range(3):
+        moved = False
+        refs = sorted(ctx.positions.keys())
+        for i, ref_a in enumerate(refs):
+            if ref_a.startswith("H"):
+                continue
+            ax, ay, arot = ctx.positions[ref_a]
+            a_hw, a_hh = _body_half_extents(ref_a, ctx, arot)
+
+            for ref_b in refs[i + 1:]:
+                if ref_b.startswith("H"):
+                    continue
+                bx, by, brot = ctx.positions[ref_b]
+                b_hw, b_hh = _body_half_extents(ref_b, ctx, brot)
+                if _resolve_body_pair(
+                    ctx, ref_a, ref_b, ax, ay, bx, by,
+                    a_hw, a_hh, b_hw, b_hh, min_x, min_y, max_x, max_y,
+                ):
+                    moved = True
+
+        if not moved:
+            break
 
 
 # Default optimizer is the EE-grade one

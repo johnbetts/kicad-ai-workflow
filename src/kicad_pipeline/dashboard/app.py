@@ -89,12 +89,14 @@ ROLE_LABELS: dict[str, str] = {
 def _build_nav_header(
     current_page: str,
     session: dict[str, object],
+    on_role_change: object | None = None,
 ) -> None:
     """Shared navigation header with role selector.
 
     Args:
         current_page: "/" or "/kanban" — highlights the active page.
         session: Per-tab session dict for storing role state.
+        on_role_change: Optional callback invoked after role changes.
     """
     from nicegui import ui
 
@@ -118,21 +120,53 @@ def _build_nav_header(
             if current_page == "/kanban":
                 kanban_btn.props("color=primary")
 
-        # Right: role selector
-        with ui.row().classes("items-center gap-2"):
-            ui.label("Role:").classes("text-subtitle2 text-grey-4")
-            role_select = ui.select(
-                options=ROLE_LABELS,
-                value=session.get("role", "framework"),
-                label="",
-            ).classes("w-52").props("dense borderless")
+            fleet_btn = ui.button(
+                "Fleet",
+                on_click=lambda: ui.navigate.to("/fleet"),
+            ).props("flat no-caps")
+            if current_page == "/fleet":
+                fleet_btn.props("color=primary")
 
-            def _on_role_change(e: object) -> None:
-                val = getattr(e, "value", None)
-                if val:
-                    session["role"] = val
+        # Right: reviewer name + role selector
+        with ui.row().classes("items-center gap-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Reviewer:").classes("text-subtitle2 text-grey-4")
+                reviewer_input = (
+                    ui.input(
+                        value=str(session.get("reviewer_name", "")),
+                        placeholder="Your name",
+                    )
+                    .classes("w-32")
+                    .props("dense borderless")
+                )
 
-            role_select.on_value_change(_on_role_change)
+                def _on_reviewer_change(e: object) -> None:
+                    val = getattr(e, "value", "")
+                    session["reviewer_name"] = val
+
+                reviewer_input.on("update:model-value", _on_reviewer_change)
+
+            # Role selector
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Role:").classes("text-subtitle2 text-grey-4")
+                role_select = (
+                    ui.select(
+                        options=ROLE_LABELS,
+                        value=session.get("role", "framework"),
+                        label="",
+                    )
+                    .classes("w-52")
+                    .props("dense borderless")
+                )
+
+                def _on_role_change_handler(e: object) -> None:
+                    val = getattr(e, "value", None)
+                    if val:
+                        session["role"] = val
+                        if callable(on_role_change):
+                            on_role_change()
+
+                role_select.on_value_change(_on_role_change_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +226,7 @@ def main(
         # Per-tab session state (survives refresh, per-tab isolation)
         session = nicegui_app.storage.tab
         session.setdefault("role", "framework")
+        session.setdefault("reviewer_name", "")
         session.setdefault("board_dir", "")
 
         board_names = _discover_boards(output_root)
@@ -212,19 +247,23 @@ def main(
                 if default_name:
                     session["board_dir"] = str(output_root / default_name)
 
-        current_board = (
-            Path(str(session["board_dir"]))
-            if session.get("board_dir")
-            else None
-        )
+        current_board = Path(str(session["board_dir"])) if session.get("board_dir") else None
 
         ui.dark_mode(True)
-        _build_nav_header("/", session)
+
+        # _rebuild_panels is forward-declared; will be defined after containers
+        # are created.  We pass a lambda so the header can call it once it exists.
+        _rebuild_ref: dict[str, object] = {}
+
+        def _rebuild_from_header() -> None:
+            fn = _rebuild_ref.get("fn")
+            if callable(fn):
+                fn()
+
+        _build_nav_header("/", session, on_role_change=_rebuild_from_header)
 
         # Board selector toolbar
-        with ui.row().classes(
-            "w-full items-center gap-4 q-px-md q-pt-sm q-pb-xs"
-        ):
+        with ui.row().classes("w-full items-center gap-4 q-px-md q-pt-sm q-pb-xs"):
             ui.icon("developer_board").classes("text-h6")
             ui.label("Board:").classes("text-subtitle1")
             board_select = ui.select(
@@ -244,15 +283,12 @@ def main(
             ).props("flat dense no-caps size=sm")
 
         # Board summary header (between selector and panels)
-        build_board_summary(current_board)
+        summary_container = ui.element("div")
+        with summary_container:
+            build_board_summary(current_board)
 
         # Toast notifications for evidence events
         start_notification_drain()
-
-        # Three panel containers
-        image_container = ui.element("div")
-        log_container = ui.element("div")
-        context_container = ui.element("div")
 
         def _get_board_dir() -> Path | None:
             val = session.get("board_dir")
@@ -261,8 +297,53 @@ def main(
         def _get_role() -> str:
             return str(session.get("role", "framework"))
 
+        # Three-panel layout: Images (left) | Chat (center) | Context (right)
+        with (
+            ui.row()
+            .classes("w-full gap-2")
+            .style("height: calc(100vh - 200px); flex-wrap: nowrap")
+        ):
+            # LEFT PANEL — Images (25%)
+            with (
+                ui.card()
+                .classes("h-full")
+                .style("flex: 0 0 25%; max-width: 25%; overflow-y: auto; overflow-x: hidden")
+            ):
+                image_container = ui.element("div")
+                with image_container:
+                    build_image_panel(current_board)
+
+            # CENTER PANEL — CLI / Chat (45%)
+            with (
+                ui.card()
+                .classes("h-full")
+                .style(
+                    "flex: 0 0 45%; max-width: 45%; "
+                    "display: flex; flex-direction: column; overflow: hidden"
+                )
+            ):
+                log_container = ui.element("div").style(
+                    "flex: 1 1 auto; display: flex; flex-direction: column; "
+                    "min-height: 0; width: 100%"
+                )
+                with log_container:
+                    build_log_panel(board_dir=current_board)
+
+            # RIGHT PANEL — Context (30%)
+            with (
+                ui.card()
+                .classes("h-full")
+                .style("flex: 0 0 30%; max-width: 30%; overflow-y: auto")
+            ):
+                context_container = ui.element("div")
+                with context_container:
+                    build_context_panel(current_board, output_root, role=_get_role())
+
         def _rebuild_panels() -> None:
             bd = _get_board_dir()
+            summary_container.clear()
+            with summary_container:
+                build_board_summary(bd)
             image_container.clear()
             with image_container:
                 build_image_panel(bd)
@@ -273,6 +354,9 @@ def main(
             with context_container:
                 build_context_panel(bd, output_root, role=_get_role())
 
+        # Register so header role-change callback can reach it
+        _rebuild_ref["fn"] = _rebuild_panels
+
         def _on_board_change(e: object) -> None:
             value = getattr(e, "value", None)
             if value:
@@ -280,40 +364,6 @@ def main(
             _rebuild_panels()
 
         board_select.on_value_change(_on_board_change)
-
-        # Three-panel layout: Images (left) | Chat (center) | Context (right)
-        with ui.row().classes("w-full gap-2").style(
-            "height: calc(100vh - 120px); flex-wrap: nowrap"
-        ):
-            # LEFT PANEL — Images (25%)
-            with (
-                ui.card().classes("h-full").style(
-                    "flex: 0 0 25%; max-width: 25%; "
-                    "overflow-y: auto; overflow-x: hidden"
-                ),
-                image_container,
-            ):
-                build_image_panel(current_board)
-
-            # CENTER PANEL — CLI / Chat (45%)
-            with (
-                ui.card().classes("h-full").style(
-                    "flex: 0 0 45%; max-width: 45%; overflow-y: auto"
-                ),
-                log_container,
-            ):
-                build_log_panel(board_dir=current_board)
-
-            # RIGHT PANEL — Context (30%)
-            with (
-                ui.card().classes("h-full").style(
-                    "flex: 0 0 30%; max-width: 30%; overflow-y: auto"
-                ),
-                context_container,
-            ):
-                build_context_panel(
-                    current_board, output_root, role=_get_role()
-                )
 
     # ------------------------------------------------------------------
     # Kanban page — multi-level board
@@ -340,10 +390,19 @@ def main(
         # Per-tab session state (survives refresh, per-tab isolation)
         session = nicegui_app.storage.tab
         session.setdefault("role", "framework")
+        session.setdefault("reviewer_name", "")
         session.setdefault("board_dir", "")
 
-        active_board_name: dict[str, str] = {"value": ""}
-        active_type_filters: set[str] = set(VALID_TYPES)
+        if "type_filters" not in session:
+            session["type_filters"] = list(VALID_TYPES)
+        if "kanban_board_name" not in session:
+            session["kanban_board_name"] = ""
+        active_board_name: dict[str, str] = {
+            "value": str(session.get("kanban_board_name", "")),
+        }
+        active_type_filters: set[str] = set(
+            session.get("type_filters", list(VALID_TYPES))  # type: ignore[arg-type]
+        )
 
         column_labels = {
             "backlog": "Backlog",
@@ -379,11 +438,7 @@ def main(
             kb = load_kanban(project_root)
             cards = kb.filter_by_level(_current_level())
             if _current_level() == "board" and active_board_name["value"]:
-                cards = [
-                    c
-                    for c in cards
-                    if c.board_name == active_board_name["value"]
-                ]
+                cards = [c for c in cards if c.board_name == active_board_name["value"]]
             cards = [c for c in cards if c.card_type in active_type_filters]
             return kb.sorted_by_priority(cards)
 
@@ -394,17 +449,13 @@ def main(
                 for status in VALID_STATUSES:
                     col_cards = [c for c in cards if c.status == status]
                     with ui.card().classes("flex-1 min-w-64"):
-                        ui.label(column_labels[status]).classes(
-                            "text-h6 font-bold q-mb-sm"
-                        )
+                        ui.label(column_labels[status]).classes("text-h6 font-bold q-mb-sm")
                         ui.separator()
                         with ui.scroll_area().classes("h-96"):
                             for card in col_cards:
                                 _render_card(card, status)
                         if not col_cards:
-                            ui.label("No cards").classes(
-                                "text-grey-6 text-center q-mt-md"
-                            )
+                            ui.label("No cards").classes("text-grey-6 text-center q-mt-md")
 
         def _render_card(card: KanbanCard, current_status: str) -> None:
             with ui.card().classes("w-full q-mb-sm"):
@@ -424,9 +475,7 @@ def main(
                         ).props("outline")
                 ui.label(card.title).classes("font-bold")
                 if card.description:
-                    ui.label(card.description[:80]).classes(
-                        "text-caption text-grey-5"
-                    )
+                    ui.label(card.description[:80]).classes("text-caption text-grey-5")
                 # Relative timestamps
                 updated_rel = _relative_time(card.updated)
                 created_rel = _relative_time(card.created)
@@ -439,9 +488,7 @@ def main(
 
                 if card.board_name:
                     with ui.row().classes("items-center gap-2"):
-                        ui.label(f"Board: {card.board_name}").classes(
-                            "text-caption text-grey-6"
-                        )
+                        ui.label(f"Board: {card.board_name}").classes("text-caption text-grey-6")
                         if card.level == "board":
                             ui.button(
                                 "Open Review",
@@ -451,13 +498,15 @@ def main(
                             ).props("flat dense no-caps size=xs color=accent")
 
                 with ui.row().classes("gap-2 q-mt-xs"):
-                    other_statuses = [
-                        s for s in VALID_STATUSES if s != current_status
-                    ]
-                    move_select = ui.select(
-                        options=other_statuses,
-                        label="Move to",
-                    ).classes("w-32").props("dense")
+                    other_statuses = [s for s in VALID_STATUSES if s != current_status]
+                    move_select = (
+                        ui.select(
+                            options=other_statuses,
+                            label="Move to",
+                        )
+                        .classes("w-32")
+                        .props("dense")
+                    )
 
                     def _on_move(e: object, cid: str = card.id) -> None:
                         val = getattr(e, "value", None)
@@ -470,13 +519,25 @@ def main(
                     def _on_edit(_e: object, cid: str = card.id) -> None:
                         _show_edit_dialog(cid)
 
-                    ui.button(icon="edit", on_click=_on_edit).props(
-                        "flat dense round size=sm"
-                    )
+                    ui.button(icon="edit", on_click=_on_edit).props("flat dense round size=sm")
 
-                    def _on_delete(_e: object, cid: str = card.id) -> None:
-                        delete_card(project_root, cid)
-                        _rebuild_board()
+                    def _on_delete(
+                        _e: object,
+                        cid: str = card.id,
+                        title: str = card.title,
+                    ) -> None:
+                        with ui.dialog() as confirm_dlg, ui.card():
+                            ui.label(f"Delete '{title[:50]}'?").classes("text-subtitle1")
+                            with ui.row().classes("justify-end gap-2 q-mt-md"):
+                                ui.button("Cancel", on_click=confirm_dlg.close).props("flat")
+
+                                def _confirm(_e2: object, _cid: str = cid) -> None:
+                                    delete_card(project_root, _cid)
+                                    confirm_dlg.close()
+                                    _rebuild_board()
+
+                                ui.button("Delete", on_click=_confirm).props("color=red")
+                        confirm_dlg.open()
 
                     ui.button(icon="delete", on_click=_on_delete).props(
                         "flat dense round size=sm color=red"
@@ -490,12 +551,8 @@ def main(
 
             with ui.dialog() as dialog, ui.card().classes("w-96"):
                 ui.label("Edit Card").classes("text-h6")
-                title_input = ui.input("Title", value=card.title).classes(
-                    "w-full"
-                )
-                desc_input = ui.textarea(
-                    "Description", value=card.description
-                ).classes("w-full")
+                title_input = ui.input("Title", value=card.title).classes("w-full")
+                desc_input = ui.textarea("Description", value=card.description).classes("w-full")
                 type_select = ui.select(
                     options=list(VALID_TYPES),
                     value=card.card_type,
@@ -510,45 +567,29 @@ def main(
                 # Full timestamps
                 ui.separator().classes("q-my-sm")
                 ui.label("Timestamps").classes("text-subtitle2 font-bold")
-                ui.label(f"Created: {card.created}").classes(
-                    "text-caption text-grey-5"
-                )
-                ui.label(f"Updated: {card.updated}").classes(
-                    "text-caption text-grey-5"
-                )
+                ui.label(f"Created: {card.created}").classes("text-caption text-grey-5")
+                ui.label(f"Updated: {card.updated}").classes("text-caption text-grey-5")
 
                 # Notes section
                 ui.separator().classes("q-my-sm")
                 ui.label("Notes").classes("text-subtitle2 font-bold")
                 if card.notes:
-                    with ui.scroll_area().classes("w-full").style(
-                        "max-height: 150px"
-                    ):
+                    with ui.scroll_area().classes("w-full").style("max-height: 150px"):
                         for note in card.notes:
-                            ui.label(note).classes(
-                                "text-caption text-grey-4 q-mb-xs"
-                            )
+                            ui.label(note).classes("text-caption text-grey-4 q-mb-xs")
                 else:
-                    ui.label("No notes yet").classes(
-                        "text-caption text-grey-6"
-                    )
+                    ui.label("No notes yet").classes("text-caption text-grey-6")
 
                 with ui.row().classes("w-full items-center gap-2"):
-                    note_input = ui.input(
-                        placeholder="Add a note..."
-                    ).classes("flex-grow")
+                    note_input = ui.input(placeholder="Add a note...").classes("flex-grow")
 
                     def _add_note(_e: object) -> None:
                         if note_input.value:
-                            add_note(
-                                project_root, card_id, note_input.value
-                            )
+                            add_note(project_root, card_id, note_input.value)
                             dialog.close()
                             _show_edit_dialog(card_id)
 
-                    ui.button(
-                        "Add Note", on_click=_add_note
-                    ).props("dense size=sm")
+                    ui.button("Add Note", on_click=_add_note).props("dense size=sm")
 
                 with ui.row().classes("justify-end gap-2 q-mt-md"):
 
@@ -611,18 +652,12 @@ def main(
                         _rebuild_board()
 
                     ui.button("Cancel", on_click=dialog.close).props("flat")
-                    ui.button("Create", on_click=_create).props(
-                        "color=primary"
-                    )
+                    ui.button("Create", on_click=_create).props("color=primary")
             dialog.open()
 
         # Toolbar: Add button + level tabs + board selector + type filters
-        with ui.row().classes(
-            "w-full q-mb-md items-center gap-4 q-px-md q-pt-sm"
-        ):
-            ui.button("+ Add Card", on_click=_show_add_dialog).props(
-                "color=primary"
-            )
+        with ui.row().classes("w-full q-mb-md items-center gap-4 q-px-md q-pt-sm"):
+            ui.button("+ Add Card", on_click=_show_add_dialog).props("color=primary")
 
             with ui.tabs().classes("w-auto") as level_tabs:
                 ui.tab("framework", label="Framework")
@@ -633,15 +668,19 @@ def main(
             level_tabs.value = _current_level()
 
             boards = _discover_boards(output_root)
-            board_selector = ui.select(
-                options=boards,
-                label="Select board",
-            ).classes("w-48").bind_visibility_from(
-                level_tabs, "value", backward=lambda v: v == "board"
+            board_selector = (
+                ui.select(
+                    options=boards,
+                    label="Select board",
+                )
+                .classes("w-48")
+                .bind_visibility_from(level_tabs, "value", backward=lambda v: v == "board")
             )
 
             def _on_board_select(e: object) -> None:
-                active_board_name["value"] = getattr(e, "value", "") or ""
+                val = getattr(e, "value", "") or ""
+                active_board_name["value"] = val
+                session["kanban_board_name"] = val
                 _rebuild_board()
 
             board_selector.on_value_change(_on_board_select)
@@ -665,9 +704,14 @@ def main(
                             active_type_filters.add(ct)
                         else:
                             active_type_filters.discard(ct)
+                        session["type_filters"] = list(active_type_filters)
                         _rebuild_board()
 
-                    ui.checkbox(ct.title(), value=True, on_change=_toggle)
+                    ui.checkbox(
+                        ct.title(),
+                        value=ct in active_type_filters,
+                        on_change=_toggle,
+                    )
 
                 _make_toggle()
 
@@ -678,14 +722,10 @@ def main(
             stats_container.clear()
             kb = load_kanban(project_root)
             level_cards = kb.filter_by_level(_current_level())
-            with stats_container, ui.row().classes(
-                "w-full q-px-md q-mb-sm items-center gap-3"
-            ):
+            with stats_container, ui.row().classes("w-full q-px-md q-mb-sm items-center gap-3"):
                 # Cards per type
                 for ct in VALID_TYPES:
-                    count = sum(
-                        1 for c in level_cards if c.card_type == ct
-                    )
+                    count = sum(1 for c in level_cards if c.card_type == ct)
                     if count > 0:
                         ui.badge(
                             f"{ct}: {count}",
@@ -695,35 +735,17 @@ def main(
                 ui.separator().props("vertical").classes("q-mx-sm")
 
                 # Open vs done
-                open_count = sum(
-                    1 for c in level_cards if c.status != "done"
-                )
-                done_count = sum(
-                    1 for c in level_cards if c.status == "done"
-                )
-                ui.label(
-                    f"Open: {open_count} | Done: {done_count}"
-                ).classes("text-caption")
+                open_count = sum(1 for c in level_cards if c.status != "done")
+                done_count = sum(1 for c in level_cards if c.status == "done")
+                ui.label(f"Open: {open_count} | Done: {done_count}").classes("text-caption")
 
                 # P0/P1 warnings
-                p0_count = sum(
-                    1
-                    for c in level_cards
-                    if c.priority == "P0" and c.status != "done"
-                )
-                p1_count = sum(
-                    1
-                    for c in level_cards
-                    if c.priority == "P1" and c.status != "done"
-                )
+                p0_count = sum(1 for c in level_cards if c.priority == "P0" and c.status != "done")
+                p1_count = sum(1 for c in level_cards if c.priority == "P1" and c.status != "done")
                 if p0_count > 0:
-                    ui.badge(
-                        f"P0: {p0_count}", color="red"
-                    ).props("outline")
+                    ui.badge(f"P0: {p0_count}", color="red").props("outline")
                 if p1_count > 0:
-                    ui.badge(
-                        f"P1: {p1_count}", color="orange"
-                    ).props("outline")
+                    ui.badge(f"P1: {p1_count}", color="orange").props("outline")
 
         # Wrap _rebuild_board to also rebuild stats
         _original_rebuild = _rebuild_board
@@ -736,6 +758,139 @@ def main(
 
         # Kanban columns
         _rebuild_board()
+
+    # ------------------------------------------------------------------
+    # Fleet page — all boards in a single table with gate status
+    # ------------------------------------------------------------------
+
+    @ui.page("/fleet")
+    async def fleet_page() -> None:
+        """Fleet overview showing all boards and their gate status."""
+        from datetime import datetime, timezone
+
+        from kicad_pipeline.evidence.gates import ALL_STAGES, check_gate
+        from kicad_pipeline.evidence.ledger import load_ledger
+
+        await ui.context.client.connected()
+        session = nicegui_app.storage.tab
+        session.setdefault("role", "framework")
+        session.setdefault("reviewer_name", "")
+
+        ui.dark_mode(True)
+        _build_nav_header("/fleet", session)
+
+        ui.label("Fleet Overview").classes("text-h5 font-bold q-px-md q-pt-md")
+
+        board_names = _discover_boards(output_root)
+
+        if not board_names:
+            ui.label("No boards found in output directory").classes("text-grey q-px-md")
+            return
+
+        fleet_container = ui.element("div")
+
+        def _build_fleet_rows() -> list[dict[str, str]]:
+            rows: list[dict[str, str]] = []
+            for name in board_names:
+                board_dir = output_root / name
+                grade = _latest_grade(board_dir)
+
+                board_pcb_files = list(board_dir.glob("*.kicad_pcb"))
+                if not board_pcb_files:
+                    continue
+                board_pcb = board_pcb_files[0]
+
+                stage_status: dict[str, str] = {}
+                blocker_parts: list[str] = []
+                for stage in ALL_STAGES:
+                    result = check_gate(board_pcb, stage)
+                    if result.passed:
+                        stage_status[stage] = "pass"
+                    else:
+                        stage_status[stage] = "fail"
+                        if result.missing:
+                            for m in result.missing:
+                                if "human_approval" in m:
+                                    blocker_parts.append(f"{stage}: needs approval")
+                                    break
+                            else:
+                                blocker_parts.append(f"{stage}: {len(result.missing)} missing")
+
+                ledger = load_ledger(board_pcb)
+                activity = "—"
+                if ledger.records:
+                    now = datetime.now(tz=timezone.utc)
+                    delta = now - ledger.records[-1].timestamp
+                    secs = delta.total_seconds()
+                    if secs < 3600:
+                        activity = f"{int(secs // 60)}m ago"
+                    elif secs < 86400:
+                        activity = f"{int(secs // 3600)}h ago"
+                    else:
+                        activity = f"{int(secs // 86400)}d ago"
+
+                blocker = blocker_parts[0] if blocker_parts else "—"
+
+                rows.append(
+                    {
+                        "board": name,
+                        "grade": grade,
+                        "requirements": stage_status.get("requirements", "?"),
+                        "schematic": stage_status.get("schematic", "?"),
+                        "pcb": stage_status.get("pcb", "?"),
+                        "validation": stage_status.get("validation", "?"),
+                        "production": stage_status.get("production", "?"),
+                        "blocker": blocker,
+                        "activity": activity,
+                    }
+                )
+            return rows
+
+        def _render_fleet_table(columns: list[dict[str, str]], rows: list[dict[str, str]]) -> None:
+            table = ui.table(
+                columns=columns,
+                rows=rows,
+                row_key="board",
+            ).classes("w-full q-mx-md")
+
+            table.on(
+                "row-click",
+                lambda e: ui.navigate.to(f"/?board={e.args[1]['board']}"),
+            )
+
+            with ui.row().classes("q-px-md q-mt-md gap-4"):
+                total = len(rows)
+                ready = sum(1 for r in rows if r["production"] == "pass")
+                blocked = sum(1 for r in rows if "approval" in r.get("blocker", ""))
+                ui.badge(f"Total: {total}", color="blue")
+                ui.badge(f"Ready: {ready}", color="green")
+                if blocked:
+                    ui.badge(f"Awaiting approval: {blocked}", color="orange")
+
+        def _rebuild_fleet() -> None:
+            columns = [
+                {"name": "board", "label": "Board", "field": "board", "sortable": True},
+                {"name": "grade", "label": "Grade", "field": "grade", "sortable": True},
+                {"name": "requirements", "label": "Req", "field": "requirements"},
+                {"name": "schematic", "label": "Sch", "field": "schematic"},
+                {"name": "pcb", "label": "PCB", "field": "pcb"},
+                {"name": "validation", "label": "Val", "field": "validation"},
+                {"name": "production", "label": "Prod", "field": "production"},
+                {"name": "blocker", "label": "Blocker", "field": "blocker"},
+                {
+                    "name": "activity",
+                    "label": "Last Activity",
+                    "field": "activity",
+                    "sortable": True,
+                },
+            ]
+            fleet_container.clear()
+            with fleet_container:
+                rows = _build_fleet_rows()
+                _render_fleet_table(columns, rows)
+
+        _rebuild_fleet()
+        ui.timer(5.0, _rebuild_fleet)
 
     ui.run(
         port=port,

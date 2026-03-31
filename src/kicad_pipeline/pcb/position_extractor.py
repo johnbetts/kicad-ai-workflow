@@ -321,8 +321,8 @@ def _record_pad_net(
             num = int(float(str(net_sub[1])))
             name = str(net_sub[2])
             result[num] = name
-        except (ValueError, IndexError):
-            pass
+        except (ValueError, IndexError) as exc:
+            log.debug("Net number/name parse failed for sub-node: %s", exc)
     elif len(net_sub) == 2:
         # (net "name") format (KiCad 10)
         name = str(net_sub[1])

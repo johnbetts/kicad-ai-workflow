@@ -153,7 +153,6 @@ def partition_board(
                    zone_component_count.get(zn, 0))
 
     # Step 2: Compute zone rects from default fractions, scaled by component count
-    total_components = sum(zone_component_count.values()) or 1
     half_gap = _ZONE_GAP_MM / 2.0
 
     # When there's only one zone, give it the full board area

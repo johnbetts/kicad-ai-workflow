@@ -11,10 +11,11 @@ import logging
 import math
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from kicad_pipeline.models.pcb import Footprint
     from kicad_pipeline.validation.component_registry import ComponentRegistry, ComponentSpec
 
@@ -93,8 +94,8 @@ def _check_pad_type(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     """
     fid = (spec.footprint_id or "").upper()
     # Mixed-technology footprints: exempt from pad type check
-    _MIXED_TECH_KW = ("RJ45", "BUZZER", "SW_PUSH", "SW_SPST", "SWITCH", "BUTTON")
-    if any(kw in fid for kw in _MIXED_TECH_KW):
+    mixed_tech_kw = ("RJ45", "BUZZER", "SW_PUSH", "SW_SPST", "SWITCH", "BUTTON")
+    if any(kw in fid for kw in mixed_tech_kw):
         return CheckResult(
             name="pad_type", passed=True,
             detail="exempt (mixed-technology footprint)", severity="critical",
@@ -116,11 +117,11 @@ def _check_no_duplicate_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
     Shield pads ("SH", "") and NPTH pads are exempt — connectors like RJ45
     legitimately have multiple shield/mounting pads with the same designation.
     """
-    _EXEMPT_PAD_NAMES = {"SH", "MP", "", "0"}  # shield, mounting post, unnamed, ground tab
+    exempt_pad_names = {"SH", "MP", "", "0"}  # shield, mounting post, unnamed, ground tab
     # Tact switches have paired pads (pin 1 and 2 each appear twice) — this
     # is the physical design, not a bug.  Only flag duplicates beyond 2x.
     is_switch = spec.ref.startswith("SW") or "switch" in spec.description.lower()
-    numbers = [p.number for p in fp.pads if p.number not in _EXEMPT_PAD_NAMES]
+    numbers = [p.number for p in fp.pads if p.number not in exempt_pad_names]
     from collections import Counter
     counts = Counter(numbers)
     max_allowed = 2 if is_switch else 1
@@ -494,7 +495,10 @@ def _check_body_covers_pads(fp: Footprint, spec: ComponentSpec) -> CheckResult:
 
     ok = len(exposed) == 0
     if ok:
-        detail = f"all pads within body ({body_x_min:.1f},{body_y_min:.1f})-({body_x_max:.1f},{body_y_max:.1f})"
+        detail = (
+            f"all pads within body ({body_x_min:.1f},{body_y_min:.1f})"
+            f"-({body_x_max:.1f},{body_y_max:.1f})"
+        )
     else:
         detail = (
             f"pads outside body: {', '.join(exposed[:5])}; "
@@ -536,26 +540,46 @@ def _check_pad_extent_vs_body(fp: Footprint, spec: ComponentSpec) -> CheckResult
     # side, so pad span can be up to ~200% of body width for small ICs.
     # SOT-223/SOT-89: large tab pad extends ~2x body height — use higher ratio.
     # THT connectors/relays have shield/mounting pins that extend further.
-    is_ic = spec.ref.startswith("U") or (spec.expected_pad_type == "smd" and spec.expected_pads > 4)
+    is_ic = (
+        spec.ref.startswith("U")
+        or (spec.expected_pad_type == "smd" and spec.expected_pads > 4)
+    )
     is_connector = spec.ref.startswith(("J", "K")) or any(
         kw in fid for kw in ("TERMINAL", "PINHEADER", "PINSOCKET", "CONNECTOR", "RJ45", "RELAY")
     )
     is_tab_package = any(kw in fid for kw in ("SOT-223", "SOT-89", "TO-252", "TO-263", "DPAK"))
     # SMD switches have gull-wing leads extending past the body
     is_switch = spec.ref.startswith("SW") or "SW_" in fid
-    max_ratio = 2.5 if is_tab_package else (2.5 if (is_ic or is_switch) else (3.0 if is_connector else 1.5))
+    if is_tab_package or is_ic or is_switch:
+        max_ratio = 2.5
+    elif is_connector:
+        max_ratio = 3.0
+    else:
+        max_ratio = 1.5
     min_ratio = 0.15
 
     issues: list[str] = []
     if spec.expected_pads > 2:
         if pad_span_x > 0 and pad_span_x > body_w * max_ratio:
-            issues.append(f"X span {pad_span_x:.1f}mm > {max_ratio*100:.0f}% of body {body_w:.1f}mm")
+            issues.append(
+                f"X span {pad_span_x:.1f}mm > "
+                f"{max_ratio * 100:.0f}% of body {body_w:.1f}mm"
+            )
         if pad_span_y > 0 and pad_span_y > body_h * max_ratio:
-            issues.append(f"Y span {pad_span_y:.1f}mm > {max_ratio*100:.0f}% of body {body_h:.1f}mm")
+            issues.append(
+                f"Y span {pad_span_y:.1f}mm > "
+                f"{max_ratio * 100:.0f}% of body {body_h:.1f}mm"
+            )
         if pad_span_x > 0 and pad_span_x < body_w * min_ratio:
-            issues.append(f"X span {pad_span_x:.1f}mm < {min_ratio*100:.0f}% of body {body_w:.1f}mm")
+            issues.append(
+                f"X span {pad_span_x:.1f}mm < "
+                f"{min_ratio * 100:.0f}% of body {body_w:.1f}mm"
+            )
         if pad_span_y > 0 and pad_span_y < body_h * min_ratio:
-            issues.append(f"Y span {pad_span_y:.1f}mm < {min_ratio*100:.0f}% of body {body_h:.1f}mm")
+            issues.append(
+                f"Y span {pad_span_y:.1f}mm < "
+                f"{min_ratio * 100:.0f}% of body {body_h:.1f}mm"
+            )
 
     ok = len(issues) == 0
     detail = (
@@ -647,7 +671,11 @@ def _render_isolation_board(
                 logger.info("Rendered %s → %s", view_name, out_path)
             else:
                 logger.warning("Render %s produced empty file", view_name)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ) as exc:
             logger.warning("Failed to render %s: %s", view_name, exc)
 
     return tuple(renders)
@@ -703,7 +731,10 @@ def _check_3d_body_visible(
             return CheckResult(
                 name="fab_3d_body_visible",
                 passed=ok,
-                detail=f"3D iso render {size_kb:.0f}KB (body {'visible' if ok else 'may be missing'})",
+                detail=(
+                    f"3D iso render {size_kb:.0f}KB "
+                    f"(body {'visible' if ok else 'may be missing'})"
+                ),
                 severity="major",
             )
     return CheckResult(

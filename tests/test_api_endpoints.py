@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import patch
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from fastapi.testclient import TestClient
 
 from kicad_pipeline.api.app import app

@@ -93,6 +93,8 @@ class ApproveRequest(BaseModel):
     """Payload for POST /api/approve."""
 
     stage: str = "pcb"
+    reviewer: str = ""
+    notes: str = ""
 
 
 class RejectRequest(BaseModel):
@@ -100,6 +102,7 @@ class RejectRequest(BaseModel):
 
     stage: str = "pcb"
     feedback: str = ""
+    reviewer: str = ""
 
 
 class CommandRequest(BaseModel):
@@ -107,6 +110,12 @@ class CommandRequest(BaseModel):
 
     command: str
     board: str = ""
+
+
+class RunnerRequest(BaseModel):
+    """Payload for POST /api/run/*."""
+
+    board: str
 
 
 def _board_pcb_path(board_name: str) -> Path:
@@ -138,14 +147,10 @@ def _discover_board_names() -> list[str]:
     return boards
 
 
-def register_api_routes(app: Starlette, output_root: Path) -> None:
-    """Register FastAPI-style API routes on the NiceGUI/Starlette app."""
+def _register_evidence_routes() -> list[object]:
     from fastapi import HTTPException
     from fastapi.responses import JSONResponse
     from starlette.routing import Route
-
-    global _output_root
-    _output_root = output_root
 
     async def post_evidence(request: Request) -> JSONResponse:
         """Accept an EvidenceRecord JSON body and append to ledger."""
@@ -176,20 +181,39 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
         ledger = load_ledger(board_pcb)
         return JSONResponse(ledger.model_dump(mode="json"))
 
+    async def get_boards(request: Request) -> JSONResponse:
+        """List available board names from the output directory."""
+        boards = _discover_board_names()
+        return JSONResponse({"boards": boards})
+
+    return [
+        Route("/api/evidence", post_evidence, methods=["POST"]),
+        Route("/api/log", post_log, methods=["POST"]),
+        Route("/api/ledger/{board_name}", get_ledger, methods=["GET"]),
+        Route("/api/boards", get_boards, methods=["GET"]),
+    ]
+
+
+def _register_approval_routes() -> list[object]:
+    from fastapi.responses import JSONResponse
+    from starlette.routing import Route
+
     async def post_approve(request: Request) -> JSONResponse:
         """Write a HUMAN_APPROVAL record to the ledger."""
         board_name = request.path_params["board_name"]
         body = await request.json()
         req = ApproveRequest.model_validate(body)
         board_pcb = _board_pcb_path(board_name)
+        reviewer = req.reviewer or "human"
+        producer = f"human:{reviewer}" if req.reviewer else "human"
         record = EvidenceRecord(
             kind=EvidenceKind.HUMAN_APPROVAL,
             stage=req.stage,
             step="api_approval",
             board=board_name,
             passed=True,
-            summary=f"Human approved {req.stage} via API",
-            producer="api",
+            summary=f"{reviewer} approved {req.stage} via API",
+            producer=producer,
         )
         append_record(board_pcb, record)
         return JSONResponse({"status": "ok", "id": record.id}, status_code=201)
@@ -200,25 +224,31 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
         body = await request.json()
         req = RejectRequest.model_validate(body)
         board_pcb = _board_pcb_path(board_name)
+        reviewer = req.reviewer or "human"
+        producer = f"human:{reviewer}" if req.reviewer else "human"
         record = EvidenceRecord(
             kind=EvidenceKind.HUMAN_REJECTION,
             stage=req.stage,
             step="api_rejection",
             board=board_name,
             passed=False,
-            summary=f"Human rejected {req.stage} via API",
+            summary=f"{reviewer} rejected {req.stage} via API",
             feedback=req.feedback,
-            producer="api",
+            producer=producer,
         )
         append_record(board_pcb, record)
         return JSONResponse({"status": "ok", "id": record.id}, status_code=201)
 
-    async def get_boards(request: Request) -> JSONResponse:
-        """List available board names from the output directory."""
-        boards = _discover_board_names()
-        return JSONResponse({"boards": boards})
+    return [
+        Route("/api/approve/{board_name}", post_approve, methods=["POST"]),
+        Route("/api/reject/{board_name}", post_reject, methods=["POST"]),
+    ]
 
-    # -- Kanban endpoints --------------------------------------------------
+
+def _register_kanban_routes() -> list[object]:
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from starlette.routing import Route
 
     async def get_kanban(request: Request) -> JSONResponse:
         """Return the full kanban board as JSON."""
@@ -238,6 +268,31 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         result = add_card(_project_root(), card)
         return JSONResponse(result.model_dump(), status_code=201)
+
+    async def post_kanban_import_roadmap(request: Request) -> JSONResponse:
+        """Import cards from a roadmap.md file."""
+        from pathlib import Path
+
+        from kicad_pipeline.dashboard.kanban import import_from_roadmap
+
+        body = await request.json()
+        roadmap_path = Path(body.get("roadmap_path", ""))
+        if not roadmap_path.exists():
+            raise HTTPException(status_code=404, detail=f"Roadmap not found: {roadmap_path}")
+        count = import_from_roadmap(_project_root(), roadmap_path)
+        return JSONResponse({"status": "ok", "imported": count})
+
+    return [
+        Route("/api/kanban", get_kanban, methods=["GET"]),
+        Route("/api/kanban/cards", post_kanban_card, methods=["POST"]),
+        Route("/api/kanban/import-roadmap", post_kanban_import_roadmap, methods=["POST"]),
+    ]
+
+
+def _register_kanban_card_routes() -> list[object]:
+    from fastapi import HTTPException
+    from fastapi.responses import JSONResponse
+    from starlette.routing import Route
 
     async def put_kanban_card(request: Request) -> JSONResponse:
         """Update an existing kanban card."""
@@ -277,18 +332,16 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return JSONResponse({"status": "ok"})
 
-    async def post_kanban_import_roadmap(request: Request) -> JSONResponse:
-        """Import cards from a roadmap.md file."""
-        from pathlib import Path
+    return [
+        Route("/api/kanban/cards/{card_id}", put_kanban_card, methods=["PUT"]),
+        Route("/api/kanban/cards/{card_id}", delete_kanban_card, methods=["DELETE"]),
+        Route("/api/kanban/cards/{card_id}/move", put_kanban_card_move, methods=["PUT"]),
+    ]
 
-        from kicad_pipeline.dashboard.kanban import import_from_roadmap
 
-        body = await request.json()
-        roadmap_path = Path(body.get("roadmap_path", ""))
-        if not roadmap_path.exists():
-            raise HTTPException(status_code=404, detail=f"Roadmap not found: {roadmap_path}")
-        count = import_from_roadmap(_project_root(), roadmap_path)
-        return JSONResponse({"status": "ok", "imported": count})
+def _register_command_routes() -> list[object]:
+    from fastapi.responses import JSONResponse
+    from starlette.routing import Route
 
     async def post_command(request: Request) -> JSONResponse:
         """Execute a dashboard command and return the response."""
@@ -314,20 +367,80 @@ def register_api_routes(app: Starlette, output_root: Path) -> None:
         response = _dispatch_command(cmd_text, board_dir, None)
         return JSONResponse({"response": response})
 
-    # Mount routes on the Starlette app
-    api_routes = [
-        Route("/api/evidence", post_evidence, methods=["POST"]),
-        Route("/api/log", post_log, methods=["POST"]),
+    return [
         Route("/api/command", post_command, methods=["POST"]),
-        Route("/api/ledger/{board_name}", get_ledger, methods=["GET"]),
-        Route("/api/approve/{board_name}", post_approve, methods=["POST"]),
-        Route("/api/reject/{board_name}", post_reject, methods=["POST"]),
-        Route("/api/boards", get_boards, methods=["GET"]),
-        Route("/api/kanban", get_kanban, methods=["GET"]),
-        Route("/api/kanban/cards", post_kanban_card, methods=["POST"]),
-        Route("/api/kanban/cards/{card_id}", put_kanban_card, methods=["PUT"]),
-        Route("/api/kanban/cards/{card_id}", delete_kanban_card, methods=["DELETE"]),
-        Route("/api/kanban/cards/{card_id}/move", put_kanban_card_move, methods=["PUT"]),
-        Route("/api/kanban/import-roadmap", post_kanban_import_roadmap, methods=["POST"]),
+    ]
+
+
+def _resolve_board_pcb(board_name: str) -> tuple[Path, str]:
+    from fastapi import HTTPException
+
+    board_dir = _output_root / board_name if _output_root else None
+    if not board_dir or not board_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Board not found: {board_name}")
+    pcbs = list(board_dir.glob("*.kicad_pcb"))
+    if not pcbs:
+        raise HTTPException(status_code=404, detail=f"No .kicad_pcb in {board_name}")
+    return board_dir, str(pcbs[0])
+
+
+def _run_subprocess_logged(cmd: list[str], board: str, label: str) -> None:
+    import subprocess
+
+    from fastapi import HTTPException
+
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from kicad_pipeline.dashboard.app import _log_buffer
+
+        ts = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+        _log_buffer.append(f"[{ts}] [runner] {label} {board}...")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail=f"{cmd[0]} not found")  # noqa: B904
+
+
+def _register_runner_routes() -> list[object]:
+    from fastapi.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def post_run_render(request: Request) -> JSONResponse:
+        body = await request.json()
+        req = RunnerRequest.model_validate(body)
+        board_dir, pcb_path = _resolve_board_pcb(req.board)
+        _run_subprocess_logged(
+            ["kicad-image-gen", "2d", pcb_path, "-o", f"{board_dir}/{req.board}_2d.png"],
+            req.board, "Re-rendering",
+        )
+        return JSONResponse({"status": "started", "board": req.board})
+
+    async def post_run_drc(request: Request) -> JSONResponse:
+        body = await request.json()
+        req = RunnerRequest.model_validate(body)
+        board_dir, pcb_path = _resolve_board_pcb(req.board)
+        _run_subprocess_logged(
+            ["kicad-cli", "pcb", "drc", "--format", "json",
+             "-o", str(board_dir / "drc_report.json"), pcb_path],
+            req.board, "Running DRC on",
+        )
+        return JSONResponse({"status": "started", "board": req.board})
+
+    return [
+        Route("/api/run/render", post_run_render, methods=["POST"]),
+        Route("/api/run/drc", post_run_drc, methods=["POST"]),
+    ]
+
+
+def register_api_routes(app: Starlette, output_root: Path) -> None:
+    """Register FastAPI-style API routes on the NiceGUI/Starlette app."""
+    global _output_root
+    _output_root = output_root
+
+    api_routes = [
+        *_register_evidence_routes(),
+        *_register_approval_routes(),
+        *_register_command_routes(),
+        *_register_kanban_routes(),
+        *_register_kanban_card_routes(),
+        *_register_runner_routes(),
     ]
     app.routes.extend(api_routes)

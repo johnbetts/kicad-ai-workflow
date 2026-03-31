@@ -33,7 +33,6 @@ from kicad_pipeline.pcb.builder import (
     _footprint_sexp,
     _generate_ic_drc_exclusions,
     _make_gnd_stitching_vias,
-    _make_rf_via_fence,
     _zone_sexp,
     build_pcb,
     pcb_to_sexp,
@@ -272,17 +271,18 @@ def test_build_pcb_no_components_raises() -> None:
 
 
 def test_default_board_size() -> None:
-    """Default board is at least 80 x 40 mm when no mechanical constraints.
+    """Default board meets absolute minimum dimensions.
 
-    Auto-sizing may produce a larger board when component footprints
-    (e.g. ESP32 module) require more area than the 80x40 minimum.
+    Auto-sizing targets 3.5x component area and may shrink below the
+    old 80x40 default.  Absolute minimums are 50x30mm (55mm wide with
+    THT connectors).
     """
     req = _make_requirements(with_mechanical=False)
     design = build_pcb(req)
     xs = [p.x for p in design.outline.polygon]
     ys = [p.y for p in design.outline.polygon]
-    assert max(xs) >= 80.0
-    assert max(ys) >= 40.0
+    assert max(xs) >= 50.0
+    assert max(ys) >= 30.0
 
 
 def test_board_dimensions_from_mechanical() -> None:
@@ -803,66 +803,6 @@ def test_build_layer_table_default_is_2_layer() -> None:
     table = _build_layer_table()
     names = [entry[1] for entry in table]
     assert "In1.Cu" not in names
-
-
-# ---------------------------------------------------------------------------
-# Phase 4: RF via fence
-# ---------------------------------------------------------------------------
-
-
-def test_rf_via_fence_around_antenna_keepout() -> None:
-    """RF via fence should place vias around antenna keepout polygons."""
-    from kicad_pipeline.models.pcb import Keepout
-
-    ko = Keepout(
-        polygon=(
-            Point(70.0, 0.0), Point(80.0, 0.0),
-            Point(80.0, 10.0), Point(70.0, 10.0),
-            Point(70.0, 0.0),
-        ),
-        layers=("F.Cu", "B.Cu"),
-        no_copper=True,
-        no_vias=False,
-        no_tracks=False,
-    )
-    vias = _make_rf_via_fence(
-        (ko,), gnd_net_num=1, spacing_mm=2.0,
-    )
-    assert len(vias) > 0
-    # All vias should be GND
-    for v in vias:
-        assert v.net_number == 1
-
-
-def test_rf_via_fence_skips_non_rf_keepout() -> None:
-    """RF via fence should skip keepouts without no_copper or without F.Cu."""
-    from kicad_pipeline.models.pcb import Keepout
-
-    # Keepout without no_copper
-    ko1 = Keepout(
-        polygon=(
-            Point(0.0, 0.0), Point(5.0, 0.0),
-            Point(5.0, 5.0), Point(0.0, 5.0),
-            Point(0.0, 0.0),
-        ),
-        layers=("F.Cu",),
-        no_copper=False,
-        no_vias=True,
-    )
-    # Keepout without F.Cu in layers
-    ko2 = Keepout(
-        polygon=(
-            Point(10.0, 0.0), Point(15.0, 0.0),
-            Point(15.0, 5.0), Point(10.0, 5.0),
-            Point(10.0, 0.0),
-        ),
-        layers=("B.Cu",),
-        no_copper=True,
-    )
-    vias = _make_rf_via_fence(
-        (ko1, ko2), gnd_net_num=1, spacing_mm=2.0,
-    )
-    assert len(vias) == 0
 
 
 def test_netclass_guard_traces_default() -> None:

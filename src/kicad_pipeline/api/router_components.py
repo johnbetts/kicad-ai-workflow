@@ -159,8 +159,8 @@ async def get_component_detail(component_id: str) -> ComponentDetail:
                     if lcsc:
                         lcsc_url = f"https://www.lcsc.com/product-detail/{lcsc}.html"
                         break
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("LCSC URL enrichment failed for %s: %s", fp_id, exc)
 
     # 3D model path
     model_3d = ""
@@ -170,8 +170,8 @@ async def get_component_detail(component_id: str) -> ComponentDetail:
             if pattern in fp_id:
                 model_3d = model_path
                 break
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("3D model map lookup failed for %s: %s", fp_id, exc)
 
     return ComponentDetail(
         component_id=comp.get("component_id", ""),
@@ -322,72 +322,59 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _run_structural_checks(comp: dict[str, Any]) -> list[CheckResultSchema]:
-    """Run structural checks on a component spec (registry-only, no footprint file)."""
-    checks: list[CheckResultSchema] = []
-
-    # 1: Expected pad count defined
+def _check_pad_specs(comp: dict[str, Any]) -> list[CheckResultSchema]:
     expected = comp.get("expected_pads", 0)
-    checks.append(
+    pad_type = comp.get("expected_pad_type", "")
+    bw = comp.get("body_width_mm") or 0
+    bh = comp.get("body_height_mm") or 0
+    return [
         CheckResultSchema(
             name="pad_count_defined",
             passed=expected > 0,
             detail=f"Expected {expected} pads" if expected > 0 else "No expected pad count",
             severity="critical" if expected == 0 else "info",
-        )
-    )
-
-    # 2: Pad type defined
-    pad_type = comp.get("expected_pad_type", "")
-    checks.append(
+        ),
         CheckResultSchema(
             name="pad_type_defined",
             passed=pad_type in ("smd", "thru_hole"),
             detail=f"Type: {pad_type}" if pad_type else "No pad type defined",
             severity="major" if not pad_type else "info",
-        )
-    )
-
-    # 3: Body dimensions
-    bw = comp.get("body_width_mm") or 0
-    bh = comp.get("body_height_mm") or 0
-    checks.append(
+        ),
         CheckResultSchema(
             name="body_dimensions",
             passed=bw > 0 and bh > 0,
             detail=f"{bw}x{bh}mm" if bw > 0 and bh > 0 else "Missing dimensions",
             severity="major" if bw == 0 or bh == 0 else "info",
-        )
-    )
+        ),
+    ]
 
-    # 4: Has description
+
+def _check_metadata(comp: dict[str, Any]) -> list[CheckResultSchema]:
     desc = comp.get("description", "")
-    checks.append(
+    fp = comp.get("footprint_id", "")
+    return [
         CheckResultSchema(
             name="has_description",
             passed=len(desc) > 5,
             detail=desc[:60] if desc else "No description",
             severity="minor",
-        )
-    )
-
-    # 5: Footprint ID set
-    fp = comp.get("footprint_id", "")
-    checks.append(
+        ),
         CheckResultSchema(
             name="footprint_id_set",
             passed=bool(fp),
             detail=fp if fp else "No footprint ID",
             severity="critical" if not fp else "info",
-        )
-    )
+        ),
+    ]
 
-    # 6: No open critical issues
+
+def _check_quality_status(comp: dict[str, Any]) -> list[CheckResultSchema]:
     issues = comp.get("known_issues", [])
     open_critical = [
         i for i in issues if i.get("status") == "open" and i.get("severity") == "critical"
     ]
-    checks.append(
+    rot = comp.get("model_rotation_z")
+    return [
         CheckResultSchema(
             name="no_open_critical_issues",
             passed=len(open_critical) == 0,
@@ -397,21 +384,23 @@ def _run_structural_checks(comp: dict[str, Any]) -> list[CheckResultSchema]:
                 else "No open critical issues"
             ),
             severity="critical" if open_critical else "info",
-        )
-    )
-
-    # 7: Model rotation defined
-    rot = comp.get("model_rotation_z")
-    checks.append(
+        ),
         CheckResultSchema(
             name="model_rotation_defined",
             passed=rot is not None,
             detail=f"Z rotation: {rot} deg" if rot is not None else "No rotation defined",
             severity="minor",
-        )
-    )
+        ),
+    ]
 
-    return checks
+
+def _run_structural_checks(comp: dict[str, Any]) -> list[CheckResultSchema]:
+    """Run structural checks on a component spec (registry-only, no footprint file)."""
+    return [
+        *_check_pad_specs(comp),
+        *_check_metadata(comp),
+        *_check_quality_status(comp),
+    ]
 
 
 def _find_component_images(component_id: str) -> dict[str, str]:

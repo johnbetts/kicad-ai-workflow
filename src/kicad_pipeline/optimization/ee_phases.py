@@ -43,6 +43,7 @@ from kicad_pipeline.optimization.ee_phases_refinement import (  # noqa: F401
     _phase_late_decoupling,
     _phase_late_relay_realignment,
     _phase_mcu_decoupling_repull,
+    _phase_pad_facing_optimization,
     _phase_review_loop,
 )
 from kicad_pipeline.optimization.functional_grouper import (
@@ -136,6 +137,58 @@ def _phase_group_placement(ctx: PlacementContext) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _apply_ordering_chain(ctx: PlacementContext, chain: object) -> None:
+    present = [r for r in chain.refs if r in ctx.positions]  # type: ignore[union-attr]
+    if len(present) < 2:
+        return
+    xs = [ctx.positions[r][0] for r in present]
+    ys = [ctx.positions[r][1] for r in present]
+    use_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+    vals = [ctx.positions[r][0 if use_x else 1] for r in present]
+    if all(vals[i] <= vals[i + 1] + 1.0 for i in range(len(vals) - 1)):
+        return
+    bounds = ctx.bounds
+    sorted_vals = sorted(vals)
+    min_gap = 4.0
+    for i in range(1, len(sorted_vals)):
+        if sorted_vals[i] - sorted_vals[i - 1] < min_gap:
+            sorted_vals[i] = sorted_vals[i - 1] + min_gap
+    for i, ref in enumerate(present):
+        rx, ry, rrot = ctx.positions[ref]
+        w, h = ctx.fp_sizes.get(ref, (2.0, 1.0))
+        if use_x:
+            new_v = max(bounds[0] + w / 2 + 1, min(bounds[2] - w / 2 - 1, sorted_vals[i]))
+            ctx.positions[ref] = (new_v, ry, rrot)
+        else:
+            new_v = max(bounds[1] + h / 2 + 1, min(bounds[3] - h / 2 - 1, sorted_vals[i]))
+            ctx.positions[ref] = (rx, new_v, rrot)
+        ctx.fixed_refs.add(ref)
+    _log.info("    Reordered chain '%s': %s", chain.group, present)  # type: ignore[union-attr]
+
+
+def _apply_proximity_constraint(ctx: PlacementContext, prox: object) -> None:
+    if prox.ref not in ctx.positions or prox.target_ref not in ctx.positions:  # type: ignore[union-attr]
+        return
+    rx, ry, rrot = ctx.positions[prox.ref]  # type: ignore[union-attr]
+    tx, ty, _ = ctx.positions[prox.target_ref]  # type: ignore[union-attr]
+    dist = math.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
+    if dist <= prox.max_distance_mm:  # type: ignore[union-attr]
+        return
+    ratio = prox.max_distance_mm / max(dist, 0.1)  # type: ignore[union-attr]
+    new_x = tx + (rx - tx) * ratio
+    new_y = ty + (ry - ty) * ratio
+    bounds = ctx.bounds
+    w, h = ctx.fp_sizes.get(prox.ref, (2.0, 1.0))  # type: ignore[union-attr]
+    new_x = max(bounds[0] + w / 2 + 1, min(bounds[2] - w / 2 - 1, new_x))
+    new_y = max(bounds[1] + h / 2 + 1, min(bounds[3] - h / 2 - 1, new_y))
+    ctx.positions[prox.ref] = (new_x, new_y, rrot)  # type: ignore[union-attr]
+    ctx.fixed_refs.add(prox.ref)  # type: ignore[union-attr]
+    _log.info(
+        "    %s: moved to (%.1f, %.1f) [proximity to %s]",
+        prox.ref, new_x, new_y, prox.target_ref,  # type: ignore[union-attr]
+    )
+
+
 def _phase_constraint_placement(ctx: PlacementContext) -> None:
     """3-constraints: Enforce explicit placement constraints (ordering, proximity).
 
@@ -152,71 +205,12 @@ def _phase_constraint_placement(ctx: PlacementContext) -> None:
     _log.info("  3-constraints: Enforcing placement constraints")
     constraints = ctx.constraints
 
-    # 1. Enforce ordering chains FIRST ----------------------------------------
-    # Ordering runs before proximity so that proximity has the final say.
-    # Otherwise ordering can undo proximity adjustments by sorting components
-    # back to their pre-proximity positions.
+    # Ordering runs before proximity so proximity has the final say.
     for chain in constraints.ordering:
-        present = [r for r in chain.refs if r in ctx.positions]
-        if len(present) < 2:
-            continue
-        # Determine dominant axis from current spread
-        xs = [ctx.positions[r][0] for r in present]
-        ys = [ctx.positions[r][1] for r in present]
-        use_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+        _apply_ordering_chain(ctx, chain)
 
-        vals = [ctx.positions[r][0 if use_x else 1] for r in present]
-        if all(vals[i] <= vals[i + 1] + 1.0 for i in range(len(vals) - 1)):
-            continue  # already in order
-
-        # Reassign sorted coordinate values to preserve declared order,
-        # ensuring minimum spacing between adjacent components and
-        # clamping each to board bounds.
-        bounds = ctx.bounds
-        sorted_vals = sorted(vals)
-
-        # Ensure minimum gap between adjacent chain members
-        min_gap = 4.0  # mm between component centers
-        for i in range(1, len(sorted_vals)):
-            if sorted_vals[i] - sorted_vals[i - 1] < min_gap:
-                sorted_vals[i] = sorted_vals[i - 1] + min_gap
-
-        for i, ref in enumerate(present):
-            rx, ry, rrot = ctx.positions[ref]
-            w, h = ctx.fp_sizes.get(ref, (2.0, 1.0))
-            if use_x:
-                new_v = max(bounds[0] + w / 2 + 1, min(bounds[2] - w / 2 - 1, sorted_vals[i]))
-                ctx.positions[ref] = (new_v, ry, rrot)
-            else:
-                new_v = max(bounds[1] + h / 2 + 1, min(bounds[3] - h / 2 - 1, sorted_vals[i]))
-                ctx.positions[ref] = (rx, new_v, rrot)
-            ctx.fixed_refs.add(ref)
-        _log.info("    Reordered chain '%s': %s", chain.group, present)
-
-    # 2. Enforce proximity constraints AFTER ordering -------------------------
-    # Proximity has the final say — it pulls components to their targets
-    # even if ordering just rearranged them.
     for prox in constraints.proximity:
-        if prox.ref not in ctx.positions or prox.target_ref not in ctx.positions:
-            continue
-        rx, ry, rrot = ctx.positions[prox.ref]
-        tx, ty, _ = ctx.positions[prox.target_ref]
-        dist = math.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
-        if dist <= prox.max_distance_mm:
-            continue
-        ratio = prox.max_distance_mm / max(dist, 0.1)
-        new_x = tx + (rx - tx) * ratio
-        new_y = ty + (ry - ty) * ratio
-        bounds = ctx.bounds
-        w, h = ctx.fp_sizes.get(prox.ref, (2.0, 1.0))
-        new_x = max(bounds[0] + w / 2 + 1, min(bounds[2] - w / 2 - 1, new_x))
-        new_y = max(bounds[1] + h / 2 + 1, min(bounds[3] - h / 2 - 1, new_y))
-        ctx.positions[prox.ref] = (new_x, new_y, rrot)
-        ctx.fixed_refs.add(prox.ref)
-        _log.info(
-            "    %s: moved to (%.1f, %.1f) [proximity to %s]",
-            prox.ref, new_x, new_y, prox.target_ref,
-        )
+        _apply_proximity_constraint(ctx, prox)
 
 
 def _phase_relay_rows(ctx: PlacementContext) -> None:
@@ -407,6 +401,59 @@ def _find_external_gate_resistors(
     return external
 
 
+def _find_coil_pin_abs_pos(
+    anchor: str,
+    ctx: PlacementContext,
+    positions: dict[str, tuple[float, float, float]] | None = None,
+) -> tuple[float, float] | None:
+    """Return the absolute (x, y) of the relay coil pin, or None if unknown.
+
+    Scans nets for ``_COIL`` names referencing *anchor*, then finds the
+    matching pad and rotates it into board coordinates.
+
+    Args:
+        positions: Override position dict (e.g. ``ctx.best_positions``
+            during late refinement).  Falls back to ``ctx.positions``.
+    """
+    pos_map = positions if positions is not None else ctx.positions
+    if anchor not in pos_map:
+        return None
+
+    # Find which pin number is the coil pin
+    coil_pin: str | None = None
+    for net in ctx.requirements.nets:
+        if "_COIL" not in net.name.upper():
+            continue
+        for conn in net.connections:
+            if conn.ref == anchor:
+                coil_pin = conn.pin
+                break
+        if coil_pin is not None:
+            break
+    if coil_pin is None:
+        return None
+
+    # Look up pad position in the PCB footprint
+    for fp in ctx.initial_pcb.footprints:
+        if fp.ref != anchor:
+            continue
+        for pad in fp.pads:
+            if str(pad.number) == str(coil_pin):
+                kx, ky, krot = pos_map[anchor]
+                rot_rad = math.radians(krot)
+                # Rotate local pad coords into board space
+                abs_x = kx + (
+                    pad.position.x * math.cos(rot_rad)
+                    - pad.position.y * math.sin(rot_rad)
+                )
+                abs_y = ky + (
+                    pad.position.x * math.sin(rot_rad)
+                    + pad.position.y * math.cos(rot_rad)
+                )
+                return abs_x, abs_y
+    return None
+
+
 def _place_relay_left_column(
     d_refs: list[str],
     q_refs: list[str],
@@ -414,37 +461,65 @@ def _place_relay_left_column(
     ky: float,
     bounds: tuple[float, float, float, float],
     ctx: PlacementContext,
+    anchor: str = "",
 ) -> None:
     """Place D_flyback and Q transistor in the relay driver left column.
 
     Y offsets are computed from actual component sizes to avoid collisions
     regardless of package size (0402/0603/0805/SOT-23/SOD-123F).
+
+    When a relay coil pin position is available, D is placed just below
+    the coil pin (minimising flyback loop area) rather than below the
+    relay body centre.
     """
-    # Compute Y offsets based on actual sizes: relay half-height + gap + component sizes
-    relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
-                  for r in ctx.positions if r.startswith("K")) if any(
-                      r.startswith("K") for r in ctx.positions) else 15.0
-    gap = 1.5  # mm between components in column
-    cursor_y = ky + relay_h / 2.0 + gap
+    # Try to place D near coil pin for minimal flyback loop area
+    coil_pos = _find_coil_pin_abs_pos(anchor, ctx) if anchor else None
+    coil_y = coil_pos[1] if coil_pos is not None else None
+
+    # Compute Y offsets based on actual sizes with rotation awareness
+    relay_h = 15.0
+    if anchor and anchor in ctx.positions:
+        krot = ctx.positions[anchor][2]
+        raw_w, raw_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
+        relay_h = raw_w if krot % 180 in (90, 270) else raw_h
+    elif any(r.startswith("K") for r in ctx.positions):
+        relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
+                      for r in ctx.positions if r.startswith("K"))
+
+    gap = 1.5  # mm between component edges
+    # Place D just outside the relay body on the coil-pin side.
+    # If the coil pin is in the top half of the relay, place D above;
+    # otherwise place D below.  This minimises flyback loop area while
+    # avoiding courtyard collisions.
+    if coil_y is not None and coil_y < ky:
+        # Coil pin is above relay centre → place D above the relay
+        relay_top = ky - relay_h / 2.0
+        cursor_y = relay_top - gap  # cursor grows upward (decreasing Y)
+    else:
+        # Default: place D below the relay body
+        cursor_y = ky + relay_h / 2.0 + gap
+
+    # Direction: -1 = upward (above relay), +1 = downward (below relay)
+    direction = -1.0 if (coil_y is not None and coil_y < ky) else 1.0
 
     for d_ref in d_refs:
         _dw, dh = ctx.fp_sizes.get(d_ref, (2.0, 2.0))
-        py = cursor_y + dh / 2.0
+        py = cursor_y + direction * dh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[d_ref] = (px, py, 0.0)
         ctx.relay_support_refs.add(d_ref)
-        cursor_y = py + dh / 2.0 + gap
+        cursor_y = py + direction * (dh / 2.0 + gap)
         _log.info("    D %s -> (%.1f, %.1f) LEFT col, rot=0", d_ref, px, py)
 
     for q_ref in q_refs:
-        _qw, qh = ctx.fp_sizes.get(q_ref, (2.0, 2.0))
-        py = cursor_y + qh / 2.0
+        _qw, qh = ctx.fp_sizes.get(q_ref, (3.0, 3.4))
+        py = cursor_y + direction * qh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[q_ref] = (px, py, 180.0)
         ctx.relay_support_refs.add(q_ref)
-        cursor_y = py + qh / 2.0 + gap
+        cursor_y = py + direction * (qh / 2.0 + gap)
         _log.info("    Q %s -> (%.1f, %.1f) LEFT col, rot=180", q_ref, px, py)
 
 
@@ -454,21 +529,39 @@ def _place_relay_right_column(
     ky: float,
     bounds: tuple[float, float, float, float],
     ctx: PlacementContext,
+    anchor: str = "",
 ) -> None:
     """Place R_gate resistors in the relay driver right column."""
-    relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
-                  for r in ctx.positions if r.startswith("K")) if any(
-                      r.startswith("K") for r in ctx.positions) else 15.0
-    gap = 1.5
-    cursor_y = ky + relay_h / 2.0 + gap
+    # Rotation-aware relay height
+    relay_h = 15.0
+    if anchor and anchor in ctx.positions:
+        krot = ctx.positions[anchor][2]
+        raw_w, raw_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
+        relay_h = raw_w if krot % 180 in (90, 270) else raw_h
+    elif any(r.startswith("K") for r in ctx.positions):
+        relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
+                      for r in ctx.positions if r.startswith("K"))
+    gap = 1.5  # mm — matches left column courtyard clearance
+
+    # Mirror left-column direction: place above relay if coil pin is above
+    coil_pos = _find_coil_pin_abs_pos(anchor, ctx) if anchor else None
+    coil_y = coil_pos[1] if coil_pos is not None else None
+    if coil_y is not None and coil_y < ky:
+        relay_top = ky - relay_h / 2.0
+        cursor_y = relay_top - gap
+        direction = -1.0
+    else:
+        cursor_y = ky + relay_h / 2.0 + gap
+        direction = 1.0
+
     for r_ref in r_refs:
         _rw, rh = ctx.fp_sizes.get(r_ref, (2.0, 2.0))
-        py = cursor_y + rh / 2.0
+        py = cursor_y + direction * rh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, right_x))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[r_ref] = (px, py, 180.0)
         ctx.relay_support_refs.add(r_ref)
-        cursor_y = py + rh / 2.0 + gap
+        cursor_y = py + direction * (rh / 2.0 + gap)
         _log.info("    R %s -> (%.1f, %.1f) RIGHT col, rot=180", r_ref, px, py)
 
 
@@ -503,6 +596,34 @@ def _place_relay_others_grid(
         ctx.relay_support_refs.add(ref)
 
 
+def _relay_driver_column_xs(
+    anchor: str, kx: float, _krot: float, ctx: PlacementContext,
+) -> tuple[float, float]:
+    raw_w, raw_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
+    k_w = raw_h if _krot % 180 in (90, 270) else raw_w
+    avg_passive_w = 2.0
+    left_x = kx - (k_w / 2.0 + avg_passive_w / 2.0 + 1.0)
+    right_x = kx + (k_w / 2.0 + avg_passive_w / 2.0 + 1.0)
+    return left_x, right_x
+
+
+def _place_relay_driver_columns(
+    anchor: str, kx: float, ky: float, _krot: float,
+    d_refs: list[str], q_refs: list[str], r_gate_refs: list[str],
+    other_refs: list[str], ctx: PlacementContext,
+) -> None:
+    bounds = ctx.bounds
+    left_x, right_x = _relay_driver_column_xs(anchor, kx, _krot, ctx)
+    coil_pos = _find_coil_pin_abs_pos(anchor, ctx)
+    if coil_pos is not None and coil_pos[0] > kx:
+        _place_relay_left_column(d_refs, q_refs, right_x, ky, bounds, ctx, anchor)
+        _place_relay_right_column(r_gate_refs, left_x, ky, bounds, ctx, anchor)
+    else:
+        _place_relay_left_column(d_refs, q_refs, left_x, ky, bounds, ctx, anchor)
+        _place_relay_right_column(r_gate_refs, right_x, ky, bounds, ctx, anchor)
+    _place_relay_others_grid(other_refs, kx, ky, bounds, ctx)
+
+
 def _phase_relay_drivers(ctx: PlacementContext) -> None:
     """3b: Relay driver placement — pad-connectivity-driven two-column layout.
 
@@ -520,10 +641,8 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
     length.  R_gate on the opposite side creates a routing channel.
     """
     _log.info("  3b: Relay driver subgroup tightening (two-column)")
-    sc_list = list(ctx.subcircuits)
-    bounds = ctx.bounds
 
-    for sc in sc_list:
+    for sc in ctx.subcircuits:
         if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
             continue
         anchor = sc.anchor_ref
@@ -539,11 +658,7 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         q_refs, d_refs, all_r_refs, other_refs = _classify_relay_support_members(
             support_members,
         )
-        # Separate flyback diodes (on COIL net) from LED indicator diodes.
-        # LED indicator diodes are NOT placed here — they are handled by
-        # _phase_relay_leds (phase 3b2) which places them correctly in each
-        # channel's left column.  Adding them to relay_support_refs here would
-        # cause _find_relay_led_pairs to skip them.
+        # LED indicator diodes handled by _phase_relay_leds (phase 3b2).
         d_flyback_refs, _d_led_indicator_refs = _split_flyback_and_led_diodes(d_refs, ctx)
         d_refs = d_flyback_refs
 
@@ -551,18 +666,11 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         r_gate_refs.extend(
             _find_external_gate_resistors(q_refs, r_gate_refs, r_other_refs, ctx),
         )
-        # LED resistors go to other_refs for generic grid placement
         other_refs.extend(r_other_refs)
 
-        # Two-column layout offsets derived from relay footprint width
-        k_w, _k_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
-        avg_passive_w = 2.0  # typical for 0402-0805
-        left_x = kx - (k_w / 2.0 + avg_passive_w / 2.0 + 1.0)   # LEFT column
-        right_x = kx + (k_w / 2.0 + avg_passive_w / 2.0 + 1.0)  # RIGHT column
-
-        _place_relay_left_column(d_refs, q_refs, left_x, ky, bounds, ctx)
-        _place_relay_right_column(r_gate_refs, right_x, ky, bounds, ctx)
-        _place_relay_others_grid(other_refs, kx, ky, bounds, ctx)
+        _place_relay_driver_columns(
+            anchor, kx, ky, _krot, d_refs, q_refs, r_gate_refs, other_refs, ctx,
+        )
 
 
 def _build_coil_net_to_relay(
@@ -688,6 +796,65 @@ def _find_relay_led_pairs(
     return relay_leds
 
 
+def _relay_led_cursor_start(
+    ctx: PlacementContext, left_x: float, ky: float,
+) -> float:
+    gap = 1.5
+    q_refs = [
+        r for r in ctx.relay_support_refs
+        if r.startswith("Q") and r in ctx.positions
+        and abs(ctx.positions[r][0] - left_x) < 3.0
+        and abs(ctx.positions[r][1] - ky) < 25.0
+    ]
+    if q_refs:
+        return max(
+            ctx.positions[qr][1] + ctx.fp_sizes.get(qr, (2.0, 2.0))[1] / 2.0
+            for qr in q_refs
+        ) + gap
+    return ky + 16.8
+
+
+def _place_led_column_refs(
+    ctx: PlacementContext,
+    r_led_refs: list[str],
+    d_led_refs: list[str],
+    other_led_refs: list[str],
+    left_x: float,
+    cursor_y: float,
+    relay_led_refs: set[str],
+) -> None:
+    bounds = ctx.bounds
+    gap = 1.5
+    for ref in r_led_refs:
+        _rw, rh = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        py = cursor_y + rh / 2.0
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+        ctx.positions[ref] = (px, py, 0.0)
+        ctx.relay_support_refs.add(ref)
+        relay_led_refs.add(ref)
+        cursor_y = py + rh / 2.0 + gap
+    for ref in d_led_refs:
+        _dw, dh = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        py = cursor_y + dh / 2.0
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+        ctx.positions[ref] = (px, py, 180.0)
+        ctx.relay_support_refs.add(ref)
+        relay_led_refs.add(ref)
+        cursor_y = py + dh / 2.0 + gap
+    for i, ref in enumerate(other_led_refs):
+        _ow, oh = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        py = cursor_y + oh / 2.0
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x + i * 3.0))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+        _, _, rot = ctx.positions[ref]
+        ctx.positions[ref] = (px, py, rot)
+        ctx.relay_support_refs.add(ref)
+        relay_led_refs.add(ref)
+        cursor_y = py + oh / 2.0 + gap
+
+
 def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[str]]:
     """3b2: Relay LED indicator placement — LEFT column below Q.
 
@@ -706,7 +873,6 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
     """
     _log.info("  3b2: Relay LED indicator placement (two-column)")
     relay_led_refs: set[str] = set()
-    bounds = ctx.bounds
 
     coil_net_to_relay = _build_coil_net_to_relay(ctx.requirements)
     _relay_leds = _find_relay_led_pairs(
@@ -723,42 +889,18 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
         if not led_members:
             continue
 
-        # LEFT column X — same as D_flyback and Q
         left_x = kx - 4.3
-
-        # Separate R_LED and D_LED refs
         r_led_refs = sorted(r for r in led_members if r.startswith("R"))
         d_led_refs = sorted(r for r in led_members if r.startswith("D"))
         other_led_refs = sorted(
-            r for r in led_members
-            if not r.startswith("R") and not r.startswith("D")
+            r for r in led_members if not r.startswith("R") and not r.startswith("D")
         )
 
-        # R_LED: below Q, pad 1 facing up toward COIL net (rot=0)
-        for ref in r_led_refs:
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 16.8))
-            ctx.positions[ref] = (px, py, 0.0)
-            ctx.relay_support_refs.add(ref)
-            relay_led_refs.add(ref)
-
-        # D_LED: below R_LED, anode facing up (rot=180)
-        for ref in d_led_refs:
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 19.1))
-            ctx.positions[ref] = (px, py, 180.0)
-            ctx.relay_support_refs.add(ref)
-            relay_led_refs.add(ref)
-
-        # Remaining LED-related refs below
-        for i, ref in enumerate(other_led_refs):
-            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x + i * 3.0))
-            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ky + 21.3))
-            _, _, rot = ctx.positions[ref]
-            ctx.positions[ref] = (px, py, rot)
-            ctx.relay_support_refs.add(ref)
-            relay_led_refs.add(ref)
-
+        cursor_y = _relay_led_cursor_start(ctx, left_x, ky)
+        _place_led_column_refs(
+            ctx, r_led_refs, d_led_refs, other_led_refs,
+            left_x, cursor_y, relay_led_refs,
+        )
         _log.info("    3b2: placed %d LED refs for %s (left col at x=%.1f)",
                    len(led_members), k_ref, left_x)
 
@@ -790,13 +932,13 @@ def _phase_decoupling(ctx: PlacementContext) -> None:
 
             dist = math.sqrt((cx - ix) ** 2 + (cy - iy) ** 2)
             edge_dist = max(0.0, dist - (iw + cw) / 2.0)
-            if edge_dist <= 4.0:
-                continue
+            if edge_dist <= 2.5:
+                continue  # already within 2.5mm edge-to-edge — good enough
 
             dx = ix - cx
             dy = iy - cy
             d = math.sqrt(dx * dx + dy * dy) or 1.0
-            target_dist = (iw + cw) / 2.0 + 1.5
+            target_dist = (iw + cw) / 2.0 + 1.0  # 1mm edge-to-edge gap
             tx = ix - dx / d * target_dist
             ty = iy - dy / d * target_dist
             tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
@@ -1071,9 +1213,10 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
             )
         else:
             cent_x, cent_y = origin_x, origin_y_target
-        ctx.positions[r] = (cent_x, cent_y, 180.0)
+        # Top edge — wire entry faces outward (rot=0)
+        ctx.positions[r] = (cent_x, cent_y, 0.0)
         cursor_x += tw + term_gap
-        _log.info("    %s -> centroid(%.1f, %.1f) origin(%.1f, %.1f) rot=180",
+        _log.info("    %s -> centroid(%.1f, %.1f) origin(%.1f, %.1f) rot=0",
                   r, cent_x, cent_y, origin_x, origin_y_target)
     ctx.top_edge_connector_refs = set(_top_refs)
 

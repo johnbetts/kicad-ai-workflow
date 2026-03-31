@@ -28,7 +28,6 @@ from kicad_pipeline.verification.orchestrator import (
     VerificationReport,
 )
 
-
 # ---------------------------------------------------------------------------
 # Data model tests
 # ---------------------------------------------------------------------------

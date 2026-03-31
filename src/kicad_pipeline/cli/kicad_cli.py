@@ -56,8 +56,8 @@ def find_kicad_cli() -> str:
             path = result.stdout.strip()
             logger.debug("Found kicad-cli on PATH: %s", path)
             return path
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.debug("PATH lookup for kicad-cli failed: %s", exc)
 
     msg = (
         "Cannot find kicad-cli. Install KiCad 9/10 or set the KICAD_CLI "

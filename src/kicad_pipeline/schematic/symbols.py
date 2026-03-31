@@ -241,6 +241,37 @@ def _place_horiz_pins(
         )
 
 
+def _lib_symbol_classify_pins(
+    component: Component,
+) -> tuple[list[object], list[object], list[object], list[object]]:
+    ref_prefix = "".join(ch for ch in component.ref if ch.isalpha()) or "U"
+    is_multirow_conn = (
+        ref_prefix == "J"
+        and "Conn_02x" in component.value
+        and len(component.pins) > 4
+    )
+    if is_multirow_conn:
+        return _classify_connector_pins(component.pins)
+    return _classify_pins(component.pins)
+
+
+def _lib_symbol_build_body(
+    left_pins: list[object], right_pins: list[object],
+) -> tuple[LibRectangle, float, float, float]:
+    side_max = max(len(left_pins), len(right_pins), 1)
+    body_height = side_max * SCHEMATIC_SYMBOL_PIN_SPACING_MM + SCHEMATIC_SYMBOL_PIN_SPACING_MM
+    half_w = _body_half_width(left_pins, right_pins)
+    body_top = body_height / 2.0
+    body_bottom = -body_height / 2.0
+    rect = LibRectangle(
+        start=Point(-half_w, body_top),
+        end=Point(half_w, body_bottom),
+        stroke=Stroke(),
+        fill="background",
+    )
+    return rect, half_w, body_top, body_bottom
+
+
 def make_lib_symbol(component: Component) -> LibSymbol:
     """Generate a :class:`LibSymbol` from a :class:`Component` definition.
 
@@ -265,42 +296,14 @@ def make_lib_symbol(component: Component) -> LibSymbol:
     Returns:
         A :class:`LibSymbol` with a rectangular body and all placed pins.
     """
-    # Derive ref prefix (leading alpha chars, e.g. "U" from "U1")
     ref_prefix = "".join(ch for ch in component.ref if ch.isalpha()) or "U"
     lib_id = f"kicad-ai:{ref_prefix}_{component.value}"
 
-    # Use connector-specific pin classification for multi-row connectors
-    is_multirow_conn = (
-        ref_prefix == "J"
-        and "Conn_02x" in component.value
-        and len(component.pins) > 4
-    )
-    if is_multirow_conn:
-        left_pins, right_pins, top_pins, bottom_pins = _classify_connector_pins(
-            component.pins,
-        )
-    else:
-        left_pins, right_pins, top_pins, bottom_pins = _classify_pins(component.pins)
+    left_pins, right_pins, top_pins, bottom_pins = _lib_symbol_classify_pins(component)
+    rect, half_w, body_top, body_bottom = _lib_symbol_build_body(left_pins, right_pins)
 
-    # Determine body height from the tallest left/right side
-    side_max = max(len(left_pins), len(right_pins), 1)
-    body_height = side_max * SCHEMATIC_SYMBOL_PIN_SPACING_MM + SCHEMATIC_SYMBOL_PIN_SPACING_MM
-
-    # Adaptive body width based on pin name lengths
-    half_w = _body_half_width(left_pins, right_pins)
     pin_x_left = -(half_w + SCHEMATIC_PIN_LENGTH_MM)
     pin_x_right = half_w + SCHEMATIC_PIN_LENGTH_MM
-
-    # KiCad lib_symbol Y-axis: positive = up (mathematical convention)
-    # body_top is the visual top (positive Y), body_bottom is visual bottom (negative Y)
-    body_top = body_height / 2.0
-    body_bottom = -body_height / 2.0
-    rect = LibRectangle(
-        start=Point(-half_w, body_top),
-        end=Point(half_w, body_bottom),
-        stroke=Stroke(),
-        fill="background",
-    )
 
     placed_pins: list[LibPin] = []
     _place_side_pins(placed_pins, left_pins, pin_x_left, body_top, rotation=0.0)
@@ -308,11 +311,7 @@ def make_lib_symbol(component: Component) -> LibSymbol:
     _place_horiz_pins(placed_pins, top_pins, body_top + SCHEMATIC_PIN_LENGTH_MM, 270.0)
     _place_horiz_pins(placed_pins, bottom_pins, body_bottom - SCHEMATIC_PIN_LENGTH_MM, 90.0)
 
-    log.debug(
-        "Generated lib_symbol %s with %d pins",
-        lib_id,
-        len(placed_pins),
-    )
+    log.debug("Generated lib_symbol %s with %d pins", lib_id, len(placed_pins))
 
     return LibSymbol(
         lib_id=lib_id,

@@ -49,11 +49,78 @@ def _positions_from_pcb(
     return {fp.ref: (fp.position.x, fp.position.y, fp.rotation) for fp in pcb.footprints}
 
 
+def _find_pin_number(
+    requirements: ProjectRequirements | None,
+    ref: str,
+    pin_name: str,
+) -> str | None:
+    """Look up a pin number from requirements by component ref and pin name."""
+    if requirements is None:
+        return None
+    for comp in requirements.components:
+        if comp.ref != ref:
+            continue
+        for pin in comp.pins:
+            if pin.name.upper() == pin_name.upper():
+                return pin.number
+    return None
+
+
+def _pad_world_position(
+    pcb: PCBDesign | None,
+    ref: str,
+    pin_name: str,
+    fallback_x: float,
+    fallback_y: float,
+    requirements: ProjectRequirements | None = None,
+) -> tuple[float, float]:
+    """Return the world (x, y) of a specific pad on a footprint.
+
+    Matches pads by: (1) pad number, (2) pin name from requirements -> pad
+    number lookup, (3) net name containing the pin name.
+    Returns (*fallback_x*, *fallback_y*) if the pad or footprint is not found.
+    """
+    if pcb is None:
+        return fallback_x, fallback_y
+    fp = None
+    for f in pcb.footprints:
+        if f.ref == ref:
+            fp = f
+            break
+    if fp is None:
+        return fallback_x, fallback_y
+
+    # Try direct pad number match (e.g. pin_name="2")
+    target_number = pin_name
+    # Also try looking up via requirements pin name -> number
+    req_number = _find_pin_number(requirements, ref, pin_name)
+    if req_number is not None:
+        target_number = req_number
+
+    for pad in fp.pads:
+        if pad.number == target_number or pad.number == pin_name:
+            rot_rad = math.radians(fp.rotation)
+            cos_r = math.cos(rot_rad)
+            sin_r = math.sin(rot_rad)
+            wx = fp.position.x + pad.position.x * cos_r - pad.position.y * sin_r
+            wy = fp.position.y + pad.position.x * sin_r + pad.position.y * cos_r
+            return wx, wy
+    return fallback_x, fallback_y
+
+
 def _check_proximity(
     constraint: ProximityConstraint,
     positions: dict[str, tuple[float, float, float]],
+    pcb: PCBDesign | None = None,
+    requirements: ProjectRequirements | None = None,
 ) -> ConstraintViolation | None:
-    """Check a single proximity constraint."""
+    """Check a single proximity constraint.
+
+    When *constraint.target_pin* is set and *pcb* is provided, measures
+    distance from the component center to the specific pad on the target
+    footprint (not the target center).  This gives more accurate results
+    for large ICs where pin positions differ significantly from the center.
+    """
     if constraint.ref not in positions:
         return None
     if constraint.target_ref not in positions:
@@ -61,7 +128,20 @@ def _check_proximity(
 
     rx, ry, _ = positions[constraint.ref]
     tx, ty, _ = positions[constraint.target_ref]
-    dist = math.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
+    dist_center = math.sqrt((rx - tx) ** 2 + (ry - ty) ** 2)
+
+    # When target_pin is specified, also measure to the actual pad position
+    # and use the shorter of center-to-center vs center-to-pin distance.
+    # This prevents false positives when the component is close to the IC
+    # but the specific pin is on the far side.
+    dist = dist_center
+    if constraint.target_pin and pcb is not None:
+        px, py = _pad_world_position(
+            pcb, constraint.target_ref, constraint.target_pin, tx, ty,
+            requirements=requirements,
+        )
+        dist_pin = math.sqrt((rx - px) ** 2 + (ry - py) ** 2)
+        dist = min(dist_center, dist_pin)
 
     if dist <= constraint.max_distance_mm:
         return None
@@ -196,7 +276,7 @@ def audit_placement_constraints(
 
     # Check proximity constraints
     for prox in constraints.proximity:
-        v = _check_proximity(prox, positions)
+        v = _check_proximity(prox, positions, pcb=pcb, requirements=requirements)
         if v is not None:
             violations.append(v)
 

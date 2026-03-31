@@ -417,6 +417,41 @@ def make_pin1_indicator(
     )
 
 
+def _silk_pad_extents(fp: Footprint) -> tuple[float, float]:
+    if fp.pads:
+        return (
+            min(p.position.y - p.size_y / 2 for p in fp.pads),
+            max(p.position.y + p.size_y / 2 for p in fp.pads),
+        )
+    return -_LABEL_OFFSET_MM, _LABEL_OFFSET_MM
+
+
+def _silk_text_size(pad_span_y: float) -> float:
+    if pad_span_y < 2.0:
+        return 0.6
+    if pad_span_y < 4.0:
+        return 0.8
+    return _REF_TEXT_SIZE_MM
+
+
+def _silk_add_ref(
+    fp: Footprint,
+    new_texts: list[FootprintText],
+    ref_y: float,
+    text_size: float,
+    has_tht: bool,
+    pad_span_y: float,
+) -> None:
+    ref_pos = Point(x=0.0, y=ref_y)
+    is_compact_smd = not has_tht and pad_span_y < 2.0
+    is_mounting_hole = fp.ref.startswith("H")
+    ref_layer = LAYER_F_FAB if (is_compact_smd or is_mounting_hole) else LAYER_F_SILKSCREEN
+    new_texts.append(
+        make_ref_label(ref=fp.ref, position=ref_pos, layer=ref_layer, size_mm=text_size)
+    )
+    log.debug("add_silkscreen_to_footprint: added ref label to %s", fp.ref)
+
+
 def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
     """Ensure reference and value labels are present on the footprint.
 
@@ -440,56 +475,23 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
     existing_types = {t.text_type for t in fp.texts}
     new_texts: list[FootprintText] = list(fp.texts)
 
-    # Compute pad extents for smart label placement
-    if fp.pads:
-        min_y = min(p.position.y - p.size_y / 2 for p in fp.pads)
-        max_y = max(p.position.y + p.size_y / 2 for p in fp.pads)
-    else:
-        min_y = -_LABEL_OFFSET_MM
-        max_y = _LABEL_OFFSET_MM
-
-    # Shrink text for compact footprints (0603/0402) to avoid silk DRC
+    min_y, max_y = _silk_pad_extents(fp)
     pad_span_y = max_y - min_y
-    if pad_span_y < 2.0:
-        text_size = 0.6
-    elif pad_span_y < 4.0:
-        text_size = 0.8
-    else:
-        text_size = _REF_TEXT_SIZE_MM
+    text_size = _silk_text_size(pad_span_y)
 
-    # Clearance must account for text half-height so glyphs don't
-    # overlap adjacent copper.  Through-hole pads get extra margin.
     has_tht = any(p.pad_type == "thru_hole" for p in fp.pads)
-    # 0.75 * text_size covers typical glyph height; 0.7mm gap keeps
-    # silk safely clear of mask apertures.
     pad_label_gap = 1.5 if has_tht else (0.75 * text_size / 2 + 0.7)
     ref_y = min(min_y - pad_label_gap, -_LABEL_OFFSET_MM)
     val_y = max(max_y + pad_label_gap, _LABEL_OFFSET_MM)
 
     if "reference" not in existing_types:
-        ref_pos = Point(x=0.0, y=ref_y)
-        # Compact SMD (0603/0402) and mounting holes: ref on F.Fab to
-        # avoid silk-over-copper DRC in dense layouts.
-        is_compact_smd = (not has_tht and pad_span_y < 2.0)
-        is_mounting_hole = fp.ref.startswith("H")
-        ref_layer = (
-            LAYER_F_FAB if (is_compact_smd or is_mounting_hole)
-            else LAYER_F_SILKSCREEN
-        )
-        new_texts.append(
-            make_ref_label(
-                ref=fp.ref, position=ref_pos,
-                layer=ref_layer, size_mm=text_size,
-            )
-        )
-        log.debug("add_silkscreen_to_footprint: added ref label to %s", fp.ref)
+        _silk_add_ref(fp, new_texts, ref_y, text_size, has_tht, pad_span_y)
 
     if "value" not in existing_types:
-        val_pos = Point(x=0.0, y=val_y)
         new_texts.append(
             make_value_label(
                 value=fp.value,
-                position=val_pos,
+                position=Point(x=0.0, y=val_y),
                 layer=LAYER_F_SILKSCREEN,
                 size_mm=min(text_size, _VALUE_TEXT_SIZE_MM),
                 hidden=True,
@@ -497,21 +499,11 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
         )
         log.debug("add_silkscreen_to_footprint: added value label to %s", fp.ref)
 
-    # Return same object if nothing changed (optimisation)
     if len(new_texts) == len(fp.texts):
         return fp
 
     return Footprint(
-        lib_id=fp.lib_id,
-        ref=fp.ref,
-        value=fp.value,
-        position=fp.position,
-        rotation=fp.rotation,
-        layer=fp.layer,
-        pads=fp.pads,
-        graphics=fp.graphics,
-        texts=tuple(new_texts),
-        lcsc=fp.lcsc,
-        uuid=fp.uuid,
-        attr=fp.attr,
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value, position=fp.position,
+        rotation=fp.rotation, layer=fp.layer, pads=fp.pads, graphics=fp.graphics,
+        texts=tuple(new_texts), lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
     )

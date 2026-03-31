@@ -4,22 +4,18 @@ from __future__ import annotations
 
 from kicad_pipeline.exceptions import (
     ComponentError,
-    ConfigurationError,
     DRCError,
     ERCError,
-    FileFormatError,
     FootprintError,
     GerberError,
     GitHubError,
     KiCadPipelineError,
     OptimizationError,
-    OrchestrationError,
     PCBError,
     ProductionError,
     RequirementsError,
     RoutingError,
     SchematicError,
-    SExpError,
     ValidationError,
 )
 from kicad_pipeline.service.errors import ERROR_REGISTRY, classify_error

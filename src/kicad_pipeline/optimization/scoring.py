@@ -1316,52 +1316,61 @@ def _score_utilization(pcb: PCBDesign) -> tuple[float, list[str]]:
 
 
 def _score_compactness(pcb: PCBDesign) -> tuple[float, list[str]]:
-    """Score layout compactness — penalizes scattered component clusters.
+    """Score board compactness — penalizes boards that waste area.
 
-    Measures the ratio of component bounding box to board area.
-    A compact layout has all components in a tight cluster.
+    Measures fill ratio: total component footprint area divided by board area.
+    Boards where components occupy >= 35% of area score 1.0 (well-packed).
+    Boards below 10% fill score 0.0 (nearly empty / egregious waste).
+    Linear interpolation between 10% and 35%.
+
+    This complements ``_score_utilization`` (which checks broad density bands)
+    by applying a stricter linear penalty for sparse layouts such as power and
+    MCU training boards that waste 50-75% of board area.
     """
+    from kicad_pipeline.pcb.footprints import estimate_footprint_size
+
     if not pcb.footprints:
         return 1.0, []
 
-    # Get bounding box of all placed components (excluding mounting holes)
-    comp_xs: list[float] = []
-    comp_ys: list[float] = []
-    for fp in pcb.footprints:
-        if not fp.pads or fp.ref.startswith("H"):
-            continue
-        comp_xs.append(fp.position.x)
-        comp_ys.append(fp.position.y)
-
-    if len(comp_xs) < 2:
-        return 1.0, []
-
-    comp_bbox_w = max(comp_xs) - min(comp_xs)
-    comp_bbox_h = max(comp_ys) - min(comp_ys)
-    comp_bbox_area = max(comp_bbox_w * comp_bbox_h, 1.0)
-
-    # Board area
+    # Board area from outline
     if pcb.outline and pcb.outline.polygon:
         xs = [p.x for p in pcb.outline.polygon]
         ys = [p.y for p in pcb.outline.polygon]
-        board_area = max((max(xs) - min(xs)) * (max(ys) - min(ys)), 1.0)
+        board_area = (max(xs) - min(xs)) * (max(ys) - min(ys))
     else:
-        board_area = 10000.0
+        board_area = 10000.0  # 100x100 fallback
 
-    ratio = comp_bbox_area / board_area
+    if board_area < 1.0:
+        return 1.0, []
+
+    # Sum component footprint areas (pad extent bounding boxes)
+    comp_area = 0.0
+    for fp in pcb.footprints:
+        if not fp.pads:
+            continue
+        w, h = estimate_footprint_size(fp.lib_id)
+        comp_area += w * h
+
+    fill_ratio = comp_area / board_area
     issues: list[str] = []
 
-    if ratio > 0.9:
-        score = 1.0  # components fill the board — very compact
-    elif ratio > 0.5:
-        score = 0.8 + 0.2 * (ratio - 0.5) / 0.4
-    elif ratio > 0.2:
-        score = 0.5 + 0.3 * (ratio - 0.2) / 0.3
-    else:
-        score = ratio / 0.2 * 0.5  # 0→0.5 as 0%→20%
+    # Thresholds: >= 0.35 → 1.0, <= 0.10 → 0.0, linear between
+    fill_high = 0.35
+    fill_low = 0.10
+
+    if fill_ratio >= fill_high:
+        score = 1.0
+    elif fill_ratio <= fill_low:
+        score = 0.0
         issues.append(
-            f"Components use {ratio:.0%} of board — layout is scattered"
+            f"Fill ratio {fill_ratio:.0%} — board is nearly empty"
         )
+    else:
+        score = (fill_ratio - fill_low) / (fill_high - fill_low)
+        if fill_ratio < 0.20:
+            issues.append(
+                f"Fill ratio {fill_ratio:.0%} — significant wasted board area"
+            )
 
     return score, issues
 

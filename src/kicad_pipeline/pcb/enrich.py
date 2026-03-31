@@ -374,5 +374,5 @@ def _shrink_rect(rect_node: list[SExpNode], amount_mm: float) -> None:
         else:
             start_node[2] = sy - amount_mm
             end_node[2] = ey + amount_mm
-    except (ValueError, IndexError):
-        pass
+    except (ValueError, IndexError) as exc:
+        _log.debug("Segment endpoint adjustment failed: %s", exc)

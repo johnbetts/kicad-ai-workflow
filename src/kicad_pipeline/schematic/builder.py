@@ -417,6 +417,60 @@ def _make_symbol_instance(
     )
 
 
+def _build_prefix_counters(components: tuple[Component, ...]) -> dict[str, int]:
+    prefix_counters: dict[str, int] = {}
+    for comp in components:
+        ref = comp.ref
+        if "?" not in ref:
+            prefix = "".join(ch for ch in ref if ch.isalpha())
+            num_str = ref[len(prefix):]
+            if num_str.isdigit():
+                prefix_counters[prefix] = max(prefix_counters.get(prefix, 0), int(num_str))
+    return prefix_counters
+
+
+def _assign_new_refs(
+    components: tuple[Component, ...],
+    prefix_counters: dict[str, int],
+) -> tuple[list[str], dict[str, list[str]]]:
+    annotated_refs: list[str] = []
+    old_to_new: dict[str, list[str]] = {}
+    for comp in components:
+        ref = comp.ref
+        if "?" in ref:
+            prefix = ref.replace("?", "")
+            count = prefix_counters.get(prefix, 0) + 1
+            prefix_counters[prefix] = count
+            new_ref = f"{prefix}{count}"
+            annotated_refs.append(new_ref)
+            old_to_new.setdefault(ref, []).append(new_ref)
+        else:
+            annotated_refs.append(ref)
+    return annotated_refs, old_to_new
+
+
+def _remap_net_connections(
+    nets: tuple[Net, ...],
+    components: tuple[Component, ...],
+    annotated_refs: list[str],
+) -> list[Net]:
+    pin_ref_queues: dict[tuple[str, str], list[str]] = {}
+    for idx, comp in enumerate(components):
+        for pin in comp.pins:
+            key = (comp.ref, pin.number)
+            pin_ref_queues.setdefault(key, []).append(annotated_refs[idx])
+    new_nets: list[Net] = []
+    for net in nets:
+        new_conns: list[NetConnection] = []
+        for conn in net.connections:
+            key = (conn.ref, conn.pin)
+            queue = pin_ref_queues.get(key)
+            new_ref = queue.pop(0) if queue else conn.ref
+            new_conns.append(replace(conn, ref=new_ref))
+        new_nets.append(replace(net, connections=tuple(new_conns)))
+    return new_nets
+
+
 def _annotate_requirements(requirements: ProjectRequirements) -> ProjectRequirements:
     """Auto-annotate unannotated reference designators (R? -> R1, R2, ...).
 
@@ -431,65 +485,19 @@ def _annotate_requirements(requirements: ProjectRequirements) -> ProjectRequirem
         New :class:`ProjectRequirements` with all refs annotated.  Returns the
         original unchanged if no ``?`` refs are found.
     """
-    # Check if any refs need annotation
-    needs_annotation = any("?" in c.ref for c in requirements.components)
-    if not needs_annotation:
+    if not any("?" in c.ref for c in requirements.components):
         return requirements
 
-    # Build old_ref -> new_ref mapping (by list index to handle duplicate "R?" etc.)
-    prefix_counters: dict[str, int] = {}
-    # First pass: register existing annotated refs to avoid collisions
-    for comp in requirements.components:
-        ref = comp.ref
-        if "?" not in ref:
-            prefix = "".join(ch for ch in ref if ch.isalpha())
-            num_str = ref[len(prefix):]
-            if num_str.isdigit():
-                prefix_counters[prefix] = max(prefix_counters.get(prefix, 0), int(num_str))
+    prefix_counters = _build_prefix_counters(requirements.components)
+    annotated_refs, old_to_new = _assign_new_refs(requirements.components, prefix_counters)
 
-    # Second pass: assign numbers to unannotated refs
-    annotated_refs: list[str] = []
-    # Track per-old-ref indices to build a mapping for net/feature updates
-    old_to_new: dict[str, list[str]] = {}  # "R?" -> ["R1", "R2", ...]
-    for comp in requirements.components:
-        ref = comp.ref
-        if "?" in ref:
-            prefix = ref.replace("?", "")
-            count = prefix_counters.get(prefix, 0) + 1
-            prefix_counters[prefix] = count
-            new_ref = f"{prefix}{count}"
-            annotated_refs.append(new_ref)
-            old_to_new.setdefault(ref, []).append(new_ref)
-        else:
-            annotated_refs.append(ref)
-
-    # Create new components with annotated refs
     new_components = tuple(
         replace(comp, ref=annotated_refs[idx])
         for idx, comp in enumerate(requirements.components)
     )
 
-    # For nets: build (old_ref, pin_number) -> queue of new_refs
-    # When multiple components share the same old ref and pin number,
-    # net connections consume from the queue in order.
-    pin_ref_queues: dict[tuple[str, str], list[str]] = {}
-    for idx, comp in enumerate(requirements.components):
-        for pin in comp.pins:
-            key = (comp.ref, pin.number)
-            pin_ref_queues.setdefault(key, []).append(annotated_refs[idx])
+    new_nets = _remap_net_connections(requirements.nets, requirements.components, annotated_refs)
 
-    # Update net connections — pop from queue to disambiguate duplicates
-    new_nets: list[Net] = []
-    for net in requirements.nets:
-        new_conns: list[NetConnection] = []
-        for conn in net.connections:
-            key = (conn.ref, conn.pin)
-            queue = pin_ref_queues.get(key)
-            new_ref = queue.pop(0) if queue else conn.ref
-            new_conns.append(replace(conn, ref=new_ref))
-        new_nets.append(replace(net, connections=tuple(new_conns)))
-
-    # Update feature blocks — use queue to map duplicate refs
     feature_ref_queues: dict[str, list[str]] = {k: list(v) for k, v in old_to_new.items()}
     new_features: list[FeatureBlock] = []
     for fb in requirements.features:
@@ -503,7 +511,6 @@ def _annotate_requirements(requirements: ProjectRequirements) -> ProjectRequirem
         "auto_annotate: annotated %d refs",
         sum(1 for c in requirements.components if "?" in c.ref),
     )
-
     return replace(
         requirements,
         components=new_components,
@@ -1208,6 +1215,38 @@ def _lib_pin_sexp(pin: LibPin) -> SExpNode:
     ]
 
 
+def _lib_symbol_unit_body_sexp(
+    short_name: str,
+    shapes: tuple[LibRectangle | LibPolyline | LibCircle, ...],
+) -> list[SExpNode]:
+    unit_body: list[SExpNode] = ["symbol", f"{short_name}_0_1"]
+    for shape in shapes:
+        if isinstance(shape, LibRectangle):
+            unit_body.append([
+                "rectangle",
+                ["start", shape.start.x, shape.start.y],
+                ["end", shape.end.x, shape.end.y],
+                _stroke_sexp(shape.stroke),
+                ["fill", ["type", shape.fill]],
+            ])
+        elif isinstance(shape, LibPolyline):
+            pts: list[SExpNode] = ["pts"]
+            for pt in shape.points:
+                pts.append(["xy", pt.x, pt.y])
+            unit_body.append(
+                ["polyline", pts, _stroke_sexp(shape.stroke), ["fill", ["type", shape.fill]]]
+            )
+        elif isinstance(shape, LibCircle):
+            unit_body.append([
+                "circle",
+                ["center", shape.center.x, shape.center.y],
+                ["radius", shape.radius],
+                _stroke_sexp(shape.stroke),
+                ["fill", ["type", shape.fill]],
+            ])
+    return unit_body
+
+
 def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
     """Serialise a :class:`LibSymbol` to a KiCad ``(symbol ...)`` node.
 
@@ -1219,15 +1258,12 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
     """
     body: list[SExpNode] = ["symbol", sym.lib_id]
 
-    # KiCad 10 required attributes
     body.append(["exclude_from_sim", False])
     body.append(["in_bom", True])
     body.append(["on_board", True])
     body.append(["in_pos_files", True])
     body.append(["duplicate_pin_numbers_are_jumpers", False])
 
-    # KiCad 9 required properties on lib_symbols
-    # Extract the symbol short name (after the colon in lib_id)
     short_name = sym.lib_id.split(":")[-1] if ":" in sym.lib_id else sym.lib_id
     for prop_name, prop_value, hidden in (
         ("Reference", short_name[0] if short_name else "U", False),
@@ -1236,57 +1272,21 @@ def _lib_symbol_sexp(sym: LibSymbol) -> SExpNode:
         ("Datasheet", "", True),
         ("Description", "", True),
     ):
-        prop_node: list[SExpNode] = [
+        body.append([
             "property", prop_name, prop_value,
             ["at", 0, 0, 0],
             _effects_sexp(FontEffect(hidden=hidden)),
-        ]
-        body.append(prop_node)
+        ])
 
-    # Hide pin numbers — pin names provide identification
     body.append(["pin_numbers", ["hide", True]])
+    body.append(_lib_symbol_unit_body_sexp(short_name, sym.shapes))
 
-    # Unit body sub-symbol — use short name without lib prefix
-    unit_body: list[SExpNode] = ["symbol", f"{short_name}_0_1"]
-    for shape in sym.shapes:
-        if isinstance(shape, LibRectangle):
-            unit_body.append(
-                [
-                    "rectangle",
-                    ["start", shape.start.x, shape.start.y],
-                    ["end", shape.end.x, shape.end.y],
-                    _stroke_sexp(shape.stroke),
-                    ["fill", ["type", shape.fill]],
-                ]
-            )
-        elif isinstance(shape, LibPolyline):
-            pts: list[SExpNode] = ["pts"]
-            for pt in shape.points:
-                pts.append(["xy", pt.x, pt.y])
-            unit_body.append(
-                ["polyline", pts, _stroke_sexp(shape.stroke), ["fill", ["type", shape.fill]]]
-            )
-        elif isinstance(shape, LibCircle):
-            unit_body.append(
-                [
-                    "circle",
-                    ["center", shape.center.x, shape.center.y],
-                    ["radius", shape.radius],
-                    _stroke_sexp(shape.stroke),
-                    ["fill", ["type", shape.fill]],
-                ]
-            )
-    body.append(unit_body)
-
-    # Pin sub-symbol — use short name without lib prefix
     pin_body: list[SExpNode] = ["symbol", f"{short_name}_1_1"]
     for pin in sym.pins:
         pin_body.append(_lib_pin_sexp(pin))
     body.append(pin_body)
 
-    # KiCad 10: embedded_fonts flag
     body.append(["embedded_fonts", False])
-
     return body
 
 

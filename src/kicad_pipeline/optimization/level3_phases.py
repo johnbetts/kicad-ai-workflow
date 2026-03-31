@@ -525,15 +525,15 @@ def _nearest_edge_and_rotation(
     return target_edge, wide_rot if is_wide else narrow_rot
 
 
-# Rotation to use for screw terminals (wire entry at local +y) at each board edge.
-# At rotation R, local +y maps in the direction that faces the board edge.
-#   top edge:    rot=180 → local +y faces -y world (toward min_y = top)
-#   bottom edge: rot=0   → local +y faces +y world (toward max_y = bottom)
-#   left edge:   rot=90  → local +y faces -x world (toward min_x = left)
-#   right edge:  rot=270 → local +y faces +x world (toward max_x = right)
+# Rotation to use for screw terminals at each board edge so that wire
+# entry faces OUTWARD (away from the board interior).
+#   top edge:    rot=0   → wire entry faces up (toward min_y = top)
+#   bottom edge: rot=180 → wire entry faces down (toward max_y = bottom)
+#   left edge:   rot=90  → wire entry faces left (toward min_x = left)
+#   right edge:  rot=270 → wire entry faces right (toward max_x = right)
 _SCREW_TERMINAL_EDGE_ROTATION: dict[str, float] = {
-    "top": 180.0,
-    "bottom": 0.0,
+    "top": 0.0,
+    "bottom": 180.0,
     "left": 90.0,
     "right": 270.0,
 }
@@ -590,7 +590,7 @@ def _is_screw_terminal_fp(fp: object) -> bool:
     val = (getattr(fp, "value", None) or "").upper()
     return any(kw in lib or kw in val for kw in (
         "TERMINALBLOCK", "TERMINAL_BLOCK", "WJ", "CONN-TH", "TB_",
-        "SCREW_TERM", "SCREWTERM", "CAGE_CLAMP",
+        "SCREW_TERM", "SCREWTERM", "CAGE_CLAMP", "P5.00",
     ))
 
 
@@ -606,11 +606,11 @@ def _orient_connectors(
     Uses pin_map.origin_to_centroid() and pad_extent_in_board_space() to
     correctly handle asymmetric footprints (connectors with pin-1 origin).
 
-    Screw terminal rotation conventions (wire entry at local +y, facing outward):
-    - Top edge: rot=180  (local +y → world -y → faces top board edge)
-    - Bottom edge: rot=0 (local +y → world +y → faces bottom board edge)
-    - Left edge:  rot=90 (local +y → world -x → faces left board edge)
-    - Right edge: rot=270 (local +y → world +x → faces right board edge)
+    Screw terminal rotation conventions (wire entry facing outward):
+    - Top edge: rot=0    (wire entry faces up/north)
+    - Bottom edge: rot=180 (wire entry faces down/south)
+    - Left edge:  rot=90  (wire entry faces left/west)
+    - Right edge: rot=270 (wire entry faces right/east)
 
     Pin headers and other generic connectors use a separate rotation table
     from _nearest_edge_and_rotation().

@@ -761,7 +761,7 @@ class TestFileFormatting:
 
     def test_utf8_encoding(self, schematic_file: tuple[Path, str]) -> None:
         path, _ = schematic_file
-        # Just ensure it can be decoded as UTF-8 without errors
+        # raises UnicodeDecodeError if file is not valid UTF-8
         path.read_text(encoding="utf-8")
 
     def test_balanced_parentheses(self, schematic_file: tuple[Path, str]) -> None:

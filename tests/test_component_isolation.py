@@ -87,7 +87,10 @@ class TestComponentIsolation:
         numbers = [p.number for p in fp.pads if p.number not in exempt]
         counts = Counter(numbers)
         # Tact switches have paired pads (each pin appears 2x) — expected
-        is_switch = component_spec.ref.startswith("SW") or "switch" in component_spec.description.lower()
+        is_switch = (
+            component_spec.ref.startswith("SW")
+            or "switch" in component_spec.description.lower()
+        )
         max_allowed = 2 if is_switch else 1
         dupes = [n for n, c in counts.items() if c > max_allowed]
         assert not dupes, (

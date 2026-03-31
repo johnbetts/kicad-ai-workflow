@@ -227,8 +227,8 @@ def _find_kicad_cli() -> str | None:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.debug("PATH lookup for kicad-cli failed: %s", exc)
     return None
 
 

@@ -213,6 +213,40 @@ _PATH_RE = re.compile(
 _NET_OUT_RE = re.compile(r'\(net\s+(?:"([^"]+)"|(\S+))(.*?)\)', re.DOTALL)
 
 
+def _ses_net_block_end(search_text: str, block_start: int) -> int:
+    depth = 0
+    for i in range(block_start, len(search_text)):
+        if search_text[i] == "(":
+            depth += 1
+        elif search_text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return block_start
+
+
+def _ses_tracks_from_path(
+    path_m: re.Match[str], net_number: int,
+) -> list[object]:
+    from kicad_pipeline.models.pcb import Point, Track
+
+    layer = path_m.group(1) or path_m.group(2)
+    width_raw = float(path_m.group(3))
+    coord_vals = [float(v) for v in path_m.group(4).strip().split()]
+    is_scaled = any(abs(v) > _FREEROUTING_COORD_THRESHOLD for v in coord_vals)
+    scale = _FREEROUTING_SCALE_FACTOR if is_scaled else 1.0
+    width = width_raw * scale
+    result: list[object] = []
+    if len(coord_vals) >= 4 and len(coord_vals) % 2 == 0:
+        for j in range(0, len(coord_vals) - 2, 2):
+            result.append(Track(
+                start=Point(x=coord_vals[j] * scale, y=coord_vals[j + 1] * scale),
+                end=Point(x=coord_vals[j + 2] * scale, y=coord_vals[j + 3] * scale),
+                width=width, layer=layer, net_number=net_number,
+            ))
+    return result
+
+
 def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
     """Parse a Specctra SES session file into :class:`Track` objects.
 
@@ -231,23 +265,12 @@ def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
     Returns:
         Tuple of :class:`Track` objects parsed from the session file.
     """
-    from kicad_pipeline.models.pcb import Point, Track
-
     net_name_to_num: dict[str, int] = {n.name: n.number for n in pcb.nets}
-
     tracks: list[Track] = []
 
-    # We need to find which net each path belongs to.
-    # Walk through the network_out section block by block.
-    # Strategy: find all (net "NAME" ...) blocks, then find (path ...) within each.
-
-    # Extract the routes / network_out section
     network_out_match = re.search(r"\(network_out(.*)", ses_content, re.DOTALL)
     search_text = network_out_match.group(1) if network_out_match else ses_content
 
-    # Find net blocks: we use a simple bracket-counting approach for each
-    # occurrence of (net NAME ...) to capture its full content.
-    # FreeRouting may use quoted or unquoted net names.
     net_block_re = re.compile(r'\(net\s+(?:"([^"]+)"|(\S+))')
     pos = 0
     while True:
@@ -257,52 +280,11 @@ def ses_to_tracks(ses_content: str, pcb: PCBDesign) -> tuple[Track, ...]:
         net_name = m.group(1) or m.group(2)
         net_number = net_name_to_num.get(net_name, 0)
 
-        # Find the matching closing parenthesis for this (net ... block
-        block_start = m.start()
-        depth = 0
-        block_end = block_start
-        for i in range(block_start, len(search_text)):
-            if search_text[i] == "(":
-                depth += 1
-            elif search_text[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    block_end = i + 1
-                    break
+        block_end = _ses_net_block_end(search_text, m.start())
+        net_block = search_text[m.start():block_end]
 
-        net_block = search_text[block_start:block_end]
-
-        # Find all (path ...) within this net block — handle both
-        # quoted and unquoted layer names and coordinates in mm*1000
         for path_m in _PATH_RE.finditer(net_block):
-            layer = path_m.group(1) or path_m.group(2)
-            width_raw = float(path_m.group(3))
-            coords_str = path_m.group(4).strip()
-            coord_vals = [float(v) for v in coords_str.split()]
-
-            # FreeRouting uses resolution mm 1000 — convert to mm
-            is_scaled = any(
-                abs(v) > _FREEROUTING_COORD_THRESHOLD for v in coord_vals
-            )
-            scale = _FREEROUTING_SCALE_FACTOR if is_scaled else 1.0
-            width = width_raw * scale
-
-            # Each consecutive pair of (x, y) values forms a track segment
-            if len(coord_vals) >= 4 and len(coord_vals) % 2 == 0:
-                for j in range(0, len(coord_vals) - 2, 2):
-                    x0 = coord_vals[j] * scale
-                    y0 = coord_vals[j + 1] * scale
-                    x1 = coord_vals[j + 2] * scale
-                    y1 = coord_vals[j + 3] * scale
-                    tracks.append(
-                        Track(
-                            start=Point(x=x0, y=y0),
-                            end=Point(x=x1, y=y1),
-                            width=width,
-                            layer=layer,
-                            net_number=net_number,
-                        )
-                    )
+            tracks.extend(_ses_tracks_from_path(path_m, net_number))  # type: ignore[arg-type]
 
         pos = m.end()
 

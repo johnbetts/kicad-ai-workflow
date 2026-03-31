@@ -101,9 +101,6 @@ from kicad_pipeline.pcb.zone_builder import (
 from kicad_pipeline.pcb.zone_builder import (
     make_gnd_zones as _make_gnd_zones,
 )
-from kicad_pipeline.pcb.zone_builder import (
-    make_rf_via_fence as _make_rf_via_fence,
-)
 from kicad_pipeline.sexp.writer import SExpNode, write_file
 
 if TYPE_CHECKING:
@@ -544,28 +541,79 @@ def _auto_size_board(
     fp_sizes: dict[str, tuple[float, float]],
     total_area: float,
 ) -> tuple[float, float, BoardOutline]:
-    """Auto-size the board if footprint area demands it.
+    """Auto-size the board — grow if too small, shrink if too big.
+
+    Target utilization: 30-60% of board area used by components.
+    A 60x40mm board for 15 small components is wasteful and produces
+    scattered, unprofessional layouts.
 
     Returns:
         (board_width_mm, board_height_mm, outline)
     """
     import math as _math
 
-    min_board_area = total_area * 3.0
+    # Account for mounting holes: 4 corners need ~4mm inset each = 8mm on each axis
+    mh_inset = 4.0  # mounting hole center inset from edge
+    mh_clearance = 5.0  # clearance around each mounting hole
+    mh_reserved_per_axis = 2 * (mh_inset + mh_clearance)  # ~18mm reserved
+
+    # Account for connector body overhang: terminal blocks extend ~5mm beyond pads
+    conn_body_margin = 8.0  # extra margin for THT connector bodies
+
+    min_board_area = total_area * 3.0  # ~33% utilization target
+    max_board_area = total_area * 5.0  # ~20% utilization floor
     min_width = _math.sqrt(min_board_area * 2.0)
     min_height = min_width / 2.0
-    new_width = max(board_width_mm, min_width)
-    new_height = max(board_height_mm, min_height)
     max_fp_w = max((s[0] for s in fp_sizes.values()), default=0.0)
     max_fp_h = max((s[1] for s in fp_sizes.values()), default=0.0)
-    new_width = max(new_width, max_fp_w + 20.0)
-    new_height = max(new_height, max_fp_h + 20.0)
+
+    # Has THT connectors? They need extra width for body overhang
+    has_tht_connector = any(
+        "terminal" in k.lower() or "conn" in k.lower() or "pinheader" in k.lower()
+        for k in fp_sizes
+    )
+
+    # Absolute minimums: mounting holes + largest component + margins
+    # A board smaller than 50x30mm can't fit mounting holes + connectors + ICs
+    abs_min_w = max(50.0, max_fp_w + mh_reserved_per_axis + conn_body_margin)
+    abs_min_h = max(30.0, max_fp_h + mh_reserved_per_axis)
+    if has_tht_connector:
+        abs_min_w = max(abs_min_w, 55.0)  # THT connectors need board edge access + body clearance
+
+    # Grow if too small
+    new_width = max(board_width_mm, min_width, abs_min_w)
+    new_height = max(board_height_mm, min_height, abs_min_h)
+
+    # Shrink if too big — board area > 5x component area is wasteful
+    current_area = new_width * new_height
+    if current_area > max_board_area and total_area > 10.0:
+        # Shrink toward ~3.5x component area, but respect absolute minimums
+        target_area = total_area * 3.5
+        # Ensure target area isn't below absolute minimum
+        target_area = max(target_area, abs_min_w * abs_min_h)
+        aspect = new_width / new_height if new_height > 0 else 1.5
+        shrunk_height = _math.sqrt(target_area / aspect)
+        shrunk_width = shrunk_height * aspect
+        # Enforce absolute minimums
+        shrunk_width = max(shrunk_width, abs_min_w)
+        shrunk_height = max(shrunk_height, abs_min_h)
+        if shrunk_width < new_width or shrunk_height < new_height:
+            new_width = min(new_width, shrunk_width)
+            new_height = min(new_height, shrunk_height)
+            log.info(
+                "build_pcb: auto-shrunk board to %.1f x %.1f mm "
+                "(component area %.0f mm², was %.0f x %.0f)",
+                new_width, new_height, total_area,
+                board_width_mm, board_height_mm,
+            )
+
+    # Aspect ratio constraint
     if new_width > 2.5 * new_height:
         new_height = new_width / 2.0
     elif new_height > 2.5 * new_width:
         new_width = new_height / 2.0
 
-    if new_width > board_width_mm or new_height > board_height_mm:
+    if abs(new_width - board_width_mm) > 0.5 or abs(new_height - board_height_mm) > 0.5:
         board_width_mm = new_width
         board_height_mm = new_height
         log.info(
@@ -615,6 +663,7 @@ def _build_pre_footprints(
         comp_layer = layer_overrides.get(comp.ref, LAYER_F_CU)
         fp = footprint_for_component(
             comp.ref, comp.value, comp.footprint, comp.lcsc, layer=comp_layer,
+            pins=comp.pins,
         )
         fp = _apply_nets_to_footprint(fp, comp, net_lookup)
         custom_props: list[tuple[str, str]] = []
@@ -907,13 +956,52 @@ def _restore_ref_text_positions(
     return restored
 
 
+def _mounting_hole_collides_with_footprints(
+    mx: float,
+    my: float,
+    mh_radius: float,
+    existing_fps: list[Footprint],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> bool:
+    """Check if a mounting hole at (mx, my) overlaps any existing footprint.
+
+    Uses axis-aligned bounding box collision with a clearance gap.
+    The mounting hole is modelled as a square with side = 2 * (mh_radius + 1.0)
+    to include the keepout ring around the drill.
+    """
+    gap = 0.5  # mm clearance between mounting hole keepout and component courtyard
+    mh_half = mh_radius + 1.0 + gap  # drill radius + annular ring + gap
+    for fp in existing_fps:
+        if fp.ref.startswith("H"):
+            continue  # Skip other mounting holes
+        w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
+        # Account for rotation
+        rot = fp.rotation % 360.0
+        if 45.0 < rot < 135.0 or 225.0 < rot < 315.0:
+            w, h = h, w
+        half_w = w / 2.0
+        half_h = h / 2.0
+        # AABB overlap check
+        if (mx - mh_half < fp.position.x + half_w
+                and mx + mh_half > fp.position.x - half_w
+                and my - mh_half < fp.position.y + half_h
+                and my + mh_half > fp.position.y - half_h):
+            return True
+    return False
+
+
 def _add_mounting_hole_footprints(
     ctx: _BuildContext,
     final_footprints: list[Footprint],
     corner_keepouts: list[Keepout],
     requirements: ProjectRequirements,
 ) -> None:
-    """Add NPTH mounting hole footprints to the board."""
+    """Add NPTH mounting hole footprints to the board.
+
+    When a default corner position collides with an already-placed component,
+    the mounting hole is shifted along the board edge to the nearest
+    collision-free position.
+    """
     mh_positions = ctx.template_mounting_positions
     mh_diameter = ctx.template_mounting_diameter
     if mh_positions is None and requirements.mechanical is not None:
@@ -933,8 +1021,43 @@ def _add_mounting_hole_footprints(
         mh_diameter = _MOUNTING_HOLE_DIAMETER_MM
 
     if mh_positions:
+        mh_radius = mh_diameter / 2.0
         for idx, (mx, my) in enumerate(mh_positions, start=1):
             mh_ref = f"H{idx}"
+
+            # Check collision and shift if needed
+            if _mounting_hole_collides_with_footprints(
+                mx, my, mh_radius, final_footprints, ctx.fp_sizes,
+            ):
+                orig_x, orig_y = mx, my
+                # Try shifting along the nearest edge (inward along Y or X)
+                inset = _MOUNTING_HOLE_INSET_MM
+                bh = ctx.board_height_mm
+                # Determine which corner this is and shift direction
+                is_top = my < bh / 2.0
+                # Shift along Y edge (move away from corner)
+                shift_step = 3.0  # mm per step
+                for step in range(1, 10):
+                    new_y = my + (shift_step * step * (1.0 if is_top else -1.0))
+                    # Keep within board bounds
+                    new_y = max(inset, min(new_y, bh - inset))
+                    if not _mounting_hole_collides_with_footprints(
+                        mx, new_y, mh_radius, final_footprints, ctx.fp_sizes,
+                    ):
+                        my = new_y
+                        log.info(
+                            "build_pcb: shifted %s from (%.1f, %.1f) to "
+                            "(%.1f, %.1f) to avoid component collision",
+                            mh_ref, orig_x, orig_y, mx, my,
+                        )
+                        break
+                else:
+                    log.warning(
+                        "build_pcb: could not find collision-free position "
+                        "for %s near (%.1f, %.1f)",
+                        mh_ref, orig_x, orig_y,
+                    )
+
             mh_fp = make_mounting_hole(mh_ref, drill_diameter=mh_diameter)
             mh_fp = Footprint(
                 lib_id=mh_fp.lib_id, ref=mh_fp.ref, value=mh_fp.value,
@@ -1306,6 +1429,22 @@ def _setup_board(
 
     fp_bboxes = _compute_footprint_bboxes(pre_footprints)
 
+    # Upgrade fp_sizes with actual pad-extent-based sizes when available.
+    # The initial fp_sizes from estimate_footprint_size() can be significantly
+    # smaller than the real JLCPCB footprints, causing the solver to undercount
+    # collisions.  Here we replace estimates with bbox-derived sizes + 1mm
+    # courtyard margin (matching review_agent._fp_size_dict convention).
+    courtyard_margin_mm = 1.0
+    for ref, bbox in fp_bboxes.items():
+        from kicad_pipeline.models.pcb import FootprintBBox as _FpBBox
+        if isinstance(bbox, _FpBBox):
+            bbox_w = bbox.max_x - bbox.min_x + courtyard_margin_mm
+            bbox_h = bbox.max_y - bbox.min_y + courtyard_margin_mm
+            est_w, est_h = fp_sizes.get(ref, (0.0, 0.0))
+            # Use the larger of estimate vs actual (never shrink)
+            if bbox_w * bbox_h > est_w * est_h:
+                fp_sizes[ref] = (bbox_w, bbox_h)
+
     ctx = _BuildContext(
         board_width_mm=board_width_mm,
         board_height_mm=board_height_mm,
@@ -1385,6 +1524,56 @@ def _post_placement_assembly(
 
 
 # ---------------------------------------------------------------------------
+# Component registry gate
+# ---------------------------------------------------------------------------
+
+
+def _check_component_registry(requirements: ProjectRequirements) -> None:
+    """Warn about components not in the registry or with failed verification.
+
+    Logs warnings for unverified/missing components and raises :class:`PCBError`
+    for components with ``verification_status == "failed"``.
+    """
+    try:
+        from kicad_pipeline.validation.component_registry import ComponentRegistry
+        registry = ComponentRegistry()
+    except Exception:
+        log.debug("Component registry not available — skipping gate")
+        return
+
+    failed: list[str] = []
+    unverified: list[str] = []
+    missing: list[str] = []
+
+    for comp in requirements.components:
+        spec = registry.get(comp.footprint)
+        if spec is None:
+            missing.append(f"{comp.ref} ({comp.footprint})")
+        elif spec.verification_status == "failed":
+            failed.append(f"{comp.ref} ({comp.footprint})")
+        elif spec.verification_status == "unverified":
+            unverified.append(f"{comp.ref} ({comp.footprint})")
+
+    if missing:
+        log.warning(
+            "Component registry: %d component(s) not registered — "
+            "run /verify-components to add and verify: %s",
+            len(missing), ", ".join(missing),
+        )
+    if unverified:
+        log.warning(
+            "Component registry: %d component(s) unverified — "
+            "run /verify-components to verify: %s",
+            len(unverified), ", ".join(unverified),
+        )
+    if failed:
+        raise PCBError(
+            f"Component registry: {len(failed)} component(s) have FAILED "
+            f"verification — fix before building: {', '.join(failed)}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1417,6 +1606,9 @@ def build_pcb(
     """
     if not requirements.components:
         raise PCBError("Cannot build PCB: requirements has no components")
+
+    # -- Component registry gate: warn/block on unverified components ------
+    _check_component_registry(requirements)
 
     _preserved_edge_cuts.clear()
 
@@ -1982,6 +2174,52 @@ def _via_sexp(via: Via) -> list[SExpNode]:
     return node
 
 
+def _pcb_sexp_header(design: PCBDesign) -> list[SExpNode]:
+    root: list[SExpNode] = [
+        "kicad_pcb",
+        ["version", design.version],
+        ["generator", design.generator],
+        ["generator_version", design.generator_version],
+        ["general", ["thickness", 1.6], ["legacy_teardrops", False]],
+        ["paper", "A4"],
+    ]
+    tb = _pcb_title_block_sexp(design)
+    if tb is not None:
+        root.append(tb)
+    layers_node: list[SExpNode] = ["layers"]
+    for layer_entry in _build_layer_table(design.design_rules.layer_count):
+        layer_node: list[SExpNode] = [layer_entry[0], layer_entry[1], layer_entry[2]]
+        if len(layer_entry) > 3:
+            layer_node.append(layer_entry[3])
+        layers_node.append(layer_node)
+    root.append(layers_node)
+    root.append([
+        "setup",
+        ["pad_to_mask_clearance", 0],
+        ["allow_soldermask_bridges_in_footprints", False],
+        ["pcbplotparams", ["layerselection", "0x00010fc_ffffffff"], ["outputdirectory", ""]],
+    ])
+    return root
+
+
+def _pcb_sexp_fp_keepouts(design: PCBDesign) -> list[SExpNode]:
+    import math as _math
+    from dataclasses import replace as _replace
+    result: list[SExpNode] = []
+    for fp in design.footprints:
+        for fz in fp.fp_zones:
+            rot_rad = _math.radians(fp.rotation)
+            cos_r, sin_r = _math.cos(rot_rad), _math.sin(rot_rad)
+            board_pts: list[Point] = []
+            for pt in fz.polygon:
+                bx = fp.position.x + pt.x * cos_r - pt.y * sin_r
+                by = fp.position.y + pt.x * sin_r + pt.y * cos_r
+                board_pts.append(Point(x=round(bx, 4), y=round(by, 4)))
+            board_fz = _replace(fz, polygon=tuple(board_pts))
+            result.append(_fp_keepout_sexp(board_fz))
+    return result
+
+
 def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     """Serialise a :class:`PCBDesign` to a KiCad S-expression tree.
 
@@ -2011,38 +2249,8 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
         A nested :data:`~kicad_pipeline.sexp.writer.SExpNode` list
         representing the root ``(kicad_pcb ...)`` expression.
     """
-    root: list[SExpNode] = [
-        "kicad_pcb",
-        ["version", design.version],
-        ["generator", design.generator],
-        ["generator_version", design.generator_version],
-        ["general", ["thickness", 1.6], ["legacy_teardrops", False]],
-        ["paper", "A4"],
-    ]
+    root = _pcb_sexp_header(design)
 
-    # Title block
-    tb = _pcb_title_block_sexp(design)
-    if tb is not None:
-        root.append(tb)
-
-    # Layers
-    layers_node: list[SExpNode] = ["layers"]
-    for layer_entry in _build_layer_table(design.design_rules.layer_count):
-        layer_node: list[SExpNode] = [layer_entry[0], layer_entry[1], layer_entry[2]]
-        if len(layer_entry) > 3:
-            layer_node.append(layer_entry[3])
-        layers_node.append(layer_node)
-    root.append(layers_node)
-
-    # Setup
-    root.append([
-        "setup",
-        ["pad_to_mask_clearance", 0],
-        ["allow_soldermask_bridges_in_footprints", False],
-        ["pcbplotparams", ["layerselection", "0x00010fc_ffffffff"], ["outputdirectory", ""]],
-    ])
-
-    # Nets, footprints, outline
     for net in design.nets:
         root.append(["net", net.number, net.name])
     for fp in design.footprints:
@@ -2050,7 +2258,6 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
     for line in _outline_sexp(design.outline):
         root.append(line)
 
-    # Preserved edge cuts
     for start, end, width in _preserved_edge_cuts:
         root.append([
             "gr_line",
@@ -2058,29 +2265,14 @@ def pcb_to_sexp(design: PCBDesign) -> SExpNode:
             ["layer", LAYER_EDGE_CUTS], ["width", width],
         ])
 
-    # Zones and keepouts
     for zone in design.zones:
         root.append(_zone_sexp(zone))
     for keepout in design.keepouts:
         root.append(_keepout_sexp(keepout))
 
-    # Footprint-level keepout zones emitted at board level with board-space coords
-    import math as _math
-    for fp in design.footprints:
-        for fz in fp.fp_zones:
-            # Transform polygon from footprint-local to board-space
-            rot_rad = _math.radians(fp.rotation)
-            cos_r, sin_r = _math.cos(rot_rad), _math.sin(rot_rad)
-            board_pts: list[Point] = []
-            for pt in fz.polygon:
-                bx = fp.position.x + pt.x * cos_r - pt.y * sin_r
-                by = fp.position.y + pt.x * sin_r + pt.y * cos_r
-                board_pts.append(Point(x=round(bx, 4), y=round(by, 4)))
-            from dataclasses import replace as _replace
-            board_fz = _replace(fz, polygon=tuple(board_pts))
-            root.append(_fp_keepout_sexp(board_fz))
+    for node in _pcb_sexp_fp_keepouts(design):
+        root.append(node)
 
-    # Tracks and vias
     for track in design.tracks:
         root.append(_track_sexp(track))
     for via in design.vias:

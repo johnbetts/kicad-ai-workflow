@@ -73,81 +73,64 @@ class ChecklistReport:
         return sum(1 for r in self.results if r.status == CheckStatus.PASS)
 
 
+def _check_board_size_limits(
+    width: float, height: float,
+) -> CheckResult:
+    min_w, min_h = JLCPCB_MIN_BOARD_SIZE_MM
+    max_w, max_h = JLCPCB_MAX_BOARD_SIZE_MM
+    if width < min_w or height < min_h:
+        return CheckResult(
+            category="Mechanical", name="Minimum board size", status=CheckStatus.FAIL,
+            message=f"Board {width:.1f}x{height:.1f}mm below JLCPCB min {min_w}x{min_h}mm",
+        )
+    if width > max_w or height > max_h:
+        return CheckResult(
+            category="Mechanical", name="Maximum board size", status=CheckStatus.FAIL,
+            message=f"Board {width:.1f}x{height:.1f}mm exceeds JLCPCB max {max_w}x{max_h}mm",
+        )
+    return CheckResult(
+        category="Mechanical", name="Board dimensions", status=CheckStatus.PASS,
+        message=f"Board {width:.1f}x{height:.1f}mm within JLCPCB limits",
+    )
+
+
+def _check_outline_closure(outline: list[object]) -> CheckResult | None:
+    if len(outline) < 3:
+        return None
+    first = outline[0]
+    last = outline[-1]
+    if abs(first.x - last.x) > 0.01 or abs(first.y - last.y) > 0.01:  # type: ignore[union-attr]
+        return CheckResult(
+            category="Mechanical", name="Outline closure", status=CheckStatus.FAIL,
+            message="Board outline is not closed (first point != last point)",
+        )
+    return CheckResult(
+        category="Mechanical", name="Outline closure", status=CheckStatus.PASS,
+        message="Board outline is properly closed",
+    )
+
+
 def _check_board_dimensions(pcb: PCBDesign) -> list[CheckResult]:
     """Verify board dimensions are within JLCPCB limits."""
     results: list[CheckResult] = []
 
     if not pcb.outline.polygon:
-        results.append(
-            CheckResult(
-                category="Mechanical",
-                name="Board outline",
-                status=CheckStatus.FAIL,
-                message="No board outline defined",
-            )
-        )
+        results.append(CheckResult(
+            category="Mechanical", name="Board outline",
+            status=CheckStatus.FAIL, message="No board outline defined",
+        ))
         return results
 
-    # Calculate bounding box from outline points.
     xs = [p.x for p in pcb.outline.polygon]
     ys = [p.y for p in pcb.outline.polygon]
     width = max(xs) - min(xs)
     height = max(ys) - min(ys)
 
-    min_w, min_h = JLCPCB_MIN_BOARD_SIZE_MM
-    max_w, max_h = JLCPCB_MAX_BOARD_SIZE_MM
+    results.append(_check_board_size_limits(width, height))
 
-    if width < min_w or height < min_h:
-        results.append(
-            CheckResult(
-                category="Mechanical",
-                name="Minimum board size",
-                status=CheckStatus.FAIL,
-                message=f"Board {width:.1f}x{height:.1f}mm below JLCPCB min {min_w}x{min_h}mm",
-            )
-        )
-    elif width > max_w or height > max_h:
-        results.append(
-            CheckResult(
-                category="Mechanical",
-                name="Maximum board size",
-                status=CheckStatus.FAIL,
-                message=f"Board {width:.1f}x{height:.1f}mm exceeds JLCPCB max {max_w}x{max_h}mm",
-            )
-        )
-    else:
-        results.append(
-            CheckResult(
-                category="Mechanical",
-                name="Board dimensions",
-                status=CheckStatus.PASS,
-                message=f"Board {width:.1f}x{height:.1f}mm within JLCPCB limits",
-            )
-        )
-
-    # Check outline is closed.
-    outline = pcb.outline.polygon
-    if len(outline) >= 3:
-        first = outline[0]
-        last = outline[-1]
-        if abs(first.x - last.x) > 0.01 or abs(first.y - last.y) > 0.01:
-            results.append(
-                CheckResult(
-                    category="Mechanical",
-                    name="Outline closure",
-                    status=CheckStatus.FAIL,
-                    message="Board outline is not closed (first point != last point)",
-                )
-            )
-        else:
-            results.append(
-                CheckResult(
-                    category="Mechanical",
-                    name="Outline closure",
-                    status=CheckStatus.PASS,
-                    message="Board outline is properly closed",
-                )
-            )
+    closure = _check_outline_closure(pcb.outline.polygon)  # type: ignore[arg-type]
+    if closure is not None:
+        results.append(closure)
 
     return results
 

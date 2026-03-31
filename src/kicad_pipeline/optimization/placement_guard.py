@@ -185,8 +185,8 @@ def _guard_cross_group(
                 if zx1 <= cx <= zx2 and zy1 <= cy <= zy2:
                     cross_group.append(ref)
                     break
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("Cross-group contamination check failed: %s", exc)
     if cross_group:
         issues.append(
             f"Cross-group ({len(cross_group)}): "

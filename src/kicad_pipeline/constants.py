@@ -240,8 +240,8 @@ SUBCIRCUIT_MAX_SPREAD_MM: float = 15.0
 VOLTAGE_DOMAIN_MIN_GAP_MM: float = 2.0
 """Minimum gap between components in different voltage domains (mm)."""
 
-CONNECTOR_EDGE_MAX_MM: float = 8.0
-"""Maximum distance from a connector centroid to the nearest board edge (mm).
+CONNECTOR_EDGE_MAX_MM: float = 5.0
+"""Maximum distance from a connector body edge to the nearest board edge (mm).
 
 Centroid-based measurement means large connectors (RJ45, pin headers) will
 naturally be further from the edge. 8mm allows for connectors whose body

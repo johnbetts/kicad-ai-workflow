@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import pytest
 
@@ -11,7 +14,6 @@ from kicad_pipeline.exceptions import RequirementsError
 from kicad_pipeline.service.models import PipelineRequest, StageOutcome
 from kicad_pipeline.service.pipeline import PipelineService
 from tests.helpers import make_requirements
-
 
 # ---------------------------------------------------------------------------
 # resolve_requirements
@@ -161,7 +163,7 @@ def test_run_pcb_success(tmp_path: Path) -> None:
         patch(
             "kicad_pipeline.optimization.placement_optimizer.optimize_placement_ee"
         ) as mock_opt,
-        patch("kicad_pipeline.pcb.builder.write_pcb") as mock_write,
+        patch("kicad_pipeline.pcb.builder.write_pcb"),
         patch(
             "kicad_pipeline.optimization.scoring.compute_fast_placement_score",
             return_value=mock_quality,

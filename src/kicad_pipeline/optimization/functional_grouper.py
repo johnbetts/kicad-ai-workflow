@@ -152,8 +152,22 @@ _REGULATOR_KEYWORDS: frozenset[str] = frozenset({
 
 
 def _is_gnd_net(name: str) -> bool:
-    """Return True if *name* is a ground net."""
-    return name.upper().strip() in _GND_NAMES
+    """Return True if *name* is a ground net.
+
+    Matches exact names (GND, AGND, etc.) and prefixed variants
+    like GND_RELAY, GND_ANALOG, DGND_PWR.  Without this, isolated
+    GND domains (e.g. GND_RELAY) are treated as signal nets,
+    causing the subcircuit detector to walk them and cross-assign
+    components between relay channels.
+    """
+    upper = name.upper().strip()
+    if upper in _GND_NAMES:
+        return True
+    # Check if name starts with a known GND prefix + separator
+    return any(
+        upper.startswith(gnd + "_") or upper.startswith(gnd + "-")
+        for gnd in _GND_NAMES
+    )
 
 
 def _parse_voltage_from_net(net_name: str) -> float | None:
@@ -394,12 +408,26 @@ def _find_relay_support_components(
     if best_d:
         refs.append(best_d)
 
-    # Gate resistor
+    # Gate resistor — prefer R on the DRIVE net (Q base), not the COIL net
+    # (Q collector).  Without this preference, non-deterministic set iteration
+    # can pick the LED resistor (COIL net) instead of the gate resistor (DRIVE
+    # net), cross-assigning LED components to wrong relay channels.
     if transistor:
-        for nb in adj.get(transistor, set()):
+        t_nets = ref_to_nets.get(transistor, set())
+        drive_nets = {n for n in t_nets if "DRIVE" in n.upper()}
+        gate_r: str | None = None
+        fallback_r: str | None = None
+        for nb in sorted(adj.get(transistor, set())):
             if _ref_prefix(nb) == "R" and nb not in claimed and nb not in refs:
-                refs.append(nb)
-                break
+                nb_nets = ref_to_nets.get(nb, set())
+                if nb_nets & drive_nets:
+                    gate_r = nb
+                    break
+                if fallback_r is None:
+                    fallback_r = nb
+        chosen = gate_r or fallback_r
+        if chosen:
+            refs.append(chosen)
 
     # LED on collector path
     if transistor:
@@ -409,14 +437,33 @@ def _find_relay_support_components(
         if led:
             refs.append(led)
 
-    # LED current-limiting resistor
+    # LED current-limiting resistor (R on COIL net, adjacent to flyback D)
     for lr in refs[:]:
         if _ref_prefix(lr) not in ("LED", "D"):
             continue
-        for nb in adj.get(lr, set()):
+        for nb in sorted(adj.get(lr, set())):
             if _ref_prefix(nb) == "R" and nb not in claimed and nb not in refs:
                 refs.append(nb)
                 break
+
+    # LED diode: find D refs adjacent to the LED resistor(s) just added.
+    # The LED R is on RELAY_COIL + LED_A nets; the LED D is on LED_A + GND.
+    # Without this step, LED diodes (D5-D8) are never claimed and may be
+    # cross-assigned to wrong relay channels by later detection phases.
+    for lr in refs[:]:
+        if _ref_prefix(lr) != "R":
+            continue
+        lr_nets = ref_to_nets.get(lr, set())
+        # Only consider LED-type nets (not COIL or DRIVE)
+        led_nets = {n for n in lr_nets if "LED" in n.upper()}
+        for net_name in sorted(led_nets):
+            for r in sorted(net_to_refs.get(net_name, set())):
+                if r in refs or r in claimed:
+                    continue
+                if _ref_prefix(r) == "D":
+                    c = comp_map.get(r)
+                    if c and "LED" in (c.value or "").upper():
+                        refs.append(r)
 
     return refs, transistor
 
@@ -1223,8 +1270,13 @@ def _detect_mcu_peripherals(
     small signal connectors).
     """
     mcu_ref = _find_mcu_ref(requirements)
-    if mcu_ref is None or mcu_ref in claimed:
+    if mcu_ref is None:
         return []
+    # The MCU IC can legitimately anchor multiple subcircuit types
+    # (decoupling, RF_ANTENNA, AND peripheral cluster).  Only skip if
+    # the MCU is claimed by a non-anchor pattern (e.g. relay driver).
+    # Being claimed as a decoupling or RF anchor should not block
+    # peripheral detection.
 
     comp_map = {c.ref: c for c in requirements.components}
 

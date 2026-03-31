@@ -2330,6 +2330,57 @@ def _try_via_in_pad(
     return True
 
 
+def _find_closest_pad_info(ic_pi: object, pad_infos: list[object]) -> object:
+    best_pi = pad_infos[0]
+    best_dist = float("inf")
+    for pi in pad_infos:
+        d = abs(pi.x - ic_pi.x) + abs(pi.y - ic_pi.y)  # type: ignore[union-attr]
+        if d < best_dist:
+            best_dist = d
+            best_pi = pi
+    return best_pi
+
+
+def _route_single_ic_pad(
+    ctx: _RouteContext,
+    ic_pi: object,
+    ic_ref: str,
+    ic_pn: str,
+    best_pi: object,
+    ic_pad_cl: float,
+    ic_stub_width: float,
+    ic_via_positions: list[tuple[float, float]],
+    vip_min_dist: float,
+) -> None:
+    ic_fp = ctx.fp_by_ref[ic_ref]
+    ic_pad = next(p for p in ic_fp.pads if p.number == ic_pn)
+    px, py = _pad_abs_pos(ic_fp, ic_pad)
+    ic_hw, ic_hh = _pad_rotated_half_size(ic_fp, ic_pad)
+
+    ic_routed = _try_ic_fcu_route(ctx, ic_pi, ic_ref, ic_pn, best_pi, ic_pad_cl, ic_stub_width)
+    if not ic_routed:
+        ic_routed = _try_ic_bcu_route(ctx, ic_pi, ic_ref, ic_pn, best_pi, ic_pad_cl, ic_stub_width)
+        if ic_routed:
+            for v in ctx.all_vias:
+                ic_via_positions.append((v.position.x, v.position.y))
+    if not ic_routed:
+        _log.debug("IC final-leg %s pad %s: B.Cu fallback %s", ic_ref, ic_pn,
+                   "skipped" if ctx.bcu_grid is None else "FAIL")
+    if not ic_routed:
+        ic_routed = _try_ic_fanout(
+            ctx, ic_pi, ic_ref, ic_pn, best_pi, ic_pad_cl, ic_stub_width,
+            ic_via_positions, vip_min_dist, px, py,
+        )
+    if not ic_routed:
+        ic_routed = _try_via_in_pad(
+            ctx, ic_pi, ic_ref, ic_pn, best_pi, ic_pad_cl, ic_stub_width,
+            ic_via_positions, vip_min_dist, px, py,
+        )
+    if not ic_routed:
+        _log.debug("IC final-leg %s pad %s: UNROUTED", ic_ref, ic_pn)
+        _mark_pad_area(ctx.grid, px, py, ic_hw, ic_hh, ctx.pad_cl)
+
+
 def _route_ic_final_legs(ctx: _RouteContext) -> None:
     """Route IC final-leg connections after MST loop."""
     if not ctx.ic_pad_infos:
@@ -2341,7 +2392,6 @@ def _route_ic_final_legs(ctx: _RouteContext) -> None:
         ctx.ic_refs_in_net, ctx.fp_by_ref, ctx.request.width_mm,
     )
 
-    # Sort IC pads outermost-first
     _ic_cx = sum(p.x for p in ctx.ic_pad_infos) / len(ctx.ic_pad_infos)
     _ic_cy = sum(p.y for p in ctx.ic_pad_infos) / len(ctx.ic_pad_infos)
     ic_sorted = sorted(
@@ -2349,62 +2399,15 @@ def _route_ic_final_legs(ctx: _RouteContext) -> None:
         key=lambda pr: -((pr[0].x - _ic_cx) ** 2 + (pr[0].y - _ic_cy) ** 2),
     )
 
-    _ic_via_positions: list[tuple[float, float]] = []
-    _vip_min_dist = VIA_DIAMETER_SIGNAL_MM + ctx.request.clearance_mm
+    ic_via_positions: list[tuple[float, float]] = []
+    vip_min_dist = VIA_DIAMETER_SIGNAL_MM + ctx.request.clearance_mm
 
     for ic_pi, (ic_ref, ic_pn) in ic_sorted:
-        # Find closest routed non-IC pad
-        best_pi = ctx.pad_infos[0]
-        best_dist = float("inf")
-        for pi in ctx.pad_infos:
-            d = abs(pi.x - ic_pi.x) + abs(pi.y - ic_pi.y)
-            if d < best_dist:
-                best_dist = d
-                best_pi = pi
-
-        ic_fp = ctx.fp_by_ref[ic_ref]
-        ic_pad = next(p for p in ic_fp.pads if p.number == ic_pn)
-        px, py = _pad_abs_pos(ic_fp, ic_pad)
-        ic_hw, ic_hh = _pad_rotated_half_size(ic_fp, ic_pad)
-
-        ic_routed = _try_ic_fcu_route(
-            ctx, ic_pi, ic_ref, ic_pn, best_pi, ic_pad_cl, ic_stub_width,
+        best_pi = _find_closest_pad_info(ic_pi, ctx.pad_infos)
+        _route_single_ic_pad(
+            ctx, ic_pi, ic_ref, ic_pn, best_pi,
+            ic_pad_cl, ic_stub_width, ic_via_positions, vip_min_dist,
         )
-
-        if not ic_routed:
-            ic_routed = _try_ic_bcu_route(
-                ctx, ic_pi, ic_ref, ic_pn, best_pi, ic_pad_cl, ic_stub_width,
-            )
-            if ic_routed:
-                for v in ctx.all_vias:
-                    _ic_via_positions.append((v.position.x, v.position.y))
-
-        if not ic_routed:
-            _log.debug(
-                "IC final-leg %s pad %s: B.Cu fallback %s",
-                ic_ref, ic_pn,
-                "skipped" if ctx.bcu_grid is None else "FAIL",
-            )
-
-        if not ic_routed:
-            ic_routed = _try_ic_fanout(
-                ctx, ic_pi, ic_ref, ic_pn, best_pi,
-                ic_pad_cl, ic_stub_width,
-                _ic_via_positions, _vip_min_dist,
-                px, py,
-            )
-
-        if not ic_routed:
-            ic_routed = _try_via_in_pad(
-                ctx, ic_pi, ic_ref, ic_pn, best_pi,
-                ic_pad_cl, ic_stub_width,
-                _ic_via_positions, _vip_min_dist,
-                px, py,
-            )
-
-        if not ic_routed:
-            _log.debug("IC final-leg %s pad %s: UNROUTED", ic_ref, ic_pn)
-            _mark_pad_area(ctx.grid, px, py, ic_hw, ic_hh, ctx.pad_cl)
 
 
 # ---------------------------------------------------------------------------

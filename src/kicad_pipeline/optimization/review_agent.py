@@ -10,6 +10,7 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -35,8 +36,24 @@ from kicad_pipeline.pcb.constraints import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from kicad_pipeline.models.pcb import PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
+
+# Standard 4-view render set for visual review
+_RENDER_VIEWS: tuple[tuple[str, ...], ...] = (
+    ("2d",),                          # 2D editor view
+    ("3d", "--view", "top"),           # 3D top-down
+    ("3d", "--view", "iso"),           # 3D isometric front
+    ("3d", "--view", "iso-back"),      # 3D isometric back
+)
+_RENDER_SUFFIXES: tuple[str, ...] = (
+    "_2d_top.png",
+    "_3d_top.png",
+    "_3d_iso.png",
+    "_3d_isoback.png",
+)
 
 _log = logging.getLogger(__name__)
 
@@ -101,6 +118,10 @@ class PlacementRule(enum.Enum):
     ZONE_OVERFLOW = "zone_overflow"
     GROUP_CONTAMINATION = "group_contamination"
     CONSTRAINT_COMPLIANCE = "constraint_compliance"
+    POWER_LOOP_AREA = "power_loop_area"
+    FLYBACK_DIODE_PROXIMITY = "flyback_diode_proximity"
+    TERMINAL_ORIENTATION = "terminal_orientation"
+    INTEGRITY_ISSUE = "integrity_issue"
 
 
 # ---------------------------------------------------------------------------
@@ -122,12 +143,54 @@ class PlacementViolation:
 
 
 @dataclass(frozen=True)
+class PersonaFinding:
+    """A single finding from a fabricator or EE persona review."""
+
+    persona: str  # "fab" | "ee"
+    severity: str  # "critical" | "major" | "minor"
+    category: str
+    description: str
+    refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PlacementReview:
-    """Complete placement review result."""
+    """Complete placement review result.
+
+    A review is only considered complete when:
+    1. Programmatic rules have been run (always — violations/grade/summary)
+    2. Renders have been generated (render_paths is non-empty)
+    3. Both fab and EE persona reviews have been recorded
+
+    Use :meth:`visual_review_complete` to check whether the review has
+    been fully validated.  Use :func:`dataclasses.replace` to add
+    persona findings after visual inspection::
+
+        review = review_placement(pcb, req, render_dir=Path("output/"))
+        # ... agent reads images, produces findings ...
+        review = replace(review, fab_findings=fab, ee_findings=ee)
+    """
 
     violations: tuple[PlacementViolation, ...]
     grade: str  # A/B/C/D/F
     summary: str
+    render_paths: tuple[Path, ...] = ()
+    fab_findings: tuple[PersonaFinding, ...] = ()
+    ee_findings: tuple[PersonaFinding, ...] = ()
+
+    @property
+    def visual_review_complete(self) -> bool:
+        """True only when renders exist AND both personas have reviewed."""
+        return (
+            len(self.render_paths) >= 4
+            and len(self.fab_findings) > 0
+            and len(self.ee_findings) > 0
+        )
+
+    @property
+    def all_findings(self) -> tuple[PersonaFinding, ...]:
+        """Combined findings from both personas."""
+        return (*self.fab_findings, *self.ee_findings)
 
 
 # ---------------------------------------------------------------------------
@@ -209,32 +272,18 @@ def _fp_positions(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
 
 
 def _fp_size_dict(pcb: PCBDesign) -> dict[str, tuple[float, float]]:
-    """Extract footprint ref -> (width, height) map from pad extents."""
-    result: dict[str, tuple[float, float]] = {}
-    for fp in pcb.footprints:
-        if not fp.pads:
-            result[fp.ref] = (3.0, 3.0)
-            continue
-        # Single pass: track min/max in one loop instead of 4 list comprehensions
-        x_min = float("inf")
-        x_max = float("-inf")
-        y_min = float("inf")
-        y_max = float("-inf")
-        for p in fp.pads:
-            px_lo = p.position.x - p.size_x / 2.0
-            px_hi = p.position.x + p.size_x / 2.0
-            py_lo = p.position.y - p.size_y / 2.0
-            py_hi = p.position.y + p.size_y / 2.0
-            if px_lo < x_min:
-                x_min = px_lo
-            if px_hi > x_max:
-                x_max = px_hi
-            if py_lo < y_min:
-                y_min = py_lo
-            if py_hi > y_max:
-                y_max = py_hi
-        result[fp.ref] = (x_max - x_min + 1.0, y_max - y_min + 1.0)
-    return result
+    """Extract footprint ref -> (width, height) map.
+
+    Delegates to :func:`~kicad_pipeline.pcb.footprints.estimate_courtyard_mm`
+    which uses a 3-tier resolution: courtyard graphics, fab body outline,
+    then pad extents + package-type body extension.  This ensures the
+    review agent uses the same size estimates as the placement optimizer,
+    preventing false RF-edge violations on modules where the physical body
+    (e.g. antenna) extends well beyond the pad field.
+    """
+    from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
+
+    return {fp.ref: estimate_courtyard_mm(fp) for fp in pcb.footprints}
 
 
 def _board_bounds(pcb: PCBDesign) -> tuple[float, float, float, float]:
@@ -280,14 +329,18 @@ def _check_decoupling_distance(
 ) -> list[PlacementViolation]:
     """Check that decoupling caps are within threshold of their IC.
 
-    Uses edge-to-edge distance (gap between bounding boxes), not
-    center-to-center, so large ICs (e.g. ESP32 26x16mm) aren't
-    penalized when caps are right at their body edge.
+    Uses the minimum of edge-to-edge distance (gap between bounding
+    boxes) and minimum pad-to-pad distance, so large ICs (e.g. ESP32
+    26x16mm) aren't penalized when a cap pad is close to an IC power pin
+    even if centroids are far apart.
     """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
     sizes = _fp_size_dict(pcb)
     threshold = DECOUPLING_CAP_MAX_DISTANCE_MM
+
+    # Build ref -> footprint lookup for pad access
+    fp_by_ref: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
 
     # Use decoupling subcircuits for IC-cap pairs
     for sc in subcircuits:
@@ -305,7 +358,32 @@ def _check_decoupling_distance(
                 continue
             cap_pos = positions[cap_ref]
             cap_size = sizes.get(cap_ref, (2.0, 1.0))
-            d = _edge_dist(ic_pos, ic_size, cap_pos, cap_size)
+            edge_d = _edge_dist(ic_pos, ic_size, cap_pos, cap_size)
+
+            # Also compute minimum pad-to-pad distance
+            min_pad_d = edge_d  # fallback to edge distance
+            ic_fp = fp_by_ref.get(ic_ref)
+            cap_fp = fp_by_ref.get(cap_ref)
+            if ic_fp is not None and cap_fp is not None:
+                ic_pads = getattr(ic_fp, "pads", ())
+                cap_pads = getattr(cap_fp, "pads", ())
+                ic_origin = getattr(ic_fp, "position", None)
+                cap_origin = getattr(cap_fp, "position", None)
+                if ic_pads and cap_pads and ic_origin and cap_origin:
+                    for ip in ic_pads:
+                        ip_abs_x = ic_origin.x + ip.position.x
+                        ip_abs_y = ic_origin.y + ip.position.y
+                        for cp in cap_pads:
+                            cp_abs_x = cap_origin.x + cp.position.x
+                            cp_abs_y = cap_origin.y + cp.position.y
+                            pd = math.sqrt(
+                                (ip_abs_x - cp_abs_x) ** 2
+                                + (ip_abs_y - cp_abs_y) ** 2
+                            )
+                            if pd < min_pad_d:
+                                min_pad_d = pd
+
+            d = min(edge_d, min_pad_d)
             if d > threshold:
                 # Suggest moving cap close to IC edge
                 suggested = _point_toward(ic_pos, cap_pos, threshold * 0.8)
@@ -327,10 +405,27 @@ def _check_subcircuit_spread(
     pcb: PCBDesign,
     subcircuits: tuple[DetectedSubCircuit, ...],
 ) -> list[PlacementViolation]:
-    """Check that sub-circuit components are clustered near anchor."""
+    """Check that sub-circuit components are clustered near anchor.
+
+    Uses edge-to-edge distance for subcircuit types whose anchor is a
+    large IC (MCU peripheral clusters, RF antenna), so modules like
+    ESP32-S3-WROOM are not penalised for centre distance.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
+    sizes = _fp_size_dict(pcb)
     threshold = SUBCIRCUIT_MAX_SPREAD_MM
+
+    # Relay drivers have inherently tall vertical extent: relay body (~16mm)
+    # plus driver column (D + Q + R_LED + D_LED ≈ 20mm below center).
+    # Use a relaxed threshold to avoid false positives on correct layouts.
+    relay_driver_spread_mm = 25.0
+
+    # Subcircuit types anchored on large ICs — use edge-to-edge distance
+    edge_dist_types = frozenset({
+        SubCircuitType.MCU_PERIPHERAL_CLUSTER,
+        SubCircuitType.RF_ANTENNA,
+    })
 
     for sc in subcircuits:
         if sc.circuit_type == SubCircuitType.DECOUPLING:
@@ -339,23 +434,35 @@ def _check_subcircuit_spread(
         if anchor_pos is None:
             continue
 
+        sc_threshold = (
+            relay_driver_spread_mm
+            if sc.circuit_type == SubCircuitType.RELAY_DRIVER
+            else threshold
+        )
+        use_edge = sc.circuit_type in edge_dist_types
+        anchor_size = sizes.get(sc.anchor_ref, (3.0, 3.0))
+
         for ref in sc.refs:
             if ref == sc.anchor_ref:
                 continue
             pos = positions.get(ref)
             if pos is None:
                 continue
-            d = _dist(anchor_pos, pos)
-            if d > threshold:
-                suggested = _point_toward(anchor_pos, pos, threshold * 0.8)
+            if use_edge:
+                ref_size = sizes.get(ref, (2.0, 1.0))
+                d = _edge_dist(anchor_pos, anchor_size, pos, ref_size)
+            else:
+                d = _dist(anchor_pos, pos)
+            if d > sc_threshold:
+                suggested = _point_toward(anchor_pos, pos, sc_threshold * 0.8)
                 violations.append(PlacementViolation(
                     rule=PlacementRule.SUBCIRCUIT_SPREAD,
                     severity="major",
                     refs=(ref, sc.anchor_ref),
                     message=f"{ref} is {d:.1f}mm from anchor {sc.anchor_ref} "
-                            f"in {sc.circuit_type.value} (max {threshold}mm)",
+                            f"in {sc.circuit_type.value} (max {sc_threshold}mm)",
                     current_value=d,
-                    threshold=threshold,
+                    threshold=sc_threshold,
                     suggested_position=suggested,
                 ))
 
@@ -473,12 +580,24 @@ def _check_connector_edge(
             else:
                 suggested = (x, nearest_edge_y + (2.0 if nearest_edge_y == min_y else -2.0))
 
+            # THT connectors require board edge access — escalate severity
+            is_tht = any(
+                pad.pad_type == "thru_hole"
+                for pad in fp.pads
+            )
+            severity = "critical" if is_tht else "major"
+            msg_suffix = (
+                " — THT connector requires board edge access"
+                if is_tht
+                else ""
+            )
+
             violations.append(PlacementViolation(
                 rule=PlacementRule.CONNECTOR_EDGE,
-                severity="major",
+                severity=severity,
                 refs=(fp.ref,),
                 message=f"{fp.ref} is {edge_dist:.1f}mm from nearest board edge "
-                        f"(max {threshold}mm for connectors)",
+                        f"(max {threshold}mm for connectors){msg_suffix}",
                 current_value=edge_dist,
                 threshold=threshold,
                 suggested_position=suggested,
@@ -678,10 +797,20 @@ def _check_mcu_peripheral_proximity(
     pcb: PCBDesign,
     subcircuits: tuple[DetectedSubCircuit, ...],
 ) -> list[PlacementViolation]:
-    """Check that MCU peripherals are within threshold of their MCU."""
+    """Check that MCU peripherals are within threshold of their MCU.
+
+    Uses edge-to-edge distance (gap between bounding boxes) so large
+    MCU modules (e.g. ESP32-S3-WROOM ~20x26mm) are not penalised for
+    centre distance when peripherals are physically right at their body
+    edge.
+    """
     violations: list[PlacementViolation] = []
     positions = _fp_positions(pcb)
+    sizes = _fp_size_dict(pcb)
     threshold = MCU_PERIPHERAL_MAX_DISTANCE_MM
+
+    # Track R* refs already checked via subcircuits to avoid duplicates
+    checked_resistors: set[str] = set()
 
     for sc in subcircuits:
         if sc.circuit_type != SubCircuitType.MCU_PERIPHERAL_CLUSTER:
@@ -689,23 +818,80 @@ def _check_mcu_peripheral_proximity(
         anchor_pos = positions.get(sc.anchor_ref)
         if anchor_pos is None:
             continue
+        anchor_size = sizes.get(sc.anchor_ref, (3.0, 3.0))
 
         for ref in sc.refs:
             if ref == sc.anchor_ref:
                 continue
+            if _ref_prefix(ref) == "R":
+                checked_resistors.add(ref)
             pos = positions.get(ref)
             if pos is None:
                 continue
-            d = _dist(anchor_pos, pos)
+            ref_size = sizes.get(ref, (2.0, 1.0))
+            d = _edge_dist(anchor_pos, anchor_size, pos, ref_size)
             if d > threshold:
+                is_pullup = _ref_prefix(ref) == "R"
+                msg = (
+                    f"Pull-up resistor {ref} is {d:.1f}mm edge-to-edge from "
+                    f"bus master {sc.anchor_ref} (max {threshold}mm)"
+                    if is_pullup
+                    else f"{ref} is {d:.1f}mm edge-to-edge from MCU "
+                         f"{sc.anchor_ref} (max {threshold}mm)"
+                )
                 suggested = _point_toward(anchor_pos, pos, threshold * 0.8)
                 violations.append(PlacementViolation(
                     rule=PlacementRule.MCU_PERIPHERAL_PROXIMITY,
                     severity="major",
                     refs=(ref, sc.anchor_ref),
-                    message=f"{ref} is {d:.1f}mm from MCU {sc.anchor_ref} "
-                            f"(max {threshold}mm for peripherals)",
+                    message=msg,
                     current_value=d,
+                    threshold=threshold,
+                    suggested_position=suggested,
+                ))
+
+    # Bug 007: Also check standalone R* refs near large MCUs (>20 pads)
+    # that weren't already part of an MCU_PERIPHERAL_CLUSTER subcircuit.
+    mcu_fps = [
+        fp for fp in pcb.footprints
+        if _ref_prefix(fp.ref) == "U" and len(fp.pads) > 20
+    ]
+    if mcu_fps:
+        resistor_fps = [
+            fp for fp in pcb.footprints
+            if _ref_prefix(fp.ref) == "R" and fp.ref not in checked_resistors
+        ]
+        for r_fp in resistor_fps:
+            r_pos = positions.get(r_fp.ref)
+            if r_pos is None:
+                continue
+            r_size = sizes.get(r_fp.ref, (2.0, 1.0))
+            # Check if this resistor is far from ALL MCUs
+            nearest_mcu_ref: str | None = None
+            nearest_d = float("inf")
+            for mcu_fp in mcu_fps:
+                mcu_pos = positions.get(mcu_fp.ref)
+                if mcu_pos is None:
+                    continue
+                mcu_size = sizes.get(mcu_fp.ref, (3.0, 3.0))
+                d = _edge_dist(mcu_pos, mcu_size, r_pos, r_size)
+                if d < nearest_d:
+                    nearest_d = d
+                    nearest_mcu_ref = mcu_fp.ref
+            # Only flag if far from all MCUs — these are likely bus pull-ups
+            # that weren't detected as part of a subcircuit
+            if nearest_mcu_ref and nearest_d > threshold:
+                suggested = _point_toward(
+                    positions[nearest_mcu_ref], r_pos, threshold * 0.8,
+                )
+                violations.append(PlacementViolation(
+                    rule=PlacementRule.MCU_PERIPHERAL_PROXIMITY,
+                    severity="major",
+                    refs=(r_fp.ref, nearest_mcu_ref),
+                    message=f"Pull-up resistor {r_fp.ref} is {nearest_d:.1f}mm "
+                            f"edge-to-edge from bus master {nearest_mcu_ref} "
+                            f"(max {threshold}mm)",
+                    current_value=nearest_d,
                     threshold=threshold,
                     suggested_position=suggested,
                 ))
@@ -1008,6 +1194,226 @@ def _check_diode_orientation_consistency(
     return violations
 
 
+def _check_power_loop_area(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+) -> list[PlacementViolation]:
+    """Check that buck converter hot loop (IC + inductor + catch diode) is tight.
+
+    The IC, inductor, and catch/Schottky diode must form a small triangle
+    for low EMI.  If the perimeter exceeds 25mm, flag as CRITICAL.
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    perimeter_threshold = 25.0
+
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.BUCK_CONVERTER:
+            continue
+        # Identify key components: IC (U*), inductor (L*), catch diode (D*)
+        ic_refs = [r for r in sc.refs if _ref_prefix(r) == "U"]
+        l_refs = [r for r in sc.refs if _ref_prefix(r) == "L"]
+        d_refs = [r for r in sc.refs if _ref_prefix(r) == "D"]
+
+        if not ic_refs or not l_refs or not d_refs:
+            continue
+
+        ic_ref = ic_refs[0]
+        l_ref = l_refs[0]
+        d_ref = d_refs[0]
+
+        ic_pos = positions.get(ic_ref)
+        l_pos = positions.get(l_ref)
+        d_pos = positions.get(d_ref)
+        if ic_pos is None or l_pos is None or d_pos is None:
+            continue
+
+        # Measure triangle perimeter
+        perimeter = _dist(ic_pos, l_pos) + _dist(l_pos, d_pos) + _dist(d_pos, ic_pos)
+        if perimeter > perimeter_threshold:
+            violations.append(PlacementViolation(
+                rule=PlacementRule.POWER_LOOP_AREA,
+                severity="critical",
+                refs=(ic_ref, l_ref, d_ref),
+                message=f"Buck converter hot loop too large: "
+                        f"{ic_ref}/{l_ref}/{d_ref} perimeter={perimeter:.1f}mm "
+                        f"(max {perimeter_threshold}mm)",
+                current_value=perimeter,
+                threshold=perimeter_threshold,
+                suggested_position=None,
+            ))
+
+    return violations
+
+
+def _check_flyback_diode_proximity(
+    pcb: PCBDesign,
+    subcircuits: tuple[DetectedSubCircuit, ...],
+    requirements: ProjectRequirements | None = None,
+) -> list[PlacementViolation]:
+    """Check that flyback diodes are close to their relay coil pins.
+
+    In relay driver subcircuits, the flyback/snubber diode must be near the
+    relay coil pins to minimise inductive spike loop area.  Threshold: 8mm
+    measured from the relay's coil pin (not the relay centre).
+
+    Only checks actual flyback diodes (connected to ``_COIL`` nets), not
+    LED indicator diodes that happen to share the subcircuit.
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    threshold = 8.0
+
+    # Build set of D refs that are on COIL nets (actual flyback diodes)
+    # and map relay ref → coil pin number for pin-level distance measurement
+    flyback_d_refs: set[str] | None = None
+    relay_coil_pins: dict[str, str] = {}  # K_ref → pin number
+    if requirements is not None:
+        flyback_d_refs = set()
+        for net in requirements.nets:
+            if "_COIL" not in net.name.upper():
+                continue
+            for conn in net.connections:
+                if conn.ref.startswith("D"):
+                    flyback_d_refs.add(conn.ref)
+                if conn.ref.startswith("K"):
+                    relay_coil_pins[conn.ref] = conn.pin
+
+    # Build relay footprint lookup for coil pin positions
+    fp_by_ref: dict[str, object] = {fp.ref: fp for fp in pcb.footprints}
+
+    for sc in subcircuits:
+        if sc.circuit_type != SubCircuitType.RELAY_DRIVER:
+            continue
+        k_refs = [r for r in sc.refs if _ref_prefix(r) == "K"]
+        d_refs = [r for r in sc.refs if _ref_prefix(r) == "D"]
+
+        # Filter to actual flyback diodes when requirements are available
+        if flyback_d_refs is not None:
+            d_refs = [r for r in d_refs if r in flyback_d_refs]
+
+        if not k_refs or not d_refs:
+            continue
+
+        for k_ref in k_refs:
+            # Use coil pin position if available, otherwise relay centroid
+            measure_pos = positions.get(k_ref)
+            coil_pin_num = relay_coil_pins.get(k_ref)
+            fp_obj = fp_by_ref.get(k_ref)
+            if coil_pin_num is not None and fp_obj is not None:
+                import math as _math
+                for pad in fp_obj.pads:  # type: ignore[union-attr]
+                    if str(pad.number) == str(coil_pin_num):
+                        rot_rad = _math.radians(fp_obj.rotation)  # type: ignore[union-attr]
+                        abs_x = fp_obj.position.x + (  # type: ignore[union-attr]
+                            pad.position.x * _math.cos(rot_rad)
+                            - pad.position.y * _math.sin(rot_rad)
+                        )
+                        abs_y = fp_obj.position.y + (  # type: ignore[union-attr]
+                            pad.position.x * _math.sin(rot_rad)
+                            + pad.position.y * _math.cos(rot_rad)
+                        )
+                        measure_pos = (abs_x, abs_y)
+                        break
+
+            if measure_pos is None:
+                continue
+            for d_ref in d_refs:
+                d_pos = positions.get(d_ref)
+                if d_pos is None:
+                    continue
+                d = _dist(measure_pos, d_pos)
+                if d > threshold:
+                    violations.append(PlacementViolation(
+                        rule=PlacementRule.FLYBACK_DIODE_PROXIMITY,
+                        severity="major",
+                        refs=(d_ref, k_ref),
+                        message=f"Flyback diode {d_ref} too far from relay coil "
+                                f"pin {k_ref}: {d:.1f}mm (max {threshold}mm)",
+                        current_value=d,
+                        threshold=threshold,
+                        suggested_position=None,
+                    ))
+
+    return violations
+
+
+# Footprint name patterns that indicate screw terminal connectors
+_SCREW_TERMINAL_PATTERNS: tuple[str, ...] = (
+    "WJ128", "WJ500", "Terminal", "P5.00", "Screw",
+)
+
+
+def _check_terminal_orientation(
+    pcb: PCBDesign,
+) -> list[PlacementViolation]:
+    """Check that screw terminal connectors face outward from the board edge.
+
+    Terminals should have their wire entry facing away from the board
+    interior.  The expected rotation depends on which board edge the
+    terminal is nearest to.
+    """
+    violations: list[PlacementViolation] = []
+    positions = _fp_positions(pcb)
+    bounds = _board_bounds(pcb)
+    min_x, min_y, max_x, max_y = bounds
+    board_w = max_x - min_x
+    board_h = max_y - min_y
+
+    for fp in pcb.footprints:
+        # Identify screw terminals by lib_id/value/footprint_source
+        fp_text = f"{fp.lib_id or ''} {fp.value or ''} {fp.footprint_source or ''}".upper()
+        is_terminal = any(pat.upper() in fp_text for pat in _SCREW_TERMINAL_PATTERNS)
+        if not is_terminal:
+            continue
+
+        pos = positions.get(fp.ref)
+        if pos is None:
+            continue
+        x, y = pos
+        rot = fp.rotation % 360.0
+
+        # Determine nearest edge
+        dist_top = y - min_y
+        dist_bottom = max_y - y
+        dist_left = x - min_x
+        dist_right = max_x - x
+        min_edge_dist = min(dist_top, dist_bottom, dist_left, dist_right)
+
+        # Expected rotation for wire entry to face outward
+        if min_edge_dist == dist_top and dist_top < board_h / 4.0:
+            expected_rot = 0.0
+        elif min_edge_dist == dist_bottom and dist_bottom < board_h / 4.0:
+            expected_rot = 180.0
+        elif min_edge_dist == dist_left and dist_left < board_w / 4.0:
+            expected_rot = 90.0
+        elif min_edge_dist == dist_right and dist_right < board_w / 4.0:
+            expected_rot = 270.0
+        else:
+            # Not clearly near an edge — skip
+            continue
+
+        # Angular difference (handle wraparound)
+        diff = abs(rot - expected_rot)
+        if diff > 180.0:
+            diff = 360.0 - diff
+
+        if diff > 45.0:
+            violations.append(PlacementViolation(
+                rule=PlacementRule.TERMINAL_ORIENTATION,
+                severity="major",
+                refs=(fp.ref,),
+                message=f"Screw terminal {fp.ref} wire entry faces board interior "
+                        f"(rotation={rot:.0f}°, expected≈{expected_rot:.0f}° "
+                        f"for nearest edge)",
+                current_value=rot,
+                threshold=expected_rot,
+                suggested_position=None,
+            ))
+
+    return violations
+
+
 def _fp_raw_pad_bbox(pcb: PCBDesign) -> dict[str, tuple[float, float, float, float]]:
     """Compute raw pad bounding box per footprint (no margin).
 
@@ -1278,6 +1684,53 @@ def _check_constraint_compliance(
 
 
 # ---------------------------------------------------------------------------
+# Image rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _render_review_images(
+    pcb: PCBDesign,
+    render_dir: Path,
+    board_name: str,
+) -> tuple[Path, ...]:
+    """Write the PCB to a temp file and render 4 standard views.
+
+    Returns paths to the generated PNG files (2D top, 3D top, 3D iso,
+    3D iso-back).  Returns only the paths that actually rendered
+    successfully — callers should check ``len(paths) >= 4``.
+    """
+    from kicad_pipeline.pcb.builder import write_pcb
+
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write PCB to render dir (temp file if not already present)
+    pcb_path = render_dir / f"{board_name}.kicad_pcb"
+    write_pcb(pcb, pcb_path)
+
+    rendered: list[Path] = []
+    for view_args, suffix in zip(_RENDER_VIEWS, _RENDER_SUFFIXES, strict=True):
+        out_path = render_dir / f"{board_name}{suffix}"
+        cmd = ["kicad-image-gen", *view_args, str(pcb_path), "-o", str(out_path)]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0 and out_path.exists():
+                rendered.append(out_path)
+                _log.debug("Rendered: %s", out_path)
+            else:
+                _log.warning(
+                    "kicad-image-gen failed for %s: %s",
+                    suffix, result.stderr[:200],
+                )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            _log.warning("kicad-image-gen unavailable: %s", exc)
+            break  # No point trying other views if the tool is missing
+
+    return tuple(rendered)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1287,20 +1740,44 @@ def review_placement(
     requirements: ProjectRequirements,
     subcircuits: tuple[DetectedSubCircuit, ...] | None = None,
     domain_map: dict[str, VoltageDomain] | None = None,
+    *,
+    render_dir: Path | None = None,
+    board_name: str = "board",
+    integrity_issues: tuple[object, ...] = (),
 ) -> PlacementReview:
     """Review a PCB placement against EE best practices.
 
-    Runs all placement rules and returns a graded review with
-    coordinate-specific violations and suggested fixes.
+    Runs all programmatic placement rules.  When *render_dir* is provided,
+    also generates 2D + 3D renders (4 standard views) via ``kicad-image-gen``
+    and includes the paths in the returned :class:`PlacementReview`.
+
+    A review is **not considered complete** until both fabricator and EE
+    persona findings have been recorded via :func:`dataclasses.replace`::
+
+        review = review_placement(pcb, req, render_dir=Path("output/board"))
+        # ... agent reads review.render_paths images ...
+        review = replace(review, fab_findings=fab_results, ee_findings=ee_results)
+        assert review.visual_review_complete
+
+    For fast inner-loop calls during optimization, omit *render_dir* to
+    skip rendering (the programmatic rules still run).
 
     Args:
         pcb: The PCB design to review.
         requirements: Project requirements.
         subcircuits: Pre-detected sub-circuits (will be detected if None).
         domain_map: Pre-classified voltage domains (will be classified if None).
+        render_dir: Directory for rendered PNG images.  When ``None``,
+            no images are generated and ``render_paths`` will be empty.
+        board_name: Stem used for render filenames (e.g. ``"train_mcu_core"``).
+        integrity_issues: Optional tuple of integrity issue objects (with
+            ``.severity`` attribute).  Critical issues are injected as
+            synthetic :data:`PlacementRule.INTEGRITY_ISSUE` violations so
+            they affect the placement grade.
 
     Returns:
-        PlacementReview with violations, grade, and summary.
+        PlacementReview with violations, grade, summary, and (if
+        *render_dir* was set) render image paths.
     """
     if subcircuits is None:
         subcircuits = detect_subcircuits(requirements)
@@ -1364,6 +1841,29 @@ def review_placement(
     all_violations.extend(
         _check_constraint_compliance(pcb, requirements)
     )
+    all_violations.extend(
+        _check_power_loop_area(pcb, subcircuits)
+    )
+    all_violations.extend(
+        _check_flyback_diode_proximity(pcb, subcircuits, requirements)
+    )
+    all_violations.extend(
+        _check_terminal_orientation(pcb)
+    )
+
+    # Bug 004: Inject critical integrity issues as synthetic violations
+    for issue in integrity_issues:
+        sev = getattr(issue, "severity", "minor")
+        if sev == "critical":
+            all_violations.append(PlacementViolation(
+                rule=PlacementRule.INTEGRITY_ISSUE,
+                severity=sev,
+                refs=(getattr(issue, "ref", "?"),),
+                message=getattr(issue, "message", str(issue)),
+                current_value=0.0,
+                threshold=0.0,
+                suggested_position=None,
+            ))
 
     violations = tuple(all_violations)
     grade = _compute_grade(violations)
@@ -1376,10 +1876,21 @@ def review_placement(
         f"({critical} critical, {major} major, {minor} minor)"
     )
 
+    # Render images when requested
+    render_paths: tuple[Path, ...] = ()
+    if render_dir is not None:
+        render_paths = _render_review_images(pcb, render_dir, board_name)
+        if len(render_paths) < 4:
+            _log.warning(
+                "Only %d/4 renders generated — visual review incomplete",
+                len(render_paths),
+            )
+
     _log.info("Placement review: %s", summary)
 
     return PlacementReview(
         violations=violations,
         grade=grade,
         summary=summary,
+        render_paths=render_paths,
     )

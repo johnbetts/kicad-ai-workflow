@@ -446,8 +446,9 @@ def _check_mounting_hole_clearance(
                 h_radius += _MOUNTING_HOLE_CLEARANCE_MM
 
             # Check overlap: expand footprint bbox by clearance, check if hole center is inside
-            if (fp_x1 - _MOUNTING_HOLE_CLEARANCE_MM <= hx <= fp_x2 + _MOUNTING_HOLE_CLEARANCE_MM
-                    and fp_y1 - _MOUNTING_HOLE_CLEARANCE_MM <= hy <= fp_y2 + _MOUNTING_HOLE_CLEARANCE_MM):
+            mh_clr = _MOUNTING_HOLE_CLEARANCE_MM
+            if (fp_x1 - mh_clr <= hx <= fp_x2 + mh_clr
+                    and fp_y1 - mh_clr <= hy <= fp_y2 + mh_clr):
                 dist_x = max(fp_x1 - hx, 0, hx - fp_x2)
                 dist_y = max(fp_y1 - hy, 0, hy - fp_y2)
                 gap = (dist_x ** 2 + dist_y ** 2) ** 0.5
@@ -833,7 +834,9 @@ def _check_board_utilization(
             ref="board",
             message=(
                 f"Board utilization {fill_ratio:.0f}% (min {_MIN_UTILIZATION_PCT:.0f}%) "
-                f"— board is oversized for {len([f for f in pcb.footprints if f.pads and not f.ref.startswith('H')])} components "
+                f"-- board is oversized for "
+                f"{len([f for f in pcb.footprints if f.pads and not f.ref.startswith('H')])} "
+                f"components "
                 f"or components are too spread out"
             ),
         ))

@@ -387,7 +387,6 @@ def test_power_chain_gap_detected() -> None:
     from kicad_pipeline.models.requirements import (
         Component,
         FeatureBlock,
-        Net,
         ProjectInfo,
         ProjectRequirements,
     )
@@ -408,7 +407,10 @@ def test_power_chain_gap_detected() -> None:
     )
     req = ProjectRequirements(
         project=ProjectInfo(name="test", revision="1"),
-        features=(FeatureBlock(name="Power", description="", components=("U1", "U2"), nets=(), subcircuits=()),),
+        features=(FeatureBlock(
+            name="Power", description="",
+            components=("U1", "U2"), nets=(), subcircuits=(),
+        ),),
         components=(
             Component(ref="U1", value="TPS54331", footprint="SOIC-8"),
             Component(ref="U2", value="AMS1117-3.3", footprint="SOT-223"),

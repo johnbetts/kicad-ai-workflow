@@ -1525,13 +1525,49 @@ def _classify_power_columns(
 #   fb_bot_r vs fb_top_r: dy=2.5 > 2.0mm minimum — OK
 _BUCK_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
     # (role, (dx, dy, rotation))  — role matched by net name keywords
-    "input_cap": (-0.9, -5.3, 0.0),       # C on VIN rail, above IC
-    "bootstrap_cap": (0.1, 4.8, 0.0),     # C on BST/BOOT net, below IC
-    "inductor": (8.3, -1.6, 0.0),         # L on SW/PH net, right of IC
-    "catch_diode": (8.3, 1.6, 180.0),     # D on SW/PH net, below inductor (same x column)
-    "fb_bot_r": (8.0, 4.9, 0.0),          # R on FB/VSNS+GND net (bottom of divider)
-    "fb_top_r": (8.0, 7.4, 180.0),        # R on FB/VSNS net only (top of divider)
-    "output_cap": (12.6, 1.5, -90.0),     # C at output (past inductor)
+    # Offsets are ABSOLUTE distances from the buck IC centroid.
+    # IC is placed at +90deg rotation so:
+    #   PH/SW pin (pin 7) → RIGHT side (dx=+2.7, dy=-0.6)
+    #   VSNS/FB pin (pin 5) → RIGHT side (dx=+2.7, dy=+1.9)
+    #   VIN pin (pin 2) → LEFT side (dx=-2.7, dy=-0.6)
+    #   BOOT pin (pin 1) → LEFT side (dx=-2.7, dy=-1.9)
+    #
+    # Footprint sizes (rotation-aware, from estimate_footprint_size):
+    #   U1 SOIC-8 at ±90°: 8.9w x 5.9h, half=(4.45, 2.95)
+    #   L1210:              3.7w x 3.0h, half=(1.85, 1.50)
+    #   SOD-323 (D1):       4.8w x 2.2h, half=(2.40, 1.10)
+    #   0805 cap (C1):      4.1w x 2.2h, half=(2.05, 1.10)
+    #   0805 cap (C2):      2.5w x 1.8h, half=(1.25, 0.90)
+    #   0402 R/C:           1.5w x 1.0h, half=(0.75, 0.50)
+    #
+    # Min center-to-center (with 0.5mm gap):
+    #   U1-L1 dx: 4.45+1.85+0.50=6.80   U1-D1 dx: 4.45+2.40+0.50=7.35
+    #   U1-0805 dx: 4.45+2.05+0.50=7.00 U1-0402 dx: 4.45+0.75+0.50=5.70
+    #   L1-D1 dy: 1.50+1.10+0.50=3.10   R-R dy: 0.50+0.50+0.50=1.50
+    #
+    # Signal flow: input(left) -> IC -> PH/inductor/diode(right) -> output(far right)
+    # Layout:
+    #   C3(bootstrap)  C1(input)   U1(IC)   L1(inductor)  C2(output)
+    #                                        D1(diode)
+    #                                        R2(fb_bot) R1(fb_top)
+    # Collision-safe offsets for SOIC-8 at 90° rotation:
+    #   SOIC-8 90°: ~8.9w x 5.9h, half=(4.45, 2.95)
+    #   L1210:      3.7w x 3.0h, half=(1.85, 1.50)
+    #   0805 cap:   2.5w x 1.8h, half=(1.25, 0.90)
+    #   SOD-323:    3.0w x 3.0h, half=(1.50, 1.50)
+    #   0402:       1.5w x 1.0h, half=(0.75, 0.50)
+    # Min center-to-center with 0.5mm gap:
+    #   U1-L1: 4.45+1.85+0.5 = 6.8mm
+    #   U1-0805: 4.45+1.25+0.5 = 6.2mm
+    #   L1-0805: 1.85+1.25+0.5 = 3.6mm
+    "input_cap": (-6.5, 0.5, 0.0),        # C on VIN rail, LEFT of IC
+    "bootstrap_cap": (-6.5, -2.5, 0.0),   # C on BST net, LEFT of IC, above C1
+    "inductor": (7.0, -0.6, 0.0),         # L on SW net, RIGHT of IC near PH pin
+    "catch_diode": (7.0, 3.0, 180.0),     # D on SW net, RIGHT below inductor
+    "fb_bot_r": (7.0, 5.5, 0.0),          # R on FB+GND, below catch diode
+    "fb_top_r": (7.0, 7.5, 180.0),        # R on FB only, below fb_bot_r
+    # C at output (L1@7.0 + L1_half 1.85 + C_half 1.25 + gap 0.9 = 11.0)
+    "output_cap": (11.0, 0.0, -90.0),
 }
 
 # Relative offsets for passives around an LDO IC anchor.
@@ -1548,8 +1584,24 @@ _BUCK_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
 # between the buck and LDO — the old -17.4mm offset placed it on top of the
 # buck output cap, and -5.5mm still left 0.355mm overlap due to the wide tab).
 _LDO_PASSIVE_OFFSETS: dict[str, tuple[float, float, float]] = {
-    "input_cap": (-6.5, 0.0, -90.0),      # C on VIN side, clear of LDO tab pad
-    "output_cap": (6.5, 0.0, -90.0),      # C on VOUT side, clear of LDO signal pads
+    # LDO IC at 180deg: VIN (pin 3) faces LEFT, VOUT (pin 2) faces LEFT,
+    # VOUT_TAB (pin 4) faces RIGHT.
+    # SOT-223 (U2): 10.4w x 7.7h at 180deg (no swap), half=(5.2, 3.85)
+    #   VIN pin at dx=-3.0, dy=+2.3 from center
+    #   VOUT pin at dx=-3.0, dy=0.0 from center
+    #   VOUT_TAB at dx=+3.0, dy=0.0 from center
+    # 0805 cap at -90deg: 2.2w x 4.1h, half-w=1.1
+    # Min dx from IC center = 5.2 + 1.1 + 0.50 = 6.80
+    #
+    # Output cap near VOUT pin on LEFT side (shortest decoupling path).
+    # Input cap on LEFT side below output cap, near VIN pin.
+    # 0805 at -90deg: 2.2w x 4.1h. Two caps stacked vertically need
+    # dy >= (4.1+4.1)/2 + 0.5 = 4.6mm
+    # Input and output caps stacked vertically on LEFT side of LDO.
+    # Output cap at dy=0 (near VOUT pin), HF bypass stacks at dy+5.
+    # Input cap at dy=-5 (above output, clear of duplicate stacking below).
+    "input_cap": (-6.0, -4.5, -90.0),     # C on VIN side (LEFT), above VOUT cap
+    "output_cap": (-6.0, 0.0, -90.0),     # C on VOUT side (LEFT), near VOUT pin
 }
 
 # Net-name keywords used to classify passive roles in power subcircuits.
@@ -1834,29 +1886,168 @@ def _place_regulator_passives(
     Returns the set of role names that were placed.
     """
     zx1, zy1, zx2, zy2 = zone_bounds
-    # Scale offsets proportionally to actual zone size vs reference zone
+    # Offsets are absolute physical distances (learned from reference boards).
+    # They must NOT scale up with zone size — larger zones should not push
+    # power components further apart.  Only scale DOWN if the zone is smaller
+    # than the reference to avoid off-board placement.
     zone_w = zx2 - zx1
     zone_h = zy2 - zy1
-    _REF_ZONE_W = 35.0  # reference zone width offsets were tuned for
-    _REF_ZONE_H = 30.0  # reference zone height offsets were tuned for
-    sx = min(1.5, max(0.5, zone_w / _REF_ZONE_W))
-    sy = min(1.5, max(0.5, zone_h / _REF_ZONE_H))
+    ref_zone_w = 35.0  # reference zone width offsets were tuned for
+    ref_zone_h = 30.0  # reference zone height offsets were tuned for
+    sx = min(1.0, max(0.5, zone_w / ref_zone_w))
+    sy = min(1.0, max(0.5, zone_h / ref_zone_h))
     placed_roles: set[str] = set()
+    # Track position of first component placed in each role so duplicates
+    # (e.g. two output caps: bulk + HF bypass) can be stacked nearby.
+    role_positions: dict[str, tuple[float, float]] = {}
+    dup_offset_mm = 5.0  # stack duplicates far enough for rotated 0805 caps (4.1mm tall)
+
     for ref in sorted(ic_net_refs):
         if ref == ic_ref:
             continue
         role = _classify_passive_role_power(ref, ctx, ic_ref, ic_net_refs, in_v, out_v)
         if role is None or role not in offsets:
             continue
-        if role in placed_roles:
-            continue
-        placed_roles.add(role)
         dx, dy, rot = offsets[role]
-        px = _clamp(ic_x + dx * sx, zx1 + 1.0, zx2 - 1.0)
-        py = _clamp(ic_y + dy * sy, zy1 + 1.0, zy2 - 1.0)
+        if role not in placed_roles:
+            # First component with this role — place at learned offset
+            placed_roles.add(role)
+            px = _clamp(ic_x + dx * sx, zx1 + 1.0, zx2 - 1.0)
+            py = _clamp(ic_y + dy * sy, zy1 + 1.0, zy2 - 1.0)
+            role_positions[role] = (px, py)
+        else:
+            # Duplicate role (e.g. C6 is a second output_cap alongside C5).
+            # Stack it adjacent to the primary component.
+            base_x, base_y = role_positions[role]
+            px = _clamp(base_x, zx1 + 1.0, zx2 - 1.0)
+            py = _clamp(base_y + dup_offset_mm, zy1 + 1.0, zy2 - 1.0)
         ctx.positions[ref] = (px, py, rot)
         ctx.power_group_fixed.add(ref)
     return placed_roles
+
+
+def _compute_global_pin_positions(
+    ic_ref: str,
+    ctx: PlacementContext,
+) -> dict[str, tuple[float, float]]:
+    """Compute global (x, y) positions of all pads on *ic_ref*.
+
+    Returns a dict mapping pad net_name (upper) to global (x, y).
+    For pads with the same net, the first one wins.
+    """
+    import math as _m
+
+    fp = None
+    for f in ctx.initial_pcb.footprints:
+        if f.ref == ic_ref:
+            fp = f
+            break
+    if fp is None:
+        return {}
+
+    cx, cy, rot_deg = ctx.positions.get(ic_ref, (0.0, 0.0, 0.0))
+    rad = _m.radians(rot_deg)
+    cos_r = _m.cos(rad)
+    sin_r = _m.sin(rad)
+
+    result: dict[str, tuple[float, float]] = {}
+    for pad in fp.pads:
+        if not pad.net_name:
+            continue
+        net_upper = pad.net_name.upper()
+        if net_upper in result or net_upper in ("GND", "AGND", "DGND", "PGND"):
+            continue
+        gx = cx + pad.position.x * cos_r - pad.position.y * sin_r
+        gy = cy + pad.position.x * sin_r + pad.position.y * cos_r
+        result[net_upper] = (gx, gy)
+    return result
+
+
+def _pull_passives_toward_pins(
+    ic_ref: str,
+    ic_net_refs: set[str],
+    zone_bounds: tuple[float, float, float, float],
+    ctx: PlacementContext,
+) -> None:
+    """Pull placed passives toward the IC pin they share a non-GND net with.
+
+    After offset-based placement, passives may be too far from their connected
+    pin. This pass computes the global pin position and pulls each passive
+    closer — placing it just outside the IC edge nearest that pin, at the
+    pin's Y coordinate (for left/right pins) or X coordinate (for top/bottom
+    pins), while preserving the offset's side choice (sign of dx/dy).
+    """
+    import math as _m
+
+    gnd_nets = frozenset({"GND", "AGND", "DGND", "PGND"})
+    pin_positions = _compute_global_pin_positions(ic_ref, ctx)
+    if not pin_positions:
+        return
+
+    zx1, zy1, zx2, zy2 = zone_bounds
+    ic_x, ic_y, _ic_rot = ctx.positions[ic_ref]
+    ic_w, ic_h = ctx.fp_sizes.get(ic_ref, (6.0, 6.0))
+    if abs(_ic_rot) % 180 in (90.0, 270.0):
+        ic_w, ic_h = ic_h, ic_w
+    ic_half_w = ic_w / 2.0
+    ic_half_h = ic_h / 2.0
+    gap = 0.2  # tight clearance for power loop components
+
+    for ref in sorted(ic_net_refs):
+        if ref == ic_ref or ref not in ctx.positions:
+            continue
+        # Find the shared non-GND net
+        shared_pin_pos: tuple[float, float] | None = None
+        for net in ctx.requirements.nets:
+            name_u = net.name.upper()
+            if name_u in gnd_nets:
+                continue
+            conn_refs = {c.ref for c in net.connections}
+            if ref in conn_refs and ic_ref in conn_refs and name_u in pin_positions:
+                shared_pin_pos = pin_positions[name_u]
+                break
+
+        if shared_pin_pos is None:
+            continue
+
+        px, py, p_rot = ctx.positions[ref]
+        pin_x, pin_y = shared_pin_pos
+        pw, ph = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        if p_rot % 180 in (90.0, 270.0):
+            pw, ph = ph, pw
+
+        # Determine which IC edge the pin is closest to
+        pin_dx = pin_x - ic_x
+        pin_dy = pin_y - ic_y
+
+        # The passive should be placed just outside the IC edge nearest
+        # the pin. Place on the side of the IC where the pin is, at min clearance
+        if abs(pin_dx) >= abs(pin_dy):
+            # Pin is on left or right edge
+            side_sign = 1.0 if pin_dx >= 0 else -1.0
+            target_x = ic_x + side_sign * (ic_half_w + pw / 2.0 + gap)
+            target_y = pin_y  # Align Y with pin
+        else:
+            # Pin is on top or bottom edge
+            side_sign = 1.0 if pin_dy >= 0 else -1.0
+            target_x = pin_x  # Align X with pin
+            target_y = ic_y + side_sign * (ic_half_h + ph / 2.0 + gap)
+
+        target_x = _clamp(target_x, zx1 + 1.0, zx2 - 1.0)
+        target_y = _clamp(target_y, zy1 + 1.0, zy2 - 1.0)
+
+        # Only move if it brings the passive closer to the pin
+        old_pin_dist = _m.sqrt((px - pin_x) ** 2 + (py - pin_y) ** 2)
+        new_pin_dist = _m.sqrt((target_x - pin_x) ** 2 + (target_y - pin_y) ** 2)
+
+        if new_pin_dist < old_pin_dist:
+            ctx.positions[ref] = (target_x, target_y, p_rot)
+            _log.info(
+                "      pin-pull %s toward %s pin: (%.1f,%.1f) -> (%.1f,%.1f) "
+                "[pin_d=%.1f->%.1f]",
+                ref, ic_ref, px, py, target_x, target_y,
+                old_pin_dist, new_pin_dist,
+            )
 
 
 def _place_power_chain_ic(
@@ -1880,7 +2071,10 @@ def _place_power_chain_ic(
     is_buck = sc.circuit_type == SubCircuitType.BUCK_CONVERTER  # type: ignore[union-attr]
     offsets = _BUCK_PASSIVE_OFFSETS if is_buck else _LDO_PASSIVE_OFFSETS
     y_frac = 0.40 if is_buck else 0.47
-    ic_rot = -90.0 if is_buck else 0.0
+    # Buck IC at +90deg so PH/SW pin (pin 7) faces RIGHT toward inductor/output.
+    # At -90deg the PH pin faces LEFT, forcing inductor placement against signal flow.
+    # LDO at 180deg so VIN faces LEFT (input side) and VOUT_TAB faces RIGHT (output).
+    ic_rot = 90.0 if is_buck else 180.0
 
     ic_x = zx1 + zone_w * x_fracs[reg_idx]
     ic_y = _clamp(zy1 + zone_h * y_frac, zy1 + 3.0, zy2 - 3.0)
@@ -1905,6 +2099,59 @@ def _place_power_chain_ic(
         len(placed_roles),
         ", ".join(sorted(placed_roles)),
     )
+
+
+def _nudge_connector_clear(
+    j_ref: str,
+    jx: float,
+    jy: float,
+    j_rot: float,
+    ctx: PlacementContext,
+    zone_bounds: tuple[float, float, float, float],
+    max_attempts: int = 8,
+) -> tuple[float, float]:
+    """Nudge a connector position until it no longer collides with any placed component.
+
+    Tries shifting in alternating Y then X directions. Returns the final (x, y).
+    """
+    zx1, zy1, zx2, zy2 = zone_bounds
+    jw, jh = ctx.fp_sizes.get(j_ref, (2.5, 5.0))
+    if j_rot % 180 in (90.0, 270.0):
+        jw, jh = jh, jw
+
+    clearance = 0.25  # mm
+
+    for _attempt in range(max_attempts):
+        collision_found = False
+        for ref, (rx, ry, r_rot) in ctx.positions.items():
+            if ref == j_ref:
+                continue
+            rw, rh = ctx.fp_sizes.get(ref, (2.0, 2.0))
+            if r_rot % 180 in (90.0, 270.0):
+                rw, rh = rh, rw
+
+            overlap_x = (jw + rw) / 2.0 + clearance - abs(jx - rx)
+            overlap_y = (jh + rh) / 2.0 + clearance - abs(jy - ry)
+
+            if overlap_x > 0 and overlap_y > 0:
+                # Collision detected — nudge in the direction of least overlap
+                collision_found = True
+                if overlap_y <= overlap_x:
+                    # Nudge in Y
+                    nudge = overlap_y + 0.5
+                    jy = jy + nudge if jy >= ry else jy - nudge
+                else:
+                    # Nudge in X
+                    nudge = overlap_x + 0.5
+                    jx = jx + nudge if jx >= rx else jx - nudge
+                jx = _clamp(jx, zx1 + 1.0, zx2 - 1.0)
+                jy = _clamp(jy, zy1 + 1.0, zy2 - 1.0)
+                break  # re-check all after nudge
+
+        if not collision_found:
+            break
+
+    return jx, jy
 
 
 def _place_power_connectors(
@@ -1941,14 +2188,14 @@ def _place_power_connectors(
 
     # index -> (x_frac, y_frac, rotation)
     # All positions are zone-relative fractions for left→right signal flow.
-    # Fractions learned from the human reference board (board 60x40mm, zone 2.5-57.5):
-    #   J1 (input 24V):  x≈25%, y≈10%, rot=180  → top-left area
-    #   J2 (mid test):   x≈51%, y≈40%, rot=-90  → center, between stages
-    #   J3 (output):     x≈75%, y≈70%, rot=-90  → lower-right
+    # Connectors must be near board edges (within 8mm) for wire access.
+    #   J1 (input 24V):  left edge, top area → wire entry faces top
+    #   J2 (mid test):   between buck and LDO, below center
+    #   J3 (output):     right edge, lower area → wire exit
     conn_rules: dict[int, tuple[float, float, float]] = {
-        0: (0.25, 0.10, 180.0),
-        1: (0.51, 0.40, -90.0),
-        2: (0.75, 0.70, -90.0),
+        0: (0.10, 0.10, 0.0),     # J1: left edge, top area, wire entry faces top
+        1: (0.50, 0.88, -90.0),   # J2: center, near bottom edge
+        2: (0.97, 0.75, -90.0),   # J3: right edge, clear of zone right
     }
     for idx, j_ref in enumerate(power_connectors):
         if j_ref in ctx.fixed_refs:
@@ -1965,6 +2212,10 @@ def _place_power_connectors(
         from kicad_pipeline.optimization.constraint_guard import respect_constraints
         clamped_x, clamped_y, rot = respect_constraints(
             j_ref, clamped_x, clamped_y, rot, ctx,
+        )
+        # Nudge connector away from any component it would collide with
+        clamped_x, clamped_y = _nudge_connector_clear(
+            j_ref, clamped_x, clamped_y, rot, ctx, zone_bounds,
         )
         ctx.positions[j_ref] = (clamped_x, clamped_y, rot)
         ctx.power_group_fixed.add(j_ref)
@@ -2142,13 +2393,17 @@ def _pwr_place_anchor_ic(
 ) -> tuple[float, float]:
     """Place buck1 IC at its anchor position. Returns updated (u1_x, u1_y)."""
     pz_x1, pz_y1, pz_x2, pz_y2 = pz_bounds
-    if not (buck1_ic and buck1_ic not in ctx.fixed_refs):
+    if not buck1_ic:
         return anchor_x, u1_y
+    # Temporarily unfix — power group phase MUST be able to reposition the buck IC
+    # to clear connector bodies and maintain proper power chain flow.
+    ctx.fixed_refs.discard(buck1_ic)
     px = max(pz_x1, min(pz_x2, anchor_x))
     py = max(pz_y1, min(pz_y2, u1_y))
     ctx.positions[buck1_ic] = (px, py, 0.0)
     grid.place(px, py, u1_w, u1_h)  # type: ignore[union-attr]
     ctx.power_group_fixed.add(buck1_ic)
+    ctx.fixed_refs.add(buck1_ic)  # re-fix after placement
     placed_in_col.add(buck1_ic)
     return px, py
 
@@ -2190,7 +2445,9 @@ def _phase_power_group(ctx: PlacementContext) -> None:
 
     u1_x, u1_y, _u1_rot = ctx.positions.get(buck1_ic, (zx1 + 5.0, zy1 + 15.0, 0.0))
     u1_w, u1_h = ctx.fp_sizes.get(buck1_ic, (5.0, 5.0))
-    anchor_x = max(zx1 + 6.0, min(zx2 - col_spacing - 3.0, zx1 + (zx2 - zx1) * 0.25))
+    # Leave room for input connector (terminal block body ~13mm from left edge)
+    # plus IC half-width (~4.5mm) plus gap (1mm) = 18.5mm minimum from left
+    anchor_x = max(zx1 + 18.0, min(zx2 - col_spacing - 3.0, zx1 + (zx2 - zx1) * 0.35))
     pwr_grid = _build_exclusion_grid(ctx, power_group_refs)
     pz_bounds = (zx1 + 2.0, zy1 + 2.0, zx2 - 2.0, ctx.bounds[3] - 3.0)
 
@@ -2504,12 +2761,13 @@ def _adc_place_connectors(
             continue
         j_x = j_x_start + ch_idx * j_spacing
         j_x_clamped, j_y_clamped = _clamp_to_bounds(j_x, j_y, bounds)
-        ctx.positions[j_ref] = (j_x_clamped, j_y_clamped, 180.0)
+        # ADC connectors sit near top edge — wire entry faces outward (rot=0)
+        ctx.positions[j_ref] = (j_x_clamped, j_y_clamped, 0.0)
         ctx.fixed_refs.add(j_ref)
         ctx.adc_channel_refs.add(j_ref)
         connector_refs.append(j_ref)
         _log.info(
-            "    3c2: connector %s -> (%.1f, %.1f) rot=180",
+            "    3c2: connector %s -> (%.1f, %.1f) rot=0",
             j_ref, j_x_clamped, j_y_clamped,
         )
     return connector_refs, j_spacing
@@ -2647,7 +2905,7 @@ def _phase_adc_channels(ctx: PlacementContext) -> None:
     Layout pattern learned from human-routed reference board:
 
     1. Place ADC channel connectors at the top edge of the analog zone,
-       evenly spaced left-to-right, rotation=180 (wire entry faces top).
+       evenly spaced left-to-right, rotation=0 (wire entry faces outward/top).
 
     2. For each channel, place passives in a horizontal strip ~8.3mm below
        the connector. Left-to-right order: C_filt, D_tvs, R_bot, R_top.
@@ -2855,6 +3113,51 @@ def _mcu_push_courtyard_violations(
         _push_component_outside_courtyard(ref, ctx, court, mcu_grid)
 
 
+def _mcu_place_debounce_caps(
+    ctx: PlacementContext, other_passive_refs: list[str],
+) -> None:
+    ref_net_names: dict[str, set[str]] = {}
+    for net in ctx.requirements.nets:
+        for conn in net.connections:
+            ref_net_names.setdefault(conn.ref, set()).add(net.name)
+
+    for ref in list(other_passive_refs):
+        if not ref.startswith("C") or ref not in ctx.positions:
+            continue
+        cap_nets = ref_net_names.get(ref, set())
+        non_gnd = {n for n in cap_nets if "GND" not in n.upper()}
+        is_debounce = any(
+            kw in n.upper() for n in non_gnd for kw in ("EN", "DEB", "RESET")
+        )
+        if not is_debounce:
+            continue
+        sw_candidates = [r for r in ctx.positions
+                         if r.startswith("SW") and r in ctx.mcu_peripheral_refs]
+        if not sw_candidates:
+            continue
+        best_sw = sw_candidates[0]
+        for sw in sw_candidates:
+            sw_nets = ref_net_names.get(sw, set())
+            sw_non_gnd = {n for n in sw_nets if "GND" not in n.upper()}
+            for cn in non_gnd:
+                for sn in sw_non_gnd:
+                    if any(kw in cn.upper() and kw in sn.upper()
+                           for kw in ("EN", "RESET", "BOOT")):
+                        best_sw = sw
+        tx, ty, _ = ctx.positions[best_sw]
+        tw, th = ctx.fp_sizes.get(ref, (1.0, 0.5))
+        sw_w, _sw_h = ctx.fp_sizes.get(best_sw, (4.0, 4.0))
+        cx = tx + sw_w / 2.0 + tw / 2.0 + 0.5
+        cy = ty
+        cx = _clamp(cx, ctx.bounds[0] + tw / 2.0 + 0.5, ctx.bounds[2] - tw / 2.0 - 0.5)
+        cy = _clamp(cy, ctx.bounds[1] + th / 2.0 + 0.5, ctx.bounds[3] - th / 2.0 - 0.5)
+        ctx.positions[ref] = (cx, cy, 0.0)
+        ctx.mcu_peripheral_refs.add(ref)
+        ctx.fixed_refs.add(ref)
+        other_passive_refs.remove(ref)
+        _log.info("    %s (debounce) -> near %s at (%.1f, %.1f)", ref, best_sw, cx, cy)
+
+
 def _phase_mcu_group(ctx: PlacementContext) -> None:
     """3c3: MCU peripheral tightening."""
     _log.info("  3c3: MCU peripheral tightening")
@@ -2905,56 +3208,7 @@ def _phase_mcu_group(ctx: PlacementContext) -> None:
     _mcu_place_led(ctx, other_passive_refs, mcu_grid, sw_base_x, sw_base_y)
 
     # Step 6c: Place EN/debounce caps near associated switch/resistor
-    # C5 connects to EN_DEB, SW2 connects to EN — they don't share a net
-    # directly, but both relate to the EN circuit. Use net-name matching.
-    _ref_net_names: dict[str, set[str]] = {}
-    for net in ctx.requirements.nets:
-        for conn in net.connections:
-            _ref_net_names.setdefault(conn.ref, set()).add(net.name)
-
-    for ref in list(other_passive_refs):
-        if not ref.startswith("C") or ref not in ctx.positions:
-            continue
-        cap_nets = _ref_net_names.get(ref, set())
-        non_gnd = {n for n in cap_nets if "GND" not in n.upper()}
-        # Check if this cap is on an EN/debounce/reset net
-        is_debounce = any(
-            kw in n.upper() for n in non_gnd for kw in ("EN", "DEB", "RESET")
-        )
-        if not is_debounce:
-            continue
-        # Find the nearest switch (SW*) that's in the MCU group
-        sw_candidates = [r for r in ctx.positions
-                         if r.startswith("SW") and r in ctx.mcu_peripheral_refs]
-        if not sw_candidates:
-            continue
-        # Pick the switch whose net names share a keyword with the cap
-        best_sw = sw_candidates[0]
-        for sw in sw_candidates:
-            sw_nets = _ref_net_names.get(sw, set())
-            sw_non_gnd = {n for n in sw_nets if "GND" not in n.upper()}
-            # Check for shared keyword (EN in EN_DEB matches EN in EN)
-            for cn in non_gnd:
-                for sn in sw_non_gnd:
-                    if any(kw in cn.upper() and kw in sn.upper()
-                           for kw in ("EN", "RESET", "BOOT")):
-                        best_sw = sw
-        tx, ty, _ = ctx.positions[best_sw]
-        tw, th = ctx.fp_sizes.get(ref, (1.0, 0.5))
-        sw_w, _sw_h = ctx.fp_sizes.get(best_sw, (4.0, 4.0))
-        # Place cap just to the right of the switch courtyard (edge-to-edge + 0.5mm gap)
-        cx = tx + sw_w / 2.0 + tw / 2.0 + 0.5
-        cy = ty
-        cx = _clamp(cx, ctx.bounds[0] + tw / 2.0 + 0.5,
-                    ctx.bounds[2] - tw / 2.0 - 0.5)
-        cy = _clamp(cy, ctx.bounds[1] + th / 2.0 + 0.5,
-                    ctx.bounds[3] - th / 2.0 - 0.5)
-        ctx.positions[ref] = (cx, cy, 0.0)
-        ctx.mcu_peripheral_refs.add(ref)
-        ctx.fixed_refs.add(ref)  # protect from late decoupling retightening
-        other_passive_refs.remove(ref)
-        _log.info("    %s (debounce) -> near %s at (%.1f, %.1f)",
-                  ref, best_sw, cx, cy)
+    _mcu_place_debounce_caps(ctx, other_passive_refs)
 
     # Step 7: Place remaining passives sorted by proximity to MCU
     def _prox_key(ref: str) -> tuple[int, float]:
@@ -3200,6 +3454,39 @@ def _eth_place_headers_bottom(
         cy += h + gap
 
 
+def _eth_compute_ic_anchor_x(
+    ctx: PlacementContext,
+    eth_connectors: list[str],
+    placed_eth: set[str],
+) -> float:
+    ic_anchor_x = _eth_connector_pad_right(ctx, eth_connectors, placed_eth, gap_mm=5.0)
+    if not eth_connectors or not any(r in placed_eth for r in eth_connectors):
+        max_conn_w = max(
+            (ctx.fp_sizes.get(r, (19.6, 0.0))[0] for r in eth_connectors),
+            default=19.6,
+        )
+        ic_anchor_x = ctx.bounds[0] + max_conn_w + 5.0
+    return ic_anchor_x
+
+
+def _eth_place_remaining(
+    ctx: PlacementContext,
+    eth_group_refs: set[str],
+    placed_eth: set[str],
+    eth_anchor_x: float,
+    col1_bottom: float,
+    eth_grid: object,
+    eth_zone_rect: tuple[float, float, float, float],
+) -> None:
+    remaining_eth = sorted(eth_group_refs - placed_eth - ctx.fixed_refs)
+    if remaining_eth:
+        _eth_place_column(
+            ctx,
+            [r for r in remaining_eth if r in ctx.positions],
+            eth_anchor_x, col1_bottom, placed_eth, eth_grid, eth_zone_rect,
+        )
+
+
 def _phase_ethernet_group(ctx: PlacementContext) -> None:
     """3c4: Ethernet group organization — horizontal left→right signal-chain.
 
@@ -3217,11 +3504,8 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
     eth_zone_rect = _find_zone_rect(ctx, "ethernet")
     by_prefix = _classify_refs_by_prefix(eth_group_refs, ctx, "U", "J")
     eth_ics = by_prefix["U"]
-    # Split J refs into large panel connectors (RJ45/SH*, width > 10mm → left
-    # edge) vs. small headers (SPI/power, width ≤ 10mm → right edge).
     all_j_refs = by_prefix["J"]
-    eth_connectors = [r for r in all_j_refs
-                      if ctx.fp_sizes.get(r, (0.0, 0.0))[0] > 10.0]
+    eth_connectors = [r for r in all_j_refs if ctx.fp_sizes.get(r, (0.0, 0.0))[0] > 10.0]
     eth_headers = [r for r in all_j_refs if r not in eth_connectors]
 
     if not (eth_ics and eth_zone_rect is not None):
@@ -3230,63 +3514,32 @@ def _phase_ethernet_group(ctx: PlacementContext) -> None:
     ezx1, ezy1, ezx2, ezy2 = eth_zone_rect
     eth_net_refs = _build_net_to_group_refs(ctx, eth_group_refs)
     eth_grid = _build_exclusion_grid(ctx, eth_group_refs)
-
     eth_main_ic = eth_ics[0]
-    crystal_refs = sorted([r for r in eth_group_refs
-                           if r.startswith("Y") and r in ctx.positions])
+    crystal_refs = sorted([r for r in eth_group_refs if r.startswith("Y") and r in ctx.positions])
     poe_ic = eth_ics[1] if len(eth_ics) > 1 else ""
     crystal_load_caps, poe_caps, other_caps = _classify_eth_caps(
         eth_group_refs, eth_net_refs, crystal_refs, poe_ic, ctx,
     )
-
-    # eth_anchor_x is the horizontal zone midpoint — used as fallback anchor
-    # for signal-chain caps and PoE IC placement.
     eth_anchor_x = (ezx1 + ezx2) / 2.0
-    # Vertical centre of the zone — all components are centred here on the Y axis.
     zone_cy = (ezy1 + ezy2) / 2.0
     placed_eth: set[str] = set()
 
-    # Step 1: Place RJ45 at the LEFT board edge (port faces left, rot=90).
-    # This is done FIRST so we can derive the IC anchor from the connector's
-    # actual right-side pad extent rather than a courtyard over-estimate.
     _eth_place_rj45_connectors(
         ctx, eth_connectors, eth_anchor_x, eth_grid, placed_eth, eth_zone_rect,
     )
-
-    # Step 2: IC anchor X = right pad extent of the RJ45 + 5 mm clearance.
-    # IC anchor Y = vertical centre of the ethernet zone.
-    ic_anchor_x = _eth_connector_pad_right(ctx, eth_connectors, placed_eth, gap_mm=5.0)
-    # Fallback when no RJ45 was placed (e.g. boards without a connector).
-    if not eth_connectors or not any(r in placed_eth for r in eth_connectors):
-        max_conn_w = max(
-            (ctx.fp_sizes.get(r, (19.6, 0.0))[0] for r in eth_connectors),
-            default=19.6,
-        )
-        ic_anchor_x = ctx.bounds[0] + max_conn_w + 5.0
-
+    ic_anchor_x = _eth_compute_ic_anchor_x(ctx, eth_connectors, placed_eth)
     ic_cx, ic_cy, ic_w, ic_h = _eth_force_place_main_ic(
-        ctx, eth_main_ic, ic_anchor_x, zone_cy,
-        eth_grid, placed_eth, eth_zone_rect,
+        ctx, eth_main_ic, ic_anchor_x, zone_cy, eth_grid, placed_eth, eth_zone_rect,
     )
-
-    # Step 3: Place small interface headers (SPI/power) at the RIGHT edge
-    # BEFORE the decoupling caps column so the caps column avoids them.
     _eth_place_headers_bottom(ctx, eth_headers, eth_grid, placed_eth, eth_zone_rect)
-
     col1_bottom = _eth_place_signal_chain(
         ctx, crystal_refs, crystal_load_caps, other_caps, poe_ic, poe_caps,
         eth_connectors, eth_anchor_x, ic_cx, ic_cy, ic_h,
         eth_grid, placed_eth, eth_zone_rect,
     )
-
-    # Any remaining eth refs
-    remaining_eth = sorted(eth_group_refs - placed_eth - ctx.fixed_refs)
-    if remaining_eth:
-        _eth_place_column(
-            ctx,
-            [r for r in remaining_eth if r in ctx.positions],
-            eth_anchor_x, col1_bottom, placed_eth, eth_grid, eth_zone_rect,
-        )
+    _eth_place_remaining(
+        ctx, eth_group_refs, placed_eth, eth_anchor_x, col1_bottom, eth_grid, eth_zone_rect,
+    )
 
     _log.info(
         "    3c4: organized %d ethernet components in signal chain: %s",

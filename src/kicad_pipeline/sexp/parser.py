@@ -17,10 +17,13 @@ semantics, only structure.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.exceptions import SExpParseError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from kicad_pipeline.sexp.writer import SExpNode
@@ -168,12 +171,12 @@ def _coerce_atom(raw: str) -> SExpNode:
     # Try integer first (no decimal point, no exponent)
     try:
         return int(raw)
-    except ValueError:
-        pass
+    except ValueError as exc:
+        logger.debug("Atom not an int, trying float: %s", exc)
     try:
         return float(raw)
-    except ValueError:
-        pass
+    except ValueError as exc:
+        logger.debug("Atom not a float, treating as string: %s", exc)
     return raw
 
 

@@ -515,9 +515,9 @@ class ComponentRegistry:
         self._specs[component_id] = new_spec
 
         # Propagate footprint-level changes back to _footprints
-        _FP_FIELDS = ("kicad_ref_pad1_x", "kicad_ref_pad1_y",
-                       "model_rotation_z", "model_offset_xy_max_mm")
-        fp_changes = {k: v for k, v in kwargs.items() if k in _FP_FIELDS}
+        fp_fields = ("kicad_ref_pad1_x", "kicad_ref_pad1_y",
+                     "model_rotation_z", "model_offset_xy_max_mm")
+        fp_changes = {k: v for k, v in kwargs.items() if k in fp_fields}
         if fp_changes and new_spec.footprint_id in self._footprints:
             old_fp = self._footprints[new_spec.footprint_id]
             fp_dict: dict[str, object] = {

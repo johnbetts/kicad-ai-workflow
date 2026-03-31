@@ -190,6 +190,60 @@ class PipelineService:
     # Stage: pcb
     # ------------------------------------------------------------------
 
+    def _pcb_build_write_score(
+        self, request: PipelineRequest, artifacts: list[str], warnings: list[str],
+    ) -> tuple[float, str]:
+        from kicad_pipeline.optimization.placement_optimizer import optimize_placement_ee
+        from kicad_pipeline.optimization.scoring import compute_fast_placement_score
+        from kicad_pipeline.pcb.builder import build_pcb, write_pcb
+        from kicad_pipeline.validation.collisions import check_collisions
+        from kicad_pipeline.validation.containment import check_board_containment
+
+        req = self.resolve_requirements(request)
+        pcb = build_pcb(
+            req,
+            board_width_mm=request.board_width_mm,
+            board_height_mm=request.board_height_mm,
+            placement_mode=request.placement_mode,
+            auto_route=request.auto_route,
+            project_name=request.board_name,
+        )
+        pcb, _review = optimize_placement_ee(req, pcb)
+
+        out_dir = request.output_dir / request.board_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pcb_path = out_dir / f"{request.board_name}.kicad_pcb"
+        write_pcb(pcb, pcb_path)
+        artifacts.append(str(pcb_path))
+
+        quality = compute_fast_placement_score(pcb, req)
+        score_overall = quality.overall_score
+        score_grade = quality.grade
+        logger.info("PCB scored %.3f (%s)", score_overall, score_grade)
+
+        containment_violations = check_board_containment(pcb)
+        for cv in containment_violations:
+            warnings.append(f"Containment: {cv}")
+        collision_violations = check_collisions(pcb)
+        for col in collision_violations:
+            warnings.append(f"Collision: {col}")
+
+        self._record_evidence(
+            request, stage="pcb", step="build_and_score", passed=True,
+            summary=(
+                f"PCB generated — score {score_overall:.3f} ({score_grade}), "
+                f"{len(containment_violations)} containment, "
+                f"{len(collision_violations)} collision warnings"
+            ),
+            artifacts=artifacts,
+            details={
+                "score_overall": score_overall, "score_grade": score_grade,
+                "containment_violations": len(containment_violations),
+                "collision_violations": len(collision_violations),
+            },
+        )
+        return score_overall, score_grade
+
     def run_pcb(self, request: PipelineRequest) -> StageOutcome:
         """Generate PCB, optimise placement, score, and validate.
 
@@ -211,78 +265,9 @@ class PipelineService:
         score_grade: str | None = None
 
         try:
-            from kicad_pipeline.optimization.placement_optimizer import (
-                optimize_placement_ee,
+            score_overall, score_grade = self._pcb_build_write_score(
+                request, artifacts, warnings,
             )
-            from kicad_pipeline.optimization.scoring import (
-                compute_fast_placement_score,
-            )
-            from kicad_pipeline.pcb.builder import build_pcb, write_pcb
-            from kicad_pipeline.validation.collisions import check_collisions
-            from kicad_pipeline.validation.containment import (
-                check_board_containment,
-            )
-
-            req = self.resolve_requirements(request)
-
-            # 1. Build
-            pcb = build_pcb(
-                req,
-                board_width_mm=request.board_width_mm,
-                board_height_mm=request.board_height_mm,
-                placement_mode=request.placement_mode,
-                auto_route=request.auto_route,
-                project_name=request.board_name,
-            )
-
-            # 2. Optimise
-            pcb, _review = optimize_placement_ee(req, pcb)
-
-            # 3. Write
-            out_dir = request.output_dir / request.board_name
-            out_dir.mkdir(parents=True, exist_ok=True)
-            pcb_path = out_dir / f"{request.board_name}.kicad_pcb"
-            write_pcb(pcb, pcb_path)
-            artifacts.append(str(pcb_path))
-
-            # 4. Score
-            quality = compute_fast_placement_score(pcb, req)
-            score_overall = quality.overall_score
-            score_grade = quality.grade
-
-            logger.info(
-                "PCB scored %.3f (%s)", score_overall, score_grade
-            )
-
-            # 5. Containment & collision checks
-            containment_violations = check_board_containment(pcb)
-            for cv in containment_violations:
-                warnings.append(f"Containment: {cv}")
-
-            collision_violations = check_collisions(pcb)
-            for col in collision_violations:
-                warnings.append(f"Collision: {col}")
-
-            # Evidence
-            self._record_evidence(
-                request,
-                stage="pcb",
-                step="build_and_score",
-                passed=True,
-                summary=(
-                    f"PCB generated — score {score_overall:.3f} ({score_grade}), "
-                    f"{len(containment_violations)} containment, "
-                    f"{len(collision_violations)} collision warnings"
-                ),
-                artifacts=artifacts,
-                details={
-                    "score_overall": score_overall,
-                    "score_grade": score_grade,
-                    "containment_violations": len(containment_violations),
-                    "collision_violations": len(collision_violations),
-                },
-            )
-
         except Exception as exc:
             errors.append(classify_error(exc, stage="pcb"))
             logger.error("PCB generation failed: %s", exc)
@@ -302,6 +287,64 @@ class PipelineService:
     # ------------------------------------------------------------------
     # Stage: validation
     # ------------------------------------------------------------------
+
+    def _run_all_checks(
+        self,
+        request: PipelineRequest,
+        errors: list[PipelineError],
+        warnings: list[str],
+    ) -> None:
+        from kicad_pipeline.pcb.builder import build_pcb
+        from kicad_pipeline.validation.collisions import check_collisions
+        from kicad_pipeline.validation.containment import check_board_containment
+        from kicad_pipeline.validation.drc import Severity as DRCSeverity
+        from kicad_pipeline.validation.drc import run_drc
+        from kicad_pipeline.validation.electrical import run_electrical_checks
+        from kicad_pipeline.validation.manufacturing import run_manufacturing_checks
+        from kicad_pipeline.validation.pcb_integrity import validate_pcb_integrity
+
+        req = self.resolve_requirements(request)
+        pcb = build_pcb(
+            req,
+            board_width_mm=request.board_width_mm,
+            board_height_mm=request.board_height_mm,
+            placement_mode=request.placement_mode,
+            auto_route=False,
+            project_name=request.board_name,
+        )
+
+        for violation in run_drc(pcb).violations:
+            if violation.severity == DRCSeverity.ERROR:
+                errors.append(PipelineError(
+                    code="KAP-021", message=str(violation),
+                    cause="DRC violation found.",
+                    fix="Review DRC report and fix clearance / drill / width issues.",
+                    severity="fatal", stage="validation",
+                ))
+            else:
+                warnings.append(f"DRC: {violation}")
+
+        for mfg_v in run_manufacturing_checks(pcb).violations:
+            warnings.append(f"Manufacturing: {mfg_v}")
+
+        for elec_v in run_electrical_checks(pcb, req).violations:
+            warnings.append(f"Electrical: {elec_v}")
+
+        for issue in validate_pcb_integrity(pcb, req):
+            if issue.severity in ("critical", "major"):
+                errors.append(PipelineError(
+                    code="KAP-020", message=str(issue),
+                    cause="PCB integrity check failed.",
+                    fix="Review integrity report and fix component / net mismatches.",
+                    severity="fatal", stage="validation",
+                ))
+            else:
+                warnings.append(f"Integrity: {issue}")
+
+        for cv in check_board_containment(pcb):
+            warnings.append(f"Containment: {cv}")
+        for col in check_collisions(pcb):
+            warnings.append(f"Collision: {col}")
 
     def run_validation(self, request: PipelineRequest) -> StageOutcome:
         """Run all validation checks on an existing PCB.
@@ -325,102 +368,16 @@ class PipelineService:
         warnings: list[str] = []
 
         try:
-            from kicad_pipeline.pcb.builder import build_pcb
-            from kicad_pipeline.validation.collisions import check_collisions
-            from kicad_pipeline.validation.containment import (
-                check_board_containment,
-            )
-            from kicad_pipeline.validation.drc import Severity as DRCSeverity
-            from kicad_pipeline.validation.drc import run_drc
-            from kicad_pipeline.validation.electrical import (
-                run_electrical_checks,
-            )
-            from kicad_pipeline.validation.manufacturing import (
-                run_manufacturing_checks,
-            )
-            from kicad_pipeline.validation.pcb_integrity import (
-                validate_pcb_integrity,
-            )
-
-            req = self.resolve_requirements(request)
-
-            # Rebuild PCB from requirements to get the in-memory model.
-            # (A future optimisation could cache this from run_pcb.)
-            pcb = build_pcb(
-                req,
-                board_width_mm=request.board_width_mm,
-                board_height_mm=request.board_height_mm,
-                placement_mode=request.placement_mode,
-                auto_route=False,
-                project_name=request.board_name,
-            )
-
-            # DRC
-            drc_report = run_drc(pcb)
-            for violation in drc_report.violations:
-                if violation.severity == DRCSeverity.ERROR:
-                    errors.append(PipelineError(
-                        code="KAP-021",
-                        message=str(violation),
-                        cause="DRC violation found.",
-                        fix="Review DRC report and fix clearance / drill / width issues.",
-                        severity="fatal",
-                        stage="validation",
-                    ))
-                else:
-                    warnings.append(f"DRC: {violation}")
-
-            # Manufacturing
-            mfg_report = run_manufacturing_checks(pcb)
-            for mfg_v in mfg_report.violations:
-                warnings.append(f"Manufacturing: {mfg_v}")
-
-            # Electrical
-            elec_report = run_electrical_checks(pcb, req)
-            for elec_v in elec_report.violations:
-                warnings.append(f"Electrical: {elec_v}")
-
-            # Integrity
-            integrity_issues = validate_pcb_integrity(pcb, req)
-            for issue in integrity_issues:
-                if issue.severity in ("critical", "major"):
-                    errors.append(PipelineError(
-                        code="KAP-020",
-                        message=str(issue),
-                        cause="PCB integrity check failed.",
-                        fix="Review integrity report and fix component / net mismatches.",
-                        severity="fatal",
-                        stage="validation",
-                    ))
-                else:
-                    warnings.append(f"Integrity: {issue}")
-
-            # Containment & collisions
-            for cv in check_board_containment(pcb):
-                warnings.append(f"Containment: {cv}")
-            for col in check_collisions(pcb):
-                warnings.append(f"Collision: {col}")
-
+            self._run_all_checks(request, errors, warnings)
             logger.info(
-                "Validation complete: %d error(s), %d warning(s)",
-                len(errors),
-                len(warnings),
+                "Validation complete: %d error(s), %d warning(s)", len(errors), len(warnings),
             )
-
             self._record_evidence(
-                request,
-                stage="validation",
-                step="full_check",
+                request, stage="validation", step="full_check",
                 passed=len(errors) == 0,
-                summary=(
-                    f"Validation: {len(errors)} error(s), {len(warnings)} warning(s)"
-                ),
-                details={
-                    "error_count": len(errors),
-                    "warning_count": len(warnings),
-                },
+                summary=f"Validation: {len(errors)} error(s), {len(warnings)} warning(s)",
+                details={"error_count": len(errors), "warning_count": len(warnings)},
             )
-
         except Exception as exc:
             errors.append(classify_error(exc, stage="validation"))
             logger.error("Validation failed: %s", exc)

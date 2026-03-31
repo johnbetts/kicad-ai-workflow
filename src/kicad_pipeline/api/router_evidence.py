@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from kicad_pipeline.api.schemas import BoardDetailSchema, BoardSummarySchema, EvidenceSubmitSchema
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -99,8 +102,8 @@ async def get_board_detail(
                     "overall_score": score.overall_score,
                     "breakdown": score.breakdown,
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Score load failed for %s: %s", board_dir.name, exc)
 
     # List all files
     files = [f.name for f in board_dir.iterdir() if f.is_file()]
@@ -219,8 +222,8 @@ async def get_board_detail(
                     "origin_x": min(comp_xs) - margin,
                     "origin_y": min(comp_ys) - margin,
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Component position extraction failed for %s: %s", board_dir.name, exc)
 
     return BoardDetailSchema(
         name=board_name,
@@ -342,38 +345,42 @@ def _compute_ratsnest(pcb_path: Path) -> list[str]:
                 world_y = fp_y + ry
                 nets.setdefault(net_name, []).append((world_x, world_y))
 
-    # For each net with 2+ pads, compute MST (minimum spanning tree)
     lines: list[str] = []
     for _net_name, pads in nets.items():
-        if len(pads) < 2:
-            continue
-        # Simple greedy MST (Prim's algorithm)
-        connected = {0}
-        remaining = set(range(1, len(pads)))
-        while remaining:
-            best_dist = float("inf")
-            best_from = 0
-            best_to = 0
-            for ci in connected:
-                for ri in remaining:
-                    dx = pads[ci][0] - pads[ri][0]
-                    dy = pads[ci][1] - pads[ri][1]
-                    d = math.sqrt(dx * dx + dy * dy)
-                    if d < best_dist:
-                        best_dist = d
-                        best_from = ci
-                        best_to = ri
-            connected.add(best_to)
-            remaining.discard(best_to)
-            x1, y1 = pads[best_from]
-            x2, y2 = pads[best_to]
-            lines.append(
-                f'  (gr_line (start {x1:.3f} {y1:.3f}) '
-                f'(end {x2:.3f} {y2:.3f}) '
-                f'(stroke (width 0.15) (type dash)) '
-                f'(layer "Dwgs.User"))'
-            )
+        if len(pads) >= 2:
+            lines.extend(_mst_ratsnest_lines(pads))
+    return lines
 
+
+def _mst_ratsnest_lines(pads: list[tuple[float, float]]) -> list[str]:
+    import math as _math
+
+    connected = {0}
+    remaining = set(range(1, len(pads)))
+    lines: list[str] = []
+    while remaining:
+        best_dist = float("inf")
+        best_from = 0
+        best_to = 0
+        for ci in connected:
+            for ri in remaining:
+                dx = pads[ci][0] - pads[ri][0]
+                dy = pads[ci][1] - pads[ri][1]
+                d = _math.sqrt(dx * dx + dy * dy)
+                if d < best_dist:
+                    best_dist = d
+                    best_from = ci
+                    best_to = ri
+        connected.add(best_to)
+        remaining.discard(best_to)
+        x1, y1 = pads[best_from]
+        x2, y2 = pads[best_to]
+        lines.append(
+            f'  (gr_line (start {x1:.3f} {y1:.3f}) '
+            f'(end {x2:.3f} {y2:.3f}) '
+            f'(stroke (width 0.15) (type dash)) '
+            f'(layer "Dwgs.User"))'
+        )
     return lines
 
 

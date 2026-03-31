@@ -15,11 +15,19 @@ logger = logging.getLogger(__name__)
 
 # Board-level image name prefixes (shown first, in this order).
 _BOARD_IMAGE_ORDER = (
-    "2d_top", "3d_top", "3d_iso", "3d_isoback", "3d_hires_top", "3d_padoverlay",
+    "2d_top",
+    "3d_top",
+    "3d_iso",
+    "3d_isoback",
+    "3d_hires_top",
+    "3d_padoverlay",
 )
 
 # Track which static directories have been registered to avoid collisions.
 _registered_static_routes: dict[str, str] = {}
+
+# Module-level callback for cross-panel image navigation (Feature 6).
+_image_nav_callback: dict[str, object] = {}
 
 
 def _sorted_images(board_dir: Path) -> tuple[list[Path], list[Path]]:
@@ -90,13 +98,67 @@ def build_image_panel(board_dir: Path | None) -> None:
     # Inline viewer — selected image shown here, not in a popup
     selected_viewer = ui.column().classes("w-full")
     image_column = ui.column().classes("w-full gap-1")
+    _selected_path: dict[str, Path | None] = {"current": None}
 
     def _show_inline(img_path: Path) -> None:
+        _selected_path["current"] = img_path
         selected_viewer.clear()
         url = _image_url(img_path)
         with selected_viewer:
             ui.label(img_path.stem).classes("text-subtitle2 font-bold")
-            ui.image(url).style("width: 100%; max-width: 100%")
+            img = ui.image(url).style("width: 100%; max-width: 100%; cursor: grab")
+            # Feature 5: Add zoom/pan via CSS transform
+            img_id = f"img_{id(img)}"
+            img.props(f'id="{img_id}"')
+            ui.run_javascript(f"""
+                (function() {{
+                    const el = document.getElementById("{img_id}");
+                    if (!el) return;
+                    let scale = 1, panX = 0, panY = 0;
+                    let isDragging = false, startX, startY;
+                    el.addEventListener("wheel", function(e) {{
+                        e.preventDefault();
+                        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                        scale = Math.max(0.5, Math.min(10, scale * delta));
+                        el.style.transform =
+                            "scale(" + scale + ") translate(" + panX + "px, " + panY + "px)";
+                    }});
+                    el.addEventListener("mousedown", function(e) {{
+                        isDragging = true;
+                        startX = e.clientX - panX;
+                        startY = e.clientY - panY;
+                        el.style.cursor = "grabbing";
+                    }});
+                    document.addEventListener("mousemove", function(e) {{
+                        if (!isDragging) return;
+                        panX = e.clientX - startX;
+                        panY = e.clientY - startY;
+                        el.style.transform =
+                            "scale(" + scale + ") translate(" + panX + "px, " + panY + "px)";
+                    }});
+                    document.addEventListener("mouseup", function() {{
+                        isDragging = false;
+                        el.style.cursor = "grab";
+                    }});
+                    el.addEventListener("dblclick", function() {{
+                        scale = 1; panX = 0; panY = 0;
+                        el.style.transform = "";
+                    }});
+                }})();
+            """)
+
+    # Feature 6: Register crop navigation callback
+    def _show_crop_by_ref(ref: str) -> None:
+        """Navigate to a component's crop image by ref designator."""
+        crops_dir = board_dir / "crops"
+        if not crops_dir.is_dir():
+            return
+        for crop in sorted(crops_dir.glob("*.png")):
+            if crop.stem.startswith(ref + "_") or crop.stem == ref:
+                _show_inline(crop)
+                return
+
+    _image_nav_callback["show_crop"] = _show_crop_by_ref
 
     def _refresh_images() -> None:
         image_column.clear()
@@ -113,28 +175,50 @@ def build_image_panel(board_dir: Path | None) -> None:
                     for img_path in board_images:
                         _make_thumbnail(img_path)
 
+            # Feature 12: Crop search/filter
             if crop_images:
-                with (
-                    ui.expansion(
-                        f"Crops ({len(crop_images)})", icon="grid_view",
-                    ).classes("w-full"),
-                    ui.row().classes("flex-wrap gap-1"),
-                ):
-                    for img_path in crop_images:
-                        _make_thumbnail(img_path)
+                with ui.expansion(
+                    f"Crops ({len(crop_images)})",
+                    icon="grid_view",
+                ).classes("w-full"):
+                    crop_filter = (
+                        ui.input(placeholder="Filter by ref (e.g., U1, C3)...")
+                        .classes("w-full q-mb-sm")
+                        .props("dense clearable")
+                    )
+                    crop_container = ui.row().classes("flex-wrap gap-1")
 
-        # Auto-select first board image on load
+                    def _refresh_crops() -> None:
+                        crop_container.clear()
+                        filter_val = (crop_filter.value or "").upper()
+                        with crop_container:
+                            for img_path in crop_images:
+                                if filter_val and not img_path.stem.upper().startswith(filter_val):
+                                    continue
+                                with ui.column().classes("items-center"):
+                                    _make_thumbnail(img_path)
+                                    ui.label(img_path.stem.split("_")[0]).classes(
+                                        "text-caption text-center"
+                                    )
+
+                    _refresh_crops()
+                    crop_filter.on("update:model-value", lambda _: _refresh_crops())
+
+        # Auto-select first board image only on first load or if selection removed
         if board_images:
-            _show_inline(board_images[0])
+            current = _selected_path["current"]
+            all_paths = board_images + crop_images
+            if current is None or current not in all_paths:
+                _show_inline(board_images[0])
 
     def _make_thumbnail(img_path: Path) -> None:
         from nicegui import ui
 
         url = _image_url(img_path)
         ui.image(url).classes("cursor-pointer").style(
-            "width: 60px; height: 45px; object-fit: cover; "
+            "width: 100px; height: 75px; object-fit: cover; "
             "border-radius: 4px; border: 1px solid #555"
-        ).on("click", lambda _e=None, p=img_path: _show_inline(p))
+        ).on("click", lambda _e=None, p=img_path: _show_inline(p)).tooltip(img_path.stem)
 
     _refresh_images()
     ui.timer(5.0, _refresh_images)
@@ -145,6 +229,18 @@ def build_image_panel(board_dir: Path | None) -> None:
         on_click=lambda: _open_diff_dialog(board_dir),
         icon="compare",
     ).classes("q-mt-md")
+
+
+# ---------------------------------------------------------------------------
+# Cross-panel navigation helper (Feature 6)
+# ---------------------------------------------------------------------------
+
+
+def _navigate_to_crop(ref: str) -> None:
+    """Navigate image panel to the crop for a given ref designator."""
+    callback = _image_nav_callback.get("show_crop")
+    if callable(callback):
+        callback(ref)
 
 
 # ---------------------------------------------------------------------------
@@ -234,13 +330,10 @@ def _dispatch_command(
         score = ledger.latest_score()
         if score is None:
             return "No score data yet."
-        breakdown_lines = [
-            f"  {dim}: {val:.3f}" for dim, val in sorted(score.breakdown.items())
-        ]
+        breakdown_lines = [f"  {dim}: {val:.3f}" for dim, val in sorted(score.breakdown.items())]
         return (
             f"Quality score for {board_name}: "
-            f"{score.grade} ({score.overall_score:.3f})\n"
-            + "\n".join(breakdown_lines)
+            f"{score.grade} ({score.overall_score:.3f})\n" + "\n".join(breakdown_lines)
         )
 
     if cmd == "/approve":
@@ -283,10 +376,11 @@ def _dispatch_command(
 
 
 def build_log_panel(board_dir: Path | None = None) -> None:
-    """Build the log stream panel (center).
+    """Build the chat/CLI panel (center).
 
-    Includes a read-only log viewer that drains the shared buffer,
-    plus an input field for executing dashboard commands.
+    Chat-style interface with scrollable message history, command input
+    with Enter-to-submit, and up-arrow command history. Drains the shared
+    log buffer for agent messages.
 
     Args:
         board_dir: Path to the active board directory.  Used by commands
@@ -296,48 +390,134 @@ def build_log_panel(board_dir: Path | None = None) -> None:
 
     from kicad_pipeline.dashboard.app import _log_buffer
 
-    log_widget = ui.log(max_lines=500).classes("w-full").style("height: 80%")
+    # Command history for up-arrow recall
+    _cmd_history: list[str] = []
+    _history_idx: dict[str, int] = {"pos": -1}
 
-    def _push_buffered() -> None:
-        while _log_buffer:
-            entry = _log_buffer.pop(0)
-            log_widget.push(f"[{_timestamp()}] [agent] {entry}")
+    # Main flex column filling the card
+    with (
+        ui.column()
+        .classes("w-full h-full")
+        .style("display: flex; flex-direction: column; min-height: 0")
+    ):
+        # Scrollable message area
+        with (
+            ui.scroll_area().classes("w-full").style("flex: 1 1 auto; min-height: 0")
+        ) as chat_scroll:
+            chat_column = ui.column().classes("w-full gap-1 q-pa-sm")
 
-    ui.timer(1.0, _push_buffered)
-
-    # Command input
-    with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
-        cmd_input = ui.input(
-            placeholder="Type a /command or message..."
-        ).classes("flex-grow")
-
-        def _send_cmd() -> None:
-            text = cmd_input.value.strip()
-            if not text:
-                return
-            cmd_input.value = ""
-
-            ts = _timestamp()
-
-            if text.startswith("/"):
-                log_widget.push(f"[{ts}] > {text}")
-                response = _dispatch_command(text, board_dir, log_widget)
-
-                # Handle board-switch sentinel.
-                if response.startswith("SWITCH_BOARD:"):
-                    target = response.split(":", 1)[1]
-                    log_widget.push(
-                        f"[{ts}] [system] Switching to board '{target}' "
-                        "(use the board selector dropdown)"
-                    )
+        def _add_message(
+            text: str,
+            sender: str = "system",
+        ) -> None:
+            """Add a styled message to the chat."""
+            with chat_column:
+                if sender == "user":
+                    with ui.row().classes("w-full justify-end"):
+                        ui.chat_message(
+                            text=text,
+                            name="you",
+                            sent=True,
+                        ).classes("max-w-3/4")
+                elif sender == "agent":
+                    with ui.row().classes("w-full"):
+                        ui.chat_message(
+                            text=text,
+                            name="agent",
+                            sent=False,
+                        ).classes("max-w-3/4")
                 else:
-                    for line in response.split("\n"):
-                        log_widget.push(f"[{ts}] [system] {line}")
-            else:
-                log_widget.push(f"[{ts}] > {text}")
+                    # System messages: monospace style
+                    with ui.row().classes("w-full"):
+                        ui.chat_message(
+                            text=text,
+                            name="system",
+                            sent=False,
+                        ).classes("max-w-full").style("font-family: monospace; font-size: 0.85em")
+            # Auto-scroll to bottom
+            chat_scroll.scroll_to(percent=1.0)
 
-        cmd_input.on("keydown.enter", lambda _: _send_cmd())
-        ui.button(icon="send", on_click=_send_cmd).props("flat dense round")
+        def _push_buffered() -> None:
+            while _log_buffer:
+                entry = _log_buffer.pop(0)
+                _add_message(entry, sender="agent")
+
+        ui.timer(1.0, _push_buffered)
+
+        # Input area pinned to bottom
+        with (
+            ui.row()
+            .classes("w-full items-center gap-2 q-pt-sm")
+            .style("flex: 0 0 auto; border-top: 1px solid #444")
+        ):
+            cmd_input = (
+                ui.input(placeholder="Type a /command or message...")
+                .classes("flex-grow")
+                .props('dense outlined autofocus color="blue-4"')
+            )
+
+            def _send_cmd() -> None:
+                text = cmd_input.value.strip()
+                if not text:
+                    return
+
+                # Save to history
+                _cmd_history.append(text)
+                _history_idx["pos"] = -1
+                cmd_input.value = ""
+
+                if text.startswith("/"):
+                    _add_message(text, sender="user")
+                    response = _dispatch_command(text, board_dir, None)
+
+                    # Handle board-switch sentinel.
+                    if response.startswith("SWITCH_BOARD:"):
+                        target = response.split(":", 1)[1]
+                        _add_message(
+                            f"Switch to board '{target}' using the board selector dropdown.",
+                            sender="system",
+                        )
+                    else:
+                        _add_message(response, sender="system")
+                else:
+                    _add_message(text, sender="user")
+
+            def _on_keydown(e: object) -> None:
+                key = getattr(getattr(e, "args", {}), "key", "")
+                if not key:
+                    args = getattr(e, "args", {})
+                    if isinstance(args, dict):
+                        key = args.get("key", "")
+                if key == "ArrowUp" and _cmd_history:
+                    if _history_idx["pos"] < 0:
+                        _history_idx["pos"] = len(_cmd_history) - 1
+                    elif _history_idx["pos"] > 0:
+                        _history_idx["pos"] -= 1
+                    cmd_input.value = _cmd_history[_history_idx["pos"]]
+                elif key == "ArrowDown" and _cmd_history:
+                    if _history_idx["pos"] >= 0:
+                        _history_idx["pos"] += 1
+                        if _history_idx["pos"] >= len(_cmd_history):
+                            _history_idx["pos"] = -1
+                            cmd_input.value = ""
+                        else:
+                            cmd_input.value = _cmd_history[_history_idx["pos"]]
+
+            cmd_input.on("keydown.enter", lambda _: _send_cmd())
+            cmd_input.on(
+                "keydown",
+                _on_keydown,
+                ["key"],
+            )
+            ui.button(icon="send", on_click=_send_cmd).props("flat dense round color=blue-4")
+
+        # Welcome message
+        _add_message(
+            "Type /help for available commands. "
+            "Use /status to check pipeline gates, "
+            "/approve to approve stages.",
+            sender="system",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +565,11 @@ def build_board_summary(board_dir: Path | None) -> None:
     if board_dir is None or not board_dir.is_dir():
         return
 
-    summary_row = ui.row().classes(
-        "w-full items-center gap-6 q-px-md q-py-xs"
-    ).style("background: rgba(255,255,255,0.03); border-radius: 4px")
+    summary_row = (
+        ui.row()
+        .classes("w-full items-center gap-6 q-px-md q-py-xs")
+        .style("background: rgba(255,255,255,0.03); border-radius: 4px")
+    )
 
     def _refresh_summary() -> None:
         from kicad_pipeline.evidence.ledger import load_ledger
@@ -399,18 +581,21 @@ def build_board_summary(board_dir: Path | None) -> None:
         score = ledger.latest_score()
         grade = score.grade if score else "?"
         grade_colors = {
-            "A": "green", "B": "light-green", "C": "yellow",
-            "D": "orange", "F": "red",
+            "A": "green",
+            "B": "light-green",
+            "C": "yellow",
+            "D": "orange",
+            "F": "red",
         }
         color = grade_colors.get(grade, "grey")
 
         # Latest stage from most recent record
-        latest_stage = "—"
+        latest_stage = "---"
         if ledger.records:
-            latest_stage = ledger.records[-1].stage or "—"
+            latest_stage = ledger.records[-1].stage or "---"
 
         # Time since last activity
-        time_ago = "—"
+        time_ago = "---"
         if ledger.records:
             now = datetime.now(tz=timezone.utc)
             delta = now - ledger.records[-1].timestamp
@@ -438,9 +623,7 @@ def build_board_summary(board_dir: Path | None) -> None:
             # Grade (large colored letter)
             with ui.column().classes("items-center"):
                 ui.label("Grade").classes("text-caption text-grey")
-                ui.label(grade).classes(
-                    f"text-h4 font-bold text-{color}"
-                )
+                ui.label(grade).classes(f"text-h4 font-bold text-{color}")
 
             ui.separator().props("vertical").classes("h-10")
 
@@ -454,9 +637,7 @@ def build_board_summary(board_dir: Path | None) -> None:
             # Latest stage
             with ui.column().classes("items-center"):
                 ui.label("Latest Stage").classes("text-caption text-grey")
-                ui.label(latest_stage.capitalize()).classes(
-                    "text-subtitle1 font-medium"
-                )
+                ui.label(latest_stage.capitalize()).classes("text-subtitle1 font-medium")
 
             ui.separator().props("vertical").classes("h-10")
 
@@ -470,7 +651,7 @@ def build_board_summary(board_dir: Path | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Context panel (right) — role-aware
+# Context panel (right) -- role-aware
 # ---------------------------------------------------------------------------
 
 
@@ -484,7 +665,7 @@ def build_context_panel(
     Content adapts based on active role:
     - framework: all cards including known issues and regression details
     - deployment: stage status, quality score, requirements
-    - board: simplified view — score, findings, actions
+    - board: simplified view -- score, findings, actions
     """
     from nicegui import ui
 
@@ -507,11 +688,20 @@ def build_context_panel(
     def _refresh_context() -> None:
         current_hash = _compute_state_hash()
         if current_hash == _prev_hash["value"]:
-            return  # No changes — skip rebuild to avoid flicker
+            return  # No changes -- skip rebuild to avoid flicker
         _prev_hash["value"] = current_hash
 
         context_column.clear()
         with context_column:
+            # Feature 1: "Waiting for You" banner
+            _render_waiting_banner(board_dir)
+
+            # Feature 11: Rejection feedback loop
+            _render_rejection_banner(board_dir)
+
+            # Primary action -- always first for quick access
+            _build_actions_card(board_dir)
+
             # Common cards for all roles
             _build_stage_status_card(board_dir)
             _build_activity_feed_card(board_dir)
@@ -524,13 +714,15 @@ def build_context_panel(
 
             _build_review_findings_card(board_dir)
 
-            # DRC report — full detail for framework/deployment, badge for board
+            # DRC report -- full detail for framework/deployment, badge for board
             _build_drc_report_card(board_dir, role=role)
+
+            # Feature 13: Manufacturing readiness checklist
+            if role in ("framework", "deployment"):
+                _build_manufacturing_readiness_card(board_dir, output_root)
 
             if role == "framework":
                 _build_known_issues_card(board_dir)
-
-            _build_actions_card(board_dir)
 
     _refresh_context()
     ui.timer(3.0, _refresh_context)
@@ -545,38 +737,142 @@ def _find_board_pcb(board_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Feature 1: "Waiting for You" banner
+# ---------------------------------------------------------------------------
+
+
+def _render_waiting_banner(board_dir: Path) -> None:
+    """Show an amber banner if the pipeline is blocked waiting for human approval."""
+    from nicegui import ui
+
+    from kicad_pipeline.evidence.ledger import load_ledger
+    from kicad_pipeline.evidence.models import EvidenceKind
+
+    board_pcb = _find_board_pcb(board_dir)
+    ledger = load_ledger(board_pcb)
+
+    gate_records = [r for r in ledger.records if r.kind == EvidenceKind.GATE_RESULT]
+    if not gate_records:
+        return
+
+    latest_gate = gate_records[-1]
+    if latest_gate.passed is False:
+        missing = latest_gate.details.get("missing", []) if latest_gate.details else []
+        if isinstance(missing, list) and "human_approval" in missing:
+            stage = latest_gate.stage or "unknown"
+            with (
+                ui.card().classes("w-full").style("background: #f57c00; color: white"),
+                ui.row().classes("items-center gap-2"),
+            ):
+                ui.icon("hourglass_top").classes("text-h5")
+                ui.label(f"Process blocked -- waiting for your approval on {stage}").classes(
+                    "font-bold"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Feature 11: Rejection feedback loop
+# ---------------------------------------------------------------------------
+
+
+def _render_rejection_banner(board_dir: Path) -> None:
+    """Show a red banner if the most recent action is a rejection without a later approval."""
+    from nicegui import ui
+
+    from kicad_pipeline.evidence.ledger import load_ledger
+    from kicad_pipeline.evidence.models import EvidenceKind
+
+    board_pcb = _find_board_pcb(board_dir)
+    ledger = load_ledger(board_pcb)
+
+    rejection_records = [r for r in ledger.records if r.kind == EvidenceKind.HUMAN_REJECTION]
+    if not rejection_records:
+        return
+
+    latest_rejection = rejection_records[-1]
+    # Check if there's a newer approval that supersedes it
+    later_approvals = [
+        r
+        for r in ledger.records
+        if r.kind == EvidenceKind.HUMAN_APPROVAL
+        and r.stage == latest_rejection.stage
+        and r.timestamp > latest_rejection.timestamp
+    ]
+    if not later_approvals:
+        with ui.card().classes("w-full").style("background: #c62828; color: white"):
+            ui.label(f"Rejected: {latest_rejection.stage}").classes("font-bold")
+            ui.label(latest_rejection.feedback or latest_rejection.summary).classes("text-body2")
+
+
+# ---------------------------------------------------------------------------
 # Context cards
 # ---------------------------------------------------------------------------
 
 
 def _build_stage_status_card(board_dir: Path) -> None:
-    """Card showing gate status for each pipeline stage."""
+    """Card showing gate status for each pipeline stage as a horizontal stepper (Feature 4)."""
     from nicegui import ui
 
     from kicad_pipeline.evidence.gates import ALL_STAGES, check_gate
+    from kicad_pipeline.evidence.ledger import load_ledger
+    from kicad_pipeline.evidence.models import EvidenceKind
 
     board_pcb = _find_board_pcb(board_dir)
+    ledger = load_ledger(board_pcb)
 
     with ui.card().classes("w-full"):
-        ui.label("Stage Status").classes("text-subtitle1 font-bold")
-        for stage in ALL_STAGES:
-            result = check_gate(board_pcb, stage)
-            if result.passed:
-                color = "green"
-                icon = "check_circle"
-            elif result.missing:
-                color = "red"
-                icon = "cancel"
-            else:
-                color = "grey"
-                icon = "radio_button_unchecked"
-            with ui.row().classes("items-center gap-2"):
-                ui.icon(icon, color=color).classes("text-lg")
-                ui.label(stage.capitalize()).classes("font-medium")
-                if result.missing:
-                    ui.label(
-                        f"missing: {', '.join(result.missing)}"
-                    ).classes("text-caption text-grey")
+        ui.label("Pipeline Status").classes("text-subtitle1 font-bold")
+
+        with ui.row().classes("w-full items-center justify-between"):
+            for i, stage in enumerate(ALL_STAGES):
+                result = check_gate(board_pcb, stage)
+                if result.passed:
+                    color = "green"
+                    icon = "check_circle"
+                elif result.missing:
+                    color = "red"
+                    icon = "cancel"
+                else:
+                    color = "grey"
+                    icon = "radio_button_unchecked"
+
+                with ui.column().classes("items-center"):
+                    ui.icon(icon, color=color).classes("text-h5")
+                    ui.label(stage.capitalize()).classes("text-caption font-medium")
+                    if result.missing:
+                        missing_str = ", ".join(result.missing[:2])
+                        if len(result.missing) > 2:
+                            missing_str += f" +{len(result.missing) - 2}"
+                        ui.label(missing_str).classes("text-caption text-grey").style(
+                            "font-size: 10px"
+                        )
+
+                    # Feature 10: Stale approval warning
+                    if result.passed:
+                        approval_records = [
+                            r
+                            for r in ledger.records
+                            if r.kind == EvidenceKind.HUMAN_APPROVAL
+                            and r.stage == stage
+                            and r.passed
+                        ]
+                        if approval_records:
+                            latest_approval = approval_records[-1]
+                            newer_evidence = [
+                                r
+                                for r in ledger.records
+                                if r.stage == stage
+                                and r.timestamp > latest_approval.timestamp
+                                and r.kind != EvidenceKind.HUMAN_APPROVAL
+                            ]
+                            if newer_evidence:
+                                ui.label("Approval may be stale").classes(
+                                    "text-caption text-orange"
+                                ).style("font-size: 10px")
+
+                # Arrow between stages
+                if i < len(ALL_STAGES) - 1:
+                    ui.icon("arrow_forward").classes("text-grey-6")
 
 
 def _build_quality_score_card(board_dir: Path) -> None:
@@ -597,8 +893,11 @@ def _build_quality_score_card(board_dir: Path) -> None:
 
         with ui.row().classes("items-center gap-4"):
             grade_colors = {
-                "A": "green", "B": "light-green", "C": "yellow",
-                "D": "orange", "F": "red",
+                "A": "green",
+                "B": "light-green",
+                "C": "yellow",
+                "D": "orange",
+                "F": "red",
             }
             color = grade_colors.get(score.grade, "grey")
             ui.label(score.grade).classes(f"text-h3 font-bold text-{color}")
@@ -609,9 +908,7 @@ def _build_quality_score_card(board_dir: Path) -> None:
                 for dimension, value in sorted(score.breakdown.items()):
                     with ui.row().classes("justify-between"):
                         ui.label(dimension).classes("text-caption")
-                        ui.label(f"{value:.3f}").classes(
-                            "text-caption font-mono"
-                        )
+                        ui.label(f"{value:.3f}").classes("text-caption font-mono")
 
 
 def _score_color(val: float) -> str:
@@ -623,6 +920,73 @@ def _score_color(val: float) -> str:
     if val >= 0.6:
         return "#ff9800"
     return "#f44336"
+
+
+def _extract_score_series(
+    timestamps: list[str], scores: list[float]
+) -> list[dict[str, object]]:
+    pieces: list[dict[str, object]] = []
+    for idx in range(len(scores) - 1):
+        color = _score_color(scores[idx])
+        pieces.append(
+            {
+                "type": "line",
+                "data": [
+                    [timestamps[idx], scores[idx]],
+                    [timestamps[idx + 1], scores[idx + 1]],
+                ],
+                "lineStyle": {"color": color, "width": 2},
+                "itemStyle": {"color": color},
+                "symbol": "circle",
+                "symbolSize": 6,
+            }
+        )
+    if len(scores) == 1:
+        color = _score_color(scores[0])
+        pieces.append(
+            {
+                "type": "line",
+                "data": [[timestamps[0], scores[0]]],
+                "lineStyle": {"color": color, "width": 2},
+                "itemStyle": {"color": color},
+                "symbol": "circle",
+                "symbolSize": 8,
+            }
+        )
+    return pieces
+
+
+def _build_score_trend_options(
+    timestamps: list[str], scores: list[float]
+) -> dict[str, object]:
+    pieces = _extract_score_series(timestamps, scores)
+    return {
+        "animation": False,
+        "grid": {"left": 45, "right": 15, "top": 20, "bottom": 30},
+        "xAxis": {"type": "category", "data": timestamps},
+        "yAxis": {"type": "value", "min": 0.0, "max": 1.0},
+        "series": [
+            *pieces,
+            {
+                "type": "line",
+                "markLine": {
+                    "silent": True,
+                    "symbol": "none",
+                    "lineStyle": {"type": "dashed", "width": 1},
+                    "data": [
+                        {"yAxis": 0.9, "label": {"formatter": "A"},
+                         "lineStyle": {"color": "#4caf50"}},
+                        {"yAxis": 0.75, "label": {"formatter": "B"},
+                         "lineStyle": {"color": "#ffeb3b"}},
+                        {"yAxis": 0.6, "label": {"formatter": "C"},
+                         "lineStyle": {"color": "#ff9800"}},
+                    ],
+                },
+                "data": [],
+            },
+        ],
+        "tooltip": {"trigger": "axis"},
+    }
 
 
 def _build_score_trend_card(board_dir: Path) -> None:
@@ -651,65 +1015,7 @@ def _build_score_trend_card(board_dir: Path) -> None:
             overall = details.get("overall_score", 0.0) if details else 0.0
             scores.append(float(overall))
 
-        pieces: list[dict[str, object]] = []
-        for idx in range(len(scores) - 1):
-            color = _score_color(scores[idx])
-            pieces.append({
-                "type": "line",
-                "data": [
-                    [timestamps[idx], scores[idx]],
-                    [timestamps[idx + 1], scores[idx + 1]],
-                ],
-                "lineStyle": {"color": color, "width": 2},
-                "itemStyle": {"color": color},
-                "symbol": "circle",
-                "symbolSize": 6,
-            })
-
-        if len(scores) == 1:
-            color = _score_color(scores[0])
-            pieces.append({
-                "type": "line",
-                "data": [[timestamps[0], scores[0]]],
-                "lineStyle": {"color": color, "width": 2},
-                "itemStyle": {"color": color},
-                "symbol": "circle",
-                "symbolSize": 8,
-            })
-
-        options: dict[str, object] = {
-            "animation": False,
-            "grid": {"left": 45, "right": 15, "top": 20, "bottom": 30},
-            "xAxis": {"type": "category", "data": timestamps},
-            "yAxis": {"type": "value", "min": 0.0, "max": 1.0},
-            "series": [
-                *pieces,
-                {
-                    "type": "line",
-                    "markLine": {
-                        "silent": True,
-                        "symbol": "none",
-                        "lineStyle": {"type": "dashed", "width": 1},
-                        "data": [
-                            {
-                                "yAxis": 0.9, "label": {"formatter": "A"},
-                                "lineStyle": {"color": "#4caf50"},
-                            },
-                            {
-                                "yAxis": 0.75, "label": {"formatter": "B"},
-                                "lineStyle": {"color": "#ffeb3b"},
-                            },
-                            {
-                                "yAxis": 0.6, "label": {"formatter": "C"},
-                                "lineStyle": {"color": "#ff9800"},
-                            },
-                        ],
-                    },
-                    "data": [],
-                },
-            ],
-            "tooltip": {"trigger": "axis"},
-        }
+        options = _build_score_trend_options(timestamps, scores)
         ui.chart(options).classes("w-full h-48")
 
 
@@ -735,9 +1041,7 @@ def _derive_board_status(board_dir: Path) -> str:
     board_pcb = _find_board_pcb(board_dir)
     ledger = load_ledger(board_pcb)
 
-    score_records = [
-        r for r in ledger.filter_by_kind(EvidenceKind.SCORE) if r.passed is True
-    ]
+    score_records = [r for r in ledger.filter_by_kind(EvidenceKind.SCORE) if r.passed is True]
     if score_records:
         latest = score_records[-1]
         grade = latest.details.get("grade", "") if latest.details else ""
@@ -791,8 +1095,62 @@ def _build_requirements_status_card(board_dir: Path) -> None:
             )
 
 
+def _get_review_personas(
+    review_records: list[object],
+) -> tuple[object, list[object], list[object]]:
+    latest = review_records[-1]  # type: ignore[index]
+    current_stage = latest.stage  # type: ignore[union-attr]
+    stage_reviews = [r for r in review_records if r.stage == current_stage]  # type: ignore[union-attr]
+    fab_reviews = [r for r in stage_reviews if "fab" in (r.producer or "").lower()]  # type: ignore[union-attr]
+    ee_reviews = [r for r in stage_reviews if "ee" in (r.producer or "").lower()]  # type: ignore[union-attr]
+    return latest, fab_reviews, ee_reviews
+
+
+def _collect_all_review_issues(
+    latest: object,
+    fab_reviews: list[object],
+    ee_reviews: list[object],
+) -> list[object]:
+    if fab_reviews and ee_reviews:
+        return list(fab_reviews[-1].issues) + list(ee_reviews[-1].issues)  # type: ignore[union-attr]
+    return list(latest.issues)  # type: ignore[union-attr]
+
+
+def _render_dual_persona(
+    fab_reviews: list[object],
+    ee_reviews: list[object],
+    severity_order: dict[object, int],
+    severity_colors: dict[object, str],
+) -> None:
+    from nicegui import ui
+
+    fab_latest = fab_reviews[-1]
+    ee_latest = ee_reviews[-1]
+    fab_issues = sorted(fab_latest.issues, key=lambda i: severity_order.get(i.severity, 99))  # type: ignore[union-attr]
+    ee_issues = sorted(ee_latest.issues, key=lambda i: severity_order.get(i.severity, 99))  # type: ignore[union-attr]
+    fab_refs = {i.ref for i in fab_issues if i.ref}  # type: ignore[union-attr]
+    ee_refs = {i.ref for i in ee_issues if i.ref}  # type: ignore[union-attr]
+    consensus_refs = fab_refs & ee_refs
+    if consensus_refs:
+        with ui.row().classes("w-full gap-2 q-mb-sm flex-wrap"):
+            for ref in sorted(consensus_refs):
+                ui.badge(f"Consensus: {ref}", color="amber").classes("text-black")
+    with ui.row().classes("w-full gap-4"):
+        with ui.column().classes("flex-1"):
+            ui.label("Fabricator Review").classes("text-subtitle2 font-bold")
+            _render_issues_table(fab_issues, severity_colors)  # type: ignore[arg-type]
+        with ui.column().classes("flex-1"):
+            ui.label("EE Review").classes("text-subtitle2 font-bold")
+            _render_issues_table(ee_issues, severity_colors)  # type: ignore[arg-type]
+
+
 def _build_review_findings_card(board_dir: Path) -> None:
-    """Card showing issues from the latest review evidence."""
+    """Card showing issues from review evidence.
+
+    Feature 3: Dual-persona review diff view -- if both fab and EE reviews exist
+    for the current stage, show them side-by-side with cross-validated consensus.
+    Feature 6: Clickable ref designators navigate to crop images.
+    """
     from nicegui import ui
 
     from kicad_pipeline.evidence.ledger import load_ledger
@@ -802,6 +1160,14 @@ def _build_review_findings_card(board_dir: Path) -> None:
     ledger = load_ledger(board_pcb)
     review_records = ledger.filter_by_kind(EvidenceKind.REVIEW)
 
+    severity_order: dict[object, int] = {
+        Severity.CRITICAL: 0, Severity.MAJOR: 1, Severity.MINOR: 2, Severity.INFO: 3
+    }
+    severity_colors: dict[object, str] = {
+        Severity.CRITICAL: "red", Severity.MAJOR: "orange",
+        Severity.MINOR: "yellow", Severity.INFO: "blue",
+    }
+
     with ui.card().classes("w-full"):
         ui.label("Review Findings").classes("text-subtitle1 font-bold")
 
@@ -809,74 +1175,77 @@ def _build_review_findings_card(board_dir: Path) -> None:
             ui.label("No reviews yet").classes("text-grey")
             return
 
-        latest = review_records[-1]
-        if not latest.issues:
-            ui.label("No issues found").classes("text-green")
-            return
+        latest, fab_reviews, ee_reviews = _get_review_personas(review_records)
+        all_issues = _collect_all_review_issues(latest, fab_reviews, ee_reviews)
 
-        severity_order = {
-            Severity.CRITICAL: 0, Severity.MAJOR: 1,
-            Severity.MINOR: 2, Severity.INFO: 3,
-        }
-        sorted_issues = sorted(
-            latest.issues, key=lambda i: severity_order.get(i.severity, 99)
-        )
-        severity_colors = {
-            Severity.CRITICAL: "red", Severity.MAJOR: "orange",
-            Severity.MINOR: "yellow", Severity.INFO: "blue",
-        }
-
-        columns = [
-            {"name": "ref", "label": "Ref", "field": "ref"},
-            {"name": "severity", "label": "Severity", "field": "severity"},
-            {"name": "description", "label": "Description", "field": "description"},
-        ]
-        rows = [
-            {"ref": i.ref, "severity": i.severity.value, "description": i.description}
-            for i in sorted_issues
-        ]
-        ui.table(columns=columns, rows=rows).classes("w-full")
+        if fab_reviews and ee_reviews:
+            _render_dual_persona(fab_reviews, ee_reviews, severity_order, severity_colors)
+        else:
+            if not latest.issues:  # type: ignore[union-attr]
+                ui.label("No issues found").classes("text-green")
+                return
+            sorted_issues = sorted(latest.issues, key=lambda i: severity_order.get(i.severity, 99))  # type: ignore[union-attr]
+            _render_issues_table(sorted_issues, severity_colors)  # type: ignore[arg-type]
 
         with ui.row().classes("gap-2 q-mt-sm"):
             for sev in Severity:
-                count = sum(1 for i in sorted_issues if i.severity == sev)
+                count = sum(1 for i in all_issues if i.severity == sev)  # type: ignore[union-attr]
                 if count > 0:
                     ui.badge(f"{sev.value}: {count}", color=severity_colors.get(sev, "grey"))
 
-        # "Report Issue" button — pre-fills a kanban card from selected finding
         board_name = board_dir.name if board_dir else ""
 
         def _report_issue_from_finding(issue_desc: str) -> None:
-            """Open the kanban add-card dialog pre-filled from a finding."""
             from kicad_pipeline.dashboard.kanban import KanbanCard, add_card
 
             project_root = board_dir.parent.parent
             new_card = KanbanCard(
-                title=issue_desc[:80],
-                description=issue_desc,
-                card_type="bug",
-                level="board",
-                board_name=board_name,
+                title=issue_desc[:80], description=issue_desc,
+                card_type="bug", level="board", board_name=board_name,
             )
             add_card(project_root, new_card)
-            ui.notify(
-                f"Issue reported to kanban: {issue_desc[:50]}...",
-                type="positive",
-            )
+            ui.notify(f"Issue reported to kanban: {issue_desc[:50]}...", type="positive")
 
-        with ui.row().classes("gap-2 q-mt-sm"):
-            for issue in sorted_issues:
+        if all_issues:
 
-                def _make_report_btn(desc: str = issue.description) -> None:
-                    ui.button(
-                        f"Report: {desc[:40]}...",
-                        on_click=lambda _e=None, d=desc: (
-                            _report_issue_from_finding(d)
-                        ),
-                        icon="bug_report",
-                    ).props("flat dense no-caps size=xs color=red")
+            def _report_all(_e: object = None) -> None:
+                for issue in all_issues:
+                    _report_issue_from_finding(issue.description)  # type: ignore[union-attr]
+                ui.notify(f"Reported {len(all_issues)} issues to kanban", type="positive")
 
-                _make_report_btn()
+            ui.button(
+                f"Report {len(all_issues)} issues to Kanban",
+                on_click=_report_all,
+                icon="bug_report",
+            ).props("flat dense no-caps size=sm color=red").classes("q-mt-sm")
+
+
+def _render_issues_table(
+    issues: list[Issue],
+    severity_colors: dict[object, str],
+) -> None:
+    """Render an issues table with clickable ref designators (Feature 6)."""
+    from nicegui import ui
+
+    if not issues:
+        ui.label("No issues found").classes("text-green")
+        return
+
+    for issue in issues:
+        sev_color = severity_colors.get(issue.severity, "grey")
+        with (
+            ui.row()
+            .classes("items-center gap-2 q-py-xs")
+            .style("border-bottom: 1px solid rgba(128,128,128,0.2)")
+        ):
+            ui.badge(issue.severity.value, color=sev_color).style("min-width: 60px")
+            if issue.ref:
+                ui.label(issue.ref).classes("cursor-pointer text-blue font-bold").on(
+                    "click", lambda _e=None, r=issue.ref: _navigate_to_crop(r)
+                )
+            else:
+                ui.label("--").classes("text-grey")
+            ui.label(issue.description).classes("text-caption")
 
 
 _KIND_ICONS: dict[str, str] = {
@@ -954,17 +1323,13 @@ def _build_activity_feed_card(board_dir: Path) -> None:
                     ui.label(f"Step: {rec.step}").classes("text-caption")
                     ui.label(f"Producer: {rec.producer}").classes("text-caption")
                     if rec.feedback:
-                        ui.label(f"Feedback: {rec.feedback}").classes(
-                            "text-caption text-orange"
-                        )
+                        ui.label(f"Feedback: {rec.feedback}").classes("text-caption text-orange")
                     if rec.details:
-                        ui.label(f"Details: {rec.details}").classes(
+                        ui.label(f"Details: {rec.details}").classes("text-caption text-grey")
+                    if rec.artifacts:
+                        ui.label(f"Artifacts: {', '.join(rec.artifacts)}").classes(
                             "text-caption text-grey"
                         )
-                    if rec.artifacts:
-                        ui.label(
-                            f"Artifacts: {', '.join(rec.artifacts)}"
-                        ).classes("text-caption text-grey")
 
 
 def _load_drc_report(board_dir: Path) -> dict[str, object] | None:
@@ -980,31 +1345,79 @@ def _load_drc_report(board_dir: Path) -> dict[str, object] | None:
         return None
 
 
+def _extract_drc_ref(item: dict[str, object]) -> str:
+    sub_items = item.get("items", [])
+    if isinstance(sub_items, list):
+        for si in sub_items:
+            if isinstance(si, dict):
+                desc = str(si.get("description", ""))
+                if " of " in desc:
+                    ref_candidate = desc.split(" of ")[-1].strip()
+                    if ref_candidate and ref_candidate[0].isalpha():
+                        return ref_candidate
+    return ""
+
+
+def _render_drc_violations(all_items: list[dict[str, object]], total: int) -> None:
+    from nicegui import ui
+
+    type_counts: dict[str, int] = {}
+    for item in all_items:
+        vtype = str(item.get("type", "unknown"))
+        type_counts[vtype] = type_counts.get(vtype, 0) + 1
+
+    with ui.expansion(f"Violations ({total})", icon="warning").classes("w-full"):
+        with ui.row().classes("gap-2 q-mb-sm flex-wrap"):
+            for vtype, count in sorted(type_counts.items(), key=lambda x: -x[1]):
+                ui.badge(f"{vtype}: {count}", color="grey")
+
+        for item in all_items:
+            severity = str(item.get("severity", ""))
+            description = str(item.get("description", ""))
+            vtype = str(item.get("type", ""))
+            ref = _extract_drc_ref(item)
+            sev_color = "red" if severity == "error" else "orange"
+            with (
+                ui.row()
+                .classes("items-center gap-2 q-py-xs")
+                .style("border-bottom: 1px solid rgba(128,128,128,0.2)")
+            ):
+                ui.badge(severity, color=sev_color).style("min-width: 50px")
+                ui.label(vtype).classes("text-caption font-bold").style("min-width: 80px")
+                if ref:
+                    ui.label(ref).classes("cursor-pointer text-blue font-bold").on(
+                        "click", lambda _e=None, r=ref: _navigate_to_crop(r)
+                    )
+                ui.label(description).classes("text-caption")
+
+
 def _build_drc_report_card(board_dir: Path, role: str = "framework") -> None:
     """Card showing DRC report violations from drc_report.json.
 
     For framework/deployment roles: full expandable detail view.
     For board role: simplified badge showing error count.
+    Feature 6: Clickable ref designators navigate to crop images.
     """
     from nicegui import ui
 
     drc = _load_drc_report(board_dir)
     if drc is None:
-        return  # No DRC report — skip the card entirely
+        with (
+            ui.card().classes("w-full"),
+            ui.row().classes("items-center gap-2"),
+        ):
+            ui.icon("assignment_late", color="grey").classes("text-lg")
+            ui.label("DRC Report").classes("text-subtitle1 font-bold")
+            ui.badge("Not run", color="grey")
+        return
 
     violations: list[dict[str, object]] = drc.get("violations", [])  # type: ignore[assignment]
     unconnected: list[dict[str, object]] = drc.get("unconnected_items", [])  # type: ignore[assignment]
     all_items = [*violations, *unconnected]
-
-    error_count = sum(
-        1 for item in all_items if item.get("severity") == "error"
-    )
-    warning_count = sum(
-        1 for item in all_items if item.get("severity") == "warning"
-    )
+    error_count = sum(1 for item in all_items if item.get("severity") == "error")
+    warning_count = sum(1 for item in all_items if item.get("severity") == "warning")
     total = len(all_items)
 
-    # Board users see a simplified badge only
     if role == "board":
         with (
             ui.card().classes("w-full"),
@@ -1014,13 +1427,9 @@ def _build_drc_report_card(board_dir: Path, role: str = "framework") -> None:
             if error_count == 0 and warning_count == 0:
                 ui.badge("DRC clean", color="green")
             else:
-                ui.badge(
-                    f"DRC: {error_count} errors",
-                    color="red" if error_count > 0 else "green",
-                )
+                ui.badge(f"DRC: {error_count} errors", color="red" if error_count > 0 else "green")
         return
 
-    # Framework / deployment: full detail view
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center gap-2"):
             ui.label("DRC Report").classes("text-subtitle1 font-bold")
@@ -1036,61 +1445,7 @@ def _build_drc_report_card(board_dir: Path, role: str = "framework") -> None:
             ui.label("No violations found").classes("text-green")
             return
 
-        # Group by type for summary
-        type_counts: dict[str, int] = {}
-        for item in all_items:
-            vtype = str(item.get("type", "unknown"))
-            type_counts[vtype] = type_counts.get(vtype, 0) + 1
-
-        with ui.expansion(
-            f"Violations ({total})", icon="warning"
-        ).classes("w-full"):
-            # Summary by type
-            with ui.row().classes("gap-2 q-mb-sm flex-wrap"):
-                for vtype, count in sorted(
-                    type_counts.items(), key=lambda x: -x[1]
-                ):
-                    ui.badge(f"{vtype}: {count}", color="grey")
-
-            # Individual violations
-            columns = [
-                {"name": "type", "label": "Type", "field": "type"},
-                {
-                    "name": "severity",
-                    "label": "Severity",
-                    "field": "severity",
-                },
-                {
-                    "name": "description",
-                    "label": "Description",
-                    "field": "description",
-                },
-                {
-                    "name": "location",
-                    "label": "Location",
-                    "field": "location",
-                },
-            ]
-            rows: list[dict[str, str]] = []
-            for item in all_items:
-                # Extract first item's position for location
-                sub_items = item.get("items", [])
-                location = ""
-                if isinstance(sub_items, list) and sub_items:
-                    first = sub_items[0]
-                    if isinstance(first, dict):
-                        pos = first.get("pos", {})
-                        if isinstance(pos, dict):
-                            x = pos.get("x", "")
-                            y = pos.get("y", "")
-                            location = f"({x}, {y})"
-                rows.append({
-                    "type": str(item.get("type", "")),
-                    "severity": str(item.get("severity", "")),
-                    "description": str(item.get("description", "")),
-                    "location": location,
-                })
-            ui.table(columns=columns, rows=rows).classes("w-full")
+        _render_drc_violations(all_items, total)
 
 
 def _build_known_issues_card(board_dir: Path) -> None:
@@ -1157,7 +1512,7 @@ def _build_actions_card(board_dir: Path) -> None:
 
             def _show_reject_dialog() -> None:
                 with ui.dialog() as dlg, ui.card().classes("w-96"):
-                    ui.label("Reject — provide feedback").classes("text-h6")
+                    ui.label("Reject -- provide feedback").classes("text-h6")
                     feedback = ui.textarea("What needs to change?").classes("w-full")
 
                     def _submit_reject() -> None:
@@ -1184,6 +1539,69 @@ def _build_actions_card(board_dir: Path) -> None:
                 dlg.open()
 
             ui.button("Reject", on_click=_show_reject_dialog, color="red", icon="close")
+
+
+# ---------------------------------------------------------------------------
+# Feature 13: Manufacturing readiness checklist
+# ---------------------------------------------------------------------------
+
+
+def _gather_readiness_checks(
+    board_dir: Path, board_pcb: Path,
+) -> list[tuple[str, bool]]:
+    from kicad_pipeline.evidence.gates import ALL_STAGES, check_gate
+    from kicad_pipeline.evidence.ledger import load_ledger
+
+    checks: list[tuple[str, bool]] = []
+    checks.append(("All pipeline gates passed",
+                    all(check_gate(board_pcb, s).passed for s in ALL_STAGES)))
+    gerber_dir = board_dir / "gerber"
+    checks.append(("Gerber files generated",
+                    gerber_dir.is_dir() and any(gerber_dir.glob("*.gbr"))))
+    checks.append(("BOM file present",
+                    any(board_dir.glob("*bom*.*")) or any(board_dir.glob("*BOM*.*"))))
+    checks.append(("Pick-and-place file present",
+                    any(board_dir.glob("*cpl*.*")) or any(board_dir.glob("*CPL*.*"))
+                    or any(board_dir.glob("*pos*.*"))))
+    drc = _load_drc_report(board_dir)
+    drc_clean = False
+    if drc:
+        drc_violations: list[dict[str, object]] = drc.get("violations", [])  # type: ignore[assignment]
+        drc_clean = sum(1 for v in drc_violations if v.get("severity") == "error") == 0
+    checks.append(("DRC clean (0 errors)", drc_clean))
+    ledger = load_ledger(board_pcb)
+    score = ledger.latest_score()
+    score_grade = score.grade if score else "?"
+    checks.append((f"Quality score >= B ({score_grade})",
+                    score is not None and score.grade in ("A", "B")))
+    checks.append(("Validation approved", check_gate(board_pcb, "validation").passed))
+    checks.append(("Production approved", check_gate(board_pcb, "production").passed))
+    return checks
+
+
+def _build_manufacturing_readiness_card(board_dir: Path, output_root: Path) -> None:
+    """Card showing manufacturing readiness checklist."""
+    from nicegui import ui
+
+    board_pcb = _find_board_pcb(board_dir)
+    checks = _gather_readiness_checks(board_dir, board_pcb)
+    ready_count = sum(1 for _, ok in checks if ok)
+    total = len(checks)
+
+    with ui.card().classes("w-full"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("Manufacturing Readiness").classes("text-subtitle1 font-bold")
+            if ready_count == total:
+                ui.badge("Ready to order", color="green")
+            else:
+                ui.badge(f"{ready_count}/{total}", color="orange")
+
+        for label, passed in checks:
+            with ui.row().classes("items-center gap-2"):
+                icon = "check_circle" if passed else "radio_button_unchecked"
+                color = "green" if passed else "grey"
+                ui.icon(icon, color=color)
+                ui.label(label).classes("text-body2")
 
 
 # ---------------------------------------------------------------------------
@@ -1218,8 +1636,8 @@ def _collect_iterations(board_dir: Path) -> list[dict[str, object]]:
                 try:
                     score_snap = ScoreSnapshot.model_validate(sr.details)
                     grade = score_snap.grade
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ScoreSnapshot validation failed for review record: %s", exc)
                 break
 
         issues: list[Issue] = []
@@ -1228,14 +1646,16 @@ def _collect_iterations(board_dir: Path) -> list[dict[str, object]]:
                 issues = list(rr.issues)
                 break
 
-        iterations.append({
-            "label": label,
-            "timestamp": ts,
-            "artifacts": list(render_rec.artifacts),
-            "score": score_snap,
-            "issues": issues,
-            "grade": grade,
-        })
+        iterations.append(
+            {
+                "label": label,
+                "timestamp": ts,
+                "artifacts": list(render_rec.artifacts),
+                "score": score_snap,
+                "issues": issues,
+                "grade": grade,
+            }
+        )
 
     return iterations
 
@@ -1250,9 +1670,7 @@ def _open_diff_dialog(board_dir: Path) -> None:
         ui.label("Iteration Compare").classes("text-h5 font-bold q-mb-md")
 
         if len(iterations) < 2:
-            ui.label("Not enough iterations to compare").classes(
-                "text-grey text-subtitle1"
-            )
+            ui.label("Not enough iterations to compare").classes("text-grey text-subtitle1")
             ui.button("Close", on_click=dlg.close)
             dlg.open()
             return
@@ -1261,11 +1679,15 @@ def _open_diff_dialog(board_dir: Path) -> None:
 
         with ui.row().classes("w-full items-center gap-4 q-mb-md"):
             before_select = ui.select(
-                options=labels, value=labels[-2], label="Before",
+                options=labels,
+                value=labels[-2],
+                label="Before",
             ).classes("w-64")
             ui.icon("arrow_forward").classes("text-h5")
             after_select = ui.select(
-                options=labels, value=labels[-1], label="After",
+                options=labels,
+                value=labels[-1],
+                label="After",
             ).classes("w-64")
 
         compare_container = ui.column().classes("w-full")
@@ -1279,8 +1701,10 @@ def _open_diff_dialog(board_dir: Path) -> None:
 
             with compare_container:
                 _render_side_by_side(
-                    before_it, after_it,
-                    str(before_select.value), str(after_select.value),
+                    before_it,
+                    after_it,
+                    str(before_select.value),
+                    str(after_select.value),
                 )
                 ui.separator().classes("q-my-md")
                 _render_change_summary(before_it, after_it)
@@ -1310,14 +1734,14 @@ def _render_side_by_side(
 
     with ui.row().classes("w-full gap-4"):
         with ui.column().classes("flex-1"):
-            ui.label(f"Before — {before_label}").classes("text-subtitle1 font-bold")
+            ui.label(f"Before -- {before_label}").classes("text-subtitle1 font-bold")
             for art_str in before_arts:
                 art = _Path(art_str)
                 if art.exists() and art.suffix.lower() == ".png":
                     ui.image(_image_url(art)).classes("w-full max-h-80 object-contain")
 
         with ui.column().classes("flex-1"):
-            ui.label(f"After — {after_label}").classes("text-subtitle1 font-bold")
+            ui.label(f"After -- {after_label}").classes("text-subtitle1 font-bold")
             for art_str in after_arts:
                 art = _Path(art_str)
                 if art.exists() and art.suffix.lower() == ".png":
@@ -1358,10 +1782,36 @@ def _render_change_summary(
         with ui.row().classes("items-center gap-2"):
             ui.label("Score:").classes("font-bold")
             ui.label(
-                f"{before_score.overall_score:.3f} → "
-                f"{after_score.overall_score:.3f}"
+                f"{before_score.overall_score:.3f} -> {after_score.overall_score:.3f}"
             ).classes("font-mono")
             ui.label(f"({sign}{delta:.3f})").classes(f"font-mono text-{delta_color}")
+
+    # Feature 7: Per-dimension breakdown comparison
+    if before_score and after_score and before_score.breakdown and after_score.breakdown:
+        all_dims = sorted(set(before_score.breakdown) | set(after_score.breakdown))
+        with ui.card().classes("w-full q-mt-sm"):
+            ui.label("Per-Dimension Breakdown").classes("text-subtitle2 font-bold")
+            columns = [
+                {"name": "dim", "label": "Dimension", "field": "dim"},
+                {"name": "before", "label": "Before", "field": "before"},
+                {"name": "after", "label": "After", "field": "after"},
+                {"name": "delta", "label": "Delta", "field": "delta"},
+            ]
+            rows = []
+            for dim in all_dims:
+                bv = before_score.breakdown.get(dim, 0.0)
+                av = after_score.breakdown.get(dim, 0.0)
+                d = av - bv
+                dim_sign = "+" if d >= 0 else ""
+                rows.append(
+                    {
+                        "dim": dim,
+                        "before": f"{bv:.3f}",
+                        "after": f"{av:.3f}",
+                        "delta": f"{dim_sign}{d:.3f}",
+                    }
+                )
+            ui.table(columns=columns, rows=rows).classes("w-full")
 
     before_descs = {i.description for i in before_issues}
     after_descs = {i.description for i in after_issues}
@@ -1370,7 +1820,7 @@ def _render_change_summary(
 
     with ui.row().classes("items-center gap-2 q-mt-sm"):
         ui.label("Issues:").classes("font-bold")
-        ui.label(f"{len(before_issues)} → {len(after_issues)}").classes("font-mono")
+        ui.label(f"{len(before_issues)} -> {len(after_issues)}").classes("font-mono")
         if resolved:
             ui.badge(f"-{len(resolved)} resolved", color="green")
         if new_issues:

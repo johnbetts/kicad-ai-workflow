@@ -191,6 +191,46 @@ def delete_card(project_root: Path, card_id: str) -> None:
     save_kanban(project_root, board)
 
 
+_CHECKBOX_RE = re.compile(
+    r"^-\s+\[([ xX])\]\s+"  # checkbox
+    r"(?:\*\*([Pp][0-3])\*\*\s+)?"  # optional **P0**
+    r"(?:(BUG|TASK|WISH|MOON)-\d+:\s+)?"  # optional ID prefix
+    r"(.+)$"  # description/title
+)
+
+
+def _parse_roadmap_line(
+    line: str,
+    current_section: str | None,
+) -> KanbanCard | None:
+    stripped = line.strip()
+    match = _CHECKBOX_RE.match(stripped)
+    if not match:
+        return None
+
+    checked = match.group(1).lower() == "x"
+    priority = (match.group(2) or "P2").upper()
+    id_prefix = match.group(3)
+    title = match.group(4).strip()
+
+    if current_section in ("wishlist", "moonshot"):
+        card_type = current_section
+    elif id_prefix == "BUG" or current_section == "bug":
+        card_type = "bug"
+    else:
+        card_type = "feature"
+
+    status = "done" if checked else "backlog"
+
+    return KanbanCard(
+        title=title,
+        card_type=card_type,
+        priority=priority,
+        status=status,
+        level="framework",
+    )
+
+
 def import_from_roadmap(project_root: Path, roadmap_path: Path) -> int:
     """Parse a roadmap.md and create kanban cards from its items.
 
@@ -210,24 +250,13 @@ def import_from_roadmap(project_root: Path, roadmap_path: Path) -> int:
     board = load_kanban(project_root)
     existing_titles = {c.title for c in board.cards}
 
-    text = roadmap_path.read_text()
-    lines = text.split("\n")
-
+    lines = roadmap_path.read_text().split("\n")
     current_section: str | None = None
     imported = 0
-
-    # Pattern: - [ ] or - [x] with optional **Px** and ID: description
-    checkbox_re = re.compile(
-        r"^-\s+\[([ xX])\]\s+"  # checkbox
-        r"(?:\*\*([Pp][0-3])\*\*\s+)?"  # optional **P0**
-        r"(?:(BUG|TASK|WISH|MOON)-\d+:\s+)?"  # optional ID prefix
-        r"(.+)$"  # description/title
-    )
 
     for line in lines:
         stripped = line.strip()
 
-        # Detect section headers
         if stripped.startswith("## "):
             header = stripped[3:].strip().lower()
             if "wishlist" in header:
@@ -240,37 +269,12 @@ def import_from_roadmap(project_root: Path, roadmap_path: Path) -> int:
                 current_section = None
             continue
 
-        match = checkbox_re.match(stripped)
-        if not match:
+        card = _parse_roadmap_line(line, current_section)
+        if card is None or card.title in existing_titles:
             continue
 
-        checked = match.group(1).lower() == "x"
-        priority = (match.group(2) or "P2").upper()
-        id_prefix = match.group(3)
-        title = match.group(4).strip()
-
-        if title in existing_titles:
-            continue
-
-        # Determine card type
-        if current_section in ("wishlist", "moonshot"):
-            card_type = current_section
-        elif id_prefix == "BUG" or current_section == "bug":
-            card_type = "bug"
-        else:
-            card_type = "feature"
-
-        status = "done" if checked else "backlog"
-
-        card = KanbanCard(
-            title=title,
-            card_type=card_type,
-            priority=priority,
-            status=status,
-            level="framework",
-        )
         board.cards.append(card)
-        existing_titles.add(title)
+        existing_titles.add(card.title)
         imported += 1
 
     if imported > 0:
