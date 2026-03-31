@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "known_bugs": [
+    {
+      "id": "BUG-OPT-001",
+      "description": "Collision resolver ignores component rotation when computing bounding boxes",
+      "check_instruction": "After placement, verify no rotated components overlap in 3D view — rotated bounding boxes must be recomputed",
+      "severity": "critical",
+      "affects_checks": ["FAB-CLEARANCE-*", "PROG-BODY-COVERS-*"],
+      "affects_components": [],
+      "verification_type": "cross_reference",
+      "status": "open"
+    },
+    {
+      "id": "BUG-OPT-002",
+      "description": "No courtyard gap enforcement between adjacent components",
+      "check_instruction": "Verify minimum 0.25mm gap between all courtyard polygons (IPC-7351B)",
+      "severity": "critical",
+      "affects_checks": ["FAB-CLEARANCE-*", "PROG-COURTYARD-SIZE-*"],
+      "affects_components": [],
+      "verification_type": "programmatic",
+      "status": "open"
+    },
+    {
+      "id": "BUG-OPT-003",
+      "description": "Changing package size (0402↔0805) destroys placement layout",
+      "check_instruction": "After package size change, verify group cohesion and subcircuit patterns are preserved",
+      "severity": "major",
+      "affects_checks": ["FAB-BOARD-PATTERN", "EE-BOARD-DECAP-ALL"],
+      "affects_components": ["R*", "C*"],
+      "verification_type": "ai_visual",
+      "status": "open"
+    },
+    {
+      "id": "BUG-OPT-004",
+      "description": "Subcircuit patterns live in training scripts not framework code",
+      "check_instruction": "Verify subcircuit layouts come from placement_optimizer.py, not post-placement scripts",
+      "severity": "major",
+      "affects_checks": ["FAB-BOARD-PATTERN"],
+      "affects_components": [],
+      "verification_type": "cross_reference",
+      "status": "open"
+    },
+    {
+      "id": "BUG-OPT-005",
+      "description": "Connector edge placement not enforced — connectors can be interior",
+      "check_instruction": "Every connector (J*) must be within 5mm of nearest board edge",
+      "severity": "major",
+      "affects_checks": ["FAB-BOARD-EDGE", "FAB-ASSY-J*"],
+      "affects_components": ["J*"],
+      "verification_type": "programmatic",
+      "status": "open"
+    },
+    {
+      "id": "BUG-OPT-006",
+      "description": "Grade A placement score does not guarantee visually good layout",
+      "check_instruction": "Cross-reference numerical score with visual inspection — scores lie, renders are truth",
+      "severity": "critical",
+      "affects_checks": ["FAB-BOARD-AESTHETICS"],
+      "affects_components": [],
+      "verification_type": "cross_reference",
+      "status": "open"
+    }
+  ],
+  "patterns": [
+    {
+      "id": "PAT-001",
+      "description": "Compliance scores can lie — 13/13 with 0 collisions means nothing if 3D render shows overlap",
+      "check_instruction": "Cross-reference PROG collision count with FAB-CLEARANCE visual checks for every component",
+      "severity": "critical",
+      "affects_checks": ["FAB-CLEARANCE-*"],
+      "affects_components": [],
+      "verification_type": "cross_reference"
+    },
+    {
+      "id": "PAT-002",
+      "description": "THT pin headers naturally sit 2-3mm above board surface — this is normal, not floating",
+      "check_instruction": "For THT J* components with thru_hole pads, accept 2-3mm body-to-board gap as normal",
+      "severity": "info",
+      "affects_checks": ["FAB-BODY-FLAT-J*"],
+      "affects_components": ["J*"],
+      "verification_type": "ai_context"
+    },
+    {
+      "id": "PAT-003",
+      "description": "KiCad stores footprint origin at pin 1, not at centroid — use pin_map.compute_centroid_offset()",
+      "check_instruction": "All position comparisons must use centroid-based coordinates, not KiCad origin",
+      "severity": "critical",
+      "affects_checks": ["PROG-CENTROID-*", "PROG-BODY-PAD-ALIGN-*"],
+      "affects_components": [],
+      "verification_type": "programmatic"
+    },
+    {
+      "id": "PAT-004",
+      "description": "3D model alignment uses JLCPCB centroid offset, not pad-1-based — 2 weeks of wrong approach proved this",
+      "check_instruction": "3D model offset must be computed from -JLCPCB_centroid, NOT from pad 1 position",
+      "severity": "critical",
+      "affects_checks": ["PROG-3D-OFFSET-*", "PROG-BODY-PAD-ALIGN-*", "FAB-BODY-ALIGN-*"],
+      "affects_components": [],
+      "verification_type": "programmatic"
+    },
+    {
+      "id": "PAT-005",
+      "description": "Edge-mount connectors (USB, RJ45, SD card) intentionally overhang board edge",
+      "check_instruction": "For edge-mount connectors, up to 10mm overhang is normal — do not flag as body overhang violation",
+      "severity": "info",
+      "affects_checks": ["FAB-ASSY-J*", "FAB-CLEARANCE-J*"],
+      "affects_components": ["J*"],
+      "verification_type": "ai_context"
+    },
+    {
+      "id": "PAT-006",
+      "description": "Decoupling distance must be measured pad-to-pin (edge-to-edge), NOT center-to-center",
+      "check_instruction": "Use actual pad coordinates from .kicad_pcb for proximity checks — QFN-48 IC pins are 5mm+ from center",
+      "severity": "critical",
+      "affects_checks": ["EE-DECAP-DIST-*", "EE-BOARD-DECAP-ALL"],
+      "affects_components": ["C*", "U*"],
+      "verification_type": "programmatic"
+    },
+    {
+      "id": "PAT-007",
+      "description": "Switches may have duplicate pad numbers (e.g., 2x pad 1, 2x pad 2) — this is normal",
+      "check_instruction": "For switch components (SW*), allow duplicate pad numbers",
+      "severity": "info",
+      "affects_checks": ["PROG-NO-DUP-PADS-SW*"],
+      "affects_components": ["SW*"],
+      "verification_type": "programmatic"
+    }
+  ]
+}
