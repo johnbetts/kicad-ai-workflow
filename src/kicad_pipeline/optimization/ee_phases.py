@@ -1120,10 +1120,17 @@ def _phase_relay_power_isolation(ctx: PlacementContext) -> None:
     """
     min_x, min_y, max_x, max_y = ctx.bounds
 
-    # Find ferrite beads and bulk caps not already placed by other phases
+    # Find ONLY relay-group ferrite beads and bulk caps — NOT all L/C on the board.
+    # Previous bug: this grabbed ALL capacitors/inductors, destroying the entire layout.
+    relay_block_refs: set[str] = set()
+    for fb in ctx.requirements.features:
+        if any(kw in fb.name.lower() for kw in ("relay", "output", "switching")):
+            relay_block_refs.update(fb.components)
+
     power_refs = [
         r for r in ctx.positions
-        if (r.startswith("L") or (r.startswith("C") and r not in ctx.fixed_refs))
+        if r in relay_block_refs
+        and (r.startswith("L") or r.startswith("C"))
         and r not in ctx.relay_support_refs
         and r not in getattr(ctx, "top_edge_connector_refs", set())
     ]
