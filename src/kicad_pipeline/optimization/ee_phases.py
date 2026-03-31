@@ -1222,16 +1222,44 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
 
 
 def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
-    """3f3: Pin ALL remaining connectors to nearest board edge.
+    """3f3: Pin ALL remaining connectors to the board edge nearest their group.
+
+    Before pushing a connector to an edge, we determine which functional
+    group (FeatureBlock) the connector belongs to, compute the centroid of
+    that group, and push the connector to the edge closest to the *group
+    centroid* — not the connector's current position.  The connector is also
+    aligned along that edge at the group centroid's coordinate so it stays
+    physically close to its functional group.
 
     Handles USB connectors, pin headers, and any J-prefix component
-    not already placed by ``_phase_top_edge_connectors``.  Each connector
-    is pushed to the nearest board edge within ``CONNECTOR_EDGE_MAX_MM``.
+    not already placed by ``_phase_top_edge_connectors``.
     """
     min_x, min_y, max_x, max_y = ctx.bounds
     margin = 3.0  # small inset from edge (BOARD_EDGE_MARGIN_MM + 1.0)
 
     already_placed = getattr(ctx, "top_edge_connector_refs", set())
+
+    # --- Build connector → functional-group map and group centroids ---
+    # Map each ref to its FeatureBlock name
+    ref_to_group: dict[str, str] = {}
+    group_refs: dict[str, list[str]] = {}
+    for fb in ctx.requirements.features:
+        for comp_ref in fb.components:
+            ref_to_group[comp_ref] = fb.name
+            group_refs.setdefault(fb.name, []).append(comp_ref)
+
+    # Compute group centroids from current positions
+    group_centroids: dict[str, tuple[float, float]] = {}
+    for gname, refs in group_refs.items():
+        xs: list[float] = []
+        ys: list[float] = []
+        for r in refs:
+            if r in ctx.positions:
+                px, py, _ = ctx.positions[r]
+                xs.append(px)
+                ys.append(py)
+        if xs:
+            group_centroids[gname] = (sum(xs) / len(xs), sum(ys) / len(ys))
 
     for ref, (cx, cy, rot) in list(ctx.positions.items()):
         if ref in ctx.fixed_refs or ref in already_placed:
@@ -1239,29 +1267,46 @@ def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
         if not ref.startswith("J"):
             continue
 
-        # Compute distance to each edge
+        # Already within 5mm of an edge — close enough
         d_left = cx - min_x
         d_right = max_x - cx
         d_top = cy - min_y
         d_bottom = max_y - cy
         min_dist = min(d_left, d_right, d_top, d_bottom)
-
-        # Already within 5mm of an edge — close enough
         if min_dist <= 5.0:
             continue
 
-        # Push to nearest edge
-        if min_dist == d_left:
-            new_x, new_y, new_rot = min_x + margin, cy, rot
-        elif min_dist == d_right:
-            new_x, new_y, new_rot = max_x - margin, cy, rot
-        elif min_dist == d_top:
-            new_x, new_y, new_rot = cx, min_y + margin, rot
-        else:
-            new_x, new_y, new_rot = cx, max_y - margin, rot
+        # Determine target edge from group centroid (fall back to connector pos)
+        gname = ref_to_group.get(ref)
+        gcx, gcy = group_centroids.get(gname, (cx, cy)) if gname else (cx, cy)
 
-        _log.info("  3f3: %s pushed to edge (%.1f,%.1f) -> (%.1f,%.1f)",
-                  ref, cx, cy, new_x, new_y)
+        # Distance from group centroid to each edge
+        gd_left = gcx - min_x
+        gd_right = max_x - gcx
+        gd_top = gcy - min_y
+        gd_bottom = max_y - gcy
+        gd_min = min(gd_left, gd_right, gd_top, gd_bottom)
+
+        # Push to the edge nearest the group centroid, aligning along
+        # that edge at the group centroid's coordinate.
+        # Clamp the along-edge coordinate to stay within board bounds.
+        if gd_min == gd_left:
+            along = max(min_y + margin, min(gcy, max_y - margin))
+            new_x, new_y, new_rot = min_x + margin, along, rot
+        elif gd_min == gd_right:
+            along = max(min_y + margin, min(gcy, max_y - margin))
+            new_x, new_y, new_rot = max_x - margin, along, rot
+        elif gd_min == gd_top:
+            along = max(min_x + margin, min(gcx, max_x - margin))
+            new_x, new_y, new_rot = along, min_y + margin, rot
+        else:
+            along = max(min_x + margin, min(gcx, max_x - margin))
+            new_x, new_y, new_rot = along, max_y - margin, rot
+
+        _log.info(
+            "  3f3: %s (group=%s) pushed to edge (%.1f,%.1f) -> (%.1f,%.1f)",
+            ref, gname or "?", cx, cy, new_x, new_y,
+        )
         ctx.positions[ref] = (new_x, new_y, new_rot)
 
 

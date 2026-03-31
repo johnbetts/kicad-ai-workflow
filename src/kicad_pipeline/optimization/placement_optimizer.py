@@ -269,21 +269,16 @@ def optimize_placement_ee(
     _log.info("=== Level 2.5: Subcircuit Pre-Protection ===")
     _preprotect_count = 0
     for sc in ctx.subcircuits:
+        sc_type = sc.circuit_type.name
+        # Only pre-protect ADC/divider subcircuits — they form tight strips
+        # that must stay together. Relay drivers, MCU peripherals, and
+        # decoupling caps are managed by dedicated Level 3 phases.
+        if "ADC" not in sc_type and "DIVIDER" not in sc_type:
+            continue
         for ref in sc.refs:
             if ref in ctx.positions:
-                sc_type = sc.circuit_type.name
-                if "RELAY" in sc_type or "DRIVER" in sc_type:
-                    ctx.relay_support_refs.add(ref)
-                    _preprotect_count += 1
-                elif "ADC" in sc_type or "DIVIDER" in sc_type:
-                    ctx.adc_channel_refs.add(ref)
-                    _preprotect_count += 1
-                elif "DECOUPLING" in sc_type:
-                    # Don't over-protect decoupling caps — they need to move
-                    pass
-                elif "MCU" in sc_type or "PERIPHERAL" in sc_type:
-                    ctx.mcu_peripheral_refs.add(ref)
-                    _preprotect_count += 1
+                ctx.adc_channel_refs.add(ref)
+                _preprotect_count += 1
     _log.info("  Pre-protected %d subcircuit refs from collision scatter",
               _preprotect_count)
 
