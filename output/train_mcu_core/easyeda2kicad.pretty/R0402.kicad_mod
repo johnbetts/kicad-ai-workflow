@@ -124,6 +124,30 @@
     (layer "F.Fab")
     (width 0.06)
   )
+  (fp_line
+    (start -0.965 -0.52)
+    (end 0.965 -0.52)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 0.965 -0.52)
+    (end 0.965 0.52)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 0.965 0.52)
+    (end -0.965 0.52)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start -0.965 0.52)
+    (end -0.965 -0.52)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
   (pad "2" smd rect
     (at 0.43 0.0)
     (size 0.57 0.54)

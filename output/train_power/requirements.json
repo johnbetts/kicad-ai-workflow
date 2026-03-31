@@ -658,13 +658,6 @@
   ],
   "pin_map": null,
   "power_budget": null,
-  "mechanical": {
-    "board_width_mm": 60.0,
-    "board_height_mm": 40.0,
-    "enclosure": null,
-    "mounting_hole_diameter_mm": 3.2,
-    "mounting_hole_positions": [],
-    "notes": null
-  },
+  "mechanical": null,
   "recommendations": []
 }

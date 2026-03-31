@@ -1,0 +1,3 @@
+{"timestamp":"2026-03-28T22:00:00Z","description":"Moved C1 near U1, J5 to right edge (x=62.5), R9/R10 near U1","reason":"J5 off-board at x=62.5 (pads extend past 65mm edge), and J5 too far from MCU group","violations_affected":["component_off_board","board_edge_clearance","connector_functional_proximity"]}
+{"timestamp":"2026-03-28T22:20:00Z","description":"Compact ADC channel vertically (R->7, C->9, D->11, R->13mm Y)","reason":"Too aggressive - 8 courtyard collisions between D/C/R at 2mm spacing. SOT-23 diodes need more room.","violations_affected":["collision"]}
+{"timestamp":"2026-03-28T22:30:00Z","description":"Rotate C2-C5,R9,R10 by 90deg","reason":"R9 collided with U1 after rotation, pad facing unchanged at 0.803","violations_affected":["collision"]}

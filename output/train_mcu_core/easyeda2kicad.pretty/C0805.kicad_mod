@@ -152,6 +152,30 @@
     (layer "F.SilkS")
     (width 0.15)
   )
+  (fp_line
+    (start -1.955 -0.925)
+    (end 1.955 -0.925)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 1.955 -0.925)
+    (end 1.955 0.925)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 1.955 0.925)
+    (end -1.955 0.925)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start -1.955 0.925)
+    (end -1.955 -0.925)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
   (pad "2" smd rect
     (at 1.0 0.0)
     (size 1.41 1.35)

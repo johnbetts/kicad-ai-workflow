@@ -1,8 +1,0 @@
-commit	grade	score	drc_errors	violations	critical	status	description
-iter1	A	-	33_silk_warn	0	0	SUCCESS	Moved D5/D7/D8/R8 to correct relay subcircuit columns; fixed D5-D8 rotation to 0deg
-iter	grade	score	collisions	violations	notes
-0	B	-	0	7	Initial: subcircuit_spread D8/R8/D5/D7, diode orientation D5-D8
-1	B	-	0	5	Fixed D5-D8 orientation 180->0; spread still flagged (misassignment)
-2	D	-	4	10	Moved components -2mm Y: relay-diode collisions K1-D1 through K4-D4
-3	F	-	6	9	Spacing fix attempt: D5/R5 too close, C1/C2/L2 collisions
-4	A	0.907	0	3	Proper spacing: D@41, Q@43.5, R@43.5/46, LED@48.5; power section spread; Grade A

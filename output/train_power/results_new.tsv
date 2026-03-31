@@ -1,0 +1,12 @@
+iter	grade	score	violations	critical	status	description
+0	C	0.969	3	2	baseline	Post-framework-regeneration baseline
+1	A	0.986	0	0	keep	J1 rotated 90deg + moved to (3,8) left edge - terminal orientation fixed
+2	A	0.986	0	0	keep	Moved LDO group closer to buck, J2 to bottom edge, J3 to right edge
+3	A	0.986	0	0	keep	C3 moved + rotated near U1, R2 repositioned, pad facing 0.612->0.653
+4	A	0.986	0	0	keep	R1 moved adjacent to R2 for tighter feedback divider
+5	A	0.986	0	0	keep	C5/C6 moved to U2 output side (x=40) for tighter decoupling
+6	A	0.986	0	0	keep	C3 repositioned above U1 pin area for shorter BST trace
+7	C	0.978	1	1	discard	C4 moved near U2 pin 3 - collision + pad facing regression
+8	D	0.979	3	3	discard	J2 moved to left edge - off-board + collision with H1
+9	A	0.986	0	0	keep	C2 moved to x=25 bridging buck-LDO gap
+10	A	0.986	0	0	keep	Final visual review - clean layout, proper signal flow

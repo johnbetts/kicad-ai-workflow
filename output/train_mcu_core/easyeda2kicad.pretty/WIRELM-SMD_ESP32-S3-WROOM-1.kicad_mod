@@ -82,7 +82,7 @@
       )
     )
   )
-  (fp_text user "GND"
+  (fp_text user "1:GND"
     (at -7.15 -8.89)
     (layer "F.Fab")
     (effects
@@ -91,7 +91,7 @@
       )
     )
   )
-  (fp_text user "3V3"
+  (fp_text user "2:3V3"
     (at -7.15 -7.62)
     (layer "F.Fab")
     (effects
@@ -100,7 +100,7 @@
       )
     )
   )
-  (fp_text user "EN"
+  (fp_text user "3:EN"
     (at -7.15 -6.35)
     (layer "F.Fab")
     (effects
@@ -109,7 +109,7 @@
       )
     )
   )
-  (fp_text user "IO4"
+  (fp_text user "4:IO4"
     (at -7.15 -5.08)
     (layer "F.Fab")
     (effects
@@ -118,7 +118,7 @@
       )
     )
   )
-  (fp_text user "IO5"
+  (fp_text user "5:IO5"
     (at -7.15 -3.81)
     (layer "F.Fab")
     (effects
@@ -127,7 +127,7 @@
       )
     )
   )
-  (fp_text user "IO6"
+  (fp_text user "6:IO6"
     (at -7.15 -2.54)
     (layer "F.Fab")
     (effects
@@ -136,7 +136,7 @@
       )
     )
   )
-  (fp_text user "IO7"
+  (fp_text user "7:IO7"
     (at -7.15 -1.27)
     (layer "F.Fab")
     (effects
@@ -145,7 +145,7 @@
       )
     )
   )
-  (fp_text user "IO15"
+  (fp_text user "8:IO15"
     (at -7.15 -0.0)
     (layer "F.Fab")
     (effects
@@ -154,7 +154,7 @@
       )
     )
   )
-  (fp_text user "IO16"
+  (fp_text user "9:IO16"
     (at -7.15 1.27)
     (layer "F.Fab")
     (effects
@@ -163,7 +163,7 @@
       )
     )
   )
-  (fp_text user "IO17"
+  (fp_text user "10:IO17"
     (at -7.15 2.54)
     (layer "F.Fab")
     (effects
@@ -172,7 +172,7 @@
       )
     )
   )
-  (fp_text user "IO18"
+  (fp_text user "11:IO18"
     (at -7.15 3.81)
     (layer "F.Fab")
     (effects
@@ -181,7 +181,7 @@
       )
     )
   )
-  (fp_text user "IO8"
+  (fp_text user "12:IO8"
     (at -7.15 5.08)
     (layer "F.Fab")
     (effects
@@ -190,7 +190,7 @@
       )
     )
   )
-  (fp_text user "IO19"
+  (fp_text user "13:IO19"
     (at -7.15 6.35)
     (layer "F.Fab")
     (effects
@@ -199,7 +199,7 @@
       )
     )
   )
-  (fp_text user "IO20"
+  (fp_text user "14:IO20"
     (at -7.15 7.62)
     (layer "F.Fab")
     (effects
@@ -208,7 +208,7 @@
       )
     )
   )
-  (fp_text user "IO3"
+  (fp_text user "15:IO3"
     (at -6.99 7.29)
     (layer "F.Fab")
     (effects
@@ -217,7 +217,7 @@
       )
     )
   )
-  (fp_text user "IO46"
+  (fp_text user "16:IO46"
     (at -5.72 7.29)
     (layer "F.Fab")
     (effects
@@ -226,7 +226,7 @@
       )
     )
   )
-  (fp_text user "IO9"
+  (fp_text user "17:IO9"
     (at -4.45 7.29)
     (layer "F.Fab")
     (effects
@@ -235,7 +235,7 @@
       )
     )
   )
-  (fp_text user "IO10"
+  (fp_text user "18:IO10"
     (at -3.18 7.29)
     (layer "F.Fab")
     (effects
@@ -244,7 +244,7 @@
       )
     )
   )
-  (fp_text user "IO11"
+  (fp_text user "19:IO11"
     (at -1.91 7.29)
     (layer "F.Fab")
     (effects
@@ -253,7 +253,7 @@
       )
     )
   )
-  (fp_text user "IO12"
+  (fp_text user "20:IO12"
     (at -0.63 7.29)
     (layer "F.Fab")
     (effects
@@ -262,7 +262,7 @@
       )
     )
   )
-  (fp_text user "IO13"
+  (fp_text user "21:IO13"
     (at 0.63 7.29)
     (layer "F.Fab")
     (effects
@@ -271,7 +271,7 @@
       )
     )
   )
-  (fp_text user "IO14"
+  (fp_text user "22:IO14"
     (at 1.9 7.29)
     (layer "F.Fab")
     (effects
@@ -280,7 +280,7 @@
       )
     )
   )
-  (fp_text user "IO21"
+  (fp_text user "23:IO21"
     (at 3.17 7.29)
     (layer "F.Fab")
     (effects
@@ -289,7 +289,7 @@
       )
     )
   )
-  (fp_text user "IO47"
+  (fp_text user "24:IO47"
     (at 4.45 7.29)
     (layer "F.Fab")
     (effects
@@ -298,7 +298,7 @@
       )
     )
   )
-  (fp_text user "IO48"
+  (fp_text user "25:IO48"
     (at 5.72 7.29)
     (layer "F.Fab")
     (effects
@@ -307,7 +307,7 @@
       )
     )
   )
-  (fp_text user "IO45"
+  (fp_text user "26:IO45"
     (at 6.99 7.26)
     (layer "F.Fab")
     (effects
@@ -316,7 +316,7 @@
       )
     )
   )
-  (fp_text user "IO0"
+  (fp_text user "27:IO0"
     (at 7.15 7.62)
     (layer "F.Fab")
     (effects
@@ -325,7 +325,7 @@
       )
     )
   )
-  (fp_text user "IO35"
+  (fp_text user "28:IO35"
     (at 7.15 6.35)
     (layer "F.Fab")
     (effects
@@ -334,7 +334,7 @@
       )
     )
   )
-  (fp_text user "IO36"
+  (fp_text user "29:IO36"
     (at 7.15 5.08)
     (layer "F.Fab")
     (effects
@@ -343,7 +343,7 @@
       )
     )
   )
-  (fp_text user "IO37"
+  (fp_text user "30:IO37"
     (at 7.15 3.81)
     (layer "F.Fab")
     (effects
@@ -352,7 +352,7 @@
       )
     )
   )
-  (fp_text user "IO38"
+  (fp_text user "31:IO38"
     (at 7.15 2.54)
     (layer "F.Fab")
     (effects
@@ -361,7 +361,7 @@
       )
     )
   )
-  (fp_text user "IO39"
+  (fp_text user "32:IO39"
     (at 7.15 1.27)
     (layer "F.Fab")
     (effects
@@ -370,7 +370,7 @@
       )
     )
   )
-  (fp_text user "IO40"
+  (fp_text user "33:IO40"
     (at 7.15 -0.0)
     (layer "F.Fab")
     (effects
@@ -379,7 +379,7 @@
       )
     )
   )
-  (fp_text user "IO41"
+  (fp_text user "34:IO41"
     (at 7.15 -1.27)
     (layer "F.Fab")
     (effects
@@ -388,7 +388,7 @@
       )
     )
   )
-  (fp_text user "IO42"
+  (fp_text user "35:IO42"
     (at 7.15 -2.54)
     (layer "F.Fab")
     (effects
@@ -397,7 +397,7 @@
       )
     )
   )
-  (fp_text user "RXD0"
+  (fp_text user "36:RXD0"
     (at 7.15 -3.81)
     (layer "F.Fab")
     (effects
@@ -406,7 +406,7 @@
       )
     )
   )
-  (fp_text user "TXD0"
+  (fp_text user "37:TXD0"
     (at 7.15 -5.08)
     (layer "F.Fab")
     (effects
@@ -415,7 +415,7 @@
       )
     )
   )
-  (fp_text user "IO2"
+  (fp_text user "38:IO2"
     (at 7.15 -6.35)
     (layer "F.Fab")
     (effects
@@ -424,7 +424,7 @@
       )
     )
   )
-  (fp_text user "IO1"
+  (fp_text user "39:IO1"
     (at 7.15 -7.62)
     (layer "F.Fab")
     (effects
@@ -433,7 +433,7 @@
       )
     )
   )
-  (fp_text user "GND"
+  (fp_text user "40:GND"
     (at 7.15 -8.89)
     (layer "F.Fab")
     (effects
@@ -579,6 +579,30 @@
     (end -6.75 -9.1)
     (layer "Cmts.User")
     (width 0.5)
+  )
+  (fp_line
+    (start -9.75 -9.59)
+    (end 9.75 -9.59)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 9.75 -9.59)
+    (end 9.75 9.59)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 9.75 9.59)
+    (end -9.75 9.59)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start -9.75 9.59)
+    (end -9.75 -9.59)
+    (layer "F.CrtYd")
+    (width 0.153)
   )
   (pad "1" smd rect
     (at -8.75 -8.89)
@@ -787,7 +811,7 @@
   )
   (model "${KICAD10_3DMODEL_DIR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step"
     (offset
-      (xyz 0.0 3.63 0.0)
+      (xyz 0.0 0.0 0.0)
     )
     (scale
       (xyz 1.0 1.0 1.0)
