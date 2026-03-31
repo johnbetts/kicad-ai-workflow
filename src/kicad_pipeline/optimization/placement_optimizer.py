@@ -264,6 +264,29 @@ def optimize_placement_ee(
     _log.info("=== Level 2: Group Placement ===")
     _phase_group_placement(ctx)
 
+    # Level 2.5: Pre-populate subcircuit protection from detected subcircuits
+    # This ensures collision resolution in Level 3 can't scatter subcircuit members.
+    _log.info("=== Level 2.5: Subcircuit Pre-Protection ===")
+    _preprotect_count = 0
+    for sc in ctx.subcircuits:
+        for ref in sc.refs:
+            if ref in ctx.positions:
+                sc_type = sc.circuit_type.name
+                if "RELAY" in sc_type or "DRIVER" in sc_type:
+                    ctx.relay_support_refs.add(ref)
+                    _preprotect_count += 1
+                elif "ADC" in sc_type or "DIVIDER" in sc_type:
+                    ctx.adc_channel_refs.add(ref)
+                    _preprotect_count += 1
+                elif "DECOUPLING" in sc_type:
+                    # Don't over-protect decoupling caps — they need to move
+                    pass
+                elif "MCU" in sc_type or "PERIPHERAL" in sc_type:
+                    ctx.mcu_peripheral_refs.add(ref)
+                    _preprotect_count += 1
+    _log.info("  Pre-protected %d subcircuit refs from collision scatter",
+              _preprotect_count)
+
     # Level 3: Intra-Group Refinement
     _log.info("=== Level 3: Intra-Group Refinement ===")
     _relay_leds = _run_level3_phases(
