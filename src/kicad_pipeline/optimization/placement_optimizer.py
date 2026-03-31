@@ -190,7 +190,7 @@ def optimize_placement_ee(
     requirements: ProjectRequirements,
     initial_pcb: PCBDesign,
     max_review_passes: int = 5,
-    level3: str = "simple",
+    level3: str = "legacy",
 ) -> tuple[PCBDesign, PlacementReview]:
     """3-level hierarchical placement optimizer (v5).
 
