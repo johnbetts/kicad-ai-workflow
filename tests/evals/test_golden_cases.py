@@ -35,6 +35,7 @@ _TRACKED_DFM_GATES = frozenset({
     "zone_membership",  # target: enforce by 2026-04-30
     "subcircuit_completeness",  # target: enforce by 2026-04-15
     "component_isolation_zones",  # target: enforce by 2026-04-30
+    "component_verification",  # target: enforce by 2026-04-15 (after all components verified)
     # package_match — ENFORCED after KI-022 fix (moved to _ENFORCED_DFM_GATES)
 })
 
@@ -92,6 +93,7 @@ _GATE_DEADLINES: dict[str, str] = {
     "zone_membership": "2026-04-30",
     "subcircuit_completeness": "2026-04-15",
     "component_isolation_zones": "2026-04-30",
+    "component_verification": "2026-04-15",
 }
 
 

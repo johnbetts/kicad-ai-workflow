@@ -17,6 +17,7 @@ Maps to operator defect taxonomy (2026-03-31):
   #9  Subcircuit completeness (missing companion components)
   #10 Schematic-PCB sync (all requirements components present)
   #11 Component-specific isolation zones (antenna keepout, etc.)
+  #13 Component verification (all components verified in registry)
 """
 from __future__ import annotations
 
@@ -869,6 +870,92 @@ def _is_edge_mount_connector(fp: object) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Gate #13: Component verification registry
+# ---------------------------------------------------------------------------
+
+def check_component_verification(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> GateResult:
+    """Verify all PCB components exist in the component registry and are verified.
+
+    Checks each component's LCSC part number (or footprint_id fallback) against
+    data/component_registry.json. Fails if any component has verification_status
+    other than 'verified'.
+
+    Maps to operator defect taxonomy: pre-build validation — ensures every
+    component has passed 10-check isolation verification before board generation.
+    """
+    import json
+    from pathlib import Path
+
+    from kicad_pipeline.evals.models import GateResult
+
+    # Load component registry
+    registry_path = Path(__file__).parents[3] / "data" / "component_registry.json"
+    if not registry_path.exists():
+        return GateResult(
+            "component_verification", False,
+            f"component registry not found: {registry_path}",
+        )
+
+    registry_data = json.loads(registry_path.read_text())
+    registry = registry_data.get("components", {})
+
+    # Skip refs that aren't real components
+    skip_prefixes = ("MH", "H", "FID", "TP")
+
+    unverified: list[str] = []
+    missing: list[str] = []
+
+    for fp in pcb.footprints:
+        if any(fp.ref.startswith(p) for p in skip_prefixes):
+            continue
+        if not fp.pads:
+            continue
+
+        # Look up by LCSC part number first, then by footprint lib_id
+        # Match against requirements to get LCSC
+        req_comp = next(
+            (c for c in requirements.components if c.ref == fp.ref),
+            None,
+        )
+        lcsc = getattr(req_comp, "lcsc", None) if req_comp else None
+
+        # Try LCSC lookup, then lib_id-based lookup
+        entry = None
+        if lcsc and lcsc in registry:
+            entry = registry[lcsc]
+        else:
+            # Try matching by footprint_id in registry entries
+            for comp_id, comp_data in registry.items():
+                fp_id = comp_data.get("footprint_id", "")
+                if fp_id and fp_id in fp.lib_id:
+                    entry = comp_data
+                    break
+
+        if entry is None:
+            missing.append(fp.ref)
+        elif entry.get("verification_status") != "verified":
+            status = entry.get("verification_status", "unknown")
+            unverified.append(f"{fp.ref}({status})")
+
+    issues: list[str] = []
+    if missing:
+        issues.append(
+            f"{len(missing)} not in registry: {', '.join(sorted(missing)[:8])}"
+        )
+    if unverified:
+        issues.append(
+            f"{len(unverified)} unverified: {', '.join(sorted(unverified)[:8])}"
+        )
+
+    passed = len(issues) == 0
+    detail = "; ".join(issues) if issues else "OK"
+    return GateResult("component_verification", passed, detail)
+
+
+# ---------------------------------------------------------------------------
 # Public: run all DFM gates
 # ---------------------------------------------------------------------------
 
@@ -885,6 +972,7 @@ ALL_DFM_GATES: tuple[str, ...] = (
     "schematic_pcb_sync",
     "component_isolation_zones",
     "board_sizing",
+    "component_verification",
 )
 
 _GATE_FUNCTIONS: dict[
@@ -903,6 +991,7 @@ _GATE_FUNCTIONS: dict[
     "schematic_pcb_sync": check_schematic_pcb_sync,  # type: ignore[dict-item]
     "component_isolation_zones": check_component_isolation_zones,  # type: ignore[dict-item]
     "board_sizing": check_board_sizing,  # type: ignore[dict-item]
+    "component_verification": check_component_verification,  # type: ignore[dict-item]
 }
 
 
