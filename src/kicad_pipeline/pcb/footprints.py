@@ -281,11 +281,8 @@ def _model_terminal_block(
         f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
         f"{model_name}.step"
     )
-    # STEP model origin is at the block center; pads are also centered at origin.
-    # No offset needed.
     return Footprint3DModel(
         path=path,
-        offset=(0.0, 0.0, 0.0),
         rotate=(0.0, 0.0, 180.0),
     )
 
@@ -716,6 +713,69 @@ def _model_for_package(lib_id: str, layer: str = LAYER_F_CU) -> Footprint3DModel
 
     _log.debug("No 3D model mapping for lib_id=%r (KI-017)", lib_id)
     return None
+
+
+def _align_tht_model_to_pad1(fp: Footprint) -> Footprint:
+    """Shift 3D model origin from pin 1 to pad centroid for THT footprints.
+
+    KiCad STEP models for THT components (pin headers, terminal blocks,
+    relays, DIP switches, RJ45, etc.) have their origin at pin 1.  But
+    parametric footprint generators center pads around (0,0).  This function
+    shifts the model so pin 1 of the STEP model aligns with pad 1 of the
+    footprint.
+
+    When the model has a non-zero Z rotation (e.g. terminal blocks at 180°),
+    the offset is applied in the **rotated** coordinate frame.  A 180° rotation
+    negates X and Y, so the offset must also be negated.
+
+    Only applies to through-hole footprints with models that have zero XY offset.
+    JLCPCB footprints are handled separately by ``_apply_jlcpcb_model_offset``.
+    """
+    if not fp.models or not fp.pads or "through_hole" not in fp.attr:
+        return fp
+    model = fp.models[0]
+    # Only correct zero-offset models (already-corrected models have non-zero)
+    if abs(model.offset[0]) > 0.01 or abs(model.offset[1]) > 0.01:
+        return fp
+    # Find pad 1
+    pad1 = next((p for p in fp.pads if p.number == "1"), None)
+    if pad1 is None:
+        return fp
+    ox, oy = pad1.position.x, pad1.position.y
+    if abs(ox) < 0.01 and abs(oy) < 0.01:
+        return fp  # pad 1 already at origin — no shift needed
+
+    # Account for model's own Z rotation.  KiCad applies offset BEFORE
+    # rotation, so if the model is rotated 180°, the offset direction
+    # must be reversed to land at the correct position after rotation.
+    import math
+
+    rz_rad = math.radians(model.rotate[2]) if len(model.rotate) > 2 else 0.0
+    if abs(rz_rad) > 0.01:
+        cos_r = math.cos(rz_rad)
+        sin_r = math.sin(rz_rad)
+        # Inverse rotation: rotate offset into model's local frame
+        rot_ox = ox * cos_r + oy * sin_r
+        rot_oy = -ox * sin_r + oy * cos_r
+        ox, oy = rot_ox, rot_oy
+
+    new_models = tuple(
+        Footprint3DModel(
+            path=m.path,
+            offset=(ox, oy, m.offset[2]),
+            scale=m.scale,
+            rotate=m.rotate,
+        )
+        for m in fp.models
+    )
+    return Footprint(
+        lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
+        position=fp.position, rotation=fp.rotation, layer=fp.layer,
+        pads=fp.pads, graphics=fp.graphics, texts=fp.texts,
+        lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr, models=new_models,
+        datasheet=fp.datasheet, description=fp.description,
+        footprint_source=fp.footprint_source,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4355,6 +4415,11 @@ def footprint_for_component(
     if "ESP32" in upper or "WROOM" in upper:
         fp = _postprocess_esp32_thermal_pad(fp)
         fp = _enrich_esp32_footprint(fp)
+
+    # THT pin-1-at-origin correction: KiCad STEP models for THT components
+    # have origin at pin 1, but parametric generators center pads at (0,0).
+    # Shift the model so pin 1 of the STEP aligns with pad 1 of the footprint.
+    fp = _align_tht_model_to_pad1(fp)
 
     # Ensure courtyard exists and covers all pads with IPC clearance.
     fp = _ensure_courtyard(fp)
