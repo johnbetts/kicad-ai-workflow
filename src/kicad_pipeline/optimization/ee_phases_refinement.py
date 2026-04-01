@@ -1189,25 +1189,18 @@ def _place_relay_driver_columns(
     # Gap between components must account for courtyard extents
     gap = 2.5  # mm clearance — SOD-323 + SOT-23 courtyards need >1.5mm
 
-    # Anchor D at coil pin Y when available for minimal flyback loop area.
-    # Place outside the relay body on the coil-pin side to avoid courtyard
-    # collisions while minimising flyback loop area.
+    # Driver passives ALWAYS go below the relay so the relay sits next
+    # to its screw terminal at the top edge.
+    driver_cursor_y = ky + kh / 2.0 + gap
+    direction = 1.0  # downward
+
     from kicad_pipeline.optimization.ee_phases import _find_coil_pin_abs_pos
     coil_pos = _find_coil_pin_abs_pos(anchor, ctx, positions=ctx.best_positions)
-    coil_y = coil_pos[1] if coil_pos is not None else None
-    if coil_y is not None and coil_y < ky:
-        # Coil pin above relay centre → place driver column above relay
-        relay_top = ky - kh / 2.0
-        driver_cursor_y = relay_top - gap
-        direction = -1.0
-    else:
-        driver_cursor_y = ky + kh / 2.0 + gap
-        direction = 1.0
 
-    # Place D+Q on the coil-pin side, R on the opposite side
+    # Place D+Q on the coil-pin X side, R on the opposite side
     if coil_pos is not None and coil_pos[0] > kx:
-        dq_x = base_right_x   # D+Q on right (coil pin side)
-        r_x = base_left_x     # R on left
+        dq_x = base_right_x
+        r_x = base_left_x
     else:
         dq_x = base_left_x    # D+Q on left
         r_x = base_right_x    # R on right
@@ -1224,12 +1217,8 @@ def _place_relay_driver_columns(
         moved += _place_two_column_ref(q_ref, dq_x, q_y, 180.0, bounds, ctx.best_positions)
         driver_cursor_y = q_y + direction * (qh / 2.0 + gap)
 
-    # R_gate column: same start cursor as driver column
-    if coil_y is not None and coil_y < ky:
-        relay_top = ky - kh / 2.0
-        r_cursor_y = relay_top - gap
-    else:
-        r_cursor_y = ky + kh / 2.0 + gap
+    # R_gate column: same start as driver column (below relay)
+    r_cursor_y = ky + kh / 2.0 + gap
     for r_ref in r_gate:
         _rw, rh = ctx.fp_sizes.get(r_ref, (2.0, 2.0))
         r_y = r_cursor_y + direction * rh / 2.0

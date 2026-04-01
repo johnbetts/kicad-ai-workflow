@@ -485,19 +485,11 @@ def _place_relay_left_column(
 
     gap = 1.5  # mm between component edges
     # Place D just outside the relay body on the coil-pin side.
-    # If the coil pin is in the top half of the relay, place D above;
-    # otherwise place D below.  This minimises flyback loop area while
-    # avoiding courtyard collisions.
-    if coil_y is not None and coil_y < ky:
-        # Coil pin is above relay centre → place D above the relay
-        relay_top = ky - relay_h / 2.0
-        cursor_y = relay_top - gap  # cursor grows upward (decreasing Y)
-    else:
-        # Default: place D below the relay body
-        cursor_y = ky + relay_h / 2.0 + gap
-
-    # Direction: -1 = upward (above relay), +1 = downward (below relay)
-    direction = -1.0 if (coil_y is not None and coil_y < ky) else 1.0
+    # Driver passives ALWAYS go below the relay so the relay can sit
+    # directly next to its screw terminal at the top edge.  The coil
+    # driving circuit (Q, D, R) connects to coil pins on the bottom.
+    cursor_y = ky + relay_h / 2.0 + gap
+    direction = 1.0  # downward (increasing Y)
 
     for d_ref in d_refs:
         _dw, dh = ctx.fp_sizes.get(d_ref, (2.0, 2.0))
@@ -540,16 +532,9 @@ def _place_relay_right_column(
                       for r in ctx.positions if r.startswith("K"))
     gap = 1.5  # mm — matches left column courtyard clearance
 
-    # Mirror left-column direction: place above relay if coil pin is above
-    coil_pos = _find_coil_pin_abs_pos(anchor, ctx) if anchor else None
-    coil_y = coil_pos[1] if coil_pos is not None else None
-    if coil_y is not None and coil_y < ky:
-        relay_top = ky - relay_h / 2.0
-        cursor_y = relay_top - gap
-        direction = -1.0
-    else:
-        cursor_y = ky + relay_h / 2.0 + gap
-        direction = 1.0
+    # Driver passives always below relay (same direction as left column)
+    cursor_y = ky + relay_h / 2.0 + gap
+    direction = 1.0
 
     for r_ref in r_refs:
         _rw, rh = ctx.fp_sizes.get(r_ref, (2.0, 2.0))
