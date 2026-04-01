@@ -166,7 +166,8 @@ def _make_buck_converter() -> Component:
             Pin("5", "VSNS", PinType.INPUT, PinFunction.ANALOG_IN, net="FB"),
             Pin("6", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
             Pin("7", "PH", PinType.OUTPUT, net="SW"),
-            Pin("8", "PAD", PinType.POWER_IN, PinFunction.GND, net="GND"),
+            Pin("8", "PH", PinType.OUTPUT, net="SW"),
+            Pin("EP", "PAD", PinType.POWER_IN, PinFunction.GND, net="GND"),
         ),
     )
 
