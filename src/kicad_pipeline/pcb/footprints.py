@@ -479,19 +479,23 @@ def _apply_registry_model_offset(
     j_cy = (min(jys) + max(jys)) / 2.0
 
     # Determine if the STEP model is pin-1-at-origin (THT packages) or
-    # body-centered (SMD packages).  THT packages with significant
-    # kicad_ref_pad1 offset need the full pad-1 correction.
-    is_pin1_origin_model = (
-        "through_hole" in fp.attr
-        and (abs(kicad_ref_pad1_x) > 1.0 or abs(kicad_ref_pad1_y) > 1.0)
-    )
+    # body-centered (SMD packages).
+    # THT connectors/relays: STEP origin at pad 1 → shift to JLCPCB pad 1.
+    # DIP ICs: STEP origin at body center → treat as SMD (centroid).
+    is_tht = "through_hole" in fp.attr
+    is_dip = "DIP" in fp.lib_id.upper()
+    is_pin1_origin_model = is_tht and not is_dip
 
     if is_pin1_origin_model:
-        # STEP model origin is at pad 1 in the KiCad standard footprint.
-        # kicad_ref_pad1 is pad 1's position relative to centroid.
-        # Shift model from JLCPCB origin (centroid) to pad 1 position.
-        off_x = kicad_ref_pad1_x - j_cx
-        off_y = kicad_ref_pad1_y - j_cy
+        # STEP model origin is at pad 1.  Find JLCPCB pad 1 position
+        # and shift the model there so pin 1 aligns with pad 1.
+        pin1 = next((p for p in fp.pads if p.number == "1"), None)
+        if pin1 is not None:
+            off_x = pin1.position.x
+            off_y = pin1.position.y
+        else:
+            off_x = -j_cx
+            off_y = -j_cy
     else:
         # STEP model origin is at body center (centroid).
         # Shift model from JLCPCB origin to centroid if they differ.
