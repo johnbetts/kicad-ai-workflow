@@ -24,6 +24,7 @@ _ENFORCED_DFM_GATES = frozenset({
     "schematic_pcb_sync",
     "board_sizing",
     "package_match",  # enforced after KI-022 fix
+    "component_verification",  # enforced: all training board components verified 2026-03-31
 })
 
 # Placement DFM gates — tracked (non-blocking) with promotion deadlines.
@@ -35,7 +36,7 @@ _TRACKED_DFM_GATES = frozenset({
     "zone_membership",  # target: enforce by 2026-04-30
     "subcircuit_completeness",  # target: enforce by 2026-04-15
     "component_isolation_zones",  # target: enforce by 2026-04-30
-    "component_verification",  # target: enforce by 2026-04-15 (after all components verified)
+    # component_verification — ENFORCED (promoted 2026-03-31, all training board parts verified)
     # package_match — ENFORCED after KI-022 fix (moved to _ENFORCED_DFM_GATES)
 })
 
