@@ -2489,7 +2489,25 @@ def make_generic_smd_ic(
     pad_w = min(pitch_mm * 0.6, _IC_PAD_W_MAX)
     pad_h = min(pitch_mm * 0.8, _IC_PAD_H_MAX)
     row_span = (half - 1) * pitch_mm
-    col_pitch = row_span / 2.0 + _IC_COL_OFFSET
+
+    # Use package-specific pad spans when the lib_id identifies a known
+    # package.  The generic formula (row_span/2 + offset) produces
+    # wide-body dimensions that don't match narrow-body STEP models.
+    _upper = lib_id.upper()
+    if "SOIC" in _upper and pitch_mm > 1.0 and pin_count <= 8:
+        # SOIC-8 narrow body (3.9mm): pad center at ±2.70mm
+        col_pitch = 2.70
+    elif "SOIC" in _upper and pitch_mm > 1.0 and pin_count <= 16:
+        # SOIC-16 narrow body (3.9mm): same pad span
+        col_pitch = 2.70
+    elif "MSOP" in _upper or "TSSOP" in _upper:
+        # MSOP/TSSOP: narrower body, pad center at ~2.30mm
+        col_pitch = 2.30
+    elif "SOP" in _upper and "MSOP" not in _upper and pitch_mm > 1.0:
+        # SOP wide body (5.3mm): pad center at ~3.40mm
+        col_pitch = 3.40
+    else:
+        col_pitch = row_span / 2.0 + _IC_COL_OFFSET
 
     pads: list[Pad] = []
     for i in range(half):
