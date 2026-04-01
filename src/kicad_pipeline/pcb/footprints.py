@@ -2140,19 +2140,30 @@ def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout]
 
 
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
-    """Return the KiCad standard ESP32-S3-WROOM-1 3D model.
+    """Return the KiCad standard ESP32-S3-WROOM-1 3D model with offset.
 
-    JLCPCB footprints embed ``WIRELM-SMD_ESP32-S3-WROOM-1.step`` which
-    does not exist in KiCad's library.  Override unconditionally with the
-    known-correct path.
+    The STEP model origin matches the KiCad standard footprint origin,
+    where pad 1 is at (-8.75, -5.26).  The JLCPCB footprint may have pad 1
+    at a different Y position, so we compute the offset from the pad-1
+    position difference.
 
-    The model offset is NOT computed here — it is handled generically by
-    :func:`_apply_jlcpcb_model_offset` using the registry's
-    ``kicad_ref_pad1_x/y`` fields.
+    KiCad ESP32-S3-WROOM-1 pad 1 position (from standard library):
+    (-8.75, -5.26) — verified from KiCad 10 installation.
     """
+    _KICAD_ESP32_PAD1 = (-8.75, -5.26)
+
+    # Find our pad 1 position
+    pad1 = next((p for p in fp.pads if p.number == "1"), None)
+    if pad1 is not None:
+        # Offset = difference between our pad 1 and KiCad's pad 1
+        off_x = pad1.position.x - _KICAD_ESP32_PAD1[0]
+        off_y = pad1.position.y - _KICAD_ESP32_PAD1[1]
+    else:
+        off_x, off_y = 0.0, 0.0
+
     return (Footprint3DModel(
         path=f"{KICAD_3DMODEL_VAR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step",
-        offset=(0.0, 0.0, 0.0),
+        offset=(off_x, off_y, 0.0),
     ),)
 
 
@@ -4304,9 +4315,9 @@ def footprint_for_component(
             if "ESP32" in fid_upper or "WROOM" in fid_upper:
                 fp = _postprocess_esp32_thermal_pad(fp)
                 fp = _enrich_esp32_footprint(fp)
-                # Re-apply registry offset after ESP32 enrichment replaced
-                # the 3D model (enrichment sets offset to 0,0,0).
-                fp = _apply_jlcpcb_model_offset(fp, footprint_id)
+                # ESP32 enrichment computes the correct model offset from
+                # pad-1 position difference vs KiCad standard footprint.
+                # Do NOT re-apply generic offset — it would overwrite with (0,0).
 
             # Add exposed thermal pad to JLCPCB footprints for dual-row
             # packages (SOIC/MSOP/TSSOP) when component pins indicate one
