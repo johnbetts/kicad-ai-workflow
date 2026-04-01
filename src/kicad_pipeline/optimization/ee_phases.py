@@ -1207,33 +1207,44 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
         return
 
     _log.info("  3f2: Top-edge screw terminal ordering (%s)", _top_refs)
-    term_gap = 3.0
-    term_widths: list[float] = []
-    for r in _top_refs:
-        w, _h = ctx.fp_sizes.get(r, (2.0, 2.0))
-        term_widths.append(w)
-    total_w = sum(term_widths) + term_gap * (len(_top_refs) - 1)
-    margin = 8.0
-    avail_w = (max_x - min_x) - 2 * margin
-    if total_w < avail_w:
-        start_x = min_x + margin + (avail_w - total_w) / 2.0
-    else:
-        compressed_gap = max(1.0, (avail_w - sum(term_widths)) / max(len(_top_refs) - 1, 1))
-        term_gap = compressed_gap
-        total_w = sum(term_widths) + term_gap * (len(_top_refs) - 1)
-        start_x = min_x + margin
-    cursor_x = start_x
+
+    # Terminals associated with relays get aligned to their relay's X.
+    # Others use evenly-spaced ordering across the top edge.
+    connector_to_relay = _build_connector_to_relay_map(ctx.requirements)
+    relay_aligned: set[str] = set()
     origin_y_target = min_y + 3.0
-    for i, r in enumerate(_top_refs):
-        tw = term_widths[i]
-        origin_x = cursor_x + tw / 2.0
-        # Top edge — wire entry faces outward (rot=0)
-        # Use origin position directly for top-edge placement.
-        # Centroid conversion would offset tall terminals (6-pin) far
-        # from the edge since centroid is at body center, not pin 1.
-        ctx.positions[r] = (origin_x, origin_y_target, 0.0)
-        cursor_x += tw + term_gap
-        _log.info("    %s -> origin(%.1f, %.1f) rot=0", r, origin_x, origin_y_target)
+
+    for r in _top_refs:
+        k_ref = connector_to_relay.get(r)
+        if k_ref and k_ref in ctx.positions:
+            kx = ctx.positions[k_ref][0]
+            px = max(min_x + 2.0, min(max_x - 2.0, kx))
+            ctx.positions[r] = (px, origin_y_target, 0.0)
+            relay_aligned.add(r)
+            _log.info("    %s -> origin(%.1f, %.1f) rot=0 (aligned to %s)",
+                       r, px, origin_y_target, k_ref)
+
+    # Remaining terminals: evenly spaced across the top edge
+    non_relay_refs = [r for r in _top_refs if r not in relay_aligned]
+    if non_relay_refs:
+        term_gap = 3.0
+        term_widths = [ctx.fp_sizes.get(r, (2.0, 2.0))[0] for r in non_relay_refs]
+        total_w = sum(term_widths) + term_gap * (len(non_relay_refs) - 1)
+        margin = 8.0
+        avail_w = (max_x - min_x) - 2 * margin
+        if total_w < avail_w:
+            start_x = min_x + margin + (avail_w - total_w) / 2.0
+        else:
+            compressed_gap = max(1.0, (avail_w - sum(term_widths)) / max(len(non_relay_refs) - 1, 1))
+            term_gap = compressed_gap
+            start_x = min_x + margin
+        cursor_x = start_x
+        for i, r in enumerate(non_relay_refs):
+            tw = term_widths[i]
+            origin_x = cursor_x + tw / 2.0
+            ctx.positions[r] = (origin_x, origin_y_target, 0.0)
+            cursor_x += tw + term_gap
+            _log.info("    %s -> origin(%.1f, %.1f) rot=0", r, origin_x, origin_y_target)
     ctx.top_edge_connector_refs = set(_top_refs)
 
 
