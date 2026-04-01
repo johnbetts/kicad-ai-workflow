@@ -348,11 +348,13 @@ def _model_connector(
 ) -> Footprint3DModel | None:
     """Return 3D model for RJ45, USB-C, Conn_01x, MicroSD connectors."""
     if "RJ45" in upper:
-        # The KiCad library only has Amphenol RJHSE538X which doesn't match
-        # the HR911105A (HanRun) connector used by JLCPCB.  Skip 3D model
-        # rather than show a wrong body.  TODO: add HR911105A STEP model.
-        _log.debug("RJ45: no matching 3D model for HR911105A, skipping")
-        return None
+        # Use the Amphenol RJHSE538X model — close enough to HR911105A
+        # (same standard RJ45 jack envelope) for visual placement review.
+        path = (
+            f"{KICAD_3DMODEL_VAR}/Connector_RJ.3dshapes/"
+            "RJ45_Amphenol_RJHSE538X.step"
+        )
+        return Footprint3DModel(path=path)
 
     if upper.startswith(("USB-C", "USB_C")):
         path = (
@@ -424,8 +426,12 @@ def _model_ws2812(upper: str) -> Footprint3DModel | None:
 def _model_sanyou_relay(
     _name: str, upper: str, _lib_id: str, _layer: str,
 ) -> Footprint3DModel | None:
-    """Match Sanyou-specific relay 3D model."""
-    if "RELAY" in upper and "SANYOU" in upper:
+    """Match Sanyou-specific relay 3D model.
+
+    Matches both KiCad standard names (containing "SANYOU") and
+    JLCPCB/easyeda2kicad names (containing "SRD" — the Sanyou SRD series).
+    """
+    if "RELAY" in upper and ("SANYOU" in upper or "SRD" in upper):
         path = (
             f"{KICAD_3DMODEL_VAR}/Relay_THT.3dshapes/"
             "Relay_SPDT_SANYOU_SRD_Series_Form_C.step"
@@ -446,23 +452,26 @@ def _apply_registry_model_offset(
 ) -> Footprint:
     """Align the 3D model with the actual JLCPCB pad positions.
 
-    KiCad STEP models are body-centered — their origin sits at the pad
-    centroid of the KiCad library footprint.  JLCPCB footprints are also
-    typically body-centered (centroid at origin).  So for most packages
-    the offset is near zero.
+    KiCad STEP models for SMD packages are body-centered — their origin sits
+    at the pad centroid of the KiCad library footprint.  JLCPCB footprints are
+    also typically body-centered (centroid at origin).  So for SMD packages
+    the offset is near zero: ``offset = -JLCPCB_centroid``.
 
-    For packages where the KiCad library footprint is NOT body-centered
-    (pin-1 at origin, like relays or DIP), the model origin sits at pad 1,
-    not at the centroid.  The stored ``kicad_ref_pad1_x/y`` tells us where
-    pad 1 is in the KiCad library, which lets us compute the KiCad centroid
-    and derive the correct offset.
+    For THT packages where the KiCad library footprint has pin-1 at origin
+    (relays, DIP, connectors), the STEP model origin sits at pad 1, NOT at
+    the centroid.  The stored ``kicad_ref_pad1_x/y`` tells us where pad 1
+    is relative to the centroid in the parametric footprint.  Since the
+    JLCPCB footprint also has centroid at origin, we need to shift the model
+    by ``kicad_ref_pad1`` to move its origin from the centroid to where pad 1
+    actually is.
+
+    The offset formulas are::
+
+        SMD (body-centered model): offset = -JLCPCB_centroid
+        THT (pad-1-origin model):  offset = kicad_ref_pad1 - JLCPCB_centroid
 
     For mirrored layouts (SOT-223 where signal pads flip side), applies
     a 180-degree Z rotation.
-
-    The offset formula is::
-
-        offset = KiCad_centroid - JLCPCB_centroid
     """
     if not fp.models or not fp.pads:
         return fp
@@ -473,12 +482,25 @@ def _apply_registry_model_offset(
     j_cx = (min(jxs) + max(jxs)) / 2.0
     j_cy = (min(jys) + max(jys)) / 2.0
 
-    # KiCad pad centroid — for body-centered packages this is ≈(0,0).
-    # For pin-1-origin packages, we can estimate it: the model dispatch
-    # already stripped hardcoded offsets, so the model origin is at the
-    # KiCad footprint origin.  Just use -JLCPCB_centroid.
-    off_x = -j_cx
-    off_y = -j_cy
+    # Determine if the STEP model is pin-1-at-origin (THT packages) or
+    # body-centered (SMD packages).  THT packages with significant
+    # kicad_ref_pad1 offset need the full pad-1 correction.
+    is_pin1_origin_model = (
+        "through_hole" in fp.attr
+        and (abs(kicad_ref_pad1_x) > 1.0 or abs(kicad_ref_pad1_y) > 1.0)
+    )
+
+    if is_pin1_origin_model:
+        # STEP model origin is at pad 1 in the KiCad standard footprint.
+        # kicad_ref_pad1 is pad 1's position relative to centroid.
+        # Shift model from JLCPCB origin (centroid) to pad 1 position.
+        off_x = kicad_ref_pad1_x - j_cx
+        off_y = kicad_ref_pad1_y - j_cy
+    else:
+        # STEP model origin is at body center (centroid).
+        # Shift model from JLCPCB origin to centroid if they differ.
+        off_x = -j_cx
+        off_y = -j_cy
 
     # Detect mirroring for directional IC packages (SOT-223 etc.)
     # where JLCPCB puts signal pads on the opposite side from KiCad.
@@ -486,7 +508,7 @@ def _apply_registry_model_offset(
     pin1 = next((p for p in fp.pads if p.number == "1"), None)
     if pin1 is not None and fp.ref.startswith("U"):
         j1_rel_x = pin1.position.x - j_cx
-        # kicad_ref_pad1 is relative to KiCad origin (≈ centroid for body-centered)
+        # kicad_ref_pad1 is relative to KiCad origin (centroid for body-centered)
         k1_rel_x = kicad_ref_pad1_x
         fid_upper = fp.lib_id.upper()
         if (abs(k1_rel_x) > 1.0 and abs(j1_rel_x) > 1.0
@@ -499,8 +521,8 @@ def _apply_registry_model_offset(
         return fp
 
     _log.debug(
-        "Model offset for %s: (%.2f, %.2f) rot_z=%+.0f (centroid-based)",
-        fp.ref, off_x, off_y, rot_z_correction,
+        "Model offset for %s: (%.2f, %.2f) rot_z=%+.0f (pin1_origin=%s)",
+        fp.ref, off_x, off_y, rot_z_correction, is_pin1_origin_model,
     )
     new_models = tuple(
         Footprint3DModel(
@@ -545,7 +567,7 @@ def _apply_jlcpcb_model_offset(fp: Footprint, footprint_id: str) -> Footprint:
         return fp
     try:
         registry = _get_component_registry()
-        spec = _lookup_registry_spec(registry, footprint_id, fp.lib_id)
+        spec = _lookup_registry_spec(registry, footprint_id, fp.lib_id, lcsc=fp.lcsc)
         if spec is None:
             return fp
         return _apply_registry_model_offset(fp, spec.kicad_ref_pad1_x, spec.kicad_ref_pad1_y)  # type: ignore[union-attr]
@@ -556,12 +578,18 @@ def _apply_jlcpcb_model_offset(fp: Footprint, footprint_id: str) -> Footprint:
 
 def _lookup_registry_spec(
     registry: object, footprint_id: str, lib_id: str,
+    *, lcsc: str | None = None,
 ) -> object:
     """Find a registry ComponentSpec matching the footprint identifiers.
 
-    Tries exact match, bare name, lib_id, then substring matching
+    Tries LCSC match, exact match, bare name, lib_id, then substring matching
     against all registry footprint_ids.
     """
+    # LCSC part number match — most reliable for JLCPCB footprints
+    if lcsc:
+        for comp in registry.all_components():  # type: ignore[attr-defined]
+            if comp.lcsc == lcsc:
+                return comp
     # Exact match
     spec = registry.get(footprint_id)  # type: ignore[union-attr]
     if spec is not None:
@@ -3529,6 +3557,26 @@ def _try_jlcpcb_footprint(
                         ref, lcsc, fh_x_spread, fh_y_spread,
                     )
                     return None
+        # Reject JLCPCB pin headers with horizontal pad layout.
+        # EasyEDA exports sometimes rotate 2-pin THT connectors 90 degrees:
+        # pads at X=±1.27 instead of Y=±1.27.  The KiCad STEP model expects
+        # vertical pin layout.  Reject and fall back to make_pinheader().
+        if (_fid_upper.startswith(("HDR", "PINHEADER", "PIN_HEADER"))
+                and len(fp.pads) >= 2):
+            all_x = [p.position.x for p in fp.pads if p.number.isdigit()]
+            all_y = [p.position.y for p in fp.pads if p.number.isdigit()]
+            if all_x and all_y:
+                x_spread = max(all_x) - min(all_x)
+                y_spread = max(all_y) - min(all_y)
+                if x_spread > y_spread + 0.5:
+                    _log.warning(
+                        "JLCPCB footprint for %s (%s) has horizontal pin layout "
+                        "(X-spread=%.2f > Y-spread=%.2f); rejecting for vertical "
+                        "KiCad model compatibility",
+                        ref, lcsc, x_spread, y_spread,
+                    )
+                    return None
+
         # Tag source provenance for downstream verification tracking
         fp = Footprint(
             lib_id=fp.lib_id, ref=fp.ref, value=fp.value,

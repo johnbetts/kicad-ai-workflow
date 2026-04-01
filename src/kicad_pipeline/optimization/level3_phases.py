@@ -82,30 +82,55 @@ def _compute_relay_row_y(
     row_refs: set[str],
     relay_zone: BoardZone | None,
 ) -> float:
-    """Compute the Y position for the relay row, avoiding top-edge obstacles."""
-    # Find the lowest bottom edge of any component above the relay row
+    """Compute the Y position for the relay row, close to terminal connectors.
+
+    Relays should sit directly below their terminal blocks (J* connectors)
+    with only a small gap.  Terminal blocks are placed at min_y + 5mm by
+    ``_phase_relay_connector_alignment``, with a half-height of ~5mm, giving
+    a bottom edge at ~min_y + 10mm.  The relay center should be just below
+    that: ``terminal_bottom + gap + relay_h/2``.
+    """
+    # Terminal connectors (J*) are placed at min_y + 5mm by
+    # _phase_relay_connector_alignment (which runs AFTER this phase).
+    # Estimate terminal bottom edge: center at min_y + 5, half-height ~5mm
+    # for a 3-pin 5.08mm-pitch terminal block.
+    _TERMINAL_ROW_Y = 5.0  # matches _phase_relay_connector_alignment
+    _TERMINAL_HALF_H = 5.5  # conservative half-height for terminal blocks
+    terminal_bottom = min_y + _TERMINAL_ROW_Y + _TERMINAL_HALF_H
+
+    # Place relay row just below terminal bottom edge with a small gap
+    gap_below_terminals = 2.0  # mm clearance between terminal and relay
+    target_y = terminal_bottom + gap_below_terminals + max_relay_h / 2.0
+
+    # Only large fixed obstacles (ICs, connectors) should push the relay
+    # row down.  Small passives (L, C, R) in the relay corridor will be
+    # repositioned by later phases.  Mounting holes have keepout handled
+    # separately.
+    _MIN_OBSTACLE_AREA = 25.0  # mm^2 — ignore small passives
     relay_x_min = start_x
     relay_x_max = start_x + total_width
     top_obstacle_y = min_y
     for ref, (ox, oy, _orot) in positions.items():
-        if ref in row_refs:
+        if ref in row_refs or ref.startswith("J") or ref.startswith("H"):
             continue
         ow, oh = _rotation_aware_size(ref, positions, fp_sizes)
+        if ow * oh < _MIN_OBSTACLE_AREA:
+            continue
         if ox + ow / 2 > relay_x_min and ox - ow / 2 < relay_x_max:
             obstacle_bot = oy + oh / 2.0
-            if obstacle_bot < avg_y:
+            if obstacle_bot < target_y:
                 top_obstacle_y = max(top_obstacle_y, obstacle_bot)
 
-    min_relay_y = top_obstacle_y + max_relay_h / 2.0 + 2.0
+    # Use obstacle-aware minimum but don't exceed target — the driver
+    # column below the relay needs vertical space for D, Q, R, LED
+    # components (~25mm).  Cap at target_y + 4mm to avoid squeezing.
+    obstacle_y = top_obstacle_y + max_relay_h / 2.0 + 2.0
+    min_relay_y = max(target_y, min(obstacle_y, target_y + 4.0))
 
     if relay_zone is not None:
-        zone_center_y = (relay_zone.rect[1] + relay_zone.rect[3]) / 2.0
         min_relay_y = max(min_relay_y, relay_zone.rect[1] + max_relay_h / 2.0 + 2.0)
-        avg_y = max(avg_y, zone_center_y)
 
-    # Fallback: enforce minimum 25mm from top edge
-    min_relay_y = max(min_relay_y, min_y + max_relay_h / 2.0 + 15.0)
-    return max(min_relay_y, avg_y)
+    return min_relay_y
 
 
 def _place_row_layout(

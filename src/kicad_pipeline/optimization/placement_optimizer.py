@@ -336,18 +336,18 @@ def optimize_placement_ee(
     )
     _enforce_tht_connectors_to_edge(ctx)
 
+    # FINAL: clamp subcircuit spread — pull outlier components toward their
+    # anchor so relay driver subcircuits stay within 25mm spread limit.
+    _clamp_subcircuit_spread(ctx)
+
     # FINAL: push apart any components whose bodies still overlap.
     # NOTE: _phase_build_final reads from ctx.best_positions, not ctx.positions.
     # After all final fixes, sync positions → best_positions.
     # The connector enforcement and collision resolver check courtyard (pads)
     # but miss 3D body collisions — especially connector bodies extending
-    # beyond their pads.
+    # beyond their pads.  Must run AFTER spread clamp, which can pull
+    # components back together and re-create overlaps.
     _final_body_collision_fix(ctx)
-
-    # FINAL: clamp subcircuit spread — pull outlier components toward their
-    # anchor so relay driver subcircuits stay within 25mm spread limit.
-    # Runs LAST (after body fix) and checks for collisions before each move.
-    _clamp_subcircuit_spread(ctx)
 
     # FINAL: re-pull any decoupling caps that drifted during late phases
     # (body collision fix, subcircuit spread clamp, THT enforcement).
@@ -450,9 +450,11 @@ def _clamp_subcircuit_spread(ctx: PlacementContext) -> None:
         if not members:
             continue
 
-        # Components within min_clearance of anchor are in the driver
-        # column and must not be moved (would cause courtyard overlap).
-        immovable = {anchor}
+        # Components placed by the relay driver column layout (D, Q, R,
+        # LED) must not be moved — they were deliberately positioned by
+        # _place_relay_driver_columns.  Also protect components within
+        # min_clearance of anchor (would cause courtyard overlap).
+        immovable = {anchor} | ctx.relay_support_refs
         for r in members:
             rx, ry, _ = ctx.positions[r]
             if math.dist((rx, ry), (ax, ay)) < min_clearance + 10.0:

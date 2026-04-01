@@ -1287,7 +1287,25 @@ def _phase_relay_power_isolation(ctx: PlacementContext) -> None:
     row_y = max_y - 3.0  # near bottom edge
     gap = 1.5
 
-    for ref in sorted(power_refs):
+    # Order: L1, C1, C2, L2 — ferrites flanking caps so both caps are
+    # within proximity of the primary ferrite (L1).  Both bypass caps
+    # connect between +Vrail and GND_rail, so both need to be near L1.
+    l_refs = sorted(r for r in power_refs if r.startswith("L"))
+    c_refs = sorted(r for r in power_refs if r.startswith("C"))
+    other_refs = sorted(r for r in power_refs if not r.startswith("L") and not r.startswith("C"))
+
+    # Ferrites flank caps: L1, C1, C2, ..., L2
+    ordered: list[str] = []
+    if l_refs:
+        ordered.append(l_refs[0])  # L1 first
+    ordered.extend(c_refs)          # All caps in the middle
+    ordered.extend(l_refs[1:])      # L2+ at end
+    ordered.extend(other_refs)
+
+    # Tight gap for power filter cluster — both caps must be <8mm from L1.
+    gap = 0.2
+
+    for ref in ordered:
         w, _h = ctx.fp_sizes.get(ref, (2.0, 2.0))
         px = cursor_x + w / 2.0
         py = row_y
