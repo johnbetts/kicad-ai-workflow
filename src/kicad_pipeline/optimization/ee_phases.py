@@ -566,7 +566,7 @@ def _place_relay_others_grid(
             break
     relay_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))[1] if anchor else 15.0
     k_w = ctx.fp_sizes.get(anchor, (15.0, 15.0))[0] if anchor else 15.0
-    other_y = ky + relay_h / 2.0 + 22.0  # below driver columns
+    other_y = ky + relay_h / 2.0 + 10.0  # below driver column (D+Q ~8mm)
     grid_spacing_x = max(5.0, k_w / 2.0 + 2.0)
     for i, ref in enumerate(other_refs):
         _w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
@@ -640,18 +640,20 @@ def _phase_relay_drivers(ctx: PlacementContext) -> None:
         q_refs, d_refs, all_r_refs, other_refs = _classify_relay_support_members(
             support_members,
         )
-        # LED indicator diodes handled by _phase_relay_leds (phase 3b2).
-        d_flyback_refs, _d_led_indicator_refs = _split_flyback_and_led_diodes(d_refs, ctx)
-        d_refs = d_flyback_refs
+        # ALL passives go below the relay as one unit (merged 3b + 3b2).
+        # Split flyback vs LED diodes for column ordering only — both placed here.
+        d_flyback_refs, d_led_refs = _split_flyback_and_led_diodes(d_refs, ctx)
 
-        r_gate_refs, r_other_refs = _split_gate_resistors(all_r_refs, q_refs, ctx)
+        r_gate_refs, r_led_refs = _split_gate_resistors(all_r_refs, q_refs, ctx)
         r_gate_refs.extend(
-            _find_external_gate_resistors(q_refs, r_gate_refs, r_other_refs, ctx),
+            _find_external_gate_resistors(q_refs, r_gate_refs, r_led_refs, ctx),
         )
-        other_refs.extend(r_other_refs)
+        # LED refs go into other_refs so they're placed in the column below drivers
+        other_refs.extend(r_led_refs)
+        other_refs.extend(d_led_refs)
 
         _place_relay_driver_columns(
-            anchor, kx, ky, _krot, d_refs, q_refs, r_gate_refs, other_refs, ctx,
+            anchor, kx, ky, _krot, d_flyback_refs, q_refs, r_gate_refs, other_refs, ctx,
         )
 
 

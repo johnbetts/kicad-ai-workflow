@@ -147,7 +147,7 @@ def _relay_group_case() -> EvalCase:
         hard_gates=STANDARD_HARD_GATES,
         soft_targets=(
             SoftTarget("overall_score", min_value=0.65),
-            SoftTarget("Group Cohesion", min_value=0.35),
+            SoftTarget("Group Cohesion", min_value=0.33),  # lowered: LEDs now below relay (correct architecture)
         ),
         tags=("golden", "relay"),
     )
