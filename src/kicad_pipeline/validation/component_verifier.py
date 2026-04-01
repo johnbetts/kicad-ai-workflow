@@ -405,9 +405,23 @@ def _check_3d_body_pad_alignment(fp: Footprint, spec: ComponentSpec) -> CheckRes
     j_cx = (min(jxs) + max(jxs)) / 2.0
     j_cy = (min(jys) + max(jys)) / 2.0
 
-    # Expected offset = -JLCPCB_centroid (aligns body center with pad center)
-    expected_ox = -j_cx
-    expected_oy = -j_cy
+    # Determine if STEP model is pin-1-at-origin (THT) or body-centered (SMD).
+    # Must match the logic in _apply_registry_model_offset() in footprints.py.
+    is_pin1_origin = (
+        spec.expected_pad_type == "thru_hole"
+        and (abs(spec.kicad_ref_pad1_x) > 1.0
+             or abs(spec.kicad_ref_pad1_y) > 1.0)
+    )
+
+    if is_pin1_origin:
+        # THT: STEP model origin is at pad 1. Offset shifts model from
+        # JLCPCB centroid to the pad-1 position.
+        expected_ox = spec.kicad_ref_pad1_x - j_cx
+        expected_oy = spec.kicad_ref_pad1_y - j_cy
+    else:
+        # SMD: STEP model origin is at body center (centroid).
+        expected_ox = -j_cx
+        expected_oy = -j_cy
 
     model = fp.models[0]
     model_ox = model.offset[0] if len(model.offset) > 0 else 0.0
@@ -419,6 +433,7 @@ def _check_3d_body_pad_alignment(fp: Footprint, spec: ComponentSpec) -> CheckRes
     # Modules (ESP32) have body extending past pads (antenna) so the STEP
     # model origin may be offset from pad centroid by several mm.
     tolerance = 5.0 if spec.ref.startswith("U") else 2.0
+    model_type = "pin1-origin" if is_pin1_origin else "body-centered"
     ok = diff <= tolerance
     return CheckResult(
         name="3d_body_pad_alignment",
@@ -426,7 +441,7 @@ def _check_3d_body_pad_alignment(fp: Footprint, spec: ComponentSpec) -> CheckRes
         detail=(
             f"model offset=({model_ox:.2f},{model_oy:.2f}), "
             f"expected=({expected_ox:.2f},{expected_oy:.2f}), "
-            f"diff={diff:.2f}mm"
+            f"diff={diff:.2f}mm ({model_type})"
         ),
         severity="major",
     )
