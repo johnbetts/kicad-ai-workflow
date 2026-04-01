@@ -12,8 +12,8 @@
       "datasheet_url": null,
       "ref_prefix": "L",
       "pins": [],
-      "verification_status": "unverified",
-      "last_verified_commit": "19ae64d",
+      "verification_status": "verified",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -282,7 +282,7 @@
       "ref_prefix": "C",
       "pins": [],
       "verification_status": "verified",
-      "last_verified_commit": "19ae64d",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -394,7 +394,7 @@
       "ref_prefix": "R",
       "pins": [],
       "verification_status": "verified",
-      "last_verified_commit": "19ae64d",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -596,8 +596,8 @@
           "pin_type": "passive"
         }
       ],
-      "verification_status": "unverified",
-      "last_verified_commit": "19ae64d",
+      "verification_status": "verified",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -629,7 +629,7 @@
       "ref_prefix": "R",
       "pins": [],
       "verification_status": "verified",
-      "last_verified_commit": "19ae64d",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -1261,8 +1261,8 @@
           "pin_type": "passive"
         }
       ],
-      "verification_status": "unverified",
-      "last_verified_commit": "19ae64d",
+      "verification_status": "verified",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -1510,7 +1510,7 @@
         }
       ],
       "verification_status": "verified",
-      "last_verified_commit": "19ae64d",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -1552,8 +1552,8 @@
           "pin_type": "passive"
         }
       ],
-      "verification_status": "unverified",
-      "last_verified_commit": "19ae64d",
+      "verification_status": "verified",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },
@@ -1627,8 +1627,8 @@
           "pin_type": "passive"
         }
       ],
-      "verification_status": "unverified",
-      "last_verified_commit": "19ae64d",
+      "verification_status": "verified",
+      "last_verified_commit": "52c74d5",
       "known_issues": [],
       "verified_fixes": []
     },

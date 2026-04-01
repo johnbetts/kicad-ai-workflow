@@ -503,8 +503,10 @@ class ComponentRegistry:
 
         Also propagates footprint-level fields (``kicad_ref_pad1_x/y``,
         ``model_rotation_z``, ``model_offset_xy_max_mm``) back to the
-        matching :class:`FootprintSpec` so that ``save()`` persists them
-        to the footprint catalog.
+        matching :class:`FootprintSpec` and part-level fields
+        (``verification_status``, ``last_verified_commit``, ``known_issues``,
+        ``verified_fixes``) back to the matching :class:`PartSpec` so that
+        ``save()`` persists them to both catalogs.
         """
         old = self._specs[component_id]
         field_dict: dict[str, object] = {
@@ -525,6 +527,18 @@ class ComponentRegistry:
             }
             fp_dict.update(fp_changes)
             self._footprints[new_spec.footprint_id] = FootprintSpec(**fp_dict)  # type: ignore[arg-type]
+
+        # Propagate part-level changes back to _parts
+        part_fields = ("verification_status", "last_verified_commit",
+                       "known_issues", "verified_fixes")
+        part_changes = {k: v for k, v in kwargs.items() if k in part_fields}
+        if part_changes and component_id in self._parts:
+            old_part = self._parts[component_id]
+            part_dict: dict[str, object] = {
+                f.name: getattr(old_part, f.name) for f in fields(old_part)
+            }
+            part_dict.update(part_changes)
+            self._parts[component_id] = PartSpec(**part_dict)  # type: ignore[arg-type]
 
     @staticmethod
     def _parse_footprint_spec(entry: dict[str, object]) -> FootprintSpec:
