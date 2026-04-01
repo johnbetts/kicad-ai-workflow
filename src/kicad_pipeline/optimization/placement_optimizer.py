@@ -344,6 +344,11 @@ def optimize_placement_ee(
     # beyond their pads.
     _final_body_collision_fix(ctx)
 
+    # FINAL: clamp subcircuit spread — pull outlier components toward their
+    # anchor so relay driver subcircuits stay within 25mm spread limit.
+    # Runs LAST (after body fix) and checks for collisions before each move.
+    _clamp_subcircuit_spread(ctx)
+
     # Sync final positions to best_positions — _phase_build_final reads best_positions
     ctx.best_positions = dict(ctx.positions)
 
@@ -394,6 +399,114 @@ def _resolve_body_pair(
     _log.info("  Final body fix: pushed %s away from %s (overlap %.1fx%.1f)",
                mover, ref_a if mover == ref_b else ref_b, overlap_x, overlap_y)
     return True
+
+
+def _clamp_subcircuit_spread(ctx: PlacementContext) -> None:
+    """Pull outlier subcircuit members toward their anchor.
+
+    After all collision resolution and body fixes, some subcircuit
+    components may have been pushed far from their anchor.  This clamp
+    pulls them back so the max pairwise spread stays within limits.
+
+    Only moves components that are farthest from the subcircuit centroid,
+    and maintains minimum clearance from the anchor body to avoid
+    creating new collisions.
+    """
+    import math
+    from kicad_pipeline.optimization.functional_grouper import (
+        SubCircuitType,
+    )
+
+    _SPREAD_LIMITS: dict[SubCircuitType, float] = {
+        SubCircuitType.RELAY_DRIVER: 25.0,
+    }
+
+    for sc in ctx.subcircuits:
+        limit = _SPREAD_LIMITS.get(sc.circuit_type)
+        if limit is None:
+            continue
+        anchor = sc.anchor_ref
+        if anchor not in ctx.positions:
+            continue
+        ax, ay, _ = ctx.positions[anchor]
+        aw, ah = ctx.fp_sizes.get(anchor, (2.0, 2.0))
+        # Rotation-aware anchor half-extents
+        arot = ctx.positions[anchor][2]
+        if arot % 180 in (90, 270):
+            aw, ah = ah, aw
+        # Minimum distance from anchor center to avoid overlap
+        min_clearance = max(aw, ah) / 2.0 + 2.0
+
+        members = [r for r in sc.refs if r != anchor and r in ctx.positions]
+        if not members:
+            continue
+
+        # Components within min_clearance of anchor are in the driver
+        # column and must not be moved (would cause courtyard overlap).
+        immovable = {anchor}
+        for r in members:
+            rx, ry, _ = ctx.positions[r]
+            if math.dist((rx, ry), (ax, ay)) < min_clearance + 10.0:
+                immovable.add(r)
+
+        movable = [r for r in members if r not in immovable]
+        if not movable:
+            continue
+
+        for _ in range(5):
+            all_refs = [anchor] + members
+            all_xy = [(ctx.positions[r][0], ctx.positions[r][1]) for r in all_refs]
+
+            max_dist = 0.0
+            pair_i, pair_j = 0, 0
+            for i in range(len(all_xy)):
+                for j in range(i + 1, len(all_xy)):
+                    d = math.dist(all_xy[i], all_xy[j])
+                    if d > max_dist:
+                        max_dist = d
+                        pair_i, pair_j = i, j
+
+            if max_dist <= limit:
+                break
+
+            # Find the movable ref farthest from anchor
+            far_ref = ""
+            far_dist = 0.0
+            for r in movable:
+                rx, ry, _ = ctx.positions[r]
+                d = math.dist((rx, ry), (ax, ay))
+                if d > far_dist:
+                    far_dist = d
+                    far_ref = r
+
+            if not far_ref or far_dist < min_clearance:
+                break
+
+            fx, fy, frot = ctx.positions[far_ref]
+            # Pull toward anchor but stop at min_clearance
+            overshoot = max_dist - limit
+            pull_fraction = min(overshoot / far_dist, 0.7)
+            new_x = fx + (ax - fx) * pull_fraction
+            new_y = fy + (ay - fy) * pull_fraction
+
+            # Ensure we don't get closer than min_clearance to anchor
+            new_dist = math.dist((new_x, new_y), (ax, ay))
+            if new_dist < min_clearance:
+                scale = min_clearance / new_dist if new_dist > 0 else 1.0
+                new_x = ax + (new_x - ax) * scale
+                new_y = ay + (new_y - ay) * scale
+
+            bx0, by0, bx1, by1 = ctx.bounds
+            new_x = max(bx0 + 2.0, min(bx1 - 2.0, new_x))
+            new_y = max(by0 + 2.0, min(by1 - 2.0, new_y))
+            ctx.positions[far_ref] = (new_x, new_y, frot)
+            new_spread = max_dist - overshoot * pull_fraction
+            _log.info(
+                "  Spread clamp: pulled %s from (%.1f,%.1f) to (%.1f,%.1f) "
+                "[%s spread %.1f→~%.1f target %.1f]",
+                far_ref, fx, fy, new_x, new_y,
+                sc.circuit_type.name, max_dist, new_spread, limit,
+            )
 
 
 def _final_body_collision_fix(ctx: PlacementContext) -> None:

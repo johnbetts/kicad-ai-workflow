@@ -1249,30 +1249,33 @@ def _place_relay_driver_columns(
         )
         moved += count_other
 
-    # When driver column is above relay, LEDs go below the relay body
-    led_cursor_y = ky + kh / 2.0 + gap if direction < 0 else driver_cursor_y
+    # ALL passives on the coil side — LEDs continue from the R_gate column
+    # in the same direction as drivers (above relay when coil is above).
     moved += _place_relay_led_members(
-        led_members, dq_x, kx, kw, ky, bounds, ctx, led_cursor_y,
+        led_members, r_x, kx, kw, ky, bounds, ctx, r_cursor_y,
+        direction=direction,
     )
     return moved
 
 
 def _place_relay_led_members(
     led_members: list[str],
-    left_x: float,
+    col_x: float,
     kx: float,
     kw: float,
     ky: float,
     bounds: tuple[float, float, float, float],
     ctx: PlacementContext,
     cursor_y: float = 0.0,
+    *,
+    direction: float = 1.0,
 ) -> int:
-    """Place LED resistors and diodes in the left column below Q. Returns moved count.
+    """Place LED resistors and diodes on the coil side of the relay.
 
     Args:
-        cursor_y: Y position of the bottom edge of the last placed component in the
-            left column.  When > 0 the LED members are placed below this cursor
-            with size-aware gaps; when 0 a fallback offset from *ky* is used.
+        col_x: X coordinate of the column to place LEDs in.
+        cursor_y: Cursor edge from the last placed component in the column.
+        direction: +1.0 = downward (increasing Y), -1.0 = upward (decreasing Y).
     """
     led_r = sorted(r for r in led_members if r.startswith("R"))
     led_d = sorted(r for r in led_members if r.startswith("D"))
@@ -1280,24 +1283,24 @@ def _place_relay_led_members(
     gap = 2.0  # mm clearance between component edges
     moved = 0
 
-    # Use cursor from left-column placement when available
+    # Use cursor from column placement when available
     if cursor_y <= 0.0:
         kh = ctx.fp_sizes.get(
             next((r for r in ctx.best_positions if r.startswith("K")), ""), (18.0, 16.0),
         )[1]
-        cursor_y = ky + kh / 2.0 + 14.0  # legacy fallback below driver column
+        cursor_y = ky + kh / 2.0 + 14.0  # legacy fallback
 
     for ref in led_r:
         _rw, rh = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        py = cursor_y + rh / 2.0
-        moved += _place_two_column_ref(ref, left_x, py, 0.0, bounds, ctx.best_positions)
-        cursor_y = py + rh / 2.0 + gap
+        py = cursor_y + direction * rh / 2.0
+        moved += _place_two_column_ref(ref, col_x, py, 0.0, bounds, ctx.best_positions)
+        cursor_y = py + direction * (rh / 2.0 + gap)
 
     for ref in led_d:
         _dw, dh = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        py = cursor_y + dh / 2.0
-        moved += _place_two_column_ref(ref, left_x, py, 180.0, bounds, ctx.best_positions)
-        cursor_y = py + dh / 2.0 + gap
+        py = cursor_y + direction * dh / 2.0
+        moved += _place_two_column_ref(ref, col_x, py, 180.0, bounds, ctx.best_positions)
+        cursor_y = py + direction * (dh / 2.0 + gap)
 
     if led_other:
         count_led, _, _, _ = _place_grid_below_anchor(
