@@ -1398,28 +1398,28 @@ def _phase_late_relay_realignment(
 
 
 def _phase_mcu_decoupling_repull(ctx: PlacementContext) -> None:
-    """MCU decoupling re-pull — re-pull caps tight against U3's LEFT side."""
+    """MCU decoupling re-pull — re-pull caps tight against MCU's LEFT side."""
     from kicad_pipeline.optimization.functional_grouper import _find_mcu_ref as _find_mcu
     mcu_ref_c3 = _find_mcu(ctx.requirements)
-    if not (mcu_ref_c3 and mcu_ref_c3 in ctx.best_positions):
+    if not (mcu_ref_c3 and mcu_ref_c3 in ctx.positions):
         return
 
     bounds = ctx.bounds
-    _mcu_fx, _mcu_fy, _mcu_fr = ctx.best_positions[mcu_ref_c3]
+    _mcu_fx, _mcu_fy, _mcu_fr = ctx.positions[mcu_ref_c3]
     _mcu_fw, _mcu_fh = ctx.fp_sizes.get(mcu_ref_c3, (19.5, 25.4))
     if _mcu_fr % 180 in (90.0, 270.0):
         _mcu_fw, _mcu_fh = _mcu_fh, _mcu_fw
     _mcu_left = _mcu_fx - _mcu_fw / 2.0
     _mcu_decoup_pulled = 0
     _mcu_decoup_refs = sorted(
-        r for r in ctx.best_positions
+        r for r in ctx.positions
         if r.startswith("C") and r in ctx.mcu_peripheral_refs
     )
     _cap_x = _mcu_left - 3.0
     _cap_y_start = _mcu_fy - (_mcu_fh / 3.0)
     _cap_y = _cap_y_start
     for ref in _mcu_decoup_refs:
-        cx, cy, crot = ctx.best_positions[ref]
+        cx, cy, crot = ctx.positions[ref]
         cw, ch = ctx.fp_sizes.get(ref, (2.5, 1.5))
         dx_edge = max(0.0, abs(cx - _mcu_fx) - (_mcu_fw + cw) / 2.0)
         dy_edge = max(0.0, abs(cy - _mcu_fy) - (_mcu_fh + ch) / 2.0)
@@ -1430,10 +1430,10 @@ def _phase_mcu_decoupling_repull(ctx: PlacementContext) -> None:
             _cap_y += ch + 1.0
             tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
             ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
-            ctx.best_positions[ref] = (tx, ty, crot)
+            ctx.positions[ref] = (tx, ty, crot)
             _mcu_decoup_pulled += 1
     if _mcu_decoup_pulled:
-        _log.info("MCU decoupling re-pull: %d caps to U3 left side",
+        _log.info("MCU decoupling re-pull: %d caps to MCU left side",
                   _mcu_decoup_pulled)
 
 

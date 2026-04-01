@@ -349,6 +349,14 @@ def optimize_placement_ee(
     # Runs LAST (after body fix) and checks for collisions before each move.
     _clamp_subcircuit_spread(ctx)
 
+    # FINAL: re-pull any decoupling caps that drifted during late phases
+    # (body collision fix, subcircuit spread clamp, THT enforcement).
+    # This is the last decoupling enforcement — nothing runs after it.
+    from kicad_pipeline.optimization.ee_phases_refinement import (
+        _post_clamp_decoupling_repull,
+    )
+    _post_clamp_decoupling_repull(ctx)
+
     # Sync final positions to best_positions — _phase_build_final reads best_positions
     ctx.best_positions = dict(ctx.positions)
 
@@ -419,6 +427,7 @@ def _clamp_subcircuit_spread(ctx: PlacementContext) -> None:
 
     _SPREAD_LIMITS: dict[SubCircuitType, float] = {
         SubCircuitType.RELAY_DRIVER: 25.0,
+        SubCircuitType.ADC_CHANNEL: 28.0,
     }
 
     for sc in ctx.subcircuits:

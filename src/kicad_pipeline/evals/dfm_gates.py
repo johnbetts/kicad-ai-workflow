@@ -354,19 +354,57 @@ def check_mounting_hole_clearance(
 # Gate #6: Distance/grouping
 # ---------------------------------------------------------------------------
 
+def _edge_to_edge_distance(
+    x1: float, y1: float, w1: float, h1: float,
+    x2: float, y2: float, w2: float, h2: float,
+) -> float:
+    """Compute edge-to-edge distance between two axis-aligned bounding boxes.
+
+    Returns 0.0 if the boxes overlap or touch.  This is the correct metric
+    for decoupling proximity — what matters electrically is the trace length
+    from the cap pad to the IC pad, which correlates with edge gap, NOT
+    center-to-center distance.  A cap sitting 0.5mm from the edge of a
+    25mm-wide ESP32 module is well-placed even though the center-to-center
+    distance would be ~13mm.
+    """
+    dx = max(0.0, abs(x1 - x2) - (w1 + w2) / 2.0)
+    dy = max(0.0, abs(y1 - y2) - (h1 + h2) / 2.0)
+    if dx == 0.0 and dy == 0.0:
+        return 0.0
+    if dx == 0.0:
+        return dy
+    if dy == 0.0:
+        return dx
+    return math.sqrt(dx * dx + dy * dy)
+
+
 def check_decoupling_proximity(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
 ) -> GateResult:
-    """Verify decoupling caps are within threshold distance of their ICs."""
+    """Verify decoupling caps are within threshold distance of their ICs.
+
+    Uses edge-to-edge distance (not center-to-center) because the
+    electrically relevant metric is the gap between component bodies,
+    which correlates with trace length.
+    """
     from kicad_pipeline.evals.models import GateResult
+    from kicad_pipeline.pcb.footprints import estimate_courtyard_mm
 
     issues: list[str] = []
 
-    # Build ref → position map
+    # Build ref → (position, size) map
     pos_map: dict[str, tuple[float, float]] = {}
+    size_map: dict[str, tuple[float, float]] = {}
+    rot_map: dict[str, float] = {}
     for fp in pcb.footprints:
         pos_map[fp.ref] = (fp.position.x, fp.position.y)
+        w, h = estimate_courtyard_mm(fp)
+        rot_map[fp.ref] = fp.rotation
+        # Swap width/height for 90/270 degree rotations
+        if fp.rotation % 180 in (90.0, 270.0):
+            w, h = h, w
+        size_map[fp.ref] = (w, h)
 
     # Detect decoupling subcircuits
     try:
@@ -384,13 +422,17 @@ def check_decoupling_proximity(
         anchor_pos = pos_map.get(sc.anchor_ref)
         if anchor_pos is None:
             continue
+        aw, ah = size_map.get(sc.anchor_ref, (5.0, 5.0))
         for ref in sc.refs:
             if ref == sc.anchor_ref:
                 continue
             cap_pos = pos_map.get(ref)
             if cap_pos is None:
                 continue
-            dist = _distance(*anchor_pos, *cap_pos)
+            cw, ch = size_map.get(ref, (1.5, 1.0))
+            dist = _edge_to_edge_distance(
+                *anchor_pos, aw, ah, *cap_pos, cw, ch,
+            )
             if dist > _DECOUPLING_MAX_DISTANCE_MM:
                 issues.append(
                     f"{ref}→{sc.anchor_ref}: {dist:.1f}mm (max {_DECOUPLING_MAX_DISTANCE_MM}mm)"
