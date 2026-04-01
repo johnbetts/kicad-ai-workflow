@@ -252,8 +252,8 @@ def _make_screw_terminal(ch: int) -> Component:
         lcsc="C8465",
         description=f"3-pin 5.08mm screw terminal — Channel {ch}",
         pins=(
-            Pin("1", "COM", PinType.PASSIVE, net=f"RELAY_COM{ch}"),
-            Pin("2", "NO", PinType.PASSIVE, net=f"RELAY_NO{ch}"),
+            Pin("1", "NO", PinType.PASSIVE, net=f"RELAY_NO{ch}"),
+            Pin("2", "COM", PinType.PASSIVE, net=f"RELAY_COM{ch}"),
             Pin("3", "NC", PinType.PASSIVE, net=f"RELAY_NC{ch}"),
         ),
     )
