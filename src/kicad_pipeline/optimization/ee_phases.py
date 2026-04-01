@@ -247,6 +247,87 @@ def _build_connector_to_relay_map(
     return connector_to_relay
 
 
+def _best_connector_rotation(
+    j_ref: str, k_ref: str, jx: float, jy: float,
+    ctx: PlacementContext,
+) -> float:
+    """Pick terminal rotation (0 or 180) that minimizes ratsnest crossings.
+
+    For each candidate rotation, compute the pad-to-relay-pad line segments
+    and count how many pairs cross.  Return the rotation with fewer crossings.
+    """
+    import math
+
+    # Get terminal pad local positions
+    j_pads: dict[str, tuple[float, float]] = {}
+    for fp in ctx.initial_pcb.footprints:
+        if fp.ref == j_ref:
+            for pad in fp.pads:
+                j_pads[pad.number] = (pad.position.x, pad.position.y)
+            break
+
+    # Get relay pad local positions
+    k_pads: dict[str, tuple[float, float]] = {}
+    for fp in ctx.initial_pcb.footprints:
+        if fp.ref == k_ref:
+            for pad in fp.pads:
+                k_pads[pad.number] = (pad.position.x, pad.position.y)
+            break
+
+    if not j_pads or not k_pads:
+        return 0.0
+
+    # Find shared nets between J and K
+    shared: list[tuple[str, str]] = []  # (j_pin, k_pin)
+    for net in ctx.requirements.nets:
+        j_pin = k_pin = None
+        for conn in net.connections:
+            if conn.ref == j_ref:
+                j_pin = conn.pin
+            elif conn.ref == k_ref:
+                k_pin = conn.pin
+        if j_pin and k_pin:
+            shared.append((j_pin, k_pin))
+
+    if len(shared) < 2:
+        return 0.0
+
+    kx, ky, krot = ctx.positions[k_ref]
+
+    def _rotate_pad(px: float, py: float, rot: float) -> tuple[float, float]:
+        import math as m
+        rad = m.radians(rot)
+        return px * m.cos(rad) - py * m.sin(rad), px * m.sin(rad) + py * m.cos(rad)
+
+    def _count_crossings(j_rot: float) -> int:
+        segments = []
+        for j_pin, k_pin in shared:
+            if j_pin not in j_pads or k_pin not in k_pads:
+                continue
+            jdx, jdy = _rotate_pad(*j_pads[j_pin], j_rot)
+            kdx, kdy = _rotate_pad(*k_pads[k_pin], krot)
+            segments.append(((jx + jdx, jy + jdy), (kx + kdx, ky + kdy)))
+
+        crossings = 0
+        for i in range(len(segments)):
+            for j in range(i + 1, len(segments)):
+                a1, a2 = segments[i]
+                b1, b2 = segments[j]
+                # CCW test for segment intersection
+                def ccw(A: tuple[float, float], B: tuple[float, float], C: tuple[float, float]) -> bool:
+                    return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+                if ccw(a1, b1, b2) != ccw(a2, b1, b2) and ccw(a1, a2, b1) != ccw(a1, a2, b2):
+                    crossings += 1
+        return crossings
+
+    c0 = _count_crossings(0.0)
+    c180 = _count_crossings(180.0)
+    best = 0.0 if c0 <= c180 else 180.0
+    _log.info("    %s rotation: 0°=%d crossings, 180°=%d crossings → %.0f°",
+               j_ref, c0, c180, best)
+    return best
+
+
 def _phase_relay_connector_alignment(ctx: PlacementContext) -> None:
     """3a2: Align relay terminal connectors (J) to their relay (K) X position.
 
@@ -276,10 +357,14 @@ def _phase_relay_connector_alignment(ctx: PlacementContext) -> None:
 
         kx, _ky, _krot = ctx.positions[k_ref]
 
-        # Set J position: same X as relay, near top edge, rotated 180 deg
         px = max(min_x + 2.0, min(max_x - 2.0, kx))
         py = max(min_y + 2.0, min(max_y - 2.0, terminal_y))
-        ctx.positions[j_ref] = (px, py, 180.0)
+
+        # Net-aware rotation: pick rot that minimizes ratsnest crossings
+        best_rot = _best_connector_rotation(
+            j_ref, k_ref, px, py, ctx,
+        )
+        ctx.positions[j_ref] = (px, py, best_rot)
         ctx.relay_support_refs.add(j_ref)
         ctx.fixed_refs.add(j_ref)  # protect from phase 3f/3f2 overriding rotation
         aligned += 1
