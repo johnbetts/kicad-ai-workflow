@@ -795,7 +795,13 @@ def _find_relay_led_pairs(
 
 def _relay_led_cursor_start(
     ctx: PlacementContext, left_x: float, ky: float,
+    direction: float = 1.0,
 ) -> float:
+    """Compute cursor Y for LED column start, continuing from Q position.
+
+    Args:
+        direction: +1.0 = downward (below relay), -1.0 = upward (above relay).
+    """
     gap = 1.5
     q_refs = [
         r for r in ctx.relay_support_refs
@@ -804,11 +810,19 @@ def _relay_led_cursor_start(
         and abs(ctx.positions[r][1] - ky) < 25.0
     ]
     if q_refs:
+        if direction < 0:
+            # Upward: continue above the topmost Q (smallest Y)
+            return min(
+                ctx.positions[qr][1] - ctx.fp_sizes.get(qr, (2.0, 2.0))[1] / 2.0
+                for qr in q_refs
+            ) - gap
+        # Downward: continue below the bottommost Q (largest Y)
         return max(
             ctx.positions[qr][1] + ctx.fp_sizes.get(qr, (2.0, 2.0))[1] / 2.0
             for qr in q_refs
         ) + gap
-    return ky + 16.8
+    # Fallback: no Q refs found
+    return ky + direction * 16.8
 
 
 def _place_led_column_refs(
@@ -819,56 +833,57 @@ def _place_led_column_refs(
     left_x: float,
     cursor_y: float,
     relay_led_refs: set[str],
+    direction: float = 1.0,
 ) -> None:
+    """Place LED column refs continuing in *direction* from cursor_y.
+
+    Args:
+        direction: +1.0 = downward (increasing Y), -1.0 = upward (decreasing Y).
+    """
     bounds = ctx.bounds
     gap = 1.5
     for ref in r_led_refs:
         _rw, rh = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        py = cursor_y + rh / 2.0
+        py = cursor_y + direction * rh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[ref] = (px, py, 0.0)
         ctx.relay_support_refs.add(ref)
         relay_led_refs.add(ref)
-        cursor_y = py + rh / 2.0 + gap
+        cursor_y = py + direction * (rh / 2.0 + gap)
     for ref in d_led_refs:
         _dw, dh = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        py = cursor_y + dh / 2.0
+        py = cursor_y + direction * dh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         ctx.positions[ref] = (px, py, 180.0)
         ctx.relay_support_refs.add(ref)
         relay_led_refs.add(ref)
-        cursor_y = py + dh / 2.0 + gap
+        cursor_y = py + direction * (dh / 2.0 + gap)
     for i, ref in enumerate(other_led_refs):
         _ow, oh = ctx.fp_sizes.get(ref, (2.0, 2.0))
-        py = cursor_y + oh / 2.0
+        py = cursor_y + direction * oh / 2.0
         px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, left_x + i * 3.0))
         py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
         _, _, rot = ctx.positions[ref]
         ctx.positions[ref] = (px, py, rot)
         ctx.relay_support_refs.add(ref)
         relay_led_refs.add(ref)
-        cursor_y = py + oh / 2.0 + gap
+        cursor_y = py + direction * (oh / 2.0 + gap)
 
 
 def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[str]]:
-    """3b2: Relay LED indicator placement — LEFT column below Q.
+    """3b2: Relay LED indicator placement — same column & direction as drivers.
 
-    Pad-connectivity-driven layout (continuation of two-column pattern):
-
-    LEFT column (dx ~ -4.3mm from K.x):
-      R_LED at dy=+16.8, rot=0    (pad 1 up toward Q collector / COIL net)
-      D_LED at dy=+19.1, rot=180  (anode up toward R_LED pad 2)
-
-    The logic: R_LED pad 1 connects to the COIL net (same as Q collector),
-    so it goes directly below Q.  D_LED anode connects to R_LED pad 2,
-    so it goes directly below R_LED with anode facing up (180 deg).
+    All support components (D_flyback, Q, R_gate, R_LED, D_LED) go on the
+    COIL SIDE of the relay.  LEDs continue the left column past Q, in the
+    same direction (upward when coil pin is above relay centre, downward
+    otherwise).
 
     Returns:
         Tuple of (relay_leds mapping, relay_led_refs set) for use by later phases.
     """
-    _log.info("  3b2: Relay LED indicator placement (two-column)")
+    _log.info("  3b2: Relay LED indicator placement (coil-side)")
     relay_led_refs: set[str] = set()
 
     coil_net_to_relay = _build_coil_net_to_relay(ctx.requirements)
@@ -887,19 +902,24 @@ def _phase_relay_leds(ctx: PlacementContext) -> tuple[dict[str, list[str]], set[
             continue
 
         left_x = kx - 4.3
+
+        # Determine coil direction — must match driver column direction
+        coil_pos = _find_coil_pin_abs_pos(k_ref, ctx)
+        direction = -1.0 if (coil_pos is not None and coil_pos[1] < ky) else 1.0
+
         r_led_refs = sorted(r for r in led_members if r.startswith("R"))
         d_led_refs = sorted(r for r in led_members if r.startswith("D"))
         other_led_refs = sorted(
             r for r in led_members if not r.startswith("R") and not r.startswith("D")
         )
 
-        cursor_y = _relay_led_cursor_start(ctx, left_x, ky)
+        cursor_y = _relay_led_cursor_start(ctx, left_x, ky, direction)
         _place_led_column_refs(
             ctx, r_led_refs, d_led_refs, other_led_refs,
-            left_x, cursor_y, relay_led_refs,
+            left_x, cursor_y, relay_led_refs, direction,
         )
-        _log.info("    3b2: placed %d LED refs for %s (left col at x=%.1f)",
-                   len(led_members), k_ref, left_x)
+        _log.info("    3b2: placed %d LED refs for %s (left col at x=%.1f, dir=%.0f)",
+                   len(led_members), k_ref, left_x, direction)
 
     return _relay_leds, relay_led_refs
 
@@ -1173,7 +1193,7 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
         if sc.circuit_type == SubCircuitType.MCU_PERIPHERAL_CLUSTER:
             _mcu_peripheral_sc_refs.update(sc.refs)
 
-    top_edge_order = ["J6", "J5", "J4", "J3", "J2", "J1"]
+    top_edge_order = ["J1", "J2", "J3", "J4", "J5", "J6"]
     # Terminal blocks MUST go to top edge regardless of fixed_refs —
     # earlier phases may have fixed them in wrong positions.
     _top_refs = [

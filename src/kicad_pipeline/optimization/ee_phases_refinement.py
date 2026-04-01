@@ -1719,7 +1719,8 @@ def _filter_stale_violations(
 
 
 def _find_rf_footprint(pcb: PCBDesign) -> object | None:
-    _rf_kw = ("esp32", "wroom", "nina", "w5500", "wifi", "ble", "nrf52")
+    # W5500 is a *wired* Ethernet controller — NOT an RF module.
+    _rf_kw = ("esp32", "wroom", "nina", "wifi", "ble", "nrf52")
     return next(
         (fp for fp in pcb.footprints if any(kw in (fp.value or "").lower() for kw in _rf_kw)),
         None,
