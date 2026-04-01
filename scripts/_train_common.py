@@ -112,6 +112,36 @@ def build_group_map(requirements: ProjectRequirements) -> dict[str, str]:
     return group_map
 
 
+def _render_4_views(pcb_path: Path) -> None:
+    """Render the mandatory 4-view standard: 2D + 3D-top + 3D-iso + 3D-iso-back.
+
+    Uses kicad-image-gen CLI. Failures are logged but don't block the build.
+    """
+    import subprocess
+
+    stem = pcb_path.stem
+    out_dir = pcb_path.parent
+    views = [
+        ("2d", ["-w", "1600"], f"{stem}_2d.png"),
+        ("3d", ["--view", "top", "-w", "1600"], f"{stem}_3d_top.png"),
+        ("3d", ["--view", "iso", "-w", "1600"], f"{stem}_3d_iso.png"),
+        ("3d", ["--view", "iso-back", "-w", "1600"], f"{stem}_3d_isoback.png"),
+    ]
+    rendered = 0
+    for mode, args, filename in views:
+        out_path = out_dir / filename
+        cmd = ["kicad-image-gen", mode, str(pcb_path), *args, "-o", str(out_path)]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
+            if out_path.exists() and out_path.stat().st_size > 1000:
+                rendered += 1
+        except (
+            subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
+        ) as exc:
+            print(f"  WARNING: render {filename} failed: {exc}")
+    print(f"  Rendered {rendered}/4 views (2D + 3D-top + 3D-iso + 3D-iso-back)")
+
+
 def write_and_compare_pcb(
     pcb: PCBDesign,
     pcb_path: Path,
@@ -166,6 +196,9 @@ def write_and_compare_pcb(
             print(f"  Project:   {pcb_path.with_suffix('.kicad_pro')}")
         except Exception as exc:
             print(f"  WARNING: project file generation failed: {exc}")
+
+    # Mandatory 4-view render: 2D + 3D-top + 3D-iso + 3D-iso-back
+    _render_4_views(pcb_path)
 
     ref_files = sorted(ref_dir.glob(f"{stem}*.kicad_pcb"))
     if ref_files:
