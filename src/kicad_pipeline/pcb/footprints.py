@@ -319,23 +319,13 @@ def _model_switch(
         )
         return Footprint3DModel(path=path, rotate=(0.0, 0.0, 90.0))
 
-    # Tactile switches — SMD vs THT
-    lib_upper = lib_id.upper()
+    # Tactile switches — all SMD tact switches use TL3305A model
+    # (5.1x5.1mm body, pads at ±3.6/±1.5). Verified against KiCad 10
+    # standard footprint: zero offset, zero rotation.
     if upper.startswith("SW_PUSH") or (upper.startswith("SW_") and "SPST" in upper):
-        if "SMD" in lib_upper or "SMD" in upper:
-            path = (
-                f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/"
-                "SW_SPST_EVQPE1.step"
-            )
-        else:
-            # SMD pad geometry (e.g. make_tact_switch) — use SMD model, no rotation.
-            # The easyeda footprint pads are at ±3.0 X / ±1.85 Y which is the
-            # same aspect-ratio orientation as the TL3305A model (wider in X).
-            return Footprint3DModel(
-                path=f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step",
-                rotate=(0.0, 0.0, 0.0),
-            )
-        return Footprint3DModel(path=path)
+        return Footprint3DModel(
+            path=f"{KICAD_3DMODEL_VAR}/Button_Switch_SMD.3dshapes/SW_SPST_TL3305A.step",
+        )
     return None
 
 
