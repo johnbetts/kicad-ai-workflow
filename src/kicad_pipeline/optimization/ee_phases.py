@@ -594,16 +594,67 @@ def _place_relay_driver_columns(
     d_refs: list[str], q_refs: list[str], r_gate_refs: list[str],
     other_refs: list[str], ctx: PlacementContext,
 ) -> None:
+    """Place all relay driver passives in a single vertical signal-chain column.
+
+    Signal flow order (top to bottom, below relay):
+      D_flyback (rot=90: pad1/COIL north, pad2/+5V south)
+      Q transistor (rot=180: collector north-east, base south-east)
+      R_gate (rot=270: pad2/DRIVE north, pad1/GPIO south)
+      R_LED (rot=90: pad1/COIL north, pad2/LED south)
+      D_LED (rot=90: pad1/Anode north, pad2/Cathode south)
+
+    Net-aware rotations align pads for straight traces without crossings.
+    """
     bounds = ctx.bounds
-    left_x, right_x = _relay_driver_column_xs(anchor, kx, _krot, ctx)
-    coil_pos = _find_coil_pin_abs_pos(anchor, ctx)
-    if coil_pos is not None and coil_pos[0] > kx:
-        _place_relay_left_column(d_refs, q_refs, right_x, ky, bounds, ctx, anchor)
-        _place_relay_right_column(r_gate_refs, left_x, ky, bounds, ctx, anchor)
-    else:
-        _place_relay_left_column(d_refs, q_refs, left_x, ky, bounds, ctx, anchor)
-        _place_relay_right_column(r_gate_refs, right_x, ky, bounds, ctx, anchor)
-    _place_relay_others_grid(other_refs, kx, ky, bounds, ctx)
+    col_x = kx  # single column centered on relay X
+
+    # Signal-chain order with net-aware rotations
+    # Each entry: (refs_list, rotation)
+    chain: list[tuple[list[str], float]] = [
+        (d_refs, 90.0),       # D_flyback: pad1(COIL)=N, pad2(+5V)=S
+        (q_refs, 180.0),      # Q: collector=NE, base=SE, emitter=W
+        (r_gate_refs, 270.0), # R_gate: pad2(DRIVE)=N, pad1(GPIO)=S
+    ]
+    # LED refs from other_refs (D and R prefixed)
+    led_r = sorted(r for r in other_refs if r.startswith("R"))
+    led_d = sorted(r for r in other_refs if r.startswith("D"))
+    remaining = sorted(r for r in other_refs if not r.startswith("R") and not r.startswith("D"))
+    chain.append((led_r, 90.0))   # R_LED: pad1(COIL)=N, pad2(LED)=S
+    chain.append((led_d, 90.0))   # D_LED: pad1(Anode)=N, pad2(Cathode)=S
+
+    # Cursor starts below relay body
+    relay_h = 15.0
+    if anchor in ctx.positions:
+        raw_w, raw_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
+        krot = ctx.positions[anchor][2]
+        relay_h = raw_w if krot % 180 in (90, 270) else raw_h
+    gap = 1.5
+    cursor_y = ky + relay_h / 2.0 + gap
+
+    for refs, rot in chain:
+        for ref in refs:
+            w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+            # Rotation swaps dimensions for placement
+            if rot % 180 in (90, 270):
+                w, h = h, w
+            py = cursor_y + h / 2.0
+            px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, col_x))
+            py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+            ctx.positions[ref] = (px, py, rot)
+            ctx.relay_support_refs.add(ref)
+            cursor_y = py + h / 2.0 + gap
+            _log.info("    %s -> (%.1f, %.1f) rot=%.0f signal-chain",
+                       ref, px, py, rot)
+
+    # Any remaining non-R/D refs
+    for ref in remaining:
+        w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        py = cursor_y + h / 2.0
+        px = max(bounds[0] + 2.0, min(bounds[2] - 2.0, col_x))
+        py = max(bounds[1] + 2.0, min(bounds[3] - 2.0, py))
+        ctx.positions[ref] = (px, py, 0.0)
+        ctx.relay_support_refs.add(ref)
+        cursor_y = py + h / 2.0 + gap
 
 
 def _phase_relay_drivers(ctx: PlacementContext) -> None:

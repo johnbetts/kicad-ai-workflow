@@ -497,7 +497,7 @@ def _phase_pad_facing_optimization(ctx: PlacementContext) -> None:
     rotation_exempt = {
         ref for ref in ctx.positions
         if ref.startswith(("J", "U", "H", "K", "SW"))
-    } | ctx.power_group_fixed
+    } | ctx.power_group_fixed | ctx.relay_support_refs
 
     optimized_count = 0
     for ref, connections in ref_connections.items():
