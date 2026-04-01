@@ -556,23 +556,48 @@ def _get_component_registry() -> object:
     return _REGISTRY_CACHE
 
 
-def _apply_jlcpcb_model_offset(fp: Footprint, footprint_id: str) -> Footprint:
+def _apply_jlcpcb_model_offset(
+    fp: Footprint, footprint_id: str, *, strict: bool = False,
+) -> Footprint:
     """Look up the component in the registry and apply model offset correction.
 
     This is the entry point called from ``_try_jlcpcb_footprint`` after the
     3D model is attached.  It loads the registry, finds the matching spec,
     and delegates to :func:`_apply_registry_model_offset`.
+
+    Args:
+        strict: If True, raise instead of returning unchanged on lookup
+            failure.  Used in the PRODUCTION stage to hard-block misaligned
+            models from reaching manufacturing.
     """
     if not fp.models:
         return fp
+    from kicad_pipeline.exceptions import KiCadPipelineError
+
     try:
         registry = _get_component_registry()
         spec = _lookup_registry_spec(registry, footprint_id, fp.lib_id, lcsc=fp.lcsc)
         if spec is None:
+            msg = (
+                f"3D model offset NOT applied for {fp.ref} "
+                f"(footprint_id={footprint_id}, lcsc={fp.lcsc}): "
+                f"no matching registry entry — model may be misaligned"
+            )
+            if strict:
+                raise KiCadPipelineError(msg)
+            _log.warning(msg)
             return fp
         return _apply_registry_model_offset(fp, spec.kicad_ref_pad1_x, spec.kicad_ref_pad1_y)  # type: ignore[union-attr]
+    except KiCadPipelineError:
+        raise  # re-raise strict mode errors
     except Exception:
-        _log.debug("Registry model offset lookup failed for %s", fp.ref, exc_info=True)
+        msg = (
+            f"Registry model offset lookup FAILED for {fp.ref} "
+            f"(footprint_id={footprint_id}): 3D model may be misaligned"
+        )
+        if strict:
+            raise KiCadPipelineError(msg)  # noqa: B904
+        _log.warning(msg, exc_info=True)
         return fp
 
 
@@ -3447,7 +3472,10 @@ def _try_jlcpcb_footprint(
     None on any failure, allowing fallback to parametric generation.
     """
     try:
-        from kicad_pipeline.parts.footprint_cache import get_jlcpcb_footprint
+        from kicad_pipeline.parts.footprint_cache import (
+            get_jlcpcb_footprint,
+            invalidate_footprint,
+        )
         from kicad_pipeline.pcb.footprint_loader import load_kicad_mod
     except ImportError:
         return None
@@ -3467,6 +3495,7 @@ def _try_jlcpcb_footprint(
                 "rejecting JLCPCB footprint",
                 ref, lcsc, len(fp.pads), footprint_id, _expected_pads,
             )
+            invalidate_footprint(lcsc)
             return None
         # Validate pad TYPE: if footprint_id implies SMD but JLCPCB returns
         # THT pads, reject the bad footprint.  Covers standard passives,
@@ -3483,6 +3512,7 @@ def _try_jlcpcb_footprint(
                     "expects SMD; rejecting",
                     ref, lcsc, len(tht_pads), footprint_id,
                 )
+                invalidate_footprint(lcsc)
                 return None
         # Validate pad SIZE: if footprint_id specifies a package size (0402/0603/0805)
         # but JLCPCB pads are a different size, reject the bad footprint.
@@ -3495,6 +3525,7 @@ def _try_jlcpcb_footprint(
                     "expects 0402 (<0.8mm); rejecting",
                     ref, lcsc, max_pad, footprint_id,
                 )
+                invalidate_footprint(lcsc)
                 return None
             if ("0603" in _fid_upper or "_0603" in _fid_upper) and max_pad > 1.2:
                 _log.warning(
@@ -3502,6 +3533,7 @@ def _try_jlcpcb_footprint(
                     "expects 0603 (<1.2mm); rejecting",
                     ref, lcsc, max_pad, footprint_id,
                 )
+                invalidate_footprint(lcsc)
                 return None
         # KI-022: Validate package CODE match — reject JLCPCB footprint
         # if its name contains a different package size than requested.
@@ -3519,6 +3551,7 @@ def _try_jlcpcb_footprint(
                     "expects %s; rejecting package mismatch",
                     ref, lcsc, jlc_pkg, footprint_id, req_pkg,
                 )
+                invalidate_footprint(lcsc)
                 return None
         # Reject JLCPCB SOIC/MSOP/TSSOP/SOP with wrong pad orientation.
         # EasyEDA exports sometimes rotate the entire footprint 90 degrees
@@ -3556,6 +3589,7 @@ def _try_jlcpcb_footprint(
                         "%.2f > Y-spread=%.2f); rejecting",
                         ref, lcsc, fh_x_spread, fh_y_spread,
                     )
+                    invalidate_footprint(lcsc)
                     return None
         # Reject JLCPCB pin headers with horizontal pad layout.
         # EasyEDA exports sometimes rotate 2-pin THT connectors 90 degrees:
@@ -3575,6 +3609,7 @@ def _try_jlcpcb_footprint(
                         "KiCad model compatibility",
                         ref, lcsc, x_spread, y_spread,
                     )
+                    invalidate_footprint(lcsc)
                     return None
 
         # Tag source provenance for downstream verification tracking

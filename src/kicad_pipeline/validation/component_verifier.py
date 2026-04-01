@@ -934,3 +934,186 @@ def verify_component(
         pcb_path=pcb_path,
         render_paths=render_paths,
     )
+
+
+# ---------------------------------------------------------------------------
+# Board-level 3D model verification (checks the ACTUAL .kicad_pcb output)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Board3DCheckResult:
+    """Result of checking one footprint's 3D model on the actual board."""
+
+    ref: str
+    passed: bool
+    detail: str
+    model_offset: tuple[float, float, float]
+    expected_offset: tuple[float, float, float] | None
+
+
+def _is_jlcpcb_lib(lib_name: str) -> bool:
+    """Return True if the footprint library name indicates a JLCPCB source."""
+    return "easyeda2kicad" in lib_name.lower()
+
+
+# KiCad standard library prefixes — footprints from these are parametric
+# (pad layout matches STEP model by construction, no offset needed).
+_PARAMETRIC_LIB_PREFIXES = (
+    "Package_TO_SOT_SMD:", "Resistor_SMD:", "Capacitor_SMD:",
+    "Inductor_SMD:", "LED_SMD:", "Diode_SMD:", "Package_QFP:",
+    "Package_DFN_QFN:", "Package_SO:", "Package_DIP:",
+    "Connector_PinHeader_", "Connector_PinSocket_",
+    "PinHeader_", "PinSocket_",
+    "TerminalBlock_",
+)
+
+
+def verify_board_3d_alignment(
+    pcb_path: Path,
+    *,
+    rotation_tolerance_deg: float = 10.0,
+) -> list[Board3DCheckResult]:
+    """Verify 3D model alignment on the actual generated board.
+
+    Parses the ``.kicad_pcb`` file, extracts every footprint's 3D model
+    offset/rotation, and checks against expected values from the component
+    registry.  This is the **board-level** verification that catches issues
+    the isolation checks miss.
+
+    Only checks JLCPCB-sourced footprints (``easyeda2kicad:`` prefix).
+    Parametric footprints from KiCad standard libraries use pad layouts
+    that match STEP models by construction — zero offset is correct.
+
+    Args:
+        pcb_path: Path to the generated ``.kicad_pcb`` file.
+        rotation_tolerance_deg: Max allowed rotation deviation.
+
+    Returns:
+        List of :class:`Board3DCheckResult` — one per footprint with a 3D model.
+    """
+    from kicad_pipeline.pcb.position_extractor import models_from_pcb_file
+    from kicad_pipeline.validation.component_registry import ComponentRegistry
+
+    board_models = models_from_pcb_file(pcb_path)
+    if not board_models:
+        logger.warning("No 3D models found in %s", pcb_path)
+        return []
+
+    registry = ComponentRegistry()
+    results: list[Board3DCheckResult] = []
+
+    for ref, bfm in board_models.items():
+        # Skip parametric footprints — their pad layout matches the STEP
+        # model by construction, so zero offset is correct.
+        is_parametric = any(
+            bfm.footprint_lib.startswith(pfx) for pfx in _PARAMETRIC_LIB_PREFIXES
+        )
+        is_jlcpcb = _is_jlcpcb_lib(bfm.footprint_lib)
+
+        if is_parametric and not is_jlcpcb:
+            results.append(Board3DCheckResult(
+                ref=ref,
+                passed=True,
+                detail=f"parametric ({bfm.footprint_lib.split(':')[0]}) — skip",
+                model_offset=bfm.model_offset,
+                expected_offset=None,
+            ))
+            continue
+
+        # For JLCPCB footprints: look up registry to validate offset
+        spec = None
+        for comp in registry.all_components():
+            # Match by LCSC if available in the registry
+            if comp.lcsc and comp.lcsc in bfm.footprint_lib:
+                spec = comp
+                break
+            if comp.footprint_id and (
+                comp.footprint_id.upper() in bfm.footprint_lib.upper()
+                or bfm.footprint_lib.upper() in comp.footprint_id.upper()
+            ):
+                spec = comp
+                break
+
+        if spec is None:
+            results.append(Board3DCheckResult(
+                ref=ref,
+                passed=True,
+                detail=f"no registry match for {bfm.footprint_lib} — unchecked",
+                model_offset=bfm.model_offset,
+                expected_offset=None,
+            ))
+            continue
+
+        ox, oy = bfm.model_offset[0], bfm.model_offset[1]
+        offset_is_zero = abs(ox) < 0.01 and abs(oy) < 0.01
+
+        # For JLCPCB footprints with THT (pin-1-at-origin STEP models),
+        # a zero offset when kicad_ref_pad1 is significant means the
+        # offset correction silently failed.
+        is_tht = spec.expected_pad_type == "thru_hole"
+        has_significant_pad1 = (
+            abs(spec.kicad_ref_pad1_x) > 1.0
+            or abs(spec.kicad_ref_pad1_y) > 1.0
+        )
+
+        if is_jlcpcb and offset_is_zero and is_tht and has_significant_pad1:
+            results.append(Board3DCheckResult(
+                ref=ref,
+                passed=False,
+                detail=(
+                    f"JLCPCB THT footprint has (0,0,0) offset but needs "
+                    f"pin-1 correction (pad1=({spec.kicad_ref_pad1_x:.2f},"
+                    f"{spec.kicad_ref_pad1_y:.2f}))"
+                ),
+                model_offset=bfm.model_offset,
+                expected_offset=None,
+            ))
+            continue
+
+        # Check rotation
+        actual_rz = bfm.model_rotate[2] if len(bfm.model_rotate) > 2 else 0.0
+        expected_rz = spec.model_rotation_z
+        rz_diff = abs((actual_rz % 360.0) - (expected_rz % 360.0))
+        if rz_diff > 180.0:
+            rz_diff = 360.0 - rz_diff
+        rz_diff_mirror = abs((actual_rz % 360.0) - ((expected_rz + 180.0) % 360.0))
+        if rz_diff_mirror > 180.0:
+            rz_diff_mirror = 360.0 - rz_diff_mirror
+        rotation_ok = (
+            rz_diff < rotation_tolerance_deg
+            or rz_diff_mirror < rotation_tolerance_deg
+        )
+
+        if not rotation_ok:
+            results.append(Board3DCheckResult(
+                ref=ref,
+                passed=False,
+                detail=(
+                    f"3D model Z rotation {actual_rz:.1f}° vs expected "
+                    f"{expected_rz:.1f}° (diff {min(rz_diff, rz_diff_mirror):.1f}°)"
+                ),
+                model_offset=bfm.model_offset,
+                expected_offset=None,
+            ))
+            continue
+
+        results.append(Board3DCheckResult(
+            ref=ref,
+            passed=True,
+            detail=f"offset=({ox:.2f},{oy:.2f}), rotation={actual_rz:.1f}° OK",
+            model_offset=bfm.model_offset,
+            expected_offset=None,
+        ))
+
+    failed = [r for r in results if not r.passed]
+    if failed:
+        logger.warning(
+            "Board 3D alignment: %d/%d footprints FAILED: %s",
+            len(failed), len(results),
+            ", ".join(f.ref for f in failed),
+        )
+    else:
+        logger.info("Board 3D alignment: all %d footprints OK", len(results))
+
+    return results

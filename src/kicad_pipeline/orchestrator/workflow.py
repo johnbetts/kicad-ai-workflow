@@ -523,6 +523,7 @@ class WorkflowEngine:
             variant_name, vdir, val_dir, warnings,
         )
         self._run_extended_validation(pcb, req, val_dir, warnings)
+        self._check_board_3d_alignment(variant_name, vdir, val_dir, warnings)
         self._enforce_parts_gate(report, val_dir)
 
     def _check_consistency(
@@ -698,6 +699,46 @@ class WorkflowEngine:
             ),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _check_board_3d_alignment(
+        variant_name: str, vdir: Path, val_dir: Path, warnings: list[str],
+    ) -> None:
+        """Check 3D model alignment on the actual generated board.
+
+        Non-blocking gate: failures are logged as warnings so the build
+        can continue, but issues are surfaced before PRODUCTION.
+        """
+        pcb_path = vdir / f"{variant_name}.kicad_pcb"
+        if not pcb_path.exists():
+            return
+        try:
+            from kicad_pipeline.validation.component_verifier import (
+                verify_board_3d_alignment,
+            )
+
+            results = verify_board_3d_alignment(pcb_path)
+            failed = [r for r in results if not r.passed]
+            if failed:
+                report_lines = [
+                    f"Board 3D alignment: {len(failed)}/{len(results)} "
+                    f"footprints have model issues:",
+                ]
+                for f in failed:
+                    report_lines.append(f"  {f.ref}: {f.detail}")
+                report_text = "\n".join(report_lines)
+                (val_dir / "3d_alignment_report.txt").write_text(
+                    report_text, encoding="utf-8",
+                )
+                for f in failed:
+                    warnings.append(f"3D alignment: {f.ref} — {f.detail}")
+                log.warning(report_text)
+            else:
+                log.info(
+                    "Board 3D alignment: all %d footprints OK", len(results),
+                )
+        except Exception:
+            log.warning("Board 3D alignment check failed", exc_info=True)
 
     @staticmethod
     def _enforce_parts_gate(report: object, val_dir: Path) -> None:

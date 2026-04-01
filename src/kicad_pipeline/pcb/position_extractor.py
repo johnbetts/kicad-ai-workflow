@@ -98,6 +98,89 @@ def _extract_ref_text_position(
     return None
 
 
+@dataclass(frozen=True)
+class BoardFootprintModel:
+    """3D model info extracted from an actual .kicad_pcb footprint."""
+
+    ref: str
+    footprint_lib: str  # e.g. "R_0805_2012Metric"
+    position: tuple[float, float, float]  # (x, y, rotation)
+    model_path: str  # STEP file path
+    model_offset: tuple[float, float, float]  # (ox, oy, oz)
+    model_rotate: tuple[float, float, float]  # (rx, ry, rz)
+
+
+_ModelInfo = tuple[str, tuple[float, float, float], tuple[float, float, float]]
+
+
+def _extract_models(fp_node: SExpNode) -> list[_ModelInfo]:
+    """Extract 3D model path, offset, and rotation from a footprint node."""
+    models: list[_ModelInfo] = []
+    if not isinstance(fp_node, list):
+        return models
+    for child in fp_node:
+        if not isinstance(child, list) or len(child) < 2 or child[0] != "model":
+            continue
+        model_path = str(child[1])
+        offset = (0.0, 0.0, 0.0)
+        rotate = (0.0, 0.0, 0.0)
+        for sub in child[2:]:
+            if not isinstance(sub, list) or len(sub) < 2:
+                continue
+            if sub[0] == "offset" and isinstance(sub[1], list) and sub[1][0] == "xyz":
+                offset = (
+                    float(str(sub[1][1])) if len(sub[1]) > 1 else 0.0,
+                    float(str(sub[1][2])) if len(sub[1]) > 2 else 0.0,
+                    float(str(sub[1][3])) if len(sub[1]) > 3 else 0.0,
+                )
+            elif sub[0] == "rotate" and isinstance(sub[1], list) and sub[1][0] == "xyz":
+                rotate = (
+                    float(str(sub[1][1])) if len(sub[1]) > 1 else 0.0,
+                    float(str(sub[1][2])) if len(sub[1]) > 2 else 0.0,
+                    float(str(sub[1][3])) if len(sub[1]) > 3 else 0.0,
+                )
+        models.append((model_path, offset, rotate))
+    return models
+
+
+def models_from_pcb_file(
+    path: str | Path,
+) -> dict[str, BoardFootprintModel]:
+    """Parse a ``.kicad_pcb`` and extract 3D model info for every footprint.
+
+    Returns:
+        Mapping of reference designator to :class:`BoardFootprintModel`.
+        Only includes footprints that have at least one 3D model.
+    """
+    tree = parse_file(path)
+    result: dict[str, BoardFootprintModel] = {}
+    if not isinstance(tree, list):
+        return result
+    for node in tree:
+        if not isinstance(node, list) or not node or node[0] != "footprint":
+            continue
+        ref = _extract_ref(node)
+        pos = _extract_position(node)
+        if ref is None or pos is None:
+            continue
+        models = _extract_models(node)
+        if not models:
+            continue
+        # Use the first model (primary 3D model)
+        model_path, offset, rotate = models[0]
+        # Extract footprint library name (first arg after "footprint")
+        lib_name = str(node[1]) if len(node) > 1 else ""
+        result[ref] = BoardFootprintModel(
+            ref=ref,
+            footprint_lib=lib_name,
+            position=pos,
+            model_path=model_path,
+            model_offset=offset,
+            model_rotate=rotate,
+        )
+    return result
+
+
 def positions_from_pcb_file(path: str | Path) -> dict[str, tuple[float, float, float]]:
     """Parse a ``.kicad_pcb`` file and extract ref -> (x_mm, y_mm, rotation_deg).
 
