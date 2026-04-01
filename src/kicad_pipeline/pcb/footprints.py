@@ -281,10 +281,9 @@ def _model_terminal_block(
         f"{KICAD_3DMODEL_VAR}/TerminalBlock_Phoenix.3dshapes/"
         f"{model_name}.step"
     )
-    return Footprint3DModel(
-        path=path,
-        rotate=(0.0, 0.0, 180.0),
-    )
+    # KiCad standard terminal block footprints use zero rotation.
+    # The STEP model's wire entry faces +Y by default.
+    return Footprint3DModel(path=path)
 
 
 def _model_esp32(
@@ -2681,18 +2680,15 @@ def make_pin_header_socket(
     cols = pin_count // max(rows, 1)
     row_pitch = pitch_mm if rows > 1 else 0.0
 
-    # Center pads at origin — pad centroid at (0, 0)
-    span_x = (rows - 1) * row_pitch
-    span_y = (cols - 1) * pitch_mm
-    x_offset = -span_x / 2.0
-    y_offset = -span_y / 2.0
-
+    # Pad 1 at origin — matches KiCad standard footprint convention.
+    # Pins extend in +Y (single row) or +Y/+X (dual row).
+    # STEP models assume this layout with zero offset.
     pads: list[Pad] = []
     pin_num = 1
     for col in range(cols):
         for row in range(rows):
-            x = x_offset + row * row_pitch
-            y = y_offset + col * pitch_mm
+            x = row * row_pitch
+            y = col * pitch_mm
             if row_swap:
                 x = -x
             pads.append(_thru_pad(str(pin_num), x, y, pad_diam, drill_mm))
@@ -2703,13 +2699,18 @@ def make_pin_header_socket(
     fab_layer = LAYER_B_FAB if is_back else LAYER_F_FAB
     crtyd_layer = LAYER_B_COURTYARD if is_back else LAYER_F_COURTYARD
 
+    span_x = (rows - 1) * row_pitch
+    span_y = (cols - 1) * pitch_mm
+    # Courtyard centered on the pad group (not origin)
+    cx = span_x / 2.0
+    cy = span_y / 2.0
     body_w = span_x + pad_diam + _TEXT_OFFSET_LARGE
     body_h = span_y + pad_diam + _TEXT_OFFSET_LARGE
     graphics: tuple[FootprintLine, ...] = (
-        *_courtyard_rect(body_w, body_h, layer=crtyd_layer),
+        *_courtyard_rect(body_w, body_h, cx=cx, cy=cy, layer=crtyd_layer),
     )
-    ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
-    val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
+    ref_y = cy - (body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
+    val_y = cy + body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
         FootprintText(text_type="reference", text=ref,
                       position=Point(0.0, ref_y), layer=silk_layer, effects_size=1.0),
@@ -2792,22 +2793,23 @@ def make_terminal_block(
     drill_mm = _TB_DRILL
     pad_diam = _TB_PAD_DIAM
 
-    # Center pads at origin — pad centroid at (0, 0)
+    # Pad 1 at origin — matches KiCad standard footprint convention.
+    # Pads extend in +X direction at pitch intervals.
     span = (pin_count - 1) * pitch_mm
-    x_offset = -span / 2.0
     pads = tuple(
         _thru_pad(
             str(i + 1),
-            x_offset + i * pitch_mm,
+            i * pitch_mm,
             0.0,
             pad_diam,
             drill_mm,
         )
         for i in range(pin_count)
     )
+    cx = span / 2.0  # courtyard centered on pad group
     body_w = span + pad_diam + _TB_BODY_W_MARGIN
     body_h = pad_diam + _TB_BODY_H_MARGIN
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h, cx=cx),)
     ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
@@ -4418,11 +4420,6 @@ def footprint_for_component(
     if "ESP32" in upper or "WROOM" in upper:
         fp = _postprocess_esp32_thermal_pad(fp)
         fp = _enrich_esp32_footprint(fp)
-
-    # THT pin-1-at-origin correction: KiCad STEP models for THT components
-    # have origin at pin 1, but parametric generators center pads at (0,0).
-    # Shift the model so pin 1 of the STEP aligns with pad 1 of the footprint.
-    fp = _align_tht_model_to_pad1(fp)
 
     # Ensure courtyard exists and covers all pads with IPC clearance.
     fp = _ensure_courtyard(fp)
