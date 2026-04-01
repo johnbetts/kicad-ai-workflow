@@ -1347,9 +1347,25 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
             _log.info("    %s -> origin(%.1f, %.1f) rot=0 (aligned to %s)",
                        r, px, origin_y_target, k_ref)
 
-    # Remaining terminals: evenly spaced across the top edge
+    # Remaining terminals: ordered by connected-component X centroid
+    # to minimize ratsnest crossings (each terminal above its subcircuit).
     non_relay_refs = [r for r in _top_refs if r not in relay_aligned]
     if non_relay_refs:
+        # Compute X centroid of components connected to each terminal via nets
+        def _connected_x_centroid(j_ref: str) -> float:
+            xs: list[float] = []
+            for net in ctx.requirements.nets:
+                j_in = any(c.ref == j_ref for c in net.connections)
+                if not j_in:
+                    continue
+                for conn in net.connections:
+                    if conn.ref != j_ref and conn.ref in ctx.positions:
+                        xs.append(ctx.positions[conn.ref][0])
+            return sum(xs) / len(xs) if xs else 0.0
+
+        non_relay_refs.sort(key=_connected_x_centroid)
+        _log.info("    Net-aware order: %s", non_relay_refs)
+
         term_gap = 3.0
         term_widths = [ctx.fp_sizes.get(r, (2.0, 2.0))[0] for r in non_relay_refs]
         total_w = sum(term_widths) + term_gap * (len(non_relay_refs) - 1)
