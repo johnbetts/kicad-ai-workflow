@@ -85,6 +85,22 @@ class EvalRunner:
             score = compute_fast_placement_score(pcb, requirements)
             from kicad_pipeline.validation.pcb_integrity import validate_pcb_integrity
             integrity_issues = validate_pcb_integrity(pcb, requirements)
+            # Write full KiCad project files so boards can be opened in KiCad
+            from kicad_pipeline.pcb.builder import write_pcb
+            pcb_path = render_dir / f"{case.case_id}.kicad_pcb"
+            write_pcb(pcb, pcb_path)
+            try:
+                from kicad_pipeline.schematic.builder import build_schematic, write_schematic
+                sch = build_schematic(requirements, project_name=case.case_id)
+                sch_path = render_dir / f"{case.case_id}.kicad_sch"
+                write_schematic(sch, sch_path, project_name=case.case_id)
+                pro_path = render_dir / f"{case.case_id}.kicad_pro"
+                if not pro_path.exists():
+                    import json as _json
+                    pro_path.write_text(_json.dumps({"meta": {"filename": pro_path.name, "version": 1}}, indent=2))
+            except Exception:
+                pass  # Schematic/project writing is best-effort
+
             from kicad_pipeline.optimization.review_agent import review_placement
             review = review_placement(
                 pcb, requirements, render_dir=render_dir, board_name=case.case_id,
