@@ -733,6 +733,9 @@ def _align_tht_model_to_pad1(fp: Footprint) -> Footprint:
     """
     if not fp.models or not fp.pads or "through_hole" not in fp.attr:
         return fp
+    # DIP packages have body-centered STEP models — no pin-1 shift needed.
+    if "DIP" in fp.lib_id.upper():
+        return fp
     model = fp.models[0]
     # Only correct zero-offset models (already-corrected models have non-zero)
     if abs(model.offset[0]) > 0.01 or abs(model.offset[1]) > 0.01:
