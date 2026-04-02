@@ -3437,13 +3437,30 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
     contact_pads_xy, coil_pads_list = _classify_relay_pads(fp.pads)
 
     if contact_pads_xy and coil_pads_list:
-        contact_cx = sum(x for x, _ in contact_pads_xy) / len(contact_pads_xy)
-        contact_cy = sum(y for _, y in contact_pads_xy) / len(contact_pads_xy)
+        # Pick the coil pad closest to the contact group
+        contact_cx_all = sum(x for x, _ in contact_pads_xy) / len(contact_pads_xy)
+        contact_cy_all = sum(y for _, y in contact_pads_xy) / len(contact_pads_xy)
         best_coil = min(
             coil_pads_list,
-            key=lambda c: (c[1] - contact_cx) ** 2 + (c[2] - contact_cy) ** 2,
+            key=lambda c: (c[1] - contact_cx_all) ** 2 + (c[2] - contact_cy_all) ** 2,
         )
         coil_num, coil_x, coil_y, coil_size = best_coil
+
+        # Use only ADJACENT contact pads for slot positioning — exclude
+        # contact pads on the far side of the relay body (e.g. pin 3 at x=+7.1
+        # when the coil pad is at x=-7.1). Only pads within half the body
+        # width of the coil pad are considered adjacent.
+        import math as _m
+        body_half_x = max(abs(x) for x, _ in contact_pads_xy) * 0.8
+        adjacent_contacts = [
+            (x, y) for x, y in contact_pads_xy
+            if abs(x - coil_x) < body_half_x
+        ]
+        if adjacent_contacts:
+            contact_cx = sum(x for x, _ in adjacent_contacts) / len(adjacent_contacts)
+        else:
+            contact_cx = contact_cx_all  # fallback
+
         cleaned.extend(_build_relay_isolation_slot(coil_x, coil_y, coil_size, contact_cx))
         slot_x = (coil_x + contact_cx) / 2.0
         _log.info(
