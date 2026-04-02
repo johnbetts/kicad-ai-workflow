@@ -429,18 +429,21 @@ def _pin_rf_to_edge(
         # 180 deg=antenna down, 270 deg=antenna right.
         target_x, target_y = cx, cy
         new_rot = rot
-        if dist_right == min_edge_dist or dist_right <= dist_left:
+        # Pick the nearest edge — no tiebreaker overrides.
+        # Prefer top/bottom edges over left/right for antenna placement
+        # (most boards have connectors on left/right, antenna clearance on top/bottom).
+        if dist_top == min_edge_dist:
+            target_y = min_y + edge_margin + h / 2.0
+            new_rot = 0.0  # Antenna pointing up (toward top edge)
+        elif dist_bottom == min_edge_dist:
+            target_y = max_y - edge_margin - h / 2.0
+            new_rot = 180.0  # Antenna pointing down (toward bottom edge)
+        elif dist_right == min_edge_dist:
             target_x = max_x - edge_margin - w / 2.0
             new_rot = 270.0  # Antenna pointing right (toward right edge)
         elif dist_left == min_edge_dist:
             target_x = min_x + edge_margin + w / 2.0
-            new_rot = 90.0  # Antenna pointing left
-        elif dist_top == min_edge_dist:
-            target_y = min_y + edge_margin + h / 2.0
-            new_rot = 0.0  # Antenna pointing up (toward top edge)
-        else:
-            target_y = max_y - edge_margin - h / 2.0
-            new_rot = 180.0  # Antenna pointing down
+            new_rot = 90.0  # Antenna pointing left (toward left edge)
 
         # Build grid without RF module
         move_grid = _PlacementGrid(bounds)
@@ -552,13 +555,21 @@ def _nearest_edge_and_rotation(
 
 # Rotation to use for screw terminals at each board edge so that wire
 # entry faces OUTWARD (away from the board interior).
-#   top edge:    rot=0   → wire entry faces up (toward min_y = top)
-#   bottom edge: rot=180 → wire entry faces down (toward max_y = bottom)
-#   left edge:   rot=90  → wire entry faces left (toward min_x = left)
-#   right edge:  rot=270 → wire entry faces right (toward max_x = right)
+#
+# The terminal block footprint has its wire-entry side at local +Y (south)
+# when rotation=0°.  Rotating by R degrees CCW maps +Y as follows:
+#   rot=0°:   +Y → south  → bottom edge
+#   rot=180°: +Y → north  → top edge
+#   rot=90°:  +Y → east   → right edge (in KiCad Y-down coords, CCW 90°)
+#   rot=270°: +Y → west   → left edge
+#
+#   top edge:    rot=180 → wire entry faces up/north (away from board center)
+#   bottom edge: rot=0   → wire entry faces down/south (away from board center)
+#   left edge:   rot=90  → wire entry faces left/west (away from board center)
+#   right edge:  rot=270 → wire entry faces right/east (away from board center)
 _SCREW_TERMINAL_EDGE_ROTATION: dict[str, float] = {
-    "top": 0.0,
-    "bottom": 180.0,
+    "top": 180.0,
+    "bottom": 0.0,
     "left": 90.0,
     "right": 270.0,
 }
@@ -632,10 +643,10 @@ def _orient_connectors(
     correctly handle asymmetric footprints (connectors with pin-1 origin).
 
     Screw terminal rotation conventions (wire entry facing outward):
-    - Top edge: rot=0    (wire entry faces up/north)
-    - Bottom edge: rot=180 (wire entry faces down/south)
-    - Left edge:  rot=90  (wire entry faces left/west)
-    - Right edge: rot=270 (wire entry faces right/east)
+    - Top edge:    rot=180 (wire entry faces up/north)
+    - Bottom edge: rot=0   (wire entry faces down/south)
+    - Left edge:   rot=90  (wire entry faces left/west)
+    - Right edge:  rot=270 (wire entry faces right/east)
 
     Pin headers and other generic connectors use a separate rotation table
     from _nearest_edge_and_rotation().
