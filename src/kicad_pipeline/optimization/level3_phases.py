@@ -747,6 +747,11 @@ def _classify_connector_function(
            for n in conn_nets if n.strip()):
         return "power_input"
 
+    # Check for ethernet-related nets (ETH, MDIO, MDC, TX, RX with LAN/PHY)
+    eth_kw = {"ETH", "MDIO", "MDC", "RMII", "LAN", "PHY"}
+    if any(any(kw in n.upper() for kw in eth_kw) for n in conn_nets):
+        return "ethernet"
+
     return "general"
 
 
@@ -805,16 +810,33 @@ def _target_edge_for_function(
     cx: float,
     cy: float,
     bounds: tuple[float, float, float, float],
+    group_centroid: tuple[float | None, float | None] = (None, None),
 ) -> str:
-    """Determine target board edge for a connector based on its function."""
+    """Determine target board edge for a connector based on its function.
+
+    When *group_centroid* is provided, "general" and "ethernet" connectors
+    use the group centroid (not the connector position) to pick the nearest
+    edge. This ensures connectors stay near their functional group.
+    """
     min_x, _, max_x, _ = bounds
     if func in ("relay_terminal", "analog_input"):
         return relay_edge
     if func == "mcu_peripheral" and mcu_centroid:
         return _nearest_edge(*mcu_centroid, bounds)
+    if func == "ethernet":
+        # Ethernet connectors go to the edge nearest their group
+        gcx, gcy = group_centroid
+        if gcx is not None and gcy is not None:
+            return _nearest_edge(gcx, gcy, bounds)
+        # Fallback: right edge (ethernet typically on the right)
+        return "right"
     if func == "power_input":
         is_left = relay_centroid and relay_centroid[0] < (max_x + min_x) / 2
         return "left" if is_left else "right"
+    # General: use group centroid if available, else connector position
+    gcx, gcy = group_centroid
+    if gcx is not None and gcy is not None:
+        return _nearest_edge(gcx, gcy, bounds)
     return _nearest_edge(cx, cy, bounds)
 
 
@@ -912,11 +934,11 @@ def _pin_connectors_by_function(
         w, h = fp_sizes.get(ref, DEFAULT_FP_SIZE_MM)
 
         func = _classify_connector_function(ref, subcircuits, adj, ref_to_nets)
+        group_cx, group_cy = _group_centroid_for_ref(ref, group_map, positions)
         target_edge = _target_edge_for_function(
             func, relay_edge, mcu_centroid, relay_centroid, cx, cy, bounds,
+            group_centroid=(group_cx, group_cy),
         )
-
-        group_cx, group_cy = _group_centroid_for_ref(ref, group_map, positions)
 
         target_x, target_y = _compute_edge_target_position(
             target_edge, cx, cy, w, h, bounds, edge_margin, group_cx, group_cy,
