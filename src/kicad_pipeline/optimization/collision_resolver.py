@@ -374,6 +374,7 @@ def _resolve_collisions(
     bounds: tuple[float, float, float, float],
     fixed_refs: set[str],
     group_bboxes: list[GroupBoundingBox] | None = None,
+    proximity_constraints: dict[str, tuple[str, float]] | None = None,
 ) -> dict[str, tuple[float, float, float]]:
     """Resolve courtyard collisions using grid-based relocation.
 

@@ -429,10 +429,15 @@ def _check_3d_body_pad_alignment(fp: Footprint, spec: ComponentSpec) -> CheckRes
 
     diff = math.sqrt((model_ox - expected_ox) ** 2 + (model_oy - expected_oy) ** 2)
 
-    # Tolerance: 2mm — enough for rounding and JLCPCB pad layout variations
-    # Modules (ESP32) have body extending past pads (antenna) so the STEP
-    # model origin may be offset from pad centroid by several mm.
-    tolerance = 5.0 if spec.ref.startswith("U") else 2.0
+    # Use the per-component tolerance from the registry (model_offset_xy_max_mm).
+    # Default 2mm for components without a registry entry.
+    # THT connectors/relays get 8mm — JLCPCB pin layouts differ significantly.
+    if spec.model_offset_xy_max_mm > 0:
+        tolerance = spec.model_offset_xy_max_mm
+    elif spec.expected_pad_type == "thru_hole":
+        tolerance = 8.0
+    else:
+        tolerance = 2.0
     model_type = "pin1-origin" if is_pin1_origin else "body-centered"
     ok = diff <= tolerance
     return CheckResult(

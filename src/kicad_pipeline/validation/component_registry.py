@@ -79,6 +79,7 @@ class FootprintSpec:
     model_offset_xy_max_mm: float
     kicad_ref_pad1_x: float
     kicad_ref_pad1_y: float
+    lcsc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,7 +291,7 @@ class ComponentRegistry:
                     model_offset_xy_max_mm=fp.model_offset_xy_max_mm,
                     kicad_ref_pad1_x=fp.kicad_ref_pad1_x,
                     kicad_ref_pad1_y=fp.kicad_ref_pad1_y,
-                    lcsc=None,
+                    lcsc=fp.lcsc,
                     datasheet_url=None,
                     verification_status="unverified",
                     last_verified_commit=None,
@@ -556,6 +557,7 @@ class ComponentRegistry:
             model_offset_xy_max_mm=float(entry.get("model_offset_xy_max_mm", 0.0)),  # type: ignore[arg-type]
             kicad_ref_pad1_x=float(entry.get("kicad_ref_pad1_x", 0.0)),  # type: ignore[arg-type]
             kicad_ref_pad1_y=float(entry.get("kicad_ref_pad1_y", 0.0)),  # type: ignore[arg-type]
+            lcsc=str(entry["lcsc"]) if entry.get("lcsc") else None,
         )
 
     @staticmethod

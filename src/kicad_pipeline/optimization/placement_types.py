@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_pipeline.models.pcb import Point
 from kicad_pipeline.pcb.pin_map import (
@@ -19,9 +19,13 @@ from kicad_pipeline.pcb.pin_map import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
     from kicad_pipeline.models.pcb import Footprint, PCBDesign, PlacementConstraintSet
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.functional_grouper import DetectedSubCircuit
+    from kicad_pipeline.optimization.review_agent import PlacementReview
     from kicad_pipeline.optimization.scoring import QualityScore
     from kicad_pipeline.optimization.zone_partitioner import BoardZone
 
@@ -65,6 +69,38 @@ class GroupBoundingBox:
     height: float
 
 
+@dataclass(frozen=True)
+class PlacementResult:
+    """Result of placement optimization with mandatory render evidence.
+
+    Supports tuple unpacking for backward compatibility::
+
+        pcb, review = optimize_placement_ee(reqs, pcb)  # still works
+        result = optimize_placement_ee(reqs, pcb)        # new style
+        result.render_paths  # dict of view -> Path
+        result.visual_findings  # list of vision check findings
+    """
+
+    pcb: PCBDesign
+    review: PlacementReview
+    render_paths: dict[str, Path] = field(default_factory=dict)
+    visual_findings: tuple[str, ...] = ()
+
+    def __iter__(self) -> Iterator[Any]:
+        """Support ``pcb, review = result`` unpacking for backward compat."""
+        yield self.pcb
+        yield self.review
+
+    def __getitem__(self, index: int) -> Any:
+        """Support ``result[0]``, ``result[1]`` indexing."""
+        if index == 0:
+            return self.pcb
+        if index == 1:
+            return self.review
+        msg = f"PlacementResult index out of range: {index}"
+        raise IndexError(msg)
+
+
 @dataclass
 class PlacementContext:
     """Mutable state passed between placement phases.
@@ -93,12 +129,16 @@ class PlacementContext:
     ethernet_fixed: set[str] = field(default_factory=set)
     top_edge_connector_refs: set[str] = field(default_factory=set)
     template_fixed: set[str] = field(default_factory=set)
+    # Edge-mapped connectors — ref → target edge name (from phase 3f3)
+    edge_mapped_connectors: dict[str, str] = field(default_factory=dict)
     # Explicit placement constraints — resolved from requirements + subcircuits
     constraints: PlacementConstraintSet | None = None
     # Review loop output — set by _phase_review_loop
     best_positions: dict[str, tuple[float, float, float]] = field(
         default_factory=dict,
     )
+    # Output directory for render evidence — set by callers or auto-generated
+    _output_dir: Path | None = None
 
 
 def _extract_positions(pcb: PCBDesign) -> tuple[tuple[str, float, float, float], ...]:

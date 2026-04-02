@@ -1353,7 +1353,9 @@ def _phase_top_edge_connectors(ctx: PlacementContext) -> None:
     # Others use evenly-spaced ordering across the top edge.
     connector_to_relay = _build_connector_to_relay_map(ctx.requirements)
     relay_aligned: set[str] = set()
-    origin_y_target = min_y + 3.0
+    # Body-aware Y: screw terminal bodies extend ~5mm above pad center
+    # (wire entry side).  Place pad center far enough in so body stays on board.
+    origin_y_target = min_y + 7.0
 
     for r in _top_refs:
         k_ref = connector_to_relay.get(r)
@@ -1419,7 +1421,9 @@ def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
     not already placed by ``_phase_top_edge_connectors``.
     """
     min_x, min_y, max_x, max_y = ctx.bounds
-    margin = 3.0  # small inset from edge (BOARD_EDGE_MARGIN_MM + 1.0)
+    _BASE_EDGE_MARGIN = 2.0
+    # Per-connector body overhang — screw terminals extend ~5mm past pads
+    _BODY_OVERHANG = {"TERMINAL": 5.0, "TB_": 5.0, "RJ45": 4.0}
 
     already_placed = getattr(ctx, "top_edge_connector_refs", set())
 
@@ -1501,6 +1505,14 @@ def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
             gname, (cx, cy),
         ) if gname else (cx, cy)
 
+        # Body-aware margin: account for connector body extending past pads
+        overhang = _BASE_EDGE_MARGIN
+        for kw, oh in _BODY_OVERHANG.items():
+            if kw in fp_name:
+                overhang = max(overhang, oh)
+                break
+        margin = _BASE_EDGE_MARGIN + overhang
+
         # Push to target edge, aligned at group centroid coordinate
         if target_edge == "left":
             along = max(min_y + margin, min(gcy, max_y - margin))
@@ -1516,10 +1528,12 @@ def _phase_all_connectors_to_edges(ctx: PlacementContext) -> None:
             new_x, new_y, new_rot = along, max_y - margin, rot
 
         _log.info(
-            "  3f3: %s (group=%s) pushed to edge (%.1f,%.1f) -> (%.1f,%.1f)",
-            ref, gname or "?", cx, cy, new_x, new_y,
+            "  3f3: %s (group=%s) pushed to %s edge (%.1f,%.1f) -> (%.1f,%.1f)",
+            ref, gname or "?", target_edge, cx, cy, new_x, new_y,
         )
         ctx.positions[ref] = (new_x, new_y, new_rot)
+        # Record the intended edge so later phases can re-enforce it
+        ctx.edge_mapped_connectors[ref] = target_edge
 
 
 def _phase_template_refinement(ctx: PlacementContext) -> None:

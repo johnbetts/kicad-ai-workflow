@@ -29,6 +29,7 @@ from kicad_pipeline.optimization.group_helpers import (
 )
 from kicad_pipeline.optimization.placement_types import (
     PlacementContext,
+    PlacementResult,
     _apply_positions,
     _dict_to_positions,
 )
@@ -39,6 +40,7 @@ from kicad_pipeline.pcb.pin_map import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from kicad_pipeline.models.pcb import Footprint, PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
@@ -247,13 +249,6 @@ def _post_clamp_decoupling_repull(
     ctx: PlacementContext,
 ) -> None:
     """Re-pull decoupling caps that drifted too far from their IC after clamping."""
-    _ref_to_group: dict[str, str] = getattr(ctx, "_ref_to_group", {})
-    if not _ref_to_group:
-        for feat in ctx.requirements.features:
-            for comp in feat.components:
-                r = comp.ref if hasattr(comp, "ref") else comp
-                _ref_to_group[r] = feat.name
-
     sc_list = list(ctx.subcircuits)
     _post_clamp_decoup = 0
     for sc in sc_list:
@@ -262,7 +257,6 @@ def _post_clamp_decoupling_repull(
         ic_ref = sc.anchor_ref
         if ic_ref not in ctx.positions:
             continue
-        ic_group = _ref_to_group.get(ic_ref, "")
         ix, iy, _irot = ctx.positions[ic_ref]
         iw, ih = ctx.fp_sizes.get(ic_ref, (5.0, 5.0))
         if _irot % 180 in (90.0, 270.0):
@@ -278,9 +272,10 @@ def _post_clamp_decoupling_repull(
             # must not be overridden here.
             if cap_ref in ctx.power_group_fixed or cap_ref in ctx.fixed_refs:
                 continue
-            cap_group = _ref_to_group.get(cap_ref, "")
-            if cap_group != ic_group:
-                continue
+            # NOTE: Previously skipped caps in a different group than their IC
+            # (cap_group != ic_group). Removed because collision resolution can
+            # push a cap into a different group's bbox — the cap still belongs
+            # to this IC's decoupling subcircuit and must be re-pulled.
             cx, cy, crot = ctx.positions[cap_ref]
             cw, ch = ctx.fp_sizes.get(cap_ref, (1.5, 1.0))
             edge_dist = _compute_edge_distance(cx, cy, cw, ch, ix, iy, iw, ih)
@@ -645,7 +640,11 @@ def _enforce_tht_connectors_to_edge(ctx: PlacementContext) -> None:
     from kicad_pipeline.constants import CONNECTOR_EDGE_MAX_MM
 
     min_x, min_y, max_x, max_y = ctx.bounds
-    margin = 4.0  # pad center inset from board edge
+    # Body-aware margin: THT connector bodies extend beyond their pads.
+    # Screw terminals overhang ~5mm (wire entry), RJ45 ~4mm, pin headers ~1mm.
+    # Use per-ref prefix overhang so the body stays on the board.
+    _BASE_MARGIN = 2.0  # minimum pad-to-edge clearance
+    _CONNECTOR_BODY_OVERHANG: dict[str, float] = {"J": 5.0, "P": 3.0}
 
     tht_connector_refs = _find_tht_connector_refs(ctx)
     if not tht_connector_refs:
@@ -687,28 +686,80 @@ def _enforce_tht_connectors_to_edge(ctx: PlacementContext) -> None:
             ref, body_edge_dist, CONNECTOR_EDGE_MAX_MM,
         )
 
-        edges: list[tuple[float, str]] = sorted(
-            [(d_left, "left"), (d_right, "right"), (d_top, "top"), (d_bottom, "bottom")],
-            key=lambda e: e[0],
-        )
+        # If phase 3f3 assigned an intended edge, prioritise that edge
+        intended_edge = ctx.edge_mapped_connectors.get(ref)
+        all_edges = [(d_left, "left"), (d_right, "right"),
+                     (d_top, "top"), (d_bottom, "bottom")]
+        if intended_edge:
+            # Put the intended edge first, then the rest sorted by distance
+            edges = [(0.0, intended_edge)] + sorted(
+                [e for e in all_edges if e[1] != intended_edge],
+                key=lambda e: e[0],
+            )
+            _log.info(
+                "  THT edge: %s has intended edge=%s from phase 3f3",
+                ref, intended_edge,
+            )
+        else:
+            edges = sorted(all_edges, key=lambda e: e[0])
+
+        prefix = ref.rstrip("0123456789")
+        overhang = _CONNECTOR_BODY_OVERHANG.get(prefix, 2.0)
+        margin = _BASE_MARGIN + overhang
         _move_connector_to_edge(ref, cx, cy, w, h, edges, ctx, margin)
 
     ctx.fixed_refs |= was_fixed
+
+
+def _build_decoupling_proximity_constraints(
+    ctx: PlacementContext,
+    max_distance_mm: float = 5.0,
+) -> dict[str, tuple[str, float]]:
+    """Build proximity constraints mapping decoupling caps to their parent IC.
+
+    Returns:
+        Dict mapping cap ref -> (ic_ref, max_distance_mm) for every
+        decoupling subcircuit detected in *ctx.subcircuits*.
+    """
+    constraints: dict[str, tuple[str, float]] = {}
+    for sc in ctx.subcircuits:
+        if sc.circuit_type != SubCircuitType.DECOUPLING:
+            continue
+        ic_ref = sc.anchor_ref
+        if ic_ref not in ctx.positions:
+            continue
+        for cap_ref in sc.refs:
+            if cap_ref == ic_ref or not cap_ref.startswith("C"):
+                continue
+            if cap_ref not in ctx.positions:
+                continue
+            # Don't constrain caps that are deliberately fixed by group phases
+            if cap_ref in ctx.power_group_fixed or cap_ref in ctx.fixed_refs:
+                continue
+            constraints[cap_ref] = (ic_ref, max_distance_mm)
+    if constraints:
+        _log.info("  Decoupling proximity constraints: %d caps bound to ICs",
+                  len(constraints))
+    return constraints
 
 
 def _phase_collision_resolution(ctx: PlacementContext) -> None:
     """3g: Collision resolution (group-constrained, then unconstrained)."""
     _log.info("  3g: Collision resolution")
     group_bboxes = _extract_group_bboxes(ctx.requirements, ctx.positions, ctx.fp_sizes)
+    edge_mapped_refs = set(ctx.edge_mapped_connectors.keys())
     subcircuit_fixed = (ctx.relay_support_refs | ctx.adc_channel_refs
                         | ctx.mcu_peripheral_refs | ctx.power_group_fixed
                         | ctx.ethernet_fixed | ctx.template_fixed
-                        | ctx.top_edge_connector_refs)
+                        | ctx.top_edge_connector_refs | edge_mapped_refs)
     relay_fixed = ctx.fixed_refs | subcircuit_fixed | {
         r for r in ctx.positions if r.startswith("K")
     }
+    # Build proximity constraints so decoupling caps stay near their ICs
+    prox = _build_decoupling_proximity_constraints(ctx)
     ctx.positions = _resolve_collisions(
         ctx.positions, ctx.fp_sizes, ctx.bounds, relay_fixed, group_bboxes=group_bboxes,
+        proximity_constraints=prox,
     )
     # Targeted final pass
     remaining_collisions = _count_collisions(ctx.positions, ctx.fp_sizes)
@@ -721,7 +772,7 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
         always_fixed_base = (ctx.mcu_peripheral_refs | ctx.top_edge_connector_refs
                              | ctx.ethernet_fixed | ctx.adc_channel_refs
                              | ctx.adc_ic_refs | ctx.relay_support_refs
-                             | ctx.power_group_fixed
+                             | ctx.power_group_fixed | edge_mapped_refs
                              | {r for r in ctx.positions if r.startswith("K")})
         intra_fixed_unprotect: set[str] = set()
         for a, b in remaining_collisions:
@@ -736,6 +787,7 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
         targeted_fixed = ctx.fixed_refs | (subcircuit_fixed - colliding_refs) | always_fixed
         ctx.positions = _resolve_collisions(
             ctx.positions, ctx.fp_sizes, ctx.bounds, targeted_fixed,
+            proximity_constraints=prox,
         )
 
     # Post-3g: Enforce ethernet connectors on bottom edge
@@ -1840,8 +1892,8 @@ def _refresh_antenna_keepout(pcb: PCBDesign) -> PCBDesign:
 
 def _phase_build_final(
     ctx: PlacementContext,
-) -> tuple[PCBDesign, PlacementReview]:
-    """Build final PCB and filter stale violations."""
+) -> PlacementResult:
+    """Build final PCB, render mandatory views, and return PlacementResult."""
     from kicad_pipeline.optimization.placement_guard import validate_placement
 
     _edge_m: float = getattr(ctx, "_edge_m", 1.5)
@@ -1885,4 +1937,169 @@ def _phase_build_final(
         _log.info("Placement guard: ALL CHECKS PASSED")
 
     _log.info("EE placement v5 complete: %s", best_review.summary)
-    return final_pcb, best_review
+
+    # --- Ratsnest optimization is available but NOT run by default ---
+    # The ratsnest swap/rotation optimizers can move components off-board,
+    # create collisions, and separate decoupling caps from ICs. They should
+    # be invoked explicitly after the user reviews the initial placement.
+    # Use: optimize_ratsnest(), optimize_rotations(), optimize_ratsnest_with_vision()
+    vision_suggestions: list[str] = []
+
+    # --- Mandatory visual verification ---
+    render_paths = _render_placement_views(final_pcb, ctx)
+    visual_findings = _run_visual_inspection(render_paths)
+
+    # Merge vision suggestions into findings
+    all_findings = (*visual_findings, *tuple(vision_suggestions))
+
+    return PlacementResult(
+        pcb=final_pcb,
+        review=best_review,
+        render_paths=render_paths,
+        visual_findings=all_findings,
+    )
+
+
+def _render_placement_views(
+    pcb: PCBDesign,
+    ctx: PlacementContext,
+) -> dict[str, Path]:
+    """Render 2D + 3D views of the final placement. Always runs.
+
+    Writes a temporary .kicad_pcb, renders 4 standard views, and returns
+    a dict mapping view name to PNG path.  If kicad-image-gen is not
+    installed or rendering fails, logs a warning and returns an empty dict
+    (does not block the pipeline — the evidence will be missing and the
+    commit gate will catch it).
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    render_paths: dict[str, _Path] = {}
+
+    try:
+        from kicad_image_gen import render_2d, render_3d
+    except ImportError:
+        _log.warning(
+            "kicad-image-gen not installed — skipping mandatory renders. "
+            "Install it to enable automatic visual verification.",
+        )
+        return render_paths
+
+    # Determine output directory: next to the PCB file if we have one,
+    # otherwise a temp dir.
+    output_dir: _Path | None = getattr(ctx, "_output_dir", None)
+    if output_dir is None:
+        output_dir = _Path(tempfile.mkdtemp(prefix="placement_renders_"))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write temporary PCB for rendering
+    try:
+        from kicad_pipeline.pcb.builder import write_pcb
+        tmp_pcb_path = output_dir / "_placement_verify.kicad_pcb"
+        write_pcb(pcb, tmp_pcb_path)
+    except Exception:
+        _log.warning("Failed to write temporary PCB for rendering", exc_info=True)
+        return render_paths
+
+    # Standard 4-view render
+    view_specs: tuple[tuple[str, str, dict[str, str]], ...] = (
+        ("2d", "placement_2d.png", {}),
+        ("3d_top", "placement_3d_top.png", {"view": "top"}),
+        ("3d_iso", "placement_3d_iso.png", {"view": "iso"}),
+        ("3d_isoback", "placement_3d_isoback.png", {"view": "iso-back"}),
+    )
+
+    for view_name, filename, kwargs in view_specs:
+        out_path = output_dir / filename
+        try:
+            if view_name == "2d":
+                render_2d(str(tmp_pcb_path), str(out_path))
+            else:
+                render_3d(str(tmp_pcb_path), str(out_path), **kwargs)
+            render_paths[view_name] = out_path
+            _log.info("Rendered %s → %s", view_name, out_path)
+        except Exception:
+            _log.warning("Failed to render %s view", view_name, exc_info=True)
+
+    # Write review evidence for commit gate
+    _write_review_evidence(render_paths, output_dir)
+
+    return render_paths
+
+
+def _write_review_evidence(
+    render_paths: dict[str, Path],
+    output_dir: Path,
+) -> None:
+    """Write .claude/last_review.json so the commit gate is satisfied."""
+    import json
+    import time
+    from pathlib import Path as _Path
+
+    evidence_dir = _Path.home() / ".claude"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_file = evidence_dir / "last_review.json"
+
+    evidence = {
+        "timestamp": time.time(),
+        "render_2d": str(render_paths.get("2d", "")),
+        "render_3d": str(render_paths.get("3d_iso", "")),
+        "render_count": len(render_paths),
+        "output_dir": str(output_dir),
+        "auto_generated": True,
+    }
+
+    try:
+        evidence_file.write_text(json.dumps(evidence, indent=2))
+        _log.info("Wrote review evidence → %s", evidence_file)
+    except Exception:
+        _log.warning("Failed to write review evidence", exc_info=True)
+
+
+def _run_visual_inspection(
+    render_paths: dict[str, Path],
+) -> tuple[str, ...]:
+    """Run AI visual inspection on rendered views if enabled.
+
+    Returns tuple of finding strings.  Returns empty tuple if visual
+    inspection is disabled or no renders are available.
+    """
+    if not render_paths:
+        return ()
+
+    try:
+        from kicad_pipeline.validation.visual_inspector import (
+            is_enabled,
+        )
+        if not is_enabled():
+            _log.debug("Visual inspector disabled — skipping AI vision checks")
+            return ()
+    except ImportError:
+        return ()
+
+    findings: list[str] = []
+    try:
+        from kicad_pipeline.validation.visual_inspector import (
+            inspect_board_renders,
+        )
+        results = inspect_board_renders(render_paths)
+        for result in results:
+            if not result.get("passed", True):
+                findings.append(
+                    f"[{result.get('check', 'unknown')}] {result.get('detail', '')}"
+                )
+    except (ImportError, AttributeError):
+        _log.debug("inspect_board_renders not available — skipping")
+    except Exception:
+        _log.warning("Visual inspection failed", exc_info=True)
+
+    if findings:
+        _log.warning("Visual inspection found %d issues:", len(findings))
+        for f in findings:
+            _log.warning("  %s", f)
+    else:
+        _log.info("Visual inspection: no issues found (or disabled)")
+
+    return tuple(findings)

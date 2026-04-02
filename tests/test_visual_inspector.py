@@ -54,9 +54,9 @@ def render_paths(tmp_path: Path) -> list[tuple[str, Path]]:
 # ---------------------------------------------------------------------------
 
 class TestIsEnabled:
-    def test_disabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_enabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("VISUAL_INSPECT_ENABLED", raising=False)
-        assert is_enabled() is False
+        assert is_enabled() is True
 
     def test_enabled_with_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("VISUAL_INSPECT_ENABLED", "1")
@@ -72,6 +72,14 @@ class TestIsEnabled:
 
     def test_disabled_with_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("VISUAL_INSPECT_ENABLED", "0")
+        assert is_enabled() is False
+
+    def test_disabled_with_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VISUAL_INSPECT_ENABLED", "false")
+        assert is_enabled() is False
+
+    def test_disabled_with_no(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VISUAL_INSPECT_ENABLED", "no")
         assert is_enabled() is False
 
 
@@ -135,7 +143,7 @@ class TestInspectComponent:
         render_paths: list[tuple[str, Path]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.delenv("VISUAL_INSPECT_ENABLED", raising=False)
+        monkeypatch.setenv("VISUAL_INSPECT_ENABLED", "0")
         result = inspect_component(render_paths, fake_spec)
         assert result.skipped is True
         assert result.passed is True

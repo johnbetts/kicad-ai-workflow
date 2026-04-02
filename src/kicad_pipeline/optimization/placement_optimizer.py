@@ -54,6 +54,7 @@ from kicad_pipeline.optimization.placement_types import (
     OptimizationConfig,  # noqa: F401 - re-exported
     PlacementCandidate,  # noqa: F401 - re-exported
     PlacementContext,
+    PlacementResult,
     _apply_positions,  # noqa: F401 - re-exported
     _board_bounds,
     _dict_to_positions,  # noqa: F401 - re-exported
@@ -191,7 +192,7 @@ def optimize_placement_ee(
     initial_pcb: PCBDesign,
     max_review_passes: int = 5,
     level3: str = "legacy",
-) -> tuple[PCBDesign, PlacementReview]:
+) -> PlacementResult:
     """3-level hierarchical placement optimizer (v5).
 
     Replaces the 15-phase v4 optimizer with a clean top-down pipeline:
@@ -210,13 +211,17 @@ def optimize_placement_ee(
     Single-pass, deterministic. Each level is complete before the next starts.
     No level undoes work from a previous level.
 
+    Renders 4 mandatory views (2D, 3D top/iso/iso-back) after placement
+    and returns them in ``PlacementResult.render_paths``.
+
     Args:
         requirements: Project requirements with components and nets.
         initial_pcb: Starting PCB with initial placement.
         max_review_passes: Max iterations of the review-fix loop.
 
     Returns:
-        Tuple of (optimized PCBDesign, final PlacementReview).
+        PlacementResult with PCB, review, render paths, and visual findings.
+        Supports tuple unpacking: ``pcb, review = optimize_placement_ee(...)``
     """
     from kicad_pipeline.optimization.ee_phases import (
         _phase_adc_analog_cluster,
@@ -450,14 +455,14 @@ def _clamp_subcircuit_spread(ctx: PlacementContext) -> None:
         if not members:
             continue
 
-        # Components placed by the relay driver column layout (D, Q, R,
-        # LED) must not be moved — they were deliberately positioned by
-        # _place_relay_driver_columns.  Also protect components within
-        # min_clearance of anchor (would cause courtyard overlap).
-        immovable = {anchor} | ctx.relay_support_refs
+        # Protect the anchor and components physically close to it
+        # (within min_clearance — moving them would cause courtyard overlap).
+        # Components farther away (e.g. LEDs placed in a separate column)
+        # can be pulled inward to meet the spread limit.
+        immovable: set[str] = {anchor}
         for r in members:
             rx, ry, _ = ctx.positions[r]
-            if math.dist((rx, ry), (ax, ay)) < min_clearance + 10.0:
+            if math.dist((rx, ry), (ax, ay)) < min_clearance + 2.0:
                 immovable.add(r)
 
         movable = [r for r in members if r not in immovable]

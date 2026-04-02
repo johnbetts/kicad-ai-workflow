@@ -163,6 +163,8 @@ _3D_MODEL_MAP: tuple[tuple[str, str, str], ...] = (
     ("L_0805", "Inductor_SMD.3dshapes", "L_0805_2012Metric.step"),
     # Crystals
     ("Crystal_SMD_3215", "Crystal.3dshapes", "Crystal_SMD_3215-2Pin_3.2x1.5mm.step"),
+    # Buzzers — match both "Buzzer_12mm" (parametric lib_id) and "Buzzer_12x9.5mm"
+    ("BUZZER_12", "Buzzer_Beeper.3dshapes", "Buzzer_12x9.5RM7.6.step"),
 )
 
 
@@ -2142,13 +2144,14 @@ def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout]
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
     """Return the KiCad standard ESP32-S3-WROOM-1 3D model with offset.
 
-    The STEP model origin matches the KiCad standard footprint origin,
-    where pad 1 is at (-8.75, -5.26).  The JLCPCB footprint may have pad 1
-    at a different Y position, so we compute the offset from the pad-1
-    position difference.
+    The STEP model is designed for the KiCad standard footprint, where
+    pad 1 is at (-8.75, -5.26).  Our parametric footprint may place pad 1
+    at a different position, so we compute the offset from the pad-1
+    position difference.  This aligns all 28 side pads perfectly (they
+    have a uniform offset from the standard).
 
     KiCad ESP32-S3-WROOM-1 pad 1 position (from standard library):
-    (-8.75, -5.26) — verified from KiCad 10 installation.
+    (-8.75, -5.26) — verified from RF_Module.pretty in KiCad 10.
     """
     _KICAD_ESP32_PAD1 = (-8.75, -5.26)
 
@@ -3352,7 +3355,17 @@ def _strip_relay_fab_blob(
 def _classify_relay_pads(
     pads: tuple[Pad, ...],
 ) -> tuple[list[tuple[float, float]], list[tuple[str, float, float, float]]]:
-    # Pad 1=COM, 3=NO, 4=NC → contact/mains side; Pad 2=Coil-, 5=Coil+ → coil/logic side
+    """Classify relay pads into contact group and coil group.
+
+    SANYOU SRD pinout:
+    - Pin 1 = COM (common contact) — HIGH VOLTAGE
+    - Pin 2 = Coil- — low voltage logic
+    - Pin 3 = NO (normally open) — HIGH VOLTAGE
+    - Pin 4 = NC (normally closed) — HIGH VOLTAGE
+    - Pin 5 = Coil+ — low voltage logic
+
+    The isolation slot goes between coil (2,5) and contacts (1,3,4).
+    """
     contact_pads_xy: list[tuple[float, float]] = []
     coil_pads_list: list[tuple[str, float, float, float]] = []
     for pad in pads:
@@ -3365,37 +3378,47 @@ def _classify_relay_pads(
 
 def _build_relay_isolation_slot(
     coil_x: float, coil_y: float, coil_size: float, contact_cx: float,
-) -> list[FootprintLine | FootprintArc]:
-    coil_r = coil_size / 2.0
-    u_half = coil_r + 1.0  # 1mm clearance from pad edge to slot center
-    if contact_cx > coil_x:
-        closed_x, open_x = coil_x - u_half, coil_x + u_half
-    else:
-        closed_x, open_x = coil_x + u_half, coil_x - u_half
+) -> list[FootprintLine]:
+    """Build a vertical isolation slot between coil and contact pad groups.
+
+    The slot runs vertically between the coil-side pads and the contact-side
+    pads, providing creepage isolation between low-voltage logic and
+    high-voltage load connections.  It's a simple rectangular slot (two
+    parallel lines capped at top and bottom), not a U-shape around a pad.
+    """
+    # The slot goes midway between the coil pin and the nearest contact pin
+    slot_x = (coil_x + contact_cx) / 2.0
     sw = _RELAY_SLOT_WIDTH / 2.0
     lw = 0.05
-    outer_r, inner_r = u_half + sw, u_half - sw
-    b = Point(open_x, coil_y - u_half - sw)
-    c = Point(open_x, coil_y - u_half + sw)
-    f = Point(open_x, coil_y + u_half - sw)
-    g = Point(open_x, coil_y + u_half + sw)
-    outer_top = Point(coil_x, coil_y - outer_r)
-    outer_bot = Point(coil_x, coil_y + outer_r)
-    outer_mid = Point(closed_x - sw if closed_x < coil_x else closed_x + sw, coil_y)
-    inner_top = Point(coil_x, coil_y - inner_r)
-    inner_bot = Point(coil_x, coil_y + inner_r)
-    inner_mid = Point(closed_x + sw if closed_x < coil_x else closed_x - sw, coil_y)
+    # Slot extends beyond the pad area vertically
+    slot_half_h = abs(coil_y) + coil_size / 2.0 + 2.0  # extend 2mm past pads
+
+    # Four lines forming a closed rectangular slot
     return [
-        FootprintLine(start=outer_top, end=b, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintLine(start=b, end=c, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintLine(start=c, end=inner_top, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintArc(
-            start=inner_top, mid=inner_mid, end=inner_bot, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintLine(start=inner_bot, end=f, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintLine(start=f, end=g, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintLine(start=g, end=outer_bot, layer=LAYER_EDGE_CUTS, width=lw),
-        FootprintArc(
-            start=outer_bot, mid=outer_mid, end=outer_top, layer=LAYER_EDGE_CUTS, width=lw),
+        # Left wall
+        FootprintLine(
+            start=Point(slot_x - sw, -slot_half_h),
+            end=Point(slot_x - sw, slot_half_h),
+            layer=LAYER_EDGE_CUTS, width=lw,
+        ),
+        # Right wall
+        FootprintLine(
+            start=Point(slot_x + sw, -slot_half_h),
+            end=Point(slot_x + sw, slot_half_h),
+            layer=LAYER_EDGE_CUTS, width=lw,
+        ),
+        # Top cap
+        FootprintLine(
+            start=Point(slot_x - sw, -slot_half_h),
+            end=Point(slot_x + sw, -slot_half_h),
+            layer=LAYER_EDGE_CUTS, width=lw,
+        ),
+        # Bottom cap
+        FootprintLine(
+            start=Point(slot_x - sw, slot_half_h),
+            end=Point(slot_x + sw, slot_half_h),
+            layer=LAYER_EDGE_CUTS, width=lw,
+        ),
     ]
 
 
@@ -3422,11 +3445,11 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
         )
         coil_num, coil_x, coil_y, coil_size = best_coil
         cleaned.extend(_build_relay_isolation_slot(coil_x, coil_y, coil_size, contact_cx))
+        slot_x = (coil_x + contact_cx) / 2.0
         _log.info(
-            "Relay %s: U-shaped isolation slot around coil pad %s at (%.1f, %.1f), "
-            "closed wall toward contacts, opens %s",
-            fp.ref, coil_num, coil_x, coil_y,
-            "left" if contact_cx > coil_x else "right",
+            "Relay %s: vertical isolation slot at x=%.1f between coil pad %s "
+            "(%.1f, %.1f) and contacts centroid (%.1f)",
+            fp.ref, slot_x, coil_num, coil_x, coil_y, contact_cx,
         )
     else:
         _log.warning("Relay %s: could not determine pad groups for isolation slot", fp.ref)
@@ -4264,6 +4287,53 @@ def _route_footprint(
     raise KiCadPipelineError(msg)
 
 
+def _try_kicad_standard_esp32(
+    ref: str,
+    value: str,
+    layer: str,
+    lcsc: str | None,
+    pins: tuple[Pin, ...],
+) -> Footprint | None:
+    """Load ESP32-S3-WROOM-1 from the KiCad standard .kicad_mod file.
+
+    The KiCad standard footprint has pad positions that exactly match the
+    STEP 3D model — zero offset needed. The parametric generator and
+    JLCPCB cache produce structurally different pad layouts that cannot
+    be offset-corrected.
+
+    Returns the enriched footprint, or None if the .kicad_mod is not found.
+    """
+    from pathlib import Path as _Path
+
+    # Look for the KiCad standard .kicad_mod in component evidence
+    evidence_dir = _Path(__file__).resolve().parents[3] / "data" / "component_evidence"
+    candidates = [
+        evidence_dir / "ESP32-S3-WROOM-1" / "RF_Module.pretty" / "ESP32-S3-WROOM-1.kicad_mod",
+        evidence_dir / "ESP32-WROOM-32E" / "RF_Module.pretty" / "ESP32-S3-WROOM-1.kicad_mod",
+    ]
+
+    for mod_path in candidates:
+        if mod_path.exists():
+            try:
+                from kicad_pipeline.pcb.footprint_loader import load_kicad_mod
+                fp = load_kicad_mod(mod_path, ref=ref, value=value, layer=layer, lcsc=lcsc)
+                # Enrich with pin labels, antenna keepout, 3D model
+                fp = _enrich_esp32_footprint(fp)
+                _log.info(
+                    "ESP32 footprint loaded from KiCad standard: %s (%d pads, %d models)",
+                    mod_path.name, len(fp.pads), len(fp.models),
+                )
+                return fp
+            except Exception:
+                _log.warning(
+                    "Failed to load KiCad standard ESP32 from %s — falling back",
+                    mod_path, exc_info=True,
+                )
+
+    _log.debug("KiCad standard ESP32 .kicad_mod not found — falling back to other paths")
+    return None
+
+
 def footprint_for_component(
     ref: str,
     value: str,
@@ -4305,13 +4375,22 @@ def footprint_for_component(
     """
     _log.debug("footprint_for_component ref=%s id=%s layer=%s", ref, footprint_id, layer)
 
+    # ESP32/WROOM: ALWAYS load from the KiCad standard .kicad_mod file.
+    # The parametric generator and JLCPCB cache both produce pad layouts
+    # that don't match the STEP model. The KiCad standard file is the
+    # ground truth — zero offset, pins land on pads, isolation-board proven.
+    fid_upper = footprint_id.strip().upper()
+    if "ESP32" in fid_upper or "WROOM" in fid_upper:
+        fp = _try_kicad_standard_esp32(ref, value, layer, lcsc, pins)
+        if fp is not None:
+            return fp
+
     # JLCPCB-first: try loading verified footprint from JLCPCB library
     if lcsc:
         fp = _try_jlcpcb_footprint(lcsc, ref, value, layer, footprint_id=footprint_id)
         if fp is not None:
             # Enrich ESP32/WROOM footprints from JLCPCB cache with pin
             # labels, antenna keepout, and 3D model.
-            fid_upper = footprint_id.strip().upper()
             if "ESP32" in fid_upper or "WROOM" in fid_upper:
                 fp = _postprocess_esp32_thermal_pad(fp)
                 fp = _enrich_esp32_footprint(fp)

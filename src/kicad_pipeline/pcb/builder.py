@@ -727,7 +727,8 @@ def _build_pre_placement_keepouts(
             layer_count=ctx.layer_count,
             board_height=ctx.board_height_mm,
         )
-        ctx.keepouts.append(antenna_ko)
+        if antenna_ko is not None:
+            ctx.keepouts.append(antenna_ko)
         body_ko = _make_rf_module_body_keepout(
             ctx.rf_pos,
             layer_count=ctx.layer_count,
@@ -840,7 +841,8 @@ def _create_post_placement_keepouts(
                 layer_count=ctx.layer_count,
                 board_height=ctx.board_height_mm,
             )
-            ctx.keepouts.append(antenna_ko)
+            if antenna_ko is not None:
+                ctx.keepouts.append(antenna_ko)
             body_ko = _make_rf_module_body_keepout(
                 ctx.rf_pos,
                 layer_count=ctx.layer_count,

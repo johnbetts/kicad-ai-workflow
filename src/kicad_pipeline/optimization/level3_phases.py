@@ -94,7 +94,7 @@ def _compute_relay_row_y(
     # _phase_relay_connector_alignment (which runs AFTER this phase).
     # Estimate terminal bottom edge: center at min_y + 5, half-height ~5mm
     # for a 3-pin 5.08mm-pitch terminal block.
-    _TERMINAL_ROW_Y = 5.0  # matches _phase_relay_connector_alignment
+    _TERMINAL_ROW_Y = 7.0  # matches _phase_top_edge_connectors (body-aware)
     _TERMINAL_HALF_H = 5.5  # conservative half-height for terminal blocks
     terminal_bottom = min_y + _TERMINAL_ROW_Y + _TERMINAL_HALF_H
 

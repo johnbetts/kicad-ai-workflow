@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from kicad_pipeline.models.pcb import Footprint, PCBDesign
     from kicad_pipeline.models.requirements import ProjectRequirements
 
@@ -1000,3 +1002,66 @@ def format_integrity_report(issues: list[IntegrityIssue]) -> str:
     for issue in sorted(issues, key=lambda i: ("critical", "major", "minor").index(i.severity)):
         lines.append(f"  [{issue.severity:8s}] [{issue.category:10s}] {issue.message}")
     return "\n".join(lines)
+
+
+def assert_renders_exist(
+    pcb_path: str | Path,
+    max_age_seconds: float = 300.0,
+) -> dict[str, Path]:
+    """Assert that fresh render PNGs exist for a PCB file.
+
+    Checks for 2D and 3D renders in the same directory as ``pcb_path``,
+    or in a ``placement_renders`` subdirectory.  Raises ``AssertionError``
+    if no fresh renders are found.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        max_age_seconds: Maximum age in seconds for renders to be
+            considered fresh (default: 5 minutes).
+
+    Returns:
+        Dict mapping view name to Path for found renders.
+
+    Raises:
+        AssertionError: If no fresh renders exist.
+    """
+    import time
+    from pathlib import Path as _Path
+
+    pcb = _Path(pcb_path)
+    now = time.time()
+
+    search_dirs = [pcb.parent, pcb.parent / "placement_renders"]
+    render_patterns = {
+        "2d": "*2d*.png",
+        "3d_top": "*3d_top*.png",
+        "3d_iso": "*3d_iso*.png",
+        "3d_isoback": "*3d_isoback*.png",
+    }
+
+    found: dict[str, _Path] = {}
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        for view_name, pattern in render_patterns.items():
+            if view_name in found:
+                continue
+            for p in search_dir.glob(pattern):
+                if p.is_file() and (now - p.stat().st_mtime) < max_age_seconds:
+                    found[view_name] = p
+                    break
+
+    if not found:
+        msg = (
+            f"No fresh render PNGs found for {pcb.name}. "
+            f"Searched: {[str(d) for d in search_dirs]}. "
+            f"The placement optimizer should produce these automatically. "
+            f"Max age: {max_age_seconds}s."
+        )
+        raise AssertionError(msg)
+
+    _log.info(
+        "Render evidence: %d views found for %s: %s",
+        len(found), pcb.name, list(found.keys()),
+    )
+    return found

@@ -506,4 +506,6 @@ def add_silkscreen_to_footprint(fp: Footprint) -> Footprint:
         lib_id=fp.lib_id, ref=fp.ref, value=fp.value, position=fp.position,
         rotation=fp.rotation, layer=fp.layer, pads=fp.pads, graphics=fp.graphics,
         texts=tuple(new_texts), lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
+        models=fp.models, datasheet=fp.datasheet, description=fp.description,
+        fp_zones=fp.fp_zones, custom_properties=fp.custom_properties,
     )

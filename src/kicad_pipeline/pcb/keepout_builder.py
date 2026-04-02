@@ -15,6 +15,9 @@ from kicad_pipeline.models.pcb import Keepout, Point
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import ProjectRequirements
 
+# Minimum polygon area in mm² — below this the keepout is degenerate
+_MIN_KEEPOUT_AREA_MM2: float = 1.0
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -51,6 +54,80 @@ RF_KEYWORDS: frozenset[str] = frozenset({"esp32", "esp8266", "nrf", "cc3200", "r
 def _new_uuid() -> str:
     """Return a fresh RFC-4122 UUID string."""
     return str(uuid.uuid4())
+
+
+def _polygon_area(points: list[Point]) -> float:
+    """Compute area of a simple polygon using the shoelace formula.
+
+    Returns the absolute area in mm².
+    """
+    n = len(points)
+    if n < 3:
+        return 0.0
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += points[i].x * points[j].y
+        area -= points[j].x * points[i].y
+    return abs(area) / 2.0
+
+
+def _clamp_polygon_preserve_shape(
+    points: list[Point],
+    board_width: float,
+    board_height: float,
+) -> list[Point] | None:
+    """Shift a polygon to stay within board bounds, preserving its shape.
+
+    Instead of clamping each corner independently (which collapses the
+    polygon when it extends past the board edge), compute the bounding box
+    of all points and shift the entire polygon by the minimum amount needed
+    to bring it within ``[0, board_width] x [0, board_height]``.
+
+    Returns ``None`` if the polygon is entirely outside the board or if the
+    resulting area is below ``_MIN_KEEPOUT_AREA_MM2``.
+    """
+    if not points:
+        return None
+
+    xs = [p.x for p in points]
+    ys = [p.y for p in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    dx = 0.0
+    dy = 0.0
+
+    # Shift left if polygon extends past right edge
+    if max_x > board_width:
+        dx = board_width - max_x
+    # Shift right if polygon extends past left edge
+    if min_x + dx < 0.0:
+        dx = -min_x
+
+    # Shift up if polygon extends past bottom edge
+    if max_y > board_height:
+        dy = board_height - max_y
+    # Shift down if polygon extends past top edge
+    if min_y + dy < 0.0:
+        dy = -min_y
+
+    shifted = [Point(x=p.x + dx, y=p.y + dy) for p in points]
+
+    # Final clamp: if the polygon is larger than the board in some
+    # dimension (e.g., rotated module bigger than board), clip to board
+    # bounds as a last resort.
+    clamped = [
+        Point(
+            x=max(0.0, min(p.x, board_width)),
+            y=max(0.0, min(p.y, board_height)),
+        )
+        for p in shifted
+    ]
+
+    if _polygon_area(clamped) < _MIN_KEEPOUT_AREA_MM2:
+        return None
+
+    return clamped
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +243,7 @@ def make_antenna_keepout(
     rf_position: tuple[float, float, float] | None = None,
     layer_count: int = 2,
     board_height: float = 80.0,
-) -> Keepout:
+) -> Keepout | None:
     """Create a no-copper keepout zone for an RF antenna.
 
     When *rf_position* is given ``(x, y, rotation_deg)`` the keepout is
@@ -182,7 +259,8 @@ def make_antenna_keepout(
         board_height: Total board height in mm (for clamping).
 
     Returns:
-        A :class:`Keepout` covering the antenna area.
+        A :class:`Keepout` covering the antenna area, or ``None`` if the
+        resulting polygon would be degenerate (< 1 mm²).
     """
     if rf_position is not None:
         x0, y0 = _antenna_origin_from_rf_position(
@@ -208,18 +286,23 @@ def make_antenna_keepout(
         y_bottom = y0 + height
 
     # Do NOT explicitly close -- KiCad auto-closes polygons for keepouts.
-    polygon = (
+    raw_polygon = [
         Point(x=x0, y=y0),
         Point(x=x0 + width, y=y0),
         Point(x=x0 + width, y=y_bottom),
         Point(x=x0, y=y_bottom),
-    )
+    ]
+
+    # Guard against degenerate polygons from clamping
+    if _polygon_area(raw_polygon) < _MIN_KEEPOUT_AREA_MM2:
+        return None
+
     # Keepout on all copper layers for proper isolation
     layers: list[str] = [LAYER_F_CU, LAYER_B_CU]
     if layer_count >= 4:
         layers.extend(["In1.Cu", "In2.Cu"])
     return Keepout(
-        polygon=tuple(polygon),
+        polygon=tuple(raw_polygon),
         layers=tuple(layers),
         no_copper=True,
         no_vias=False,
@@ -271,17 +354,23 @@ def make_rf_module_body_keepout(
     # Rotate and translate to board coordinates
     cos_a = _m.cos(angle_rad)
     sin_a = _m.sin(angle_rad)
-    polygon: list[Point] = []
+    raw_polygon: list[Point] = []
     for lx, ly in local_corners:
         bx = cx + lx * cos_a - ly * sin_a
         by = cy + lx * sin_a + ly * cos_a
-        # Clamp to board bounds
-        bx = max(0.0, min(bx, board_width))
-        by = max(0.0, min(by, board_height))
-        polygon.append(Point(x=bx, y=by))
+        raw_polygon.append(Point(x=bx, y=by))
+
+    # Shift the entire polygon to stay within board bounds (preserving
+    # shape) instead of clamping each corner independently, which can
+    # collapse the polygon to zero area near board edges.
+    clamped = _clamp_polygon_preserve_shape(
+        raw_polygon, board_width, board_height,
+    )
+    if clamped is None:
+        return None
 
     return Keepout(
-        polygon=tuple(polygon),
+        polygon=tuple(clamped),
         layers=("In1.Cu", "In2.Cu"),
         no_copper=True,
         no_vias=False,

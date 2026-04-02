@@ -70,10 +70,14 @@ _JSON_FORMAT = (
 # ---------------------------------------------------------------------------
 
 def is_enabled() -> bool:
-    """Check if visual inspection is enabled (opt-in)."""
-    return os.environ.get("VISUAL_INSPECT_ENABLED", "").strip() in (
-        "1", "true", "yes",
-    )
+    """Check if visual inspection is enabled (default: enabled).
+
+    Set ``VISUAL_INSPECT_ENABLED=0`` to disable.  Requires an Anthropic
+    API key to be available (env var or vault).
+    """
+    explicit = os.environ.get("VISUAL_INSPECT_ENABLED", "").strip()
+    # Default: enabled (was opt-in, now opt-out per council recommendation)
+    return explicit not in ("0", "false", "no")
 
 
 def _get_api_key() -> str | None:
@@ -330,3 +334,56 @@ def inspect_component(
         model_used=_VISION_MODEL,
         skipped=False,
     )
+
+
+def inspect_board_renders(
+    render_paths: dict[str, Path],
+) -> list[dict[str, object]]:
+    """Run board-level visual inspection on placement renders.
+
+    Args:
+        render_paths: Dict mapping view name to PNG path
+            (e.g. ``{"2d": Path(...), "3d_iso": Path(...)}``)
+
+    Returns:
+        List of check result dicts with keys: check, passed, detail.
+        Empty list if inspection is unavailable.
+    """
+    if not is_enabled():
+        return []
+
+    images: list[tuple[str, Path]] = []
+    for view in ("3d_iso", "3d_top", "2d"):
+        p = render_paths.get(view)
+        if p and p.exists():
+            images.append((view, p))
+
+    if not images:
+        _log.debug("No board render images available for inspection")
+        return []
+
+    prompt = (
+        "You are a senior PCB layout reviewer inspecting a board placement.\n\n"
+        "Perform these checks on the rendered board:\n\n"
+        "1. **no_overlaps**: Are any 3D component bodies overlapping each other?\n"
+        "2. **components_flat**: Are all components flat on the PCB surface?\n"
+        "3. **group_cohesion**: Do functional groups form tight, recognizable clusters?\n"
+        "4. **connectors_at_edges**: Are connectors placed near board edges?\n"
+        "5. **reasonable_density**: Is the board reasonably dense (no massive empty areas)?\n\n"
+        "Respond with ONLY a JSON array of exactly 5 objects, one per check:\n"
+        '[{"check": "<name>", "passed": true|false, '
+        '"confidence": 0.0-1.0, "detail": "explanation"}]\n\n'
+        "Check names: no_overlaps, components_flat, group_cohesion, "
+        "connectors_at_edges, reasonable_density.\n"
+    )
+
+    response = _call_claude_vision(images, prompt)
+    if response is None:
+        _log.warning("Board-level visual inspection API call failed")
+        return []
+
+    findings = _parse_findings(response)
+    return [
+        {"check": f.check, "passed": f.passed, "detail": f.detail}
+        for f in findings
+    ]

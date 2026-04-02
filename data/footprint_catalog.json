@@ -11,7 +11,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 2.0,
       "kicad_ref_pad1_x": -3.25,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "C_0402": {
       "footprint_id": "C_0402",
@@ -23,7 +24,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.48,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C49678"
     },
     "C_0603": {
       "footprint_id": "C_0603",
@@ -35,7 +37,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.775,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "C_0805": {
       "footprint_id": "C_0805",
@@ -47,7 +50,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.95,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C15850"
     },
     "C_1206": {
       "footprint_id": "C_1206",
@@ -59,7 +63,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.6,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "Crystal_SMD_3215": {
       "footprint_id": "Crystal_SMD_3215",
@@ -71,7 +76,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 4.0,
       "kicad_ref_pad1_x": -1.2,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C13738"
     },
     "DIP-8": {
       "footprint_id": "DIP-8",
@@ -83,7 +89,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 1.0,
       "kicad_ref_pad1_x": -3.81,
-      "kicad_ref_pad1_y": -3.81
+      "kicad_ref_pad1_y": -3.81,
+      "lcsc": null
     },
     "ESP32-S3-WROOM-1": {
       "footprint_id": "ESP32-S3-WROOM-1",
@@ -95,7 +102,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 5.0,
       "kicad_ref_pad1_x": -8.75,
-      "kicad_ref_pad1_y": -5.26
+      "kicad_ref_pad1_y": -5.26,
+      "lcsc": "C2913202"
     },
     "ESP32-WROOM-32E": {
       "footprint_id": "ESP32-WROOM-32E",
@@ -107,7 +115,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 5.0,
       "kicad_ref_pad1_x": -8.75,
-      "kicad_ref_pad1_y": -5.260000000000001
+      "kicad_ref_pad1_y": -5.260000000000001,
+      "lcsc": null
     },
     "LED_0603": {
       "footprint_id": "LED_0603",
@@ -119,7 +128,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.7875,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C2286"
     },
     "LED_0805": {
       "footprint_id": "LED_0805",
@@ -131,7 +141,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.9375,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "LQFP-48": {
       "footprint_id": "LQFP-48",
@@ -143,7 +154,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 1.0,
       "kicad_ref_pad1_x": -7.25,
-      "kicad_ref_pad1_y": -5.75
+      "kicad_ref_pad1_y": -5.75,
+      "lcsc": "C32843"
     },
     "L_0805": {
       "footprint_id": "L_0805",
@@ -155,7 +167,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.0625,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C1015"
     },
     "L_1210": {
       "footprint_id": "L_1210",
@@ -167,7 +180,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.6,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C96950"
     },
     "MSOP-10": {
       "footprint_id": "MSOP-10",
@@ -178,8 +192,9 @@
       "body_height_mm": 3.1,
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
-      "kicad_ref_pad1_x": -2.5,
-      "kicad_ref_pad1_y": -1.0
+      "kicad_ref_pad1_x": -2.3,
+      "kicad_ref_pad1_y": -1.0,
+      "lcsc": "C37593"
     },
     "MountingHole_3.2mm": {
       "footprint_id": "MountingHole_3.2mm",
@@ -191,7 +206,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "PinHeader_1x02_P2.54mm_Vertical": {
       "footprint_id": "PinHeader_1x02_P2.54mm_Vertical",
@@ -203,7 +219,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 5.0,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": -1.27
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C124375"
     },
     "PinHeader_1x04": {
       "footprint_id": "PinHeader_1x04",
@@ -215,7 +232,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 5.0,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": -3.81
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "PinHeader_1x04_P2.54mm": {
       "footprint_id": "PinHeader_1x04_P2.54mm",
@@ -227,7 +245,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 5.0,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": -3.81
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "PinHeader_1x06_P2.54mm_Vertical": {
       "footprint_id": "PinHeader_1x06_P2.54mm_Vertical",
@@ -239,7 +258,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 5.0,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": -6.35
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "QFN-32": {
       "footprint_id": "QFN-32",
@@ -251,7 +271,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 1.0,
       "kicad_ref_pad1_x": -5.25,
-      "kicad_ref_pad1_y": -3.75
+      "kicad_ref_pad1_y": -3.75,
+      "lcsc": null
     },
     "QFP-48": {
       "footprint_id": "QFP-48",
@@ -263,7 +284,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 1.0,
       "kicad_ref_pad1_x": -7.25,
-      "kicad_ref_pad1_y": -5.75
+      "kicad_ref_pad1_y": -5.75,
+      "lcsc": null
     },
     "RJ45": {
       "footprint_id": "RJ45",
@@ -275,7 +297,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 8.0,
       "kicad_ref_pad1_x": -3.5599999999999996,
-      "kicad_ref_pad1_y": -2.03
+      "kicad_ref_pad1_y": -2.03,
+      "lcsc": null
     },
     "RJ45_HR911105A": {
       "footprint_id": "RJ45_HR911105A",
@@ -285,9 +308,10 @@
       "body_width_mm": 19.6,
       "body_height_mm": 16.8,
       "model_rotation_z": 0.0,
-      "model_offset_xy_max_mm": 1.0,
+      "model_offset_xy_max_mm": 8.0,
       "kicad_ref_pad1_x": -3.5599999999999996,
-      "kicad_ref_pad1_y": -2.03
+      "kicad_ref_pad1_y": -2.03,
+      "lcsc": "C12074"
     },
     "R_0402": {
       "footprint_id": "R_0402",
@@ -299,7 +323,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.51,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C17414"
     },
     "R_0603": {
       "footprint_id": "R_0603",
@@ -311,7 +336,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.825,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C23138"
     },
     "R_0805": {
       "footprint_id": "R_0805",
@@ -323,7 +349,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.9125,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "R_1206": {
       "footprint_id": "R_1206",
@@ -335,7 +362,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.6,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "Relay_SPDT": {
       "footprint_id": "Relay_SPDT",
@@ -345,9 +373,10 @@
       "body_width_mm": 19.0,
       "body_height_mm": 15.5,
       "model_rotation_z": 0.0,
-      "model_offset_xy_max_mm": 2.0,
+      "model_offset_xy_max_mm": 10.0,
       "kicad_ref_pad1_x": -7.1,
-      "kicad_ref_pad1_y": -0.02499999999999991
+      "kicad_ref_pad1_y": -0.02499999999999991,
+      "lcsc": null
     },
     "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C": {
       "footprint_id": "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C",
@@ -357,9 +386,10 @@
       "body_width_mm": 19.0,
       "body_height_mm": 15.5,
       "model_rotation_z": 0.0,
-      "model_offset_xy_max_mm": 2.0,
+      "model_offset_xy_max_mm": 10.0,
       "kicad_ref_pad1_x": -7.1,
-      "kicad_ref_pad1_y": -0.02499999999999991
+      "kicad_ref_pad1_y": -0.02499999999999991,
+      "lcsc": null
     },
     "SOD-123": {
       "footprint_id": "SOD-123",
@@ -371,7 +401,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.1,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "SOD-323": {
       "footprint_id": "SOD-323",
@@ -383,7 +414,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.05,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C81598"
     },
     "SOIC-8": {
       "footprint_id": "SOIC-8",
@@ -394,8 +426,9 @@
       "body_height_mm": 4.0,
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
-      "kicad_ref_pad1_x": -3.4050000000000002,
-      "kicad_ref_pad1_y": -1.905
+      "kicad_ref_pad1_x": -2.7,
+      "kicad_ref_pad1_y": -1.905,
+      "lcsc": "C9865"
     },
     "SOT-223": {
       "footprint_id": "SOT-223",
@@ -407,7 +440,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 6.0,
       "kicad_ref_pad1_x": -2.3,
-      "kicad_ref_pad1_y": 3.1
+      "kicad_ref_pad1_y": 3.1,
+      "lcsc": "C6186"
     },
     "SOT-23": {
       "footprint_id": "SOT-23",
@@ -419,7 +453,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -0.9375,
-      "kicad_ref_pad1_y": -0.95
+      "kicad_ref_pad1_y": -0.95,
+      "lcsc": "C727114"
     },
     "SOT-23-5": {
       "footprint_id": "SOT-23-5",
@@ -431,7 +466,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.1375,
-      "kicad_ref_pad1_y": -0.95
+      "kicad_ref_pad1_y": -0.95,
+      "lcsc": null
     },
     "SOT-23-6": {
       "footprint_id": "SOT-23-6",
@@ -443,7 +479,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -1.1375,
-      "kicad_ref_pad1_y": -0.95
+      "kicad_ref_pad1_y": -0.95,
+      "lcsc": null
     },
     "SW_Push_4.5x4.5mm": {
       "footprint_id": "SW_Push_4.5x4.5mm",
@@ -455,7 +492,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -3.5,
-      "kicad_ref_pad1_y": -2.5
+      "kicad_ref_pad1_y": -2.5,
+      "lcsc": "C318884"
     },
     "SW_Push_SMD_6x6": {
       "footprint_id": "SW_Push_SMD_6x6",
@@ -464,10 +502,11 @@
       "expected_pad_type": "smd",
       "body_width_mm": 6.0,
       "body_height_mm": 6.0,
-      "model_rotation_z": 0.0,
+      "model_rotation_z": 90.0,
       "model_offset_xy_max_mm": 0.5,
       "kicad_ref_pad1_x": -3.5,
-      "kicad_ref_pad1_y": -2.5
+      "kicad_ref_pad1_y": -2.5,
+      "lcsc": null
     },
     "TSSOP-20": {
       "footprint_id": "TSSOP-20",
@@ -478,8 +517,9 @@
       "body_height_mm": 4.4,
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 1.0,
-      "kicad_ref_pad1_x": -3.75,
-      "kicad_ref_pad1_y": -2.25
+      "kicad_ref_pad1_x": -2.3,
+      "kicad_ref_pad1_y": -2.25,
+      "lcsc": null
     },
     "TerminalBlock_2P": {
       "footprint_id": "TerminalBlock_2P",
@@ -490,8 +530,9 @@
       "body_height_mm": 8.6,
       "model_rotation_z": 180.0,
       "model_offset_xy_max_mm": 6.0,
-      "kicad_ref_pad1_x": -2.54,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_x": 0.0,
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "TerminalBlock_5.08mm_2P": {
       "footprint_id": "TerminalBlock_5.08mm_2P",
@@ -502,8 +543,9 @@
       "body_height_mm": 8.6,
       "model_rotation_z": 180.0,
       "model_offset_xy_max_mm": 6.0,
-      "kicad_ref_pad1_x": -2.54,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_x": 0.0,
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C8269"
     },
     "TerminalBlock_5.08mm_3P": {
       "footprint_id": "TerminalBlock_5.08mm_3P",
@@ -514,8 +556,9 @@
       "body_height_mm": 8.6,
       "model_rotation_z": 180.0,
       "model_offset_xy_max_mm": 6.0,
-      "kicad_ref_pad1_x": -5.08,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_x": 0.0,
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": "C8465"
     },
     "USB-C": {
       "footprint_id": "USB-C",
@@ -527,7 +570,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 1.0,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     },
     "USB-C-SMD": {
       "footprint_id": "USB-C-SMD",
@@ -539,7 +583,8 @@
       "model_rotation_z": 0.0,
       "model_offset_xy_max_mm": 8.0,
       "kicad_ref_pad1_x": 0.0,
-      "kicad_ref_pad1_y": 0.0
+      "kicad_ref_pad1_y": 0.0,
+      "lcsc": null
     }
   }
 }
