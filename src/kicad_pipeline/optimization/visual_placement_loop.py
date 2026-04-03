@@ -245,9 +245,14 @@ def apply_diagnosis_fix(
     refs = diagnosis.refs
 
     if fix == "swap" and len(refs) >= 2:
-        # Try swapping the first two refs
+        # Only swap if both components are in the same placement group
+        comp_groups = {c.ref: c.placement_group for c in requirements.components}
+        g1 = comp_groups.get(refs[0])
+        g2 = comp_groups.get(refs[1])
+        if g1 != g2:
+            _log.debug("Rejected swap %s↔%s: different groups (%s vs %s)", refs[0], refs[1], g1, g2)
+            return None
         trial = _apply_component_swap(pcb, refs[0], refs[1])
-        # Verify improvement
         if total_ratsnest_length(trial) < total_ratsnest_length(pcb):
             _log.info("Applied swap %s↔%s: %s", refs[0], refs[1], diagnosis.description)
             return trial

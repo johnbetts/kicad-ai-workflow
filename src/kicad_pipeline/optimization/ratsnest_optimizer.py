@@ -129,16 +129,19 @@ def _find_component_swap_candidates(
     from collections import defaultdict
 
     # Group components by (value, footprint, placement_group)
+    # Components WITHOUT a placement_group are NOT swappable — swapping
+    # across groups destroys zone layout even if it improves ratsnest.
     groups: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     for comp in requirements.components:
-        key = (comp.value, comp.footprint, comp.placement_group or "")
+        if not comp.placement_group:
+            continue  # ungrouped components cannot be swapped
+        key = (comp.value, comp.footprint, comp.placement_group)
         groups[key].append(comp.ref)
 
     candidates: list[tuple[str, str]] = []
     for key, refs in groups.items():
         if len(refs) < 2:
             continue
-        # Generate all pairs
         for i in range(len(refs)):
             for j in range(i + 1, len(refs)):
                 candidates.append((refs[i], refs[j]))
