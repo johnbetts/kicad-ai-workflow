@@ -1,5 +1,34 @@
 # Placement Iteration Proposals — nl-s-3c-complete
 
+## Run 2 — 2026-04-02 (post zone/collision/board fixes)
+
+- Baseline: 1014 crossings, 4588mm, Grade F
+- After optimization: 941 crossings, 4576mm
+- Previous run baseline was 1071 → zone fix saved 57 crossings
+- Nudge fallback resolved 12 collisions (previously 0)
+- Board area warning active: "suggest 142×82mm"
+
+### Council Proposals (ranked by impact)
+
+1. **Force board to 142×82mm** — requirements change, zero risk.
+   87 collisions physically unresolvable at current size.
+   File: nl-s-3c-complete/build_with_pipeline.py, MechanicalConstraints
+   Status: PENDING
+
+2. **Zone contamination enforcer** — reject nudge candidates outside
+   component's assigned zone. 41 cross-zone components = ~200 crossings.
+   File: collision_resolver.py, _random_nudge_fallback → add zone_bboxes param
+   Status: PENDING
+
+3. **MCU group width clamp** — max 35mm width, wrap peripheral rows.
+   Prevents MCU from spanning entire board.
+   File: level3_phases.py or ee_phases_groups.py
+   Status: PENDING
+
+---
+
+## Run 1 — 2026-04-02 (initial)
+
 Generated: 2026-04-02 from 3 visual loop iterations + geometric optimization.
 
 ## What Worked (Applied Changes)
