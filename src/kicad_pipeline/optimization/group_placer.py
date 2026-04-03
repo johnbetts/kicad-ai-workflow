@@ -200,9 +200,21 @@ def _compute_absolute_positions(
     gh: float,
     fp_sizes: dict[str, tuple[float, float]],
     board_bounds: tuple[float, float, float, float],
+    zone_rect: tuple[float, float, float, float] | None = None,
 ) -> dict[str, tuple[float, float]]:
-    """Shift internal layout to absolute positions centered at (cx, cy)."""
+    """Shift internal layout to absolute positions centered at (cx, cy).
+
+    When *zone_rect* is provided, components are clamped to the zone
+    boundaries (with board bounds as the outer limit). This prevents
+    group overflow into adjacent zones.
+    """
     bx1, by1, bx2, by2 = board_bounds
+    # Use zone bounds if available, else board bounds
+    if zone_rect is not None:
+        cx1, cy1, cx2, cy2 = zone_rect
+    else:
+        cx1, cy1, cx2, cy2 = bx1, by1, bx2, by2
+
     offset_x = cx - (gox + gw / 2.0)
     offset_y = cy - (goy + gh / 2.0)
 
@@ -211,6 +223,10 @@ def _compute_absolute_positions(
         abs_x = rx + offset_x
         abs_y = ry + offset_y
         w, h = fp_sizes.get(ref, (2.0, 2.0))
+        # Clamp to zone first, then board (zone is the tighter constraint)
+        abs_x = max(cx1 + w / 2 + 0.5, min(cx2 - w / 2 - 0.5, abs_x))
+        abs_y = max(cy1 + h / 2 + 0.5, min(cy2 - h / 2 - 0.5, abs_y))
+        # Final board clamp (safety)
         abs_x = max(bx1 + w / 2 + 1, min(bx2 - w / 2 - 1, abs_x))
         abs_y = max(by1 + h / 2 + 1, min(by2 - h / 2 - 1, abs_y))
         abs_positions[ref] = (abs_x, abs_y)
@@ -239,10 +255,24 @@ def _place_single_group(
     )
 
     cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
+
+    # Clamp group center so the group bbox stays within its zone.
+    # This prevents the grid search from placing groups outside their zone
+    # when the target position is occupied.
+    zone = zone_map.get(group.name)
+    if zone is not None:
+        zx1, zy1, zx2, zy2 = zone.rect
+        # Group center must be far enough from zone edges to fit the group
+        half_w, half_h = gw / 2.0, gh / 2.0
+        cx = max(zx1 + half_w, min(zx2 - half_w, cx))
+        cy = max(zy1 + half_h, min(zy2 - half_h, cy))
+
     grid.place(cx, cy, gw, gh)
 
+    zone_rect = zone.rect if zone is not None else None
     abs_positions = _compute_absolute_positions(
         layout, cx, cy, gox, goy, gw, gh, fp_sizes, board_bounds,
+        zone_rect=zone_rect,
     )
 
     all_x = [p[0] for p in abs_positions.values()]
