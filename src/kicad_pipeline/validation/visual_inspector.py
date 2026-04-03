@@ -41,9 +41,11 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _VAULTS_DIR = Path.home() / ".claude" / "skills" / "research-agent" / "vaults"
-_API_URL = "https://api.anthropic.com/v1/messages"
-_VISION_MODEL = "claude-sonnet-4-6-20250514"
+_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_VISION_MODEL = "claude-sonnet-4-6-20250514"
 _API_VERSION = "2023-06-01"
+_XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+_XAI_VISION_MODEL = "grok-4-fast-non-reasoning"
 _TIMEOUT_SECONDS = 60
 
 # The 5 checks performed on each component.
@@ -107,6 +109,25 @@ def _get_api_key() -> str | None:
     return None
 
 
+def _get_xai_api_key() -> str | None:
+    """Get xAI/Grok API key from env or vault."""
+    key = os.environ.get("XAI_API_KEY")
+    if key:
+        return key
+
+    json_path = _VAULTS_DIR / "tech" / "integrations" / "xai.json"
+    if json_path.exists():
+        try:
+            creds = json.loads(json_path.read_text())
+            k = creds.get("api_key")
+            if k:
+                return str(k)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Result models
 # ---------------------------------------------------------------------------
@@ -153,20 +174,41 @@ def _call_claude_vision(
     prompt: str,
     max_tokens: int = 1024,
 ) -> str | None:
-    """Call the Anthropic Messages API with images. Returns response text."""
-    api_key = _get_api_key()
-    if not api_key:
-        return None
+    """Call a vision API with images. Tries Anthropic first, falls back to xAI/Grok.
 
+    Returns response text or None if all providers fail.
+    """
+    # Try Anthropic first
+    anthropic_key = _get_api_key()
+    if anthropic_key:
+        result = _call_anthropic_vision(images, prompt, anthropic_key, max_tokens)
+        if result is not None:
+            return result
+
+    # Fall back to xAI/Grok
+    xai_key = _get_xai_api_key()
+    if xai_key:
+        result = _call_xai_vision(images, prompt, xai_key, max_tokens)
+        if result is not None:
+            return result
+
+    _log.warning("No vision API available (no Anthropic or xAI key)")
+    return None
+
+
+def _call_anthropic_vision(
+    images: Sequence[tuple[str, Path]],
+    prompt: str,
+    api_key: str,
+    max_tokens: int = 1024,
+) -> str | None:
+    """Call the Anthropic Messages API with images."""
     content: list[dict[str, object]] = []
     for label, img_path in images:
         if not img_path.exists():
             continue
         b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
-        content.append({
-            "type": "text",
-            "text": f"[{label}]",
-        })
+        content.append({"type": "text", "text": f"[{label}]"})
         content.append({
             "type": "image",
             "source": {
@@ -178,13 +220,13 @@ def _call_claude_vision(
     content.append({"type": "text", "text": prompt})
 
     payload = json.dumps({
-        "model": _VISION_MODEL,
+        "model": _ANTHROPIC_VISION_MODEL,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": content}],
     }).encode("utf-8")
 
     try:
-        req = urllib.request.Request(_API_URL, data=payload, headers={
+        req = urllib.request.Request(_ANTHROPIC_API_URL, data=payload, headers={
             "x-api-key": api_key,
             "anthropic-version": _API_VERSION,
             "Content-Type": "application/json",
@@ -192,7 +234,6 @@ def _call_claude_vision(
         })
         with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            # Anthropic Messages API returns content[0].text
             blocks = data.get("content", [])
             for block in blocks:
                 if isinstance(block, dict) and block.get("type") == "text":
@@ -206,6 +247,57 @@ def _call_claude_vision(
         return None
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
         _log.warning("Anthropic API error: %s", exc)
+        return None
+
+
+def _call_xai_vision(
+    images: Sequence[tuple[str, Path]],
+    prompt: str,
+    api_key: str,
+    max_tokens: int = 1024,
+) -> str | None:
+    """Call the xAI/Grok vision API (OpenAI-compatible format)."""
+    content: list[dict[str, object]] = []
+    for label, img_path in images:
+        if not img_path.exists():
+            continue
+        b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
+        content.append({"type": "text", "text": f"[{label}]"})
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{b64}",
+            },
+        })
+    content.append({"type": "text", "text": prompt})
+
+    payload = json.dumps({
+        "model": _XAI_VISION_MODEL,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": content}],
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(_XAI_API_URL, data=payload, headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "kicad-pipeline-visual-inspector/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            # OpenAI-compatible: choices[0].message.content
+            choices = data.get("choices", [])
+            if choices:
+                return str(choices[0].get("message", {}).get("content", ""))
+            return None
+    except urllib.error.HTTPError as exc:
+        body = ""
+        with contextlib.suppress(Exception):
+            body = exc.read().decode()[:200]
+        _log.warning("xAI API HTTP %d: %s", exc.code, body)
+        return None
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+        _log.warning("xAI API error: %s", exc)
         return None
 
 
