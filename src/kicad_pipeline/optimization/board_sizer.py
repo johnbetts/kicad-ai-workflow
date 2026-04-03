@@ -6,12 +6,15 @@ board dimensions that pass placement and maintain quality score >= threshold.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import ProjectRequirements
     from kicad_pipeline.optimization.scoring import QualityScore
+
+log = logging.getLogger(__name__)
 
 # Approximate footprint areas in mm^2 keyed by package pattern fragments.
 _PACKAGE_AREAS: dict[str, float] = {
@@ -55,6 +58,75 @@ _DEFAULT_AREA_MM2: float = 25.0
 
 # Default board aspect ratio (width:height).
 _DEFAULT_ASPECT_RATIO: float = 4.0 / 3.0
+
+# Auto-size aspect ratio (3:2 per spec).
+_AUTO_ASPECT_RATIO: float = 3.0 / 2.0
+
+# Minimum area multiplier applied to total courtyard area for auto-sizing.
+_MIN_AREA_MULTIPLIER: float = 2.0
+
+# Courtyard areas in mm^2 by component category (pattern fragments, case-insensitive).
+# Used only for minimum-area enforcement, not for auto-size sweeping.
+_COURTYARD_AREAS: tuple[tuple[str, float], ...] = (
+    # Relays — largest category, check first
+    ("Relay", 400.0),
+    # THT connectors
+    ("TerminalBlock", 150.0),
+    ("PinHeader", 150.0),
+    ("RJ45", 150.0),
+    ("USB", 150.0),
+    # Mounting holes
+    ("MountingHole", 50.0),
+    # SMD ICs
+    ("SOIC", 100.0),
+    ("MSOP", 100.0),
+    ("TSSOP", 100.0),
+    ("QFP", 100.0),
+    ("TQFP", 100.0),
+    ("QFN", 100.0),
+    ("ESP32", 100.0),
+    ("WROOM", 100.0),
+    # SMD passives and small discretes
+    ("R_", 4.0),
+    ("C_", 4.0),
+    ("L_", 4.0),
+    ("LED_", 4.0),
+    ("SOD-", 4.0),
+    ("SOT-", 4.0),
+)
+
+# Fallback courtyard area for unrecognised footprints (mm^2).
+_DEFAULT_COURTYARD_AREA_MM2: float = 25.0
+
+
+def _courtyard_area_for_footprint(footprint: str) -> float:
+    """Return estimated courtyard area in mm^2 for a single footprint string."""
+    fp_upper = footprint.upper()
+    for pattern, area in _COURTYARD_AREAS:
+        if pattern.upper() in fp_upper:
+            return area
+    return _DEFAULT_COURTYARD_AREA_MM2
+
+
+def _compute_minimum_board_area(requirements: ProjectRequirements) -> float:
+    """Compute the minimum board area from total courtyard footprint areas × 2.
+
+    This gives the hard lower bound beneath which components cannot physically
+    fit on the board.
+
+    Args:
+        requirements: Project requirements with component list.
+
+    Returns:
+        Minimum board area in mm^2.
+    """
+    total_courtyard = sum(
+        _courtyard_area_for_footprint(comp.footprint)
+        for comp in requirements.components
+    )
+    if total_courtyard <= 0:
+        total_courtyard = _DEFAULT_COURTYARD_AREA_MM2
+    return total_courtyard * _MIN_AREA_MULTIPLIER
 
 
 def _compute_component_area(requirements: ProjectRequirements) -> float:
@@ -140,6 +212,22 @@ def optimize_board_size(
     if requirements.mechanical is not None:
         mech = requirements.mechanical
         if mech.board_width_mm > 0 and mech.board_height_mm > 0:
+            user_area = mech.board_width_mm * mech.board_height_mm
+            min_area_needed = _compute_minimum_board_area(requirements)
+            if user_area < min_area_needed:
+                min_w, min_h = _dimensions_from_area(min_area_needed, _AUTO_ASPECT_RATIO)
+                log.warning(
+                    "Board dimensions %.0fx%.0fmm (area=%.0fmm²) are smaller than the "
+                    "computed minimum for %d components (min_area=%.0fmm², suggested "
+                    "%.0fx%.0fmm). Components may fall off-board.",
+                    mech.board_width_mm,
+                    mech.board_height_mm,
+                    user_area,
+                    len(requirements.components),
+                    min_area_needed,
+                    min_w,
+                    min_h,
+                )
             pcb = build_pcb(
                 requirements,
                 board_width_mm=mech.board_width_mm,
@@ -154,9 +242,14 @@ def optimize_board_size(
     if comp_area <= 0:
         comp_area = _DEFAULT_AREA_MM2
 
+    # For auto-sizing, use the minimum-area floor (courtyard × 2) as a lower bound,
+    # then sweep from the max multiplier downward.
+    min_area_floor = _compute_minimum_board_area(requirements)
     max_area = comp_area * max_area_multiplier
-    min_area = comp_area * min_area_multiplier
-    best_w, best_h = _dimensions_from_area(max_area)
+    min_area = max(comp_area * min_area_multiplier, min_area_floor)
+
+    # Auto-size uses 3:2 aspect ratio per spec.
+    best_w, best_h = _dimensions_from_area(max_area, _AUTO_ASPECT_RATIO)
 
     pcb = build_pcb(
         requirements,

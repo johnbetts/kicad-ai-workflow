@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.constants import (
@@ -215,6 +216,125 @@ def _ref_has_collision(
     return False
 
 
+def _count_collisions_at(
+    ref: str,
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+) -> int:
+    """Count how many components would collide with *ref* placed at (cx, cy)."""
+    count = 0
+    gap = COMPONENT_CLEARANCE_GAP_MM
+    for other_ref, (ox, oy, _orot) in positions.items():
+        if other_ref == ref:
+            continue
+        ow, oh = _rotation_aware_size(other_ref, positions, fp_sizes)
+        if abs(cx - ox) < (w + ow) / 2.0 + gap and abs(cy - oy) < (h + oh) / 2.0 + gap:
+            count += 1
+    return count
+
+
+def _violates_proximity(
+    ref: str,
+    cx: float,
+    cy: float,
+    proximity_constraints: dict[str, tuple[str, float]] | None,
+    positions: dict[str, tuple[float, float, float]],
+) -> bool:
+    """Return True if placing *ref* at (cx, cy) violates any proximity constraint.
+
+    A proximity constraint ``proximity_constraints[ref] = (other_ref, max_dist)``
+    requires that the Manhattan distance between *ref* and *other_ref* stays at
+    or below *max_dist*.
+    """
+    if proximity_constraints is None:
+        return False
+    if ref not in proximity_constraints:
+        return False
+    other_ref, max_dist = proximity_constraints[ref]
+    if other_ref not in positions:
+        return False
+    ox, oy, _ = positions[other_ref]
+    dist = math.hypot(cx - ox, cy - oy)
+    return dist > max_dist
+
+
+_NUDGE_COMPASS: tuple[tuple[float, float], ...] = (
+    (0.0, -1.0),   # N
+    (1.0, -1.0),   # NE
+    (1.0, 0.0),    # E
+    (1.0, 1.0),    # SE
+    (0.0, 1.0),    # S
+    (-1.0, 1.0),   # SW
+    (-1.0, 0.0),   # W
+    (-1.0, -1.0),  # NW
+)
+_NUDGE_SMALL_MM = (2.0, 3.5, 5.0)
+_NUDGE_LARGE_MM = (5.0, 7.5, 10.0)
+
+
+def _random_nudge_fallback(
+    ref: str,
+    rx: float,
+    ry: float,
+    rot: float,
+    w: float,
+    h: float,
+    positions: dict[str, tuple[float, float, float]],
+    fp_sizes: dict[str, tuple[float, float]],
+    bounds: tuple[float, float, float, float],
+    proximity_constraints: dict[str, tuple[str, float]] | None,
+) -> tuple[float, float] | None:
+    """Try 8-direction nudges to find an improvement when grid relocation fails.
+
+    Attempts small nudges (2-5 mm) first, then larger nudges (5-10 mm).
+    Picks the candidate with the fewest remaining collisions (greedy).
+    Accepts any candidate that is strictly better than the current position.
+
+    Returns:
+        (new_x, new_y) if an improvement was found, else None.
+    """
+    bmin_x = bounds[0] + BOARD_EDGE_MARGIN_MM
+    bmin_y = bounds[1] + BOARD_EDGE_MARGIN_MM
+    bmax_x = bounds[2] - BOARD_EDGE_MARGIN_MM
+    bmax_y = bounds[3] - BOARD_EDGE_MARGIN_MM
+
+    current_hits = _count_collisions_at(ref, rx, ry, w, h, positions, fp_sizes)
+
+    best_pos: tuple[float, float] | None = None
+    best_hits = current_hits  # must beat current to be accepted
+
+    for nudge_set in (_NUDGE_SMALL_MM, _NUDGE_LARGE_MM):
+        # Randomise compass order so repeated calls explore different directions
+        compass_order = list(_NUDGE_COMPASS)
+        random.shuffle(compass_order)
+        for dist in nudge_set:
+            for dx_unit, dy_unit in compass_order:
+                cx = rx + dx_unit * dist
+                cy = ry + dy_unit * dist
+                # Clamp to board
+                cx = max(bmin_x, min(bmax_x, cx))
+                cy = max(bmin_y, min(bmax_y, cy))
+                # Respect proximity constraints
+                if _violates_proximity(ref, cx, cy, proximity_constraints, positions):
+                    continue
+                hits = _count_collisions_at(ref, cx, cy, w, h, positions, fp_sizes)
+                if hits < best_hits:
+                    best_hits = hits
+                    best_pos = (cx, cy)
+                    if hits == 0:
+                        # Collision-free — accept immediately
+                        return best_pos
+        if best_pos is not None:
+            # Found improvement in small nudge set — stop here
+            return best_pos
+
+    return best_pos
+
+
 def _build_exclusion_grid(
     ref: str,
     positions: dict[str, tuple[float, float, float]],
@@ -330,6 +450,7 @@ def _run_collision_pass(
     fixed_refs: set[str],
     group_bboxes: list[GroupBoundingBox] | None,
     pass_num: int,
+    proximity_constraints: dict[str, tuple[str, float]] | None = None,
 ) -> int:
     """Execute one collision-resolution pass; return number of components moved."""
     current_collisions = _count_collisions(result, fp_sizes)
@@ -357,6 +478,19 @@ def _run_collision_pass(
         fx, fy = grid.find_free_pos(target_x, target_y, w, h)
         fx, fy = _clamp_to_group(ref, fx, fy, w, h, result, fp_sizes,
                                  group_bboxes, grid, _group_rect_fn)
+
+        # If grid relocation returned the same position, try random nudge fallback.
+        if fx == rx and fy == ry:
+            nudge = _random_nudge_fallback(
+                ref, rx, ry, rot, w, h, result, fp_sizes, bounds, proximity_constraints
+            )
+            if nudge is not None:
+                fx, fy = nudge
+                _log.debug(
+                    "  Nudge fallback moved %s from (%.1f, %.1f) to (%.1f, %.1f)",
+                    ref, rx, ry, fx, fy,
+                )
+
         result[ref] = (fx, fy, rot)
         moved += 1
 
@@ -398,7 +532,9 @@ def _resolve_collisions(
     for _pass in range(COLLISION_MAX_PASSES):
         if not _count_collisions(result, fp_sizes):
             break
-        _run_collision_pass(result, fp_sizes, bounds, fixed_refs, group_bboxes, _pass)
+        _run_collision_pass(
+            result, fp_sizes, bounds, fixed_refs, group_bboxes, _pass, proximity_constraints
+        )
         if not _count_collisions(result, fp_sizes):
             break
 
