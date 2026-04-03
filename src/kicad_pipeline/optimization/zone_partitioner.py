@@ -223,6 +223,75 @@ def _edge_affinity_for_zone(zone_name: str) -> str | None:
     return affinities.get(zone_name)
 
 
+def _reorder_rows_by_traffic(
+    row_definitions: list[tuple[str, list[str]]],
+    zone_groups: dict[str, list[str]],
+    requirements: ProjectRequirements,
+    fixed_rows: set[str] | None = None,
+) -> list[tuple[str, list[str]]]:
+    """Reorder zones within each row by inter-group net traffic.
+
+    For each multi-zone row, sort zones so that the zone with the most
+    inter-group nets to zones in the row above is placed on the left
+    (closest to the high-traffic side).  This minimizes crossing distance
+    for the most-connected group pairs.
+    """
+    from collections import defaultdict
+
+    # Build ref → group name map
+    ref_to_group: dict[str, str] = {}
+    for feat in requirements.features:
+        for comp in feat.components:
+            ref_to_group[comp.ref if hasattr(comp, "ref") else comp] = feat.name
+
+    # Build group → zone name map
+    group_to_zone: dict[str, str] = {}
+    for zn, gnames in zone_groups.items():
+        for gn in gnames:
+            group_to_zone[gn] = zn
+
+    # Build inter-zone traffic matrix
+    power_nets = {"GND", "+5V", "+3V3", "+24V", "+12V", "VCC", "VBUS", ""}
+    zone_traffic: dict[tuple[str, str], int] = defaultdict(int)
+    for net in requirements.nets:
+        if net.name.upper() in power_nets or not net.connections:
+            continue
+        zones_in_net: set[str] = set()
+        for conn in net.connections:
+            g = ref_to_group.get(conn.ref)
+            if g:
+                z = group_to_zone.get(g)
+                if z:
+                    zones_in_net.add(z)
+        zlist = sorted(zones_in_net)
+        for i in range(len(zlist)):
+            for j in range(i + 1, len(zlist)):
+                zone_traffic[(zlist[i], zlist[j])] += 1
+                zone_traffic[(zlist[j], zlist[i])] += 1
+
+    # For each non-fixed row with >1 zone, sort by traffic to the row above.
+    _fixed = fixed_rows or set()
+    result: list[tuple[str, list[str]]] = []
+    prev_row_zones: set[str] = set()
+    for row_name, row_zones in row_definitions:
+        active = [z for z in row_zones if z in zone_groups]
+        if len(active) > 1 and prev_row_zones and row_name not in _fixed:
+            # Score each zone by its traffic to the previous row's zones
+            def _traffic_to_prev(z: str) -> int:
+                return sum(
+                    zone_traffic.get((z, pz), 0) for pz in prev_row_zones
+                )
+            active.sort(key=_traffic_to_prev, reverse=True)
+            _log.debug(
+                "  Row %s reordered by traffic: %s",
+                row_name,
+                [(z, _traffic_to_prev(z)) for z in active],
+            )
+        result.append((row_name, active if active else row_zones))
+        prev_row_zones = set(active) if active else set(row_zones)
+    return result
+
+
 def partition_board(
     board_bounds: tuple[float, float, float, float],
     groups: list[FeatureBlock],
@@ -332,6 +401,11 @@ def partition_board(
     single_zone = len(zone_groups) == 1
 
     # 3-row layout preserves the connector row for edge-pinned terminals.
+    # Row order is fixed — L3 phases have implicit dependencies on zone positions.
+    # Traffic analysis (Run 3, iter 26-28) confirmed: reordering rows makes
+    # crossings WORSE because L3 relay/MCU/ethernet phases assume specific
+    # zone positions. The existing order (power-relay, analog-ethernet-mcu)
+    # already satisfies the strongest adjacency (ethernet↔mcu = 8 nets).
     row_definitions: list[tuple[str, list[str]]] = [
         ("row0", ["input_connectors"]),
         ("row1", ["power", "relay"]),
