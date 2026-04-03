@@ -254,12 +254,32 @@ def _place_single_group(
         group.name, zone_map, gw, gh, board_bounds,
     )
 
-    cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
+    # Auto-rotate group to fit zone: if group aspect ratio doesn't match
+    # zone aspect ratio, rotate the internal layout 90° so the group's
+    # long axis aligns with the zone's long axis. This prevents e.g.
+    # a 19×99mm relay strip from overflowing a 151×32mm horizontal zone.
+    zone = zone_map.get(group.name)
+    if zone is not None:
+        zx1, zy1, zx2, zy2 = zone.rect
+        zone_w = zx2 - zx1
+        zone_h = zy2 - zy1
+        group_is_tall = gh > gw * 1.3  # group is tall/narrow
+        zone_is_wide = zone_w > zone_h * 1.3  # zone is wide/short
+        if group_is_tall and zone_is_wide:
+            _log.info(
+                "  Auto-rotating group '%s' (%.0fx%.0fmm → %.0fx%.0fmm) "
+                "to fit zone '%s' (%.0fx%.0fmm)",
+                group.name, gw, gh, gh, gw, zone.name, zone_w, zone_h,
+            )
+            # Rotate all internal positions 90° CW: (x, y) → (y, -x)
+            rotated_layout: dict[str, tuple[float, float, float]] = {}
+            for ref, (rx, ry, rot) in layout.items():
+                rotated_layout[ref] = (ry, -rx, (rot + 90.0) % 360.0)
+            layout = rotated_layout
+            gw, gh = _group_dimensions(layout, fp_sizes)
+            gox, goy = _group_internal_origin(layout, fp_sizes)
 
-    # NOTE: Zone clamping was tested in Runs 6-7 and made crossings WORSE
-    # (747-753 vs 680 without). The collision resolver needs freedom to
-    # place components outside zones for dense boards. Zone membership is
-    # still tracked for diagnostics but not enforced here.
+    cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
 
     grid.place(cx, cy, gw, gh)
 

@@ -11,11 +11,15 @@ This is Level 1 of the 3-level hierarchical placement engine.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kicad_pipeline.models.requirements import FeatureBlock
+    from kicad_pipeline.models.requirements import (
+        FeatureBlock,
+        ProjectRequirements,
+    )
     from kicad_pipeline.optimization.functional_grouper import PowerFlowTopology
 
 _log = logging.getLogger(__name__)
@@ -54,13 +58,12 @@ _DEFAULT_COMPONENT_AREA_MM2: float = 4.0
 
 # Spacing density factor: multiply raw component area to account for
 # courtyard clearances, routing channels, and component-to-component gaps.
-# 2.0× is the sweet spot — tested across 7 runs, df=2.0 (Run 3) produced
-# 680 crossings vs 683 (df=3.5) and 753 (df=2.5 + 2-row). Higher density
-# factors waste board area at zone boundaries; zone clamping overconstrained.
-_DENSITY_FACTOR: float = 2.0
+# At 5×, a group with 1000mm² of footprint area gets a 5000mm² zone,
+# which is ~70×70mm — enough for routing channels around clustered components.
+_DENSITY_FACTOR: float = 5.0
 
 # Minimum zone dimension (mm) — prevents zones from collapsing to zero.
-_MIN_ZONE_DIM_MM: float = 25.0
+_MIN_ZONE_DIM_MM: float = 15.0
 
 def _component_area_mm2(ref: str) -> float:
     """Return estimated footprint area (mm²) for a component reference.
@@ -95,6 +98,52 @@ def _zone_footprint_area_mm2(refs: tuple[str, ...]) -> float:
     """
     raw = sum(_component_area_mm2(r) for r in refs)
     return raw * _DENSITY_FACTOR
+
+
+def _zone_footprint_area_from_requirements(
+    refs: tuple[str, ...],
+    ref_to_footprint: dict[str, str],
+) -> float:
+    """Compute zone area from actual footprint sizes (not ref-prefix estimates).
+
+    Uses ``estimate_footprint_size()`` to get real (width, height) per component
+    from its footprint ID, then computes the needed zone area as::
+
+        max(sum_of_areas × density_factor,
+            largest_side² × 4)
+
+    The second term ensures the zone is large enough for the physically largest
+    component (e.g., ESP32 at 26mm or relays at 20mm) plus surrounding passives.
+    """
+    from kicad_pipeline.pcb.footprints import estimate_footprint_size
+
+    total = 0.0
+    max_w = 0.0
+    max_h = 0.0
+    for ref in refs:
+        fp_id = ref_to_footprint.get(ref)
+        if fp_id:
+            w, h = estimate_footprint_size(fp_id)
+            total += w * h
+            # Track the largest individual component dimensions.
+            if w * h > max_w * max_h:
+                max_w, max_h = w, h
+        else:
+            total += _component_area_mm2(ref)
+    # Area from density factor
+    area_from_density = total * _DENSITY_FACTOR
+    # Area from largest component — use actual aspect ratio, not square.
+    # A 36mm pin header needs a 36×10mm zone, not a 90×90mm zone.
+    # Formula: (long_side + margin) × (short_side × 3) where margin accounts
+    # for passives alongside the connector/IC, and ×3 accounts for components
+    # on both sides plus routing.
+    if max_w > 5.0 and max_h > 5.0:
+        long_side = max(max_w, max_h)
+        short_side = min(max_w, max_h)
+        area_from_largest = (long_side + 10.0) * (short_side * 3.0)
+    else:
+        area_from_largest = 0.0
+    return max(area_from_density, area_from_largest)
 
 
 # ---------------------------------------------------------------------------
@@ -178,19 +227,19 @@ def partition_board(
     board_bounds: tuple[float, float, float, float],
     groups: list[FeatureBlock],
     topology: PowerFlowTopology | None = None,
+    requirements: ProjectRequirements | None = None,
 ) -> list[BoardZone]:
     """Partition board into non-overlapping rectangular zones.
 
     Strategy:
     1. Map each FeatureBlock to a zone by keyword matching on name.
-    2. Compute needed footprint area per zone bottom-up from component refs
-       (SMD passive 4mm², THT 50mm², IC/relay 100mm², module 200mm²) scaled by
-       a density factor of 2.0 for component spacing.
-    3. Preserve the 3-row layout Y spans from the reference board fractions.
-       Within each row, redistribute widths proportionally to zone footprint area
-       (not component count) so large-component zones get more space.
-    4. Enforce a minimum zone dimension of 25mm to prevent collapsed zones.
-    5. Warn when a zone's allocated area is less than its needed footprint area.
+    2. Compute needed footprint area per zone bottom-up from actual footprint
+       sizes (via ``estimate_footprint_size()``) when *requirements* is provided,
+       falling back to ref-prefix heuristics otherwise.
+    3. Use adaptive row heights: row heights are proportional to the total
+       footprint area of zones in that row, not fixed fractions.
+    4. Within each row, distribute widths proportionally to zone footprint area.
+    5. Enforce a minimum zone dimension of 15mm.
     6. Ensure inter-zone gaps of ``_ZONE_GAP_MM``.
     7. Only create zones that have at least one assigned group.
 
@@ -199,6 +248,9 @@ def partition_board(
         groups: FeatureBlock instances to partition.
         topology: Optional power flow topology for domain ordering
             (reserved for future use).
+        requirements: Optional full project requirements for accurate footprint
+            size lookup. When provided, uses ``estimate_footprint_size()`` on
+            each component's footprint ID instead of ref-prefix heuristics.
 
     Returns:
         List of BoardZone instances with absolute board coordinates.
@@ -210,19 +262,46 @@ def partition_board(
     if not groups:
         return []
 
+    # Build ref → footprint_id map from requirements (for accurate sizing).
+    ref_to_footprint: dict[str, str] = {}
+    if requirements is not None:
+        for comp in requirements.components:
+            ref_to_footprint[comp.ref] = comp.footprint
+
     # Step 1: Map groups to zones and compute needed footprint area bottom-up.
     zone_groups: dict[str, list[str]] = {}
     zone_component_count: dict[str, int] = {}
     zone_footprint_area: dict[str, float] = {}
+    # Minimum zone height needed: the short side of the tallest-area component
+    # (components can be rotated, so min(w,h) determines the height needed).
+    zone_min_height: dict[str, float] = {}
     for group in groups:
         zone_name = _match_group_to_zone(group.name)
         zone_groups.setdefault(zone_name, []).append(group.name)
         zone_component_count[zone_name] = (
             zone_component_count.get(zone_name, 0) + len(group.components)
         )
+        # Use accurate footprint sizes when requirements available.
+        if ref_to_footprint:
+            area = _zone_footprint_area_from_requirements(
+                group.components, ref_to_footprint,
+            )
+            # Track the short side of the largest component in this zone.
+            # Components can be rotated, so min(w,h) is the minimum zone
+            # height needed to fit any single component.
+            from kicad_pipeline.pcb.footprints import estimate_footprint_size
+            for ref in group.components:
+                fp_id = ref_to_footprint.get(ref)
+                if fp_id:
+                    w, h = estimate_footprint_size(fp_id)
+                    short_side = min(w, h)
+                    zone_min_height[zone_name] = max(
+                        zone_min_height.get(zone_name, 0.0), short_side,
+                    )
+        else:
+            area = _zone_footprint_area_mm2(group.components)
         zone_footprint_area[zone_name] = (
-            zone_footprint_area.get(zone_name, 0.0)
-            + _zone_footprint_area_mm2(group.components)
+            zone_footprint_area.get(zone_name, 0.0) + area
         )
 
     if not zone_groups:
@@ -242,69 +321,81 @@ def partition_board(
             zone_footprint_area.get(zn, 0.0),
         )
 
-    # Step 2: Compute zone rects using area-proportional allocation.
+    # Step 2: Compute zone rects using fully area-proportional allocation.
     #
-    # The 3-row layout structure is preserved (row heights from _DEFAULT_ZONE_FRACTIONS).
-    # Within each row, widths are now allocated proportionally to zone footprint area
-    # (sum of component areas × density factor) rather than component count.
-    # This prevents the MCU catch-all zone from consuming disproportionate space.
+    # Row heights AND column widths are both proportional to zone content.
+    # This replaces the old fixed-fraction layout that produced 25mm-tall
+    # strips regardless of content.
     half_gap = _ZONE_GAP_MM / 2.0
 
     # When there's only one zone, give it the full board area
     single_zone = len(zone_groups) == 1
 
     # 3-row layout preserves the connector row for edge-pinned terminals.
-    # Run 3 (3-row, df=2.0) produced 680 crossings — best result across 7 runs.
-    row_groups: dict[str, list[str]] = {
-        "row0": ["input_connectors"],
-        "row1": ["power", "relay"],
-        "row2": ["analog", "ethernet", "mcu"],
-    }
+    row_definitions: list[tuple[str, list[str]]] = [
+        ("row0", ["input_connectors"]),
+        ("row1", ["power", "relay"]),
+        ("row2", ["analog", "ethernet", "mcu"]),
+    ]
 
-    # Build area-proportional fractions for each zone within its row.
-    adjusted_fracs: dict[str, tuple[float, float, float, float]] = {}
-    for _row_name, row_zones in row_groups.items():
-        # Only consider zones that have assigned groups
-        active = [z for z in row_zones if z in zone_groups]
+    # Compute which rows are active and their total areas.
+    active_rows: list[tuple[str, list[str], float, float]] = []
+    for row_name, row_zone_names in row_definitions:
+        active = [z for z in row_zone_names if z in zone_groups]
         if not active:
             continue
-        if len(active) == 1:
-            # Single zone in row — give it the full row width
-            base = _DEFAULT_ZONE_FRACTIONS.get(active[0])
-            if base:
-                row_ys = [
-                    _DEFAULT_ZONE_FRACTIONS[z]
-                    for z in row_zones
-                    if z in _DEFAULT_ZONE_FRACTIONS
-                ]
-                y1 = min(f[1] for f in row_ys)
-                y2 = max(f[3] for f in row_ys)
-                adjusted_fracs[active[0]] = (0.0, y1, 1.0, y2)
-            continue
+        row_area = sum(zone_footprint_area.get(z, 0.0) for z in active)
+        # Minimum row height: short side of tallest component × 2.5
+        # (component height + clearance + surrounding passives).
+        # Uses min(w,h) since components can be rotated.
+        row_min_h_mm = max(
+            zone_min_height.get(z, 0.0) for z in active
+        ) * 2.5 + _ZONE_GAP_MM
+        active_rows.append(
+            (row_name, active, max(row_area, 1.0), row_min_h_mm),
+        )
 
-        # Multiple zones in row — distribute width proportionally to footprint area.
-        areas = [max(zone_footprint_area.get(z, _DEFAULT_COMPONENT_AREA_MM2), _DEFAULT_COMPONENT_AREA_MM2)
-                 for z in active]
-        total_area = sum(areas) or 1.0
+    # Distribute row heights: first satisfy minimums, then distribute
+    # remaining space proportionally to area.
+    total_min_h = sum(min_h for _, _, _, min_h in active_rows)
+    total_row_area = sum(ra for _, _, ra, _ in active_rows) or 1.0
 
-        # Get row Y span from default fractions
-        row_ys = [
-            _DEFAULT_ZONE_FRACTIONS[z]
-            for z in active
-            if z in _DEFAULT_ZONE_FRACTIONS
+    # If minimums exceed board height, scale them down proportionally.
+    if total_min_h > board_h:
+        scale = board_h / total_min_h
+        active_rows = [
+            (n, z, a, m * scale) for n, z, a, m in active_rows
         ]
-        if not row_ys:
-            continue
-        y1 = min(f[1] for f in row_ys)
-        y2 = max(f[3] for f in row_ys)
+        total_min_h = board_h
 
-        # Distribute X proportionally to area with a minimum 15% floor per zone.
-        min_frac = 0.15
-        remaining = 1.0 - min_frac * len(active)
+    remaining_h = board_h - total_min_h
+
+    # Build fraction rects for each zone.
+    adjusted_fracs: dict[str, tuple[float, float, float, float]] = {}
+    y_cursor = 0.0
+    for _row_name, row_zones, row_area, row_min_h in active_rows:
+        # Base height from minimum + proportional share of remaining space.
+        row_h_mm = row_min_h + remaining_h * (row_area / total_row_area)
+        row_h_frac = row_h_mm / board_h
+        y_start = y_cursor
+        y_end = y_cursor + row_h_frac
+        y_cursor = y_end
+
+        if len(row_zones) == 1:
+            adjusted_fracs[row_zones[0]] = (0.0, y_start, 1.0, y_end)
+            continue
+
+        # Multiple zones in row — distribute width proportionally to area.
+        areas = [
+            max(zone_footprint_area.get(z, 1.0), 1.0) for z in row_zones
+        ]
+        total_area = sum(areas) or 1.0
+        min_x_frac = 0.12
+        remaining_x = 1.0 - min_x_frac * len(row_zones)
         x_cursor = 0.0
-        for i, z in enumerate(active):
-            frac = min_frac + remaining * (areas[i] / total_area)
-            adjusted_fracs[z] = (x_cursor, y1, x_cursor + frac, y2)
+        for i, z in enumerate(row_zones):
+            frac = min_x_frac + remaining_x * (areas[i] / total_area)
+            adjusted_fracs[z] = (x_cursor, y_start, x_cursor + frac, y_end)
             x_cursor += frac
 
     board_area = board_w * board_h
@@ -333,7 +424,7 @@ def partition_board(
         abs_x2 = bx1 + zx2 * board_w - half_gap
         abs_y2 = by1 + zy2 * board_h - half_gap
 
-        # Enforce minimum zone dimension (25mm) — prevents collapsed zones.
+        # Enforce minimum zone dimension — prevents collapsed zones.
         if abs_x2 - abs_x1 < _MIN_ZONE_DIM_MM:
             abs_x2 = abs_x1 + _MIN_ZONE_DIM_MM
         if abs_y2 - abs_y1 < _MIN_ZONE_DIM_MM:

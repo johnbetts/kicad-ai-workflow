@@ -492,6 +492,24 @@ def _run_collision_pass(
         fx, fy = _clamp_to_group(ref, fx, fy, w, h, result, fp_sizes,
                                  group_bboxes, grid, _group_rect_fn)
 
+        # Clamp grid relocation to zone boundary — prevents cross-zone scatter.
+        if (zone_bboxes is not None and zone_membership is not None
+                and ref in zone_membership):
+            zname = zone_membership[ref]
+            zbbox = zone_bboxes.get(zname)
+            if zbbox is not None:
+                zx1, zy1, zx2, zy2 = zbbox
+                if not (zx1 <= fx <= zx2 and zy1 <= fy <= zy2):
+                    # Clamp to zone boundary instead of crossing it.
+                    clamped_x = max(zx1 + w / 2, min(zx2 - w / 2, fx))
+                    clamped_y = max(zy1 + h / 2, min(zy2 - h / 2, fy))
+                    if grid.is_free(clamped_x, clamped_y, w, h):
+                        fx, fy = clamped_x, clamped_y
+                    else:
+                        # Can't fit in zone — revert to original position
+                        # and let nudge fallback try.
+                        fx, fy = rx, ry
+
         # If grid relocation returned the same position, try random nudge fallback.
         if fx == rx and fy == ry:
             nudge = _random_nudge_fallback(

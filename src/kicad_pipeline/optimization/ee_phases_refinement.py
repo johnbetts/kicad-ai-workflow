@@ -839,6 +839,76 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
     # Post-3g: Enforce THT connectors to nearest board edge
     _enforce_tht_connectors_to_edge(ctx)
 
+    # Post-3g: Evict cross-group contaminations — push components back into
+    # their assigned zone.  Components that ended up in the wrong zone during
+    # collision resolution are moved toward the center of their assigned zone.
+    _evict_contaminations(ctx)
+
+
+def _evict_contaminations(ctx: PlacementContext) -> None:
+    """Move components that are in the wrong zone back to their assigned zone.
+
+    For each component with a zone assignment (from L2), check if its current
+    position is inside a DIFFERENT zone.  If so, move it toward the center of
+    its assigned zone, clamped to avoid collisions.
+    """
+    if not ctx.zone_membership or not ctx.zones:
+        return
+
+    zone_bboxes = _build_zone_bboxes(ctx)
+    evicted = 0
+    for ref, zone_name in ctx.zone_membership.items():
+        if ref not in ctx.positions or ref in ctx.fixed_refs:
+            continue
+        if ref.startswith("J"):  # connectors are edge-pinned, skip
+            continue
+        rx, ry, rot = ctx.positions[ref]
+        zbbox = zone_bboxes.get(zone_name)
+        if zbbox is None:
+            continue
+        zx1, zy1, zx2, zy2 = zbbox
+
+        # Check if component is inside its assigned zone
+        if zx1 <= rx <= zx2 and zy1 <= ry <= zy2:
+            continue  # already in correct zone
+
+        # Check if it's inside a DIFFERENT zone (contamination)
+        in_wrong_zone = False
+        for z in ctx.zones:
+            if z.name == zone_name:
+                continue
+            wx1, wy1, wx2, wy2 = z.rect
+            if wx1 <= rx <= wx2 and wy1 <= ry <= wy2:
+                in_wrong_zone = True
+                break
+
+        if not in_wrong_zone:
+            continue  # outside all zones — tolerate (board margin)
+
+        # Move toward center of assigned zone
+        w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        target_x = max(zx1 + w / 2 + 1, min(zx2 - w / 2 - 1, (zx1 + zx2) / 2))
+        target_y = max(zy1 + h / 2 + 1, min(zy2 - h / 2 - 1, (zy1 + zy2) / 2))
+
+        # Only move if target doesn't create a collision
+        from kicad_pipeline.optimization.collision_resolver import (
+            _count_collisions_at,
+            _rotation_aware_size,
+        )
+        tw, th = _rotation_aware_size(ref, ctx.positions, ctx.fp_sizes)
+        collisions_at_target = _count_collisions_at(
+            ref, target_x, target_y, tw, th, ctx.positions, ctx.fp_sizes,
+        )
+        if collisions_at_target == 0:
+            ctx.positions[ref] = (target_x, target_y, rot)
+            evicted += 1
+            _log.debug("  Evicted %s from wrong zone to %s center (%.1f, %.1f)",
+                        ref, zone_name, target_x, target_y)
+
+    if evicted:
+        _log.info("  3g-evict: moved %d contaminated components to correct zones",
+                   evicted)
+
 
 def _phase_first_clamp(ctx: PlacementContext) -> None:
     """First board-edge clamp using pad extent."""

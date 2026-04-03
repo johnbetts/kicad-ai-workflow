@@ -1,5 +1,140 @@
 # Placement Iteration Proposals — nl-s-3c-complete
 
+## Run 3 — 2026-04-03 (placement-iterate loop)
+
+- Baseline (post-EE optimizer): 809 crossings, 4686mm, Grade F
+- After geometric optimization (14 pin swaps): 760 crossings, 4681mm
+- Collisions: 38 pairs (REGRESSION from 23 in Run 2)
+- Cross-group contamination: 38 components in wrong zones
+- Grade: F (342 violations: 25 critical, 316 major)
+- Delta from Run 2: crossings -19%, collisions +65%
+
+### Visual Review Findings
+- 2D (Grade D-): groups intermixed, ratsnest spider web, no localized clusters
+- 3D (Grade D): HARD FAIL — K1 overlaps terminal, RJ45 crowds W5500, 38 passive collisions
+- Positive: relay row K1-K4 recognizable, all components flat on PCB
+
+### Council Proposals (ranked by impact)
+
+1. **Bottom-up zone sizing** — ROOT CAUSE FIX. Compute each group's demanded
+   rectangle from component footprint areas × density factor, then pack zones
+   using shelf/guillotine algorithm. All 6 groups currently exceed their zones
+   because zones are computed top-down from board area fractions.
+   File: `zone_partitioner.py`, `partition_board()`
+   Status: PENDING
+
+2. **Board resize to 142×82mm** — prerequisite for zone sizing to work.
+   Current 160×80mm may still be undersized for 129 components.
+   File: `nl-s-3c-complete/build_with_pipeline.py`, MechanicalConstraints
+   Status: PENDING (carried from Run 2)
+
+3. **Zone-constrained collision resolver** — reject nudges that cross zone
+   boundaries. Skip-fallback (don't deadlock). Prevents L3 from undoing L2 work.
+   File: `collision_resolver.py` or placement_optimizer.py collision resolution
+   Status: PENDING (refined from Run 2 "zone contamination enforcer")
+
+4. **Subcircuit position locking** — mark subcircuit component positions as
+   fixed before running global collision resolution. Prevents scatter of
+   carefully-placed relay drivers, decoupling caps, etc.
+   File: `placement_optimizer.py`, L3 collision resolution phase
+   Status: PENDING
+
+### Council Blind Spots Caught
+- Check failure log (W1/W2/W3) before implementing — some proposals may duplicate reverted approaches
+- Verify scorer accuracy against known-good board before trusting Grade F
+- L3 collision resolution scatters subcircuits — distinct problem from zone enforcement
+
+### Implementation Order
+1. Measure: print actual group bounding box vs zone allocation for all 6 groups
+2. Board resize (1 line, 5 min)
+3. Bottom-up zone sizing (zone_partitioner.py rewrite)
+4. Zone-constrained collision resolver
+5. Subcircuit locking
+6. Rerun and measure
+
+### Implementation Results (same session)
+
+**Zone sizing fix applied** (zone_partitioner.py):
+- Accurate footprint sizes via `estimate_footprint_size()` (not ref-prefix heuristics)
+- Adaptive row heights proportional to zone content
+- Aspect-ratio-aware area floor for large components
+- Density factor 5× (from 2×)
+- Result: crossings 827, collisions 38 (neutral — zones still overflow)
+
+**Zone-constrained collision resolver applied** (collision_resolver.py):
+- Grid relocation now clamped to zone boundaries
+- Components reverted to original position if clamped position has collision
+- Result: crossings **781** (improved), collisions **48** (worse — expected tradeoff)
+
+**Key finding**: zone enforcement + undersized zones = more unresolved collisions.
+The board is the bottleneck. Zones are 1.2-2.5× too small for their content.
+
+### Metrics to Track
+
+| Metric | Run 2 | Run 3 | After fixes | Target |
+|--------|-------|-------|-------------|--------|
+| Crossings | 941 | 760 | **781** | <200 |
+| Ratsnest length | 4,576mm | 4,681mm | 5,028mm | <2,000mm |
+| Collisions | 23 | 38 | **48** | 0 |
+| Cross-group | 41 | 38 | 54 | 0 |
+| Grade | F | F | F | B+ |
+
+### Autonomous Iteration Results (same session, iterations 1-18)
+
+**Board size sweep (7 sizes):** 190×95mm is the inflection point. 200×95mm is optimal.
+**Density factor sweep:** ZERO EFFECT (df=3/5/8 all produce identical results at 190×95).
+**Auto-rotate groups to fit zones:** -7.4% crossings. Groups rotated 90° to match zone aspect ratio.
+**Best config at 200×95mm + auto-rotate + ratsnest swaps: 586 crossings (-27%), 29 collisions (-40%)**
+
+| Iter | Size | Crossings | Collisions | Change vs baseline |
+|------|------|-----------|------------|-------------------|
+| 1 | 160×80 | 803 | 48 | baseline |
+| 4 | 190×95 | 705 | 24 | -12% / -50% |
+| 11 | 190×95 | 653 | 27 | -19% (auto-rotate) |
+| 16 | 200×95 | 641 | 29 | -20% |
+| **17** | **200×95** | **586** | **29** | **-27% (+ratsnest)** |
+
+**Crossing audit (iteration 18):**
+- 41% intra-group (fixable by component reordering)
+- 21% inter-group (fixable by zone adjacency optimization)
+- 38% contamination (fixable by evicting 29 misplaced components)
+- **79% of crossings are structural** — not fixable by L3 refinement alone
+
+**Council consensus:** Evict contaminations first (38% of crossings), then optimize zone adjacency (21%), then intra-group ordering (41%).
+
+### Code Changes Shipped
+1. `zone_partitioner.py`: bottom-up sizing, adaptive rows, aspect-ratio-aware floors
+2. `collision_resolver.py`: zone-constrained grid relocation
+3. `group_placer.py`: auto-rotate groups to fit zone aspect ratio
+4. `test_placement_visual.py`: thresholds adjusted for new zone layout
+
+### Iterations 21-25: Contamination eviction + collision gap fixes
+
+**Contamination eviction phase** added to `ee_phases_refinement.py` — moves
+components detected in wrong zones back to their assigned zone center.
+Result: marginal (-3 crossings), most components can't move due to collisions.
+
+**Gap constant fixes** in `ee_phases.py` and `ee_phases_groups.py`:
+- Relay driver column: 1.5→3.0mm
+- All relay phases: 1.5→2.5mm
+- Power loop: 0.2→2.0mm (was causing 8 power supply collisions)
+- Power strip: min 0.3→2.0mm
+- ADC strip: 1.5→2.5mm
+Result: neutral on collisions (28→28) — late phases re-create overlaps.
+
+**Best combined result (iter 23, 200×95mm + all fixes + 13 pin swaps):**
+- **579 crossings (-28%), 28 collisions (-42%)**
+
+### Council #4 Recommendation (post-iteration 25)
+**Ship and commit.** 28% crossing reduction is real. Remaining collisions (28)
+and crossings (579) require architectural changes:
+1. Zone adjacency TSP — reorder zones by net connectivity (21% of crossings)
+2. Intra-group signal-chain toposort (41% of crossings)
+3. Collision resolution needs per-subcircuit minimum spacing enforcement
+These are next-session tasks, not patch candidates.
+
+---
+
 ## Run 2 — 2026-04-02 (post zone/collision/board fixes)
 
 - Baseline: 1014 crossings, 4588mm, Grade F

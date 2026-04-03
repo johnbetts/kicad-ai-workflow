@@ -74,6 +74,7 @@ def _phase_zone_partitioning(ctx: PlacementContext) -> None:
     topology = compute_power_flow_topology(ctx.subcircuits)
     ctx.zones = partition_board(
         ctx.bounds, list(ctx.requirements.features), topology,
+        requirements=ctx.requirements,
     )
     _log.info("  %d zones created", len(ctx.zones))
 
@@ -568,7 +569,7 @@ def _place_relay_left_column(
         relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
                       for r in ctx.positions if r.startswith("K"))
 
-    gap = 1.5  # mm between component edges
+    gap = 2.5  # mm between component edges (prevents courtyard collisions)
     # Place D just outside the relay body on the coil-pin side.
     # Driver passives ALWAYS go below the relay so the relay can sit
     # directly next to its screw terminal at the top edge.  The coil
@@ -615,7 +616,7 @@ def _place_relay_right_column(
     elif any(r.startswith("K") for r in ctx.positions):
         relay_h = max(ctx.fp_sizes.get(r, (2.0, 15.0))[1]
                       for r in ctx.positions if r.startswith("K"))
-    gap = 1.5  # mm — matches left column courtyard clearance
+    gap = 2.5  # mm — matches courtyard clearance
 
     # Driver passives always below relay (same direction as left column)
     cursor_y = ky + relay_h / 2.0 + gap
@@ -713,7 +714,7 @@ def _place_relay_driver_columns(
         raw_w, raw_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
         krot = ctx.positions[anchor][2]
         relay_h = raw_w if krot % 180 in (90, 270) else raw_h
-    gap = 1.5
+    gap = 3.0  # increased from 1.5 — prevents Q/D courtyard collisions
     cursor_y = ky + relay_h / 2.0 + gap
 
     for refs, rot in chain:
@@ -925,7 +926,7 @@ def _relay_led_cursor_start(
     Args:
         direction: +1.0 = downward (below relay), -1.0 = upward (above relay).
     """
-    gap = 1.5
+    gap = 2.5
     q_refs = [
         r for r in ctx.relay_support_refs
         if r.startswith("Q") and r in ctx.positions
@@ -964,7 +965,7 @@ def _place_led_column_refs(
         direction: +1.0 = downward (increasing Y), -1.0 = upward (decreasing Y).
     """
     bounds = ctx.bounds
-    gap = 1.5
+    gap = 2.5
     for ref in r_led_refs:
         _rw, rh = ctx.fp_sizes.get(ref, (2.0, 2.0))
         py = cursor_y + direction * rh / 2.0
@@ -1285,7 +1286,7 @@ def _phase_relay_power_isolation(ctx: PlacementContext) -> None:
     # Place in a row near bottom-left, clear of mounting holes
     cursor_x = min_x + 10.0
     row_y = max_y - 3.0  # near bottom edge
-    gap = 1.5
+    gap = 2.5
 
     # Order: L1, C1, C2, L2 — ferrites flanking caps so both caps are
     # within proximity of the primary ferrite (L1).  Both bypass caps

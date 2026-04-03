@@ -1103,13 +1103,11 @@ def _eth_place_rj45_connectors(
     placed_eth: set[str],
     zone_rect: tuple[float, float, float, float],
 ) -> None:
-    """Place RJ45 connectors at the LEFT board edge, vertically centered.
+    """Place RJ45 connectors at the RIGHT board edge (or edge_mapped edge).
 
-    Signal flow is left→right: J1 (RJ45) sits at the left edge with its
-    mating face pointing outward (left).  Rotation=90 is used so the port
-    faces x_min.  After a 90° rotation the effective width becomes h and
-    the effective height becomes w.  Origin is adjusted so all pads stay
-    inside the board.
+    Rotation=270 faces the port outward (right / x_max).  After rotation
+    the effective width becomes h and the effective height becomes w.
+    Origin is adjusted so all pads stay inside the board.
     """
     bounds = ctx.bounds
     _ezx1, ezy1, _ezx2, ezy2 = zone_rect
@@ -1118,35 +1116,49 @@ def _eth_place_rj45_connectors(
     for ref in eth_connectors:
         if ref not in ctx.positions or ref in ctx.fixed_refs:
             continue
+        # Respect edge_mapped_connectors if set by phase 3f3
+        intended_edge = getattr(ctx, "edge_mapped_connectors", {}).get(ref, "right")
+        use_left = intended_edge == "left"
+        rotation = 90.0 if use_left else 270.0
         fp_match = None
         for fp in ctx.initial_pcb.footprints:
             if fp.ref == ref:
                 fp_match = fp
                 break
         w, h = ctx.fp_sizes.get(ref, (19.6, 15.4))
-        # After 90° rotation: effective dims are (h_body → x-axis, w_body → y-axis)
         rot_w, rot_h = h, w
-        cent_x = bounds[0] + rot_w / 2.0 + 1.0
+        edge_margin = 1.0
+        if use_left:
+            cent_x = bounds[0] + rot_w / 2.0 + 1.0
+        else:
+            cent_x = bounds[2] - rot_w / 2.0 - 1.0
         cent_y = _clamp(zone_cy, ezy1 + rot_h / 2.0 + 1.0, ezy2 - rot_h / 2.0 - 1.0)
         if fp_match is not None:
-            # Rotation=90: connector port faces left (x_min). Adjust origin so
-            # pads don't fall outside the board.
-            trial_origin_x = bounds[0] + 3.0
-            trial_origin_y = zone_cy
-            pad_min_x, _, _, _ = pad_extent_in_board_space(
-                fp_match, trial_origin_x, trial_origin_y, 90.0,
-            )
-            edge_margin = 1.0
-            if pad_min_x < bounds[0] + edge_margin:
-                trial_origin_x += (bounds[0] + edge_margin - pad_min_x)
+            if use_left:
+                trial_origin_x = bounds[0] + 3.0
+                trial_origin_y = zone_cy
+                pad_min_x, _, _, _ = pad_extent_in_board_space(
+                    fp_match, trial_origin_x, trial_origin_y, rotation,
+                )
+                if pad_min_x < bounds[0] + edge_margin:
+                    trial_origin_x += (bounds[0] + edge_margin - pad_min_x)
+            else:
+                trial_origin_x = bounds[2] - 3.0
+                trial_origin_y = zone_cy
+                _, _, pad_max_x, _ = pad_extent_in_board_space(
+                    fp_match, trial_origin_x, trial_origin_y, rotation,
+                )
+                if pad_max_x > bounds[2] - edge_margin:
+                    trial_origin_x -= (pad_max_x - bounds[2] + edge_margin)
             cent_x, cent_y = origin_to_centroid(
-                fp_match, trial_origin_x, trial_origin_y, 90.0,
+                fp_match, trial_origin_x, trial_origin_y, rotation,
             )
             cent_y = _clamp(cent_y, ezy1 + rot_h / 2.0 + 1.0, ezy2 - rot_h / 2.0 - 1.0)
-        ctx.positions[ref] = (cent_x, cent_y, 90.0)
+        ctx.positions[ref] = (cent_x, cent_y, rotation)
         ctx.ethernet_fixed.add(ref)
         placed_eth.add(ref)
-        _log.info("    %s (RJ45) -> left edge (%.1f, %.1f) rot=90", ref, cent_x, cent_y)
+        edge_name = "left" if use_left else "right"
+        _log.info("    %s (RJ45) -> %s edge (%.1f, %.1f) rot=%.0f", ref, edge_name, cent_x, cent_y, rotation)
 
 
 def _eth_fix_crystal_cap_overlaps(
@@ -1991,7 +2003,7 @@ def _pull_passives_toward_pins(
         ic_w, ic_h = ic_h, ic_w
     ic_half_w = ic_w / 2.0
     ic_half_h = ic_h / 2.0
-    gap = 0.2  # tight clearance for power loop components
+    gap = 2.0  # clearance for power loop components (was 0.2 — caused collisions)
 
     for ref in sorted(ic_net_refs):
         if ref == ic_ref or ref not in ctx.positions:
@@ -2431,7 +2443,7 @@ def _phase_power_group(ctx: PlacementContext) -> None:
         for r in power_group_refs if r[0] in "CRDL"
     ]
     avg_h = sum(passive_heights) / len(passive_heights) if passive_heights else 2.0
-    strip_gap = max(0.3, avg_h * 0.3)   # 30% of avg height, min 0.3mm
+    strip_gap = max(2.0, avg_h * 0.5)   # 50% of avg height, min 2.0mm (was 0.3mm)
     col_spacing = max(5.0, avg_h * 4.0)  # proportional column spacing
     sub_col_offset = max(2.0, avg_h * 1.75)  # proportional sub-column offset
     placed_in_col: set[str] = set()
@@ -2681,7 +2693,7 @@ def _adc_init_ctx_defaults(ctx: PlacementContext) -> None:
     ctx._r_top_connector_x = {}  # type: ignore[attr-defined]
     ctx._occupied_x_ranges = []  # type: ignore[attr-defined]
     ctx._CHANNEL_SPACING_MM = 8.0  # type: ignore[attr-defined]
-    ctx._STRIP_GAP_MM = 1.5  # type: ignore[attr-defined]
+    ctx._STRIP_GAP_MM = 2.5  # type: ignore[attr-defined]  # was 1.5 — caused collisions
 
 
 def _adc_group_by_ic(
@@ -3044,7 +3056,7 @@ def _phase_adc_channels(ctx: PlacementContext) -> None:
     ctx._r_top_connector_x = _r_top_connector_x  # type: ignore[attr-defined]
     ctx._occupied_x_ranges = _occupied_x_ranges  # type: ignore[attr-defined]
     ctx._CHANNEL_SPACING_MM = channel_spacing_mm  # type: ignore[attr-defined]
-    ctx._STRIP_GAP_MM = 1.5 * sy  # type: ignore[attr-defined]  # scale by zone factor
+    ctx._STRIP_GAP_MM = 2.5 * sy  # type: ignore[attr-defined]  # scale by zone factor (was 1.5)
 
 
 def _phase_adc_analog_cluster(ctx: PlacementContext) -> None:

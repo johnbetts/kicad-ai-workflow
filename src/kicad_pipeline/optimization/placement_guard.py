@@ -167,7 +167,10 @@ def _guard_cross_group(
     try:
         sc = detect_subcircuits(requirements)
         topo = compute_power_flow_topology(sc)
-        zones = partition_board(bounds, list(requirements.features), topo)
+        zones = partition_board(
+            bounds, list(requirements.features), topo,
+            requirements=requirements,
+        )
         ref_to_group: dict[str, str] = {}
         for feat in requirements.features:
             for comp in feat.components:
