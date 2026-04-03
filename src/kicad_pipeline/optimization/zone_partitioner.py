@@ -53,8 +53,9 @@ _AREA_BY_REF_PREFIX: dict[str, float] = {
 _DEFAULT_COMPONENT_AREA_MM2: float = 4.0
 
 # Spacing density factor: multiply raw component area to account for
-# courtyard clearances and component-to-component gaps.
-_DENSITY_FACTOR: float = 2.0
+# courtyard clearances, routing channels, and component-to-component gaps.
+# 3.5× gives enough room for routing between components without overflow.
+_DENSITY_FACTOR: float = 3.5
 
 # Minimum zone dimension (mm) — prevents zones from collapsing to zero.
 _MIN_ZONE_DIM_MM: float = 25.0
