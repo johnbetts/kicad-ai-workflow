@@ -54,9 +54,10 @@ _DEFAULT_COMPONENT_AREA_MM2: float = 4.0
 
 # Spacing density factor: multiply raw component area to account for
 # courtyard clearances, routing channels, and component-to-component gaps.
-# 2.5× balances density with routing space — higher values waste board area
-# at zone boundaries, lower values cause collisions within zones.
-_DENSITY_FACTOR: float = 2.5
+# 2.0× is the sweet spot — tested across 7 runs, df=2.0 (Run 3) produced
+# 680 crossings vs 683 (df=3.5) and 753 (df=2.5 + 2-row). Higher density
+# factors waste board area at zone boundaries; zone clamping overconstrained.
+_DENSITY_FACTOR: float = 2.0
 
 # Minimum zone dimension (mm) — prevents zones from collapsing to zero.
 _MIN_ZONE_DIM_MM: float = 25.0
@@ -114,16 +115,16 @@ _ZONE_KEYWORDS: dict[str, tuple[str, ...]] = {
 # reference board analysis.  Format: (x_start, y_start, x_end, y_end)
 # as fractions of board width/height.
 _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
-    # 2-row layout (160x80mm board):
-    #   Row 1 (top half): power (left) + relay (right, includes input connectors)
-    #   Row 2 (bottom half): analog (left) + ethernet (center) + mcu (right)
-    # Input connectors merged into relay zone at runtime.
-    "input_connectors": (0.00, 0.00, 1.00, 0.10),  # fallback if not merged
-    "power":            (0.00, 0.05, 0.35, 0.50),
-    "relay":            (0.35, 0.05, 1.00, 0.50),
-    "analog":           (0.00, 0.50, 0.35, 0.95),
-    "mcu":              (0.55, 0.50, 1.00, 0.95),
-    "ethernet":         (0.35, 0.50, 0.55, 0.95),
+    # 3-row layout (160x80mm board) — Run 3 config (best: 680 crossings):
+    #   Row 0: input_connectors (full width, 18% height)
+    #   Row 1: power (left) + relay (right)
+    #   Row 2: analog (left) + ethernet (center) + mcu (right)
+    "input_connectors": (0.00, 0.00, 1.00, 0.18),
+    "power":            (0.00, 0.18, 0.35, 0.55),
+    "relay":            (0.35, 0.18, 1.00, 0.55),
+    "analog":           (0.00, 0.55, 0.30, 0.90),
+    "mcu":              (0.55, 0.55, 1.00, 0.90),
+    "ethernet":         (0.30, 0.55, 0.55, 0.90),
 }
 
 # Minimum inter-zone gap (mm)
@@ -252,24 +253,10 @@ def partition_board(
     # When there's only one zone, give it the full board area
     single_zone = len(zone_groups) == 1
 
-    # 2-row layout: top row (power + relay), bottom row (analog + ethernet + mcu).
-    # Input connectors merge into their functional zone (not a separate row).
-    # This uses 100% of board area instead of wasting 18% on a connector row.
-    if "input_connectors" in zone_groups:
-        # Merge input_connectors into relay zone (most common association)
-        target = "relay" if "relay" in zone_groups else next(iter(zone_groups))
-        zone_groups.setdefault(target, []).extend(zone_groups.pop("input_connectors"))
-        zone_component_count[target] = (
-            zone_component_count.get(target, 0)
-            + zone_component_count.pop("input_connectors", 0)
-        )
-        zone_footprint_area[target] = (
-            zone_footprint_area.get(target, 0)
-            + zone_footprint_area.pop("input_connectors", 0)
-        )
-        _log.info("  Merged 'input_connectors' into '%s' zone", target)
-
+    # 3-row layout preserves the connector row for edge-pinned terminals.
+    # Run 3 (3-row, df=2.0) produced 680 crossings — best result across 7 runs.
     row_groups: dict[str, list[str]] = {
+        "row0": ["input_connectors"],
         "row1": ["power", "relay"],
         "row2": ["analog", "ethernet", "mcu"],
     }

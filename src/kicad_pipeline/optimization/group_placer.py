@@ -256,23 +256,15 @@ def _place_single_group(
 
     cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
 
-    # Clamp group center so the group bbox stays within its zone.
-    # This prevents the grid search from placing groups outside their zone
-    # when the target position is occupied.
-    zone = zone_map.get(group.name)
-    if zone is not None:
-        zx1, zy1, zx2, zy2 = zone.rect
-        # Group center must be far enough from zone edges to fit the group
-        half_w, half_h = gw / 2.0, gh / 2.0
-        cx = max(zx1 + half_w, min(zx2 - half_w, cx))
-        cy = max(zy1 + half_h, min(zy2 - half_h, cy))
+    # NOTE: Zone clamping was tested in Runs 6-7 and made crossings WORSE
+    # (747-753 vs 680 without). The collision resolver needs freedom to
+    # place components outside zones for dense boards. Zone membership is
+    # still tracked for diagnostics but not enforced here.
 
     grid.place(cx, cy, gw, gh)
 
-    zone_rect = zone.rect if zone is not None else None
     abs_positions = _compute_absolute_positions(
         layout, cx, cy, gox, goy, gw, gh, fp_sizes, board_bounds,
-        zone_rect=zone_rect,
     )
 
     all_x = [p[0] for p in abs_positions.values()]
