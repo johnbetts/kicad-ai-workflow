@@ -101,6 +101,78 @@ class PlacementResult:
         raise IndexError(msg)
 
 
+class CollisionGuardDict(dict):  # type: ignore[type-arg]
+    """A dict subclass that rejects writes creating courtyard collisions.
+
+    Wraps ``ctx.positions`` so every ``ctx.positions[ref] = (x, y, rot)``
+    write is checked for courtyard overlap with all other components.
+    If the new position would collide, the write is silently rejected and
+    the old position is preserved.
+
+    This enforces a zero-collision invariant across ALL L3 phases without
+    requiring each phase to be collision-aware.
+
+    Attributes:
+        fp_sizes: ref → (width, height) courtyard sizes.
+        rejected: Count of rejected placements (for diagnostics).
+        enabled: When False, behaves like a normal dict (bypass guard).
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        fp_sizes: dict[str, tuple[float, float]] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.fp_sizes: dict[str, tuple[float, float]] = fp_sizes or {}
+        self.rejected: int = 0
+        self.enabled: bool = True
+
+    def __setitem__(self, ref: str, value: tuple[float, float, float]) -> None:
+        if not self.enabled or not self.fp_sizes:
+            super().__setitem__(ref, value)
+            return
+
+        nx, ny, nrot = value
+        nw, nh = self.fp_sizes.get(ref, (2.0, 2.0))
+        if nrot % 180 in (90, 270):
+            nw, nh = nh, nw
+
+        # Check collision with all other components
+        from kicad_pipeline.constants import COMPONENT_CLEARANCE_GAP_MM
+        clearance = COMPONENT_CLEARANCE_GAP_MM
+        for other_ref, (ox, oy, orot) in self.items():
+            if other_ref == ref:
+                continue
+            # Skip mounting holes — they have fixed positions
+            if other_ref.startswith(("H", "MH")):
+                continue
+            ow, oh = self.fp_sizes.get(other_ref, (2.0, 2.0))
+            if orot % 180 in (90, 270):
+                ow, oh = oh, ow
+            if (abs(nx - ox) < (nw + ow) / 2.0 + clearance
+                    and abs(ny - oy) < (nh + oh) / 2.0 + clearance):
+                # Collision detected — reject this placement
+                self.rejected += 1
+                return
+
+        super().__setitem__(ref, value)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        """Override update to go through __setitem__ for collision checking."""
+        if args:
+            other = args[0]
+            if isinstance(other, dict):
+                for key, value in other.items():
+                    self[key] = value
+            else:
+                for key, value in other:
+                    self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+
 @dataclass
 class PlacementContext:
     """Mutable state passed between placement phases.
