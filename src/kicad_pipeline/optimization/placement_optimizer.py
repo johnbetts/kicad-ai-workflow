@@ -270,6 +270,17 @@ def optimize_placement_ee(
     _log.info("=== Level 2: Group Placement ===")
     _phase_group_placement(ctx)
 
+    # Record which zone each component belongs to after L2 placement.
+    # This map is used by collision resolution and late phases to prevent
+    # components from being pushed across zone boundaries.
+    for zone in ctx.zones:
+        zx1, zy1, zx2, zy2 = zone.rect
+        for ref, (rx, ry, _rot) in ctx.positions.items():
+            if zx1 <= rx <= zx2 and zy1 <= ry <= zy2:
+                ctx.zone_membership[ref] = zone.name
+    _log.info("  Zone membership recorded: %d refs assigned to zones",
+              len(ctx.zone_membership))
+
     # Level 2.5: Pre-populate subcircuit protection from detected subcircuits
     # This ensures collision resolution in Level 3 can't scatter subcircuit members.
     _log.info("=== Level 2.5: Subcircuit Pre-Protection ===")
@@ -404,11 +415,19 @@ def _resolve_body_pair(
     if overlap_x < overlap_y:
         push = overlap_x + 0.5
         nx = mx + push if mx > (ax + bx) / 2.0 else mx - push
-        ctx.positions[mover] = (max(min_x + 2.0, min(max_x - 2.0, nx)), my, mrot)
+        nx = max(min_x + 2.0, min(max_x - 2.0, nx))
+        from kicad_pipeline.optimization.ee_phases_refinement import _is_within_zone
+        if not _is_within_zone(mover, nx, my, ctx):
+            return False
+        ctx.positions[mover] = (nx, my, mrot)
     else:
         push = overlap_y + 0.5
         ny = my + push if my > (ay + by) / 2.0 else my - push
-        ctx.positions[mover] = (mx, max(min_y + 2.0, min(max_y - 2.0, ny)), mrot)
+        ny = max(min_y + 2.0, min(max_y - 2.0, ny))
+        from kicad_pipeline.optimization.ee_phases_refinement import _is_within_zone
+        if not _is_within_zone(mover, mx, ny, ctx):
+            return False
+        ctx.positions[mover] = (mx, ny, mrot)
     _log.info("  Final body fix: pushed %s away from %s (overlap %.1fx%.1f)",
                mover, ref_a if mover == ref_b else ref_b, overlap_x, overlap_y)
     return True

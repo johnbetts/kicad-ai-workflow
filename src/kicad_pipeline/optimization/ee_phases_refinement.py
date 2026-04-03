@@ -144,6 +144,29 @@ def _clamp_all_positions(
     return count
 
 
+def _build_zone_bboxes(
+    ctx: PlacementContext,
+) -> dict[str, tuple[float, float, float, float]]:
+    """Build zone name → (x1, y1, x2, y2) bounding box dict from ctx.zones."""
+    return {zone.name: zone.rect for zone in ctx.zones}
+
+
+def _is_within_zone(ref: str, x: float, y: float, ctx: PlacementContext) -> bool:
+    """Return True if (x, y) is within the zone assigned to *ref* after Level 2.
+
+    If no zone was assigned (zone_membership is empty or ref not present), the
+    move is allowed unconditionally — no constraint is applied.
+    """
+    zone_name = ctx.zone_membership.get(ref)
+    if not zone_name:
+        return True
+    for zone in ctx.zones:
+        if zone.name == zone_name:
+            zx1, zy1, zx2, zy2 = zone.rect
+            return zx1 <= x <= zx2 and zy1 <= y <= zy2
+    return True
+
+
 def _build_subcircuit_fixed(ctx: PlacementContext) -> set[str]:
     """Build the set of subcircuit-fixed refs from context."""
     return (ctx.relay_support_refs | ctx.adc_channel_refs
@@ -209,7 +232,12 @@ def _resolve_post_phase_collisions(
     targeted = (ctx.fixed_refs
                 | (subcircuit_fixed - colliding)
                 | always_fixed)
-    return _resolve_collisions(positions, fp_sizes, bounds, targeted)
+    zone_bboxes = _build_zone_bboxes(ctx) if ctx.zone_membership else None
+    zone_membership = ctx.zone_membership if ctx.zone_membership else None
+    return _resolve_collisions(
+        positions, fp_sizes, bounds, targeted,
+        zone_bboxes=zone_bboxes, zone_membership=zone_membership,
+    )
 
 
 def _compute_edge_distance(
@@ -284,6 +312,9 @@ def _post_clamp_decoupling_repull(
             tx, ty = _cap_side_position(placed_count, ix, iy, iw, ih, cw, ch)
             tx = max(ctx.bounds[0] + 1.0, min(ctx.bounds[2] - 1.0, tx))
             ty = max(ctx.bounds[1] + 1.0, min(ctx.bounds[3] - 1.0, ty))
+            # Respect zone boundary — skip move if it would push cap out of its zone
+            if not _is_within_zone(cap_ref, tx, ty, ctx):
+                continue
             ctx.positions[cap_ref] = (tx, ty, crot)
             placed_count += 1
             _post_clamp_decoup += 1
@@ -757,9 +788,12 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
     }
     # Build proximity constraints so decoupling caps stay near their ICs
     prox = _build_decoupling_proximity_constraints(ctx)
+    _zbboxes = _build_zone_bboxes(ctx) if ctx.zone_membership else None
+    _zmembership = ctx.zone_membership if ctx.zone_membership else None
     ctx.positions = _resolve_collisions(
         ctx.positions, ctx.fp_sizes, ctx.bounds, relay_fixed, group_bboxes=group_bboxes,
         proximity_constraints=prox,
+        zone_bboxes=_zbboxes, zone_membership=_zmembership,
     )
     # Targeted final pass
     remaining_collisions = _count_collisions(ctx.positions, ctx.fp_sizes)
@@ -788,6 +822,7 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
         ctx.positions = _resolve_collisions(
             ctx.positions, ctx.fp_sizes, ctx.bounds, targeted_fixed,
             proximity_constraints=prox,
+            zone_bboxes=_zbboxes, zone_membership=_zmembership,
         )
 
     # Post-3g: Enforce ethernet connectors on bottom edge
@@ -1398,8 +1433,11 @@ def _resolve_relay_post_alignment_collisions(
         | ctx.adc_ic_refs
         | ctx.power_group_fixed
     )
+    _zbboxes2 = _build_zone_bboxes(ctx) if ctx.zone_membership else None
+    _zmembership2 = ctx.zone_membership if ctx.zone_membership else None
     ctx.best_positions = _resolve_collisions(
         ctx.best_positions, ctx.fp_sizes, ctx.bounds, relay_fixed,
+        zone_bboxes=_zbboxes2, zone_membership=_zmembership2,
     )
 
 

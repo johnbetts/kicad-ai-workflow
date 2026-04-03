@@ -287,6 +287,8 @@ def _random_nudge_fallback(
     fp_sizes: dict[str, tuple[float, float]],
     bounds: tuple[float, float, float, float],
     proximity_constraints: dict[str, tuple[str, float]] | None,
+    zone_bboxes: dict[str, tuple[float, float, float, float]] | None = None,
+    zone_membership: dict[str, str] | None = None,
 ) -> tuple[float, float] | None:
     """Try 8-direction nudges to find an improvement when grid relocation fails.
 
@@ -321,6 +323,15 @@ def _random_nudge_fallback(
                 # Respect proximity constraints
                 if _violates_proximity(ref, cx, cy, proximity_constraints, positions):
                     continue
+                # Respect zone boundary — reject nudge if it exits the assigned zone
+                if (zone_membership is not None and zone_bboxes is not None
+                        and ref in zone_membership):
+                    zname = zone_membership[ref]
+                    zbbox = zone_bboxes.get(zname)
+                    if zbbox is not None:
+                        zx1, zy1, zx2, zy2 = zbbox
+                        if not (zx1 <= cx <= zx2 and zy1 <= cy <= zy2):
+                            continue
                 hits = _count_collisions_at(ref, cx, cy, w, h, positions, fp_sizes)
                 if hits < best_hits:
                     best_hits = hits
@@ -451,6 +462,8 @@ def _run_collision_pass(
     group_bboxes: list[GroupBoundingBox] | None,
     pass_num: int,
     proximity_constraints: dict[str, tuple[str, float]] | None = None,
+    zone_bboxes: dict[str, tuple[float, float, float, float]] | None = None,
+    zone_membership: dict[str, str] | None = None,
 ) -> int:
     """Execute one collision-resolution pass; return number of components moved."""
     current_collisions = _count_collisions(result, fp_sizes)
@@ -482,7 +495,8 @@ def _run_collision_pass(
         # If grid relocation returned the same position, try random nudge fallback.
         if fx == rx and fy == ry:
             nudge = _random_nudge_fallback(
-                ref, rx, ry, rot, w, h, result, fp_sizes, bounds, proximity_constraints
+                ref, rx, ry, rot, w, h, result, fp_sizes, bounds, proximity_constraints,
+                zone_bboxes=zone_bboxes, zone_membership=zone_membership,
             )
             if nudge is not None:
                 fx, fy = nudge
@@ -509,6 +523,8 @@ def _resolve_collisions(
     fixed_refs: set[str],
     group_bboxes: list[GroupBoundingBox] | None = None,
     proximity_constraints: dict[str, tuple[str, float]] | None = None,
+    zone_bboxes: dict[str, tuple[float, float, float, float]] | None = None,
+    zone_membership: dict[str, str] | None = None,
 ) -> dict[str, tuple[float, float, float]]:
     """Resolve courtyard collisions using grid-based relocation.
 
@@ -533,7 +549,8 @@ def _resolve_collisions(
         if not _count_collisions(result, fp_sizes):
             break
         _run_collision_pass(
-            result, fp_sizes, bounds, fixed_refs, group_bboxes, _pass, proximity_constraints
+            result, fp_sizes, bounds, fixed_refs, group_bboxes, _pass,
+            proximity_constraints, zone_bboxes=zone_bboxes, zone_membership=zone_membership,
         )
         if not _count_collisions(result, fp_sizes):
             break

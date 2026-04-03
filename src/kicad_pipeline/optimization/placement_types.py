@@ -131,6 +131,10 @@ class PlacementContext:
     template_fixed: set[str] = field(default_factory=set)
     # Edge-mapped connectors — ref → target edge name (from phase 3f3)
     edge_mapped_connectors: dict[str, str] = field(default_factory=dict)
+    # Zone membership: maps ref → zone_name for boundary enforcement
+    # Populated after Level 2 group placement so Level 3 phases don't scatter
+    # components across zone boundaries during collision resolution.
+    zone_membership: dict[str, str] = field(default_factory=dict)
     # Explicit placement constraints — resolved from requirements + subcircuits
     constraints: PlacementConstraintSet | None = None
     # Review loop output — set by _phase_review_loop
