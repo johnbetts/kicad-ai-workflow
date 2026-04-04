@@ -36,7 +36,11 @@ _WEIGHT_THERMAL: float = 0.10
 # Original weights summed to 1.0; new 13 x 0.9 + 0.10 = 1.00 exactly.
 # Fast-path sub-dimension weights (EE-aligned, v6 — 18 dimensions)
 # Added utilization + compactness + signal flow to catch sprawling/disordered layouts.
-_FAST_WEIGHT_COLLISION: float = 0.12
+# Fast-path sub-dimension weights (EE-aligned, v7 — 19 dimensions)
+# v7: Added subcircuit_proximity (0.06) to reward tight template layouts.
+# Reduced collision 0.12→0.10, group_cohesion 0.04→0.02, group_isolation 0.04→0.02
+# to maintain sum ≈ 1.0.
+_FAST_WEIGHT_COLLISION: float = 0.10
 _FAST_WEIGHT_SUBCIRCUIT_COHESION: float = 0.04
 _FAST_WEIGHT_VOLTAGE_ISOLATION: float = 0.12
 _FAST_WEIGHT_CONNECTOR_EDGE: float = 0.08
@@ -45,15 +49,16 @@ _FAST_WEIGHT_MCU_PERIPHERAL: float = 0.08
 _FAST_WEIGHT_RF_EDGE: float = 0.04
 _FAST_WEIGHT_CONNECTOR_ORIENTATION: float = 0.04
 _FAST_WEIGHT_REGULATOR_BOUNDARY: float = 0.04
-_FAST_WEIGHT_GROUP_COHESION: float = 0.04
+_FAST_WEIGHT_GROUP_COHESION: float = 0.02
 _FAST_WEIGHT_SUBGROUP_COHESION: float = 0.04
-_FAST_WEIGHT_GROUP_ISOLATION: float = 0.04
+_FAST_WEIGHT_GROUP_ISOLATION: float = 0.02
 _FAST_WEIGHT_PAD_FACING: float = 0.04
 _FAST_WEIGHT_CONSTRAINT_COMPLIANCE: float = 0.04
 _FAST_WEIGHT_HUMAN_FEEDBACK: float = 0.04
 _FAST_WEIGHT_UTILIZATION: float = 0.04
 _FAST_WEIGHT_COMPACTNESS: float = 0.04
 _FAST_WEIGHT_SIGNAL_FLOW: float = 0.04
+_FAST_WEIGHT_SUBCIRCUIT_PROXIMITY: float = 0.06
 
 # Legacy weight names for backward compatibility
 _FAST_WEIGHT_NET_PROXIMITY: float = _FAST_WEIGHT_SUBCIRCUIT_COHESION
@@ -1444,6 +1449,53 @@ def _score_signal_flow(
     return passes / checks, issues[:5]
 
 
+def _score_subcircuit_proximity(
+    pcb: PCBDesign,
+    requirements: ProjectRequirements,
+) -> tuple[float, list[str]]:
+    """Score how close subcircuit support components are to their anchor IC.
+
+    For each detected subcircuit, measures the mean distance from support
+    components to the anchor.  Perfect (1.0) = all within 5mm.
+    Failing (0.0) = mean distance > 20mm.
+
+    This rewards tight template layouts (relay drivers near relay,
+    decoupling caps near IC) and penalises scattered support components.
+    """
+    import math
+
+    from kicad_pipeline.optimization.functional_grouper import detect_subcircuits
+
+    pos = _fp_position_dict(pcb)
+    subcircuits = detect_subcircuits(requirements)
+    issues: list[str] = []
+    total_score = 0.0
+    n_scored = 0
+
+    for sc in subcircuits:
+        anchor = sc.anchor_ref
+        if anchor not in pos:
+            continue
+        ax, ay = pos[anchor]
+        support = [r for r in sc.refs if r != anchor and r in pos]
+        if not support:
+            continue
+        dists = [math.hypot(pos[r][0] - ax, pos[r][1] - ay) for r in support]
+        mean_dist = sum(dists) / len(dists)
+        # Score: 1.0 at ≤5mm, linear to 0.0 at ≥20mm
+        sc_score = max(0.0, min(1.0, 1.0 - (mean_dist - 5.0) / 15.0))
+        total_score += sc_score
+        n_scored += 1
+        if sc_score < 0.5:
+            issues.append(
+                f"{sc.anchor_ref} subcircuit spread: {mean_dist:.1f}mm mean"
+            )
+
+    if n_scored == 0:
+        return 1.0, []
+    return total_score / n_scored, issues[:5]
+
+
 def _gather_placement_subdimensions(
     pcb: PCBDesign,
     requirements: ProjectRequirements,
@@ -1480,6 +1532,7 @@ def _gather_placement_subdimensions(
     utilization_score, utilization_issues = _score_utilization(pcb)
     compactness_score, compactness_issues = _score_compactness(pcb)
     signal_flow_score, signal_flow_issues = _score_signal_flow(pcb, requirements)
+    sc_prox_score, sc_prox_issues = _score_subcircuit_proximity(pcb, requirements)
 
     return {
         "collision": (collision_score, tuple(collision_issues[:5])),
@@ -1499,6 +1552,7 @@ def _gather_placement_subdimensions(
         "utilization": (utilization_score, tuple(utilization_issues[:5])),
         "compactness": (compactness_score, tuple(compactness_issues[:5])),
         "signal_flow": (signal_flow_score, tuple(signal_flow_issues[:5])),
+        "sc_proximity": (sc_prox_score, tuple(sc_prox_issues[:5])),
     }
 
 
@@ -1523,6 +1577,7 @@ def _build_fast_breakdown(
         ("utilization", "Board Utilization", _FAST_WEIGHT_UTILIZATION),
         ("compactness", "Layout Compactness", _FAST_WEIGHT_COMPACTNESS),
         ("signal_flow", "Signal Flow", _FAST_WEIGHT_SIGNAL_FLOW),
+        ("sc_proximity", "Subcircuit Proximity", _FAST_WEIGHT_SUBCIRCUIT_PROXIMITY),
     )
     return tuple(
         ScoreDetail(
@@ -1580,6 +1635,7 @@ def compute_fast_placement_score(
         + _FAST_WEIGHT_UTILIZATION * dims["utilization"][0]
         + _FAST_WEIGHT_COMPACTNESS * dims["compactness"][0]
         + _FAST_WEIGHT_SIGNAL_FLOW * dims["signal_flow"][0]
+        + _FAST_WEIGHT_SUBCIRCUIT_PROXIMITY * dims["sc_proximity"][0]
     )
 
     manufacturing_score = _clamp01(0.5 + 0.5 * dims["collision"][0])
