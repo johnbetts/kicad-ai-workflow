@@ -31,8 +31,8 @@ _log = logging.getLogger(__name__)
 
 # Layout constants (mm)
 _RELAY_GAP_MM = 1.0        # gap between adjacent relays
-_COIL_GAP_MM = 2.0         # gap between relay bottom and first driver row
-_ROW_GAP_MM = 1.0          # gap between driver component rows
+_COIL_GAP_MM = 3.0         # gap between relay bottom and first driver row
+_ROW_GAP_MM = 2.0          # gap between driver component rows (prevents Q/D overlap)
 _SHARED_OFFSET_X_MM = -3.0  # shared components offset left of relay row
 
 
