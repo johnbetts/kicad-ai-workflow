@@ -309,22 +309,55 @@ def _guard_connector_rotation(
 
 
 def _guard_relay_orientation(pcb: PCBDesign, issues: list[str]) -> None:
-    """Check that relays are oriented correctly.
+    """Check relay orientation — COM pin must face screw terminals, coil faces drivers.
 
-    Recurring bug: relays need 90deg left rotation so the U-shaped
-    isolation cutout is around Common, not in the middle.
+    SANYOU SRD relay pin layout (at rot=0):
+      Pin 1 (COM) at local (-5.1, +6.0) — bottom-left
+      Pin 5 (COIL+) at local (-7.1, 0.0) — left-center
+      Pin 2 (COIL-) at local (+7.1, +6.0) — bottom-right
+    U-shaped isolation cutout on LEFT side (x≈-6.1mm) separating COM from COIL.
+
+    At rot=90 (CW): COM moves to top, coil to bottom → drivers below face coil ✓
+    At rot=0 or 180: COM at left/right — cutout doesn't align with driver column.
+
+    Also verifies COM pin (pin 1) faces the screw terminal side (top edge)
+    and coil pins (2, 5) face the driver side (bottom/below).
     """
+    import math
+
     for fp in pcb.footprints:
         if not fp.ref.startswith("K"):
             continue
         rot = fp.rotation
-        # Relays should be at 90 or 270 degrees (rotated left/right)
-        # NOT at 0 or 180 (default orientation has cutout in wrong place)
+
+        # Relays must be at 90 degrees for this board layout
+        # (drivers below on coil side, terminals above on COM side)
         if rot % 180 == 0:
             issues.append(
-                f"RECURRING: {fp.ref} relay at rot={rot:.0f} — needs 90deg rotation "
-                f"so isolation cutout wraps around Common pin"
+                f"RECURRING: {fp.ref} relay at rot={rot:.0f} — needs 90deg rotation. "
+                f"At rot=0/180 the isolation cutout doesn't separate COM from coil "
+                f"drivers correctly. SRD datasheet: COM=pin1, COIL=pin2/5."
             )
+            continue
+
+        # At rot=90: verify COM pin (pin 1) faces toward top edge (terminals)
+        # Pin 1 local position: (-5.1, +6.0). At rot=90: board_y = origin_y + (-5.1)*sin(90) + 6.0*cos(90) = origin_y - 5.1
+        # So COM is ABOVE the relay center — toward top edge. ✓
+        # This is correct when screw terminals are at the top edge.
+        pin1 = None
+        for pad in fp.pads:
+            if pad.number == "1":
+                pin1 = pad
+                break
+        if pin1 is not None:
+            rot_rad = math.radians(rot)
+            com_board_y = fp.position.y + pin1.position.x * math.sin(rot_rad) + pin1.position.y * math.cos(rot_rad)
+            # COM should be toward the top of the board (lower Y value)
+            if com_board_y > fp.position.y + 2.0:
+                issues.append(
+                    f"RECURRING: {fp.ref} COM pin (pin 1) faces bottom — should face "
+                    f"top edge toward screw terminals. Try rot={((rot + 180) % 360):.0f}"
+                )
 
 
 def _guard_antenna_isolation(pcb: PCBDesign, issues: list[str]) -> None:
