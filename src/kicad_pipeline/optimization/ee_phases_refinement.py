@@ -1645,6 +1645,34 @@ def _phase_mcu_decoupling_repull(ctx: PlacementContext) -> None:
         _log.info("MCU decoupling re-pull: %d caps to MCU left side",
                   _mcu_decoup_pulled)
 
+    # Also pull far MCU peripheral non-caps (R, SW, LED) toward MCU
+    _mcu_periph_other = sorted(
+        r for r in ctx.positions
+        if r in ctx.mcu_peripheral_refs
+        and not r.startswith("C") and not r.startswith("J")
+        and r != mcu_ref_c3
+    )
+    _mcu_right = _mcu_fx + _mcu_fw / 2.0
+    _periph_y = _mcu_fy - (_mcu_fh / 3.0)
+    _periph_pulled = 0
+    for ref in _mcu_periph_other:
+        rx, ry, rrot = ctx.positions[ref]
+        import math
+        dist = math.hypot(rx - _mcu_fx, ry - _mcu_fy)
+        if dist > 20.0 and ref not in ctx.fixed_refs:
+            # Pull to MCU right side
+            rw, rh = ctx.fp_sizes.get(ref, (2.0, 1.0))
+            tx = _mcu_right + 3.0
+            ty = _periph_y
+            _periph_y += max(rw, rh) + 1.5
+            tx = max(bounds[0] + 2.0, min(bounds[2] - 2.0, tx))
+            ty = max(bounds[1] + 2.0, min(bounds[3] - 2.0, ty))
+            ctx.positions[ref] = (tx, ty, rrot)
+            _periph_pulled += 1
+    if _periph_pulled:
+        _log.info("MCU peripheral re-pull: %d non-cap refs to MCU right side",
+                  _periph_pulled)
+
 
 def _phase_final_clamp(ctx: PlacementContext) -> None:
     """Final board-edge clamp — ensure ALL components are inside board."""
