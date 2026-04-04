@@ -452,6 +452,14 @@ def optimize_placement_ee(
     )
     _post_clamp_decoupling_repull(ctx)
 
+    # FINAL: enforce connector placement rules (rotation, edge position,
+    # U8 adjacent to J13, J16/J15 near MCU). This is the absolute last
+    # placement pass — fixes recurring bugs from human review.
+    from kicad_pipeline.optimization.ee_phases_refinement import (
+        _enforce_connector_rules,
+    )
+    _enforce_connector_rules(ctx)
+
     # Sync final positions to best_positions — _phase_build_final reads best_positions
     ctx.best_positions = dict(ctx.positions)
 

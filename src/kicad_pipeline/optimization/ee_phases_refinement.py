@@ -1697,6 +1697,105 @@ def _phase_final_clamp(ctx: PlacementContext) -> None:
     )
 
 
+def _enforce_connector_rules(ctx: PlacementContext) -> None:
+    """Final enforcement of connector placement rules.
+
+    Fixes known recurring bugs:
+    - Screw terminals: wires face off-board (nearest edge)
+    - USB-C: connector body faces off board edge
+    - RJ45: at board edge, magnetics (U8) adjacent
+    - J16 (SD card), J13 (RJ45): near MCU area, not far right
+    - All THT connectors: rotation aligned with nearest edge
+
+    Runs AFTER all L3 phases — this is the last word on connector positions.
+    """
+    bounds = ctx.bounds
+    bx1, by1, bx2, by2 = bounds
+    board_w = bx2 - bx1
+    board_h = by2 - by1
+
+    fp_lookup = {fp.ref: fp for fp in ctx.initial_pcb.footprints}
+
+    for ref in list(ctx.positions):
+        fp = fp_lookup.get(ref)
+        if not fp or not ref.startswith("J"):
+            continue
+
+        rx, ry, rot = ctx.positions[ref]
+        lib = fp.lib_id.lower()
+        w, h = ctx.fp_sizes.get(ref, (5.0, 5.0))
+
+        # ── Screw terminals: wires face nearest edge ──
+        if "terminal" in lib or "5.08" in lib or "mkds" in lib:
+            # Terminal blocks at top edge (Y near min): rot=180 (wires face up/out)
+            dist_top = abs(ry - by1)
+            dist_bot = abs(ry - by2)
+            if dist_top < dist_bot:
+                # Top edge: wires face up (away from board)
+                if rot not in (180.0,):
+                    ctx.positions[ref] = (rx, ry, 180.0)
+                    _log.info("  Connector fix: %s rot -> 180 (wires face top edge)", ref)
+            else:
+                # Bottom edge: wires face down
+                if rot not in (0.0,):
+                    ctx.positions[ref] = (rx, ry, 0.0)
+                    _log.info("  Connector fix: %s rot -> 0 (wires face bottom edge)", ref)
+
+        # ── USB-C: connector body off board edge ──
+        elif "usb" in lib:
+            # USB at bottom edge: rot=0 means connector faces down (off board)
+            dist_bot = abs(ry - by2)
+            if dist_bot < 15.0:
+                # At bottom: push to edge, face down
+                new_y = by2 - 1.0
+                ctx.positions[ref] = (rx, new_y, 0.0)
+                _log.info("  Connector fix: %s USB-C to bottom edge, rot=0", ref)
+
+        # ── RJ45: at right edge ──
+        elif "rj45" in lib or "rjhse" in lib:
+            # RJ45 at right edge facing right
+            new_x = bx2 - w / 2.0 - 0.5
+            ctx.positions[ref] = (new_x, ry, 270.0)
+            _log.info("  Connector fix: %s RJ45 to right edge, rot=270", ref)
+
+    # ── U8 (magnetics) must be adjacent to J13 (RJ45) ──
+    j13_pos = ctx.positions.get("J13")
+    u8_pos = ctx.positions.get("U8")
+    if j13_pos and u8_pos:
+        j13x, j13y, _ = j13_pos
+        u8x, u8y, u8rot = u8_pos
+        import math
+        dist = math.hypot(u8x - j13x, u8y - j13y)
+        if dist > 15.0:
+            # Place U8 to the left of J13, same Y
+            u8w, _ = ctx.fp_sizes.get("U8", (5.0, 5.0))
+            j13w, _ = ctx.fp_sizes.get("J13", (16.0, 16.0))
+            new_x = j13x - j13w / 2.0 - u8w / 2.0 - 2.0
+            ctx.positions["U8"] = (new_x, j13y, u8rot)
+            _log.info("  Connector fix: U8 moved to (%.1f,%.1f) adjacent to J13", new_x, j13y)
+
+    # ── J16 (SD card), J15 should be near MCU, not far corner ──
+    u3_pos = ctx.positions.get("U3")
+    if u3_pos:
+        u3x, u3y, _ = u3_pos
+        u3w, u3h = ctx.fp_sizes.get("U3", (19.5, 25.4))
+        for jref in ("J16", "J15"):
+            if jref not in ctx.positions:
+                continue
+            jx, jy, jrot = ctx.positions[jref]
+            dist = math.hypot(jx - u3x, jy - u3y)
+            if dist > 30.0:
+                # Place near MCU left side
+                jw, jh = ctx.fp_sizes.get(jref, (5.0, 5.0))
+                new_x = u3x - u3w / 2.0 - jw / 2.0 - 3.0
+                new_y = u3y
+                # Clamp to board
+                new_x = max(bx1 + jw / 2.0 + 1, min(bx2 - jw / 2.0 - 1, new_x))
+                new_y = max(by1 + jh / 2.0 + 1, min(by2 - jh / 2.0 - 1, new_y))
+                ctx.positions[jref] = (new_x, new_y, jrot)
+                _log.info("  Connector fix: %s moved near MCU at (%.1f,%.1f)", jref, new_x, new_y)
+
+
 def _aabbs_overlap(
     a: tuple[float, float, float, float],
     b: tuple[float, float, float, float],
