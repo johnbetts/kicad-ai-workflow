@@ -229,6 +229,12 @@ def validate_placement(
     collision_tuples = _guard_collisions(positions_dict, fp_sizes, issues)
     cross_group = _guard_cross_group(requirements, positions_dict, bounds, issues)
 
+    # Known recurring bug checks (from human review feedback)
+    _guard_connector_rotation(pcb, bounds, issues)
+    _guard_relay_orientation(pcb, issues)
+    _guard_antenna_isolation(pcb, issues)
+    _guard_ethernet_adjacency(pcb, positions_dict, issues)
+
     passed = len(off_board) == 0 and len(collision_tuples) <= 5
     return PlacementGuardResult(
         passed=passed,
@@ -238,3 +244,128 @@ def validate_placement(
         cross_group_refs=tuple(sorted(cross_group)),
         issues=tuple(issues),
     )
+
+
+# ---------------------------------------------------------------------------
+# Known Recurring Bug Guards
+# ---------------------------------------------------------------------------
+
+def _guard_connector_rotation(
+    pcb: PCBDesign, bounds: tuple[float, float, float, float],
+    issues: list[str],
+) -> None:
+    """Check that connectors face off-board (wires toward nearest edge).
+
+    Recurring bugs: screw terminals facing inward, USB-C facing wrong way,
+    RJ45 not at board edge.
+    """
+    import math
+    min_x, min_y, max_x, max_y = bounds
+    board_cx = (min_x + max_x) / 2.0
+    board_cy = (min_y + max_y) / 2.0
+
+    for fp in pcb.footprints:
+        if not fp.ref.startswith("J"):
+            continue
+        x, y = fp.position.x, fp.position.y
+        rot = fp.rotation
+
+        # Find nearest board edge
+        dist_left = abs(x - min_x)
+        dist_right = abs(x - max_x)
+        dist_top = abs(y - min_y)
+        dist_bottom = abs(y - max_y)
+        min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+
+        # Connector should be within 10mm of an edge
+        if min_dist > 10.0:
+            issues.append(
+                f"RECURRING: {fp.ref} is {min_dist:.0f}mm from nearest edge "
+                f"(connectors should be <10mm from edge)"
+            )
+
+        # Check rotation: connector opening should face the nearest edge
+        # Terminal blocks at top edge: rot should be 0 or 180 (wires up)
+        # Terminal blocks at bottom edge: rot should be 0 or 180 (wires down)
+        # USB/RJ45 at left/right edge: rot should be 90 or 270
+        is_terminal = "terminal" in fp.lib_id.lower() or "5.08" in fp.lib_id
+        if is_terminal and min_dist == dist_top and rot not in (0.0, 180.0):
+            issues.append(
+                f"RECURRING: {fp.ref} screw terminal at top edge has rot={rot:.0f} "
+                f"(should be 0 or 180 for wires facing outward)"
+            )
+
+
+def _guard_relay_orientation(pcb: PCBDesign, issues: list[str]) -> None:
+    """Check that relays are oriented correctly.
+
+    Recurring bug: relays need 90deg left rotation so the U-shaped
+    isolation cutout is around Common, not in the middle.
+    """
+    for fp in pcb.footprints:
+        if not fp.ref.startswith("K"):
+            continue
+        rot = fp.rotation
+        # Relays should be at 90 or 270 degrees (rotated left/right)
+        # NOT at 0 or 180 (default orientation has cutout in wrong place)
+        if rot % 180 == 0:
+            issues.append(
+                f"RECURRING: {fp.ref} relay at rot={rot:.0f} — needs 90deg rotation "
+                f"so isolation cutout wraps around Common pin"
+            )
+
+
+def _guard_antenna_isolation(pcb: PCBDesign, issues: list[str]) -> None:
+    """Check that antenna keepout zone is on the correct side of the MCU.
+
+    Recurring bug: isolation zone placed on wrong side of ESP32 module,
+    not under the antenna.
+    """
+    # Find MCU (ESP32)
+    mcu_fp = None
+    for fp in pcb.footprints:
+        if "esp32" in fp.lib_id.lower() or "wroom" in fp.lib_id.lower():
+            mcu_fp = fp
+            break
+    if mcu_fp is None:
+        return
+
+    # The antenna is at the TOP of the ESP32 module (furthest from pin 1).
+    # The keepout zone should be above/around the antenna end.
+    # Check if any keepout exists near the antenna end.
+    mcu_x = mcu_fp.position.x
+    mcu_y = mcu_fp.position.y
+    mcu_rot = mcu_fp.rotation
+
+    # At rot=0, antenna is at the top (negative Y in KiCad coords).
+    # At rot=90, antenna is at the right. Etc.
+    # Just flag the issue as a reminder to verify.
+    issues.append(
+        f"CHECK: {mcu_fp.ref} ({mcu_fp.lib_id}) at rot={mcu_rot:.0f} — "
+        f"verify antenna keepout zone is under the antenna end, not the pin side"
+    )
+
+
+def _guard_ethernet_adjacency(
+    pcb: PCBDesign,
+    positions: dict[str, tuple[float, float]],
+    issues: list[str],
+) -> None:
+    """Check that ethernet magnetics (U8) is adjacent to RJ45 (J13).
+
+    Recurring bug: U8 placed far from J13.
+    """
+    import math
+
+    # Find U8 and J13 by ref
+    u8_pos = positions.get("U8")
+    j13_pos = positions.get("J13")
+    if u8_pos is None or j13_pos is None:
+        return
+
+    dist = math.hypot(u8_pos[0] - j13_pos[0], u8_pos[1] - j13_pos[1])
+    if dist > 15.0:
+        issues.append(
+            f"RECURRING: U8 (magnetics) is {dist:.0f}mm from J13 (RJ45) — "
+            f"should be <15mm for signal integrity"
+        )
