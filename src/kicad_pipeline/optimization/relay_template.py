@@ -222,8 +222,10 @@ def place_relay_group_rigid(
               len(all_placed), len(all_placed) - n_relays - len(relay_led_refs) - len(shared_refs),
               len(relay_led_refs), len(shared_refs))
 
-    # FREEZE all relay components — no downstream phase can scatter them
-    ctx.fixed_refs.update(all_placed)
-    _log.info("  Relay template: FROZEN %d refs", len(all_placed))
+    # Mark as relay support — downstream phases know about them but
+    # collision resolver can still nudge overlapping components apart.
+    # Don't add to fixed_refs — that prevents collision resolution entirely.
+    _log.info("  Relay template: %d refs marked as relay_support (collision-resolvable)",
+              len(all_placed))
 
     return relay_leds, relay_led_refs, all_placed
