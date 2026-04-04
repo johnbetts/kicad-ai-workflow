@@ -324,12 +324,14 @@ def _guard_relay_orientation(pcb: PCBDesign, issues: list[str]) -> None:
 
 
 def _guard_antenna_isolation(pcb: PCBDesign, issues: list[str]) -> None:
-    """Check that antenna keepout zone is on the correct side of the MCU.
+    """Check that antenna keepout zone exists near the antenna end of the MCU.
 
-    Recurring bug: isolation zone placed on wrong side of ESP32 module,
-    not under the antenna.
+    Recurring bug: isolation zone placed on wrong side of ESP32 module.
+    The antenna is at the TOP of the module body (negative Y in local coords).
+    At rot=180, antenna points toward +Y (bottom edge).
     """
-    # Find MCU (ESP32)
+    import math
+
     mcu_fp = None
     for fp in pcb.footprints:
         if "esp32" in fp.lib_id.lower() or "wroom" in fp.lib_id.lower():
@@ -338,20 +340,31 @@ def _guard_antenna_isolation(pcb: PCBDesign, issues: list[str]) -> None:
     if mcu_fp is None:
         return
 
-    # The antenna is at the TOP of the ESP32 module (furthest from pin 1).
-    # The keepout zone should be above/around the antenna end.
-    # Check if any keepout exists near the antenna end.
-    mcu_x = mcu_fp.position.x
-    mcu_y = mcu_fp.position.y
-    mcu_rot = mcu_fp.rotation
+    # Compute antenna end position based on rotation
+    module_half_h = 12.75  # ESP32-S3-WROOM-1 half-height
+    rot_rad = math.radians(mcu_fp.rotation)
+    antenna_x = mcu_fp.position.x - module_half_h * math.sin(rot_rad)
+    antenna_y = mcu_fp.position.y - module_half_h * math.cos(rot_rad)
 
-    # At rot=0, antenna is at the top (negative Y in KiCad coords).
-    # At rot=90, antenna is at the right. Etc.
-    # Just flag the issue as a reminder to verify.
-    issues.append(
-        f"CHECK: {mcu_fp.ref} ({mcu_fp.lib_id}) at rot={mcu_rot:.0f} — "
-        f"verify antenna keepout zone is under the antenna end, not the pin side"
-    )
+    # Check if any keepout zone exists within 15mm of the antenna end
+    has_nearby_keepout = False
+    if pcb.keepouts:
+        for ko in pcb.keepouts:
+            if not ko.polygon:
+                continue
+            ko_cx = sum(p.x for p in ko.polygon) / len(ko.polygon)
+            ko_cy = sum(p.y for p in ko.polygon) / len(ko.polygon)
+            dist = math.hypot(ko_cx - antenna_x, ko_cy - antenna_y)
+            if dist < 15.0:
+                has_nearby_keepout = True
+                break
+
+    if not has_nearby_keepout:
+        issues.append(
+            f"RECURRING: {mcu_fp.ref} antenna keepout missing or misplaced — "
+            f"antenna end at ({antenna_x:.0f},{antenna_y:.0f}), "
+            f"no keepout within 15mm"
+        )
 
 
 def _guard_ethernet_adjacency(

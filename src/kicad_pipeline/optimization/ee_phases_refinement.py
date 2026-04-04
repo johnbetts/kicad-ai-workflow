@@ -1794,6 +1794,35 @@ def _enforce_connector_rules(ctx: PlacementContext) -> None:
             cursor_x = new_x - jw / 2.0 - 2.0  # next component left of this one
             _log.info("  Connector fix: %s placed next to J2 at (%.1f,%.1f)", jref, new_x, new_y)
 
+    # ── MCU: ensure antenna end is INSIDE board (not overhanging) ──
+    # ESP32 at rot=180: antenna points toward +Y (bottom edge).
+    # If antenna end > board bottom, shift MCU up.
+    import math as _math
+    for ref in list(ctx.positions):
+        fp = fp_lookup.get(ref)
+        if not fp:
+            continue
+        if "esp32" not in fp.lib_id.lower() and "wroom" not in fp.lib_id.lower():
+            continue
+        rx, ry, rrot = ctx.positions[ref]
+        module_half_h = 12.75  # ESP32-S3-WROOM-1 half-height
+        rot_rad = _math.radians(rrot)
+        antenna_y = ry - module_half_h * _math.cos(rot_rad)
+        _log.info("  MCU antenna check: %s at (%.1f,%.1f) rot=%.0f antenna_y=%.1f board_bottom=%.1f",
+                   ref, rx, ry, rrot, antenna_y, by2)
+        if antenna_y > by2 - 2.0:
+            # Antenna overhangs bottom — shift MCU up
+            shift = antenna_y - (by2 - 2.0)
+            ctx.positions[ref] = (rx, ry - shift, rrot)
+            _log.info("  MCU fix: %s shifted up %.1fmm (antenna was at %.1f, board bottom=%.1f)",
+                       ref, shift, antenna_y, by2)
+        elif antenna_y < by1 + 2.0:
+            # Antenna overhangs top — shift MCU down
+            shift = (by1 + 2.0) - antenna_y
+            ctx.positions[ref] = (rx, ry + shift, rrot)
+            _log.info("  MCU fix: %s shifted down %.1fmm (antenna was at %.1f, board top=%.1f)",
+                       ref, shift, antenna_y, by1)
+
 
 def _aabbs_overlap(
     a: tuple[float, float, float, float],

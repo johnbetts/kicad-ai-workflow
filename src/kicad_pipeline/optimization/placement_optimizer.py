@@ -658,6 +658,13 @@ def _final_body_collision_fix(ctx: PlacementContext) -> None:
     """
     min_x, min_y, max_x, max_y = ctx.bounds
 
+    # Pairs that MUST be adjacent — exempt from body collision push-apart.
+    # These are component pairs where signal integrity requires close
+    # proximity even if their bodies overlap slightly.
+    _exempt_pairs = {
+        frozenset(("U8", "J13")),  # ethernet magnetics must be adjacent to RJ45
+    }
+
     for _pass in range(3):
         moved = False
         refs = sorted(ctx.positions.keys())
@@ -669,6 +676,8 @@ def _final_body_collision_fix(ctx: PlacementContext) -> None:
 
             for ref_b in refs[i + 1:]:
                 if ref_b.startswith("H"):
+                    continue
+                if frozenset((ref_a, ref_b)) in _exempt_pairs:
                     continue
                 bx, by, brot = ctx.positions[ref_b]
                 b_hw, b_hh = _body_half_extents(ref_b, ctx, brot)
