@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from kicad_pipeline.constants import COMPONENT_CLEARANCE_GAP_MM
 from kicad_pipeline.optimization.collision_resolver import (
     _count_collisions,  # noqa: F401 - re-exported
     _fp_courtyard_sizes,
@@ -398,77 +397,16 @@ def optimize_placement_ee(
             "FINAL: %d collisions after all phases — running final resolution",
             len(final_collisions),
         )
-        # Fix relays and mounting holes only. All connectors (including
-        # RJ45) are moveable in the final pass — this allows the push-apart
-        # to resolve J13/J15 overlaps where one must move.
         final_fixed = ctx.fixed_refs | {
-            r for r in ctx.positions if r.startswith(("K", "H", "MH"))
+            r for r in ctx.positions
+            if r.startswith(("J", "K", "H", "MH"))
         }
         ctx.positions = _resolve_collisions(
             dict(ctx.positions), ctx.fp_sizes, ctx.bounds, final_fixed,
         )
         remaining = _count_collisions(ctx.positions, ctx.fp_sizes)
         _log.info(
-            "FINAL: grid resolver → %d collisions",
-            len(remaining),
-        )
-
-        # Pairwise push-apart for stubborn collisions the grid can't fix.
-        # Handles collision chains (A-B-C where pushing B into C requires
-        # pushing C too) by iterating until convergence.
-        positions = ctx.positions if isinstance(ctx.positions, dict) else dict(ctx.positions)
-        gap = COMPONENT_CLEARANCE_GAP_MM
-        for _push_round in range(100):
-            still_colliding = _count_collisions(positions, ctx.fp_sizes)
-            if not still_colliding:
-                break
-            moved_any = False
-            for a, b in still_colliding:
-                ax, ay, arot = positions[a]
-                bx, by, brot = positions[b]
-                aw, ah = ctx.fp_sizes.get(a, (2.0, 2.0))
-                bw, bh = ctx.fp_sizes.get(b, (2.0, 2.0))
-                if arot % 180 in (90, 270):
-                    aw, ah = ah, aw
-                if brot % 180 in (90, 270):
-                    bw, bh = bh, bw
-                # Pick the mover: smaller area, prefer non-fixed
-                area_a, area_b = aw * ah, bw * bh
-                mover = b if area_b <= area_a else a
-                if mover in final_fixed:
-                    mover = a if mover == b else b
-                if mover in final_fixed:
-                    mover = b if area_b <= area_a else a
-                mx, my, mrot = positions[mover]
-                ox, oy = (bx, by) if mover == a else (ax, ay)
-                ow, oh = (bw, bh) if mover == a else (aw, ah)
-                mw, mh = (aw, ah) if mover == a else (bw, bh)
-                need_dx = (mw + ow) / 2.0 + gap
-                need_dy = (mh + oh) / 2.0 + gap
-                dx, dy = mx - ox, my - oy
-                if abs(dx) < need_dx and abs(dy) < need_dy:
-                    push_x = need_dx - abs(dx) if abs(dx) < need_dx else 0
-                    push_y = need_dy - abs(dy) if abs(dy) < need_dy else 0
-                    if push_x <= push_y:
-                        nx = mx + (push_x + 0.2) * (1 if dx >= 0 else -1)
-                        # Clamp to board
-                        nx = max(ctx.bounds[0] + mw / 2, min(ctx.bounds[2] - mw / 2, nx))
-                        positions[mover] = (nx, my, mrot)
-                    else:
-                        ny = my + (push_y + 0.2) * (1 if dy >= 0 else -1)
-                        ny = max(ctx.bounds[1] + mh / 2, min(ctx.bounds[3] - mh / 2, ny))
-                        positions[mover] = (mx, ny, mrot)
-                    moved_any = True
-                    _log.debug(
-                        "  FINAL push: %s away from %s",
-                        mover, a if mover == b else b,
-                    )
-            if not moved_any:
-                break  # no progress possible
-        ctx.positions = positions
-        remaining = _count_collisions(ctx.positions, ctx.fp_sizes)
-        _log.info(
-            "FINAL: push-apart → %d collisions",
+            "FINAL: resolved to %d collisions",
             len(remaining),
         )
 
