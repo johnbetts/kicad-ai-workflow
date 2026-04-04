@@ -137,7 +137,7 @@ def place_relay_group_rigid(
         kref = sc.anchor_ref
         kx = row_start_x + relay_w / 2.0 + i * relay_pitch
         relay_xs.append(kx)
-        ctx.positions[kref] = (kx, relay_row_y, 90.0)  # 90deg: cutout around Common
+        ctx.positions[kref] = (kx, relay_row_y, 90.0)  # 90deg: COM faces TOP (toward terminals)
         all_placed.add(kref)
         ctx.relay_support_refs.add(kref)
 
