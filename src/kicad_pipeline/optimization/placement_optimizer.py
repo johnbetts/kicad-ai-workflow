@@ -199,11 +199,14 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     """
     phases["subnet_placement"](ctx)  # type: ignore[operator]
     phases["constraint_placement"](ctx)  # type: ignore[operator]
-    phases["relay_rows"](ctx)  # type: ignore[operator]
-    phases["relay_connector_align"](ctx)  # type: ignore[operator]
-    phases["relay_drivers"](ctx)  # type: ignore[operator]
-    relay_leds, _relay_led_refs = phases["relay_leds"](ctx)  # type: ignore[operator]
-    phases["relay_power_isolation"](ctx)  # type: ignore[operator]
+
+    # Rigid relay template — replaces relay_rows + relay_connector_align +
+    # relay_drivers + relay_leds + relay_power_isolation.
+    # All 28 relay components placed deterministically and FROZEN.
+    from kicad_pipeline.optimization.relay_template import place_relay_group_rigid
+    relay_leds, _relay_led_refs, _relay_placed = place_relay_group_rigid(
+        ctx,  # type: ignore[arg-type]
+    )
     phases["decoupling"](ctx)  # type: ignore[operator]
     phases["power_group"](ctx)  # type: ignore[operator]
     phases["power_chain_flow"](ctx)  # type: ignore[operator]
