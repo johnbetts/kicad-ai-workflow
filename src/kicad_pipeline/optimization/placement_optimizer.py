@@ -229,6 +229,15 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     )
     _enforce_zone_boundaries(ctx)  # type: ignore[arg-type]
 
+    # Refresh zone membership — L3 phases moved components, so the L2
+    # zone_membership is stale. The collision resolver reads zone_membership
+    # to prevent cross-zone scatter; it needs fresh assignments.
+    ctx.zone_membership.clear()  # type: ignore[union-attr]
+    for zone in ctx.zones:  # type: ignore[union-attr]
+        for ref, (rx, ry, _rot) in ctx.positions.items():  # type: ignore[union-attr]
+            if zone.contains(rx, ry):  # type: ignore[union-attr]
+                ctx.zone_membership[ref] = zone.name  # type: ignore[union-attr]
+
     phases["collision"](ctx)  # type: ignore[operator]
     phases["first_clamp"](ctx)  # type: ignore[operator]
     phases["review_loop"](ctx)  # type: ignore[operator]
