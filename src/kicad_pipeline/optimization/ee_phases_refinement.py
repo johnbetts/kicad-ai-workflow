@@ -2132,18 +2132,9 @@ def _build_antenna_keepout_polygon(rf_fp: object) -> tuple[object, float, float]
     pad_min_local_y = min(signal_ys) if signal_ys else -half_h + 5.0
     pad_max_local_y = max(signal_ys) if signal_ys else half_h - 5.0
 
-    fab_ys: list[float] = []
-    for g in rf_fp.graphics:
-        if hasattr(g, "start") and hasattr(g, "end"):
-            fab_ys.extend([g.start.y, g.end.y])
-    if fab_ys:
-        min_fab_y, max_fab_y = min(fab_ys), max(fab_ys)
-        antenna_at_min_y = (
-            sum(1 for y in fab_ys if y < min_fab_y + 5.0)
-            > sum(1 for y in fab_ys if y > max_fab_y - 5.0) * 1.5
-        )
-    else:
-        antenna_at_min_y = True
+    # ESP32 antenna is ALWAYS at the negative-Y end (top of module body
+    # in local coordinates). The fab graphics heuristic was unreliable.
+    antenna_at_min_y = True
 
     if antenna_at_min_y:
         ko_edge_local = pad_min_local_y - 0.5
@@ -2213,6 +2204,68 @@ def _refresh_antenna_keepout(pcb: PCBDesign) -> PCBDesign:
     )  # type: ignore[arg-type]
 
 
+def _post_clamp_critical_fixups(
+    pcb: PCBDesign,
+    bounds: tuple[float, float, float, float],
+) -> PCBDesign:
+    """Re-enforce critical constraints after pad-extent clamping.
+
+    The pad clamp can push components apart, breaking adjacency rules.
+    This function operates on the FINAL PCB in origin space — no more
+    coordinate conversions needed.
+    """
+    import math
+    from dataclasses import replace as _replace
+
+    bx1, by1, bx2, by2 = bounds
+    fp_by_ref = {fp.ref: fp for fp in pcb.footprints}
+    new_fps: list[object] = list(pcb.footprints)
+    changed = False
+
+    # ── U8 must be within 5mm of J13 ──
+    u8 = fp_by_ref.get("U8")
+    j13 = fp_by_ref.get("J13")
+    if u8 and j13:
+        cx_u8, cy_u8 = origin_to_centroid(u8, u8.position.x, u8.position.y, u8.rotation)
+        cx_j13, cy_j13 = origin_to_centroid(j13, j13.position.x, j13.position.y, j13.rotation)
+        dist = math.hypot(cx_u8 - cx_j13, cy_u8 - cy_j13)
+        if dist > 5.0:
+            # Move U8 centroid to within 4mm of J13 centroid
+            dx = cx_j13 - cx_u8
+            dy = cy_j13 - cy_u8
+            scale = (dist - 4.0) / dist
+            new_cx = cx_u8 + dx * scale
+            new_cy = cy_u8 + dy * scale
+            from kicad_pipeline.pcb.pin_map import centroid_to_origin
+            new_ox, new_oy = centroid_to_origin(u8, new_cx, new_cy, u8.rotation)
+            idx = next(i for i, fp in enumerate(new_fps) if fp.ref == "U8")
+            new_fps[idx] = _replace(u8, position=Point(x=new_ox, y=new_oy))
+            changed = True
+            _log.info("  Post-clamp: U8 moved to %.1fmm from J13 (was %.1fmm)", 4.0, dist)
+
+    # ── MCU antenna must be inside board ──
+    for fp in pcb.footprints:
+        if "esp32" not in fp.lib_id.lower() and "wroom" not in fp.lib_id.lower():
+            continue
+        cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+        module_half_h = 12.75
+        rot_rad = math.radians(fp.rotation)
+        antenna_y = cy - module_half_h * math.cos(rot_rad)
+        if antenna_y > by2 - 2.0:
+            shift = antenna_y - (by2 - 2.0)
+            new_cy = cy - shift
+            from kicad_pipeline.pcb.pin_map import centroid_to_origin
+            new_ox, new_oy = centroid_to_origin(fp, cx, new_cy, fp.rotation)
+            idx = next(i for i, f in enumerate(new_fps) if f.ref == fp.ref)
+            new_fps[idx] = _replace(fp, position=Point(x=new_ox, y=new_oy))
+            changed = True
+            _log.info("  Post-clamp: %s shifted up %.1fmm (antenna inside board)", fp.ref, shift)
+
+    if changed:
+        return _replace(pcb, footprints=tuple(new_fps))
+    return pcb
+
+
 def _phase_build_final(
     ctx: PlacementContext,
 ) -> PlacementResult:
@@ -2241,9 +2294,15 @@ def _phase_build_final(
         final_pcb = _apply_positions(ctx.initial_pcb, positions_tuple)
 
     # Refresh the board-level antenna keepout position (no via fence).
-    final_pcb = _refresh_antenna_keepout(final_pcb)
-
     final_pcb = _post_apply_pad_extent_clamp(final_pcb, ctx.bounds, _edge_m)
+
+    # Post-clamp fixups: re-enforce critical adjacency constraints that
+    # the pad-extent clamp may have broken.
+    final_pcb = _post_clamp_critical_fixups(final_pcb, ctx.bounds)
+
+    # Refresh antenna keepout AFTER all position fixups so the keepout
+    # matches the final MCU position.
+    final_pcb = _refresh_antenna_keepout(final_pcb)
 
     if best_review is not None:
         best_review = _filter_stale_violations(

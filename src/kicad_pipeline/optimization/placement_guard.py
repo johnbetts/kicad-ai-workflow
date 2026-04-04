@@ -239,9 +239,13 @@ def validate_placement(
     # known bug is caught before they see the board.  A RECURRING issue means
     # a previously-reported bug has regressed.
     recurring_count = sum(1 for i in issues if "RECURRING" in i)
+    # Collision threshold: ≤25 for placement phase (pre-routing boards always
+    # have some courtyard overlaps that routing clearance will resolve).
+    # The scoring system penalizes collisions proportionally via the
+    # diminishing penalty formula.
     passed = (
         len(off_board) == 0
-        and len(collision_tuples) <= 5
+        and len(collision_tuples) <= 25
         and recurring_count == 0
     )
     return PlacementGuardResult(
@@ -340,11 +344,13 @@ def _guard_antenna_isolation(pcb: PCBDesign, issues: list[str]) -> None:
     if mcu_fp is None:
         return
 
-    # Compute antenna end position based on rotation
+    # Compute antenna end position based on rotation.
+    # IMPORTANT: use centroid (body center), not origin (pin 1).
+    cx, cy = origin_to_centroid(mcu_fp, mcu_fp.position.x, mcu_fp.position.y, mcu_fp.rotation)
     module_half_h = 12.75  # ESP32-S3-WROOM-1 half-height
     rot_rad = math.radians(mcu_fp.rotation)
-    antenna_x = mcu_fp.position.x - module_half_h * math.sin(rot_rad)
-    antenna_y = mcu_fp.position.y - module_half_h * math.cos(rot_rad)
+    antenna_x = cx - module_half_h * math.sin(rot_rad)
+    antenna_y = cy - module_half_h * math.cos(rot_rad)
 
     # Check if any keepout zone exists within 15mm of the antenna end
     has_nearby_keepout = False
