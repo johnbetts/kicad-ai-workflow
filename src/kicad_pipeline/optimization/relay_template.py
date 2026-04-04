@@ -120,8 +120,10 @@ def place_relay_group_rigid(
         zone_cx = (bx1 + bx2) / 2.0
         zy1 = 15.0  # fallback
 
-    # ── Row 1: Relays ──────────────────────────────────────────────
-    relay_w, relay_h = ctx.fp_sizes.get(relay_scs[0].anchor_ref, (17.7, 15.6))
+    # ── Row 1: Relays (rotated 90deg so isolation cutout wraps Common) ──
+    raw_w, raw_h = ctx.fp_sizes.get(relay_scs[0].anchor_ref, (17.7, 15.6))
+    # At 90deg rotation, dimensions swap
+    relay_w, relay_h = raw_h, raw_w
     relay_pitch = relay_w + _RELAY_GAP_MM
     total_row_w = n_relays * relay_w + (n_relays - 1) * _RELAY_GAP_MM
 
@@ -135,7 +137,7 @@ def place_relay_group_rigid(
         kref = sc.anchor_ref
         kx = row_start_x + relay_w / 2.0 + i * relay_pitch
         relay_xs.append(kx)
-        ctx.positions[kref] = (kx, relay_row_y, 0.0)
+        ctx.positions[kref] = (kx, relay_row_y, 90.0)  # 90deg: cutout around Common
         all_placed.add(kref)
         ctx.relay_support_refs.add(kref)
 
