@@ -825,14 +825,6 @@ def _phase_collision_resolution(ctx: PlacementContext) -> None:
             zone_bboxes=_zbboxes, zone_membership=_zmembership,
         )
 
-    # Install collision guard AFTER resolving collisions — this protects
-    # the resolved state from being degraded by later phases (review loop,
-    # clamp, THT enforcement, body collision fix).
-    from kicad_pipeline.optimization.placement_types import CollisionGuardDict
-    guarded = CollisionGuardDict(ctx.positions, fp_sizes=ctx.fp_sizes)
-    ctx.positions = guarded  # type: ignore[assignment]
-    _log.info("  3g: Collision guard activated (protecting resolved positions)")
-
     # Post-3g: Enforce ethernet connectors on bottom edge
     max_y = ctx.bounds[3]
     for ref in ctx.ethernet_fixed:

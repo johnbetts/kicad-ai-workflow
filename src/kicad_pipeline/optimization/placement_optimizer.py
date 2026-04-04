@@ -308,12 +308,6 @@ def optimize_placement_ee(
         ctx.best_positions = dict(ctx.positions)
         return _phase_build_final(ctx)
 
-    # Collision guard is activated AFTER the main placement phases (3a-3f)
-    # complete and before the late refinement phases. This allows the main
-    # phases to freely place components, then the guard prevents late phases
-    # (review loop, clamp, THT enforcement) from re-creating collisions.
-    # The guard is installed by _phase_collision_resolution after it resolves
-    # existing collisions.
     _log.info("=== Level 3: Intra-Group Refinement (legacy 25-phase) ===")
     _relay_leds = _run_level3_phases(
         ctx,
@@ -378,37 +372,6 @@ def optimize_placement_ee(
         _post_clamp_decoupling_repull,
     )
     _post_clamp_decoupling_repull(ctx)
-
-    # Log collision guard stats
-    from kicad_pipeline.optimization.placement_types import CollisionGuardDict
-    if isinstance(ctx.positions, CollisionGuardDict):
-        _log.info(
-            "Collision guard: %d placements rejected (prevented new collisions)",
-            ctx.positions.rejected,
-        )
-
-    # FINAL collision resolution — the absolute last pass.
-    # Late phases (review loop, clamp, body fix, decoupling repull) can
-    # re-create collisions.  This final pass resolves them with no fixed
-    # refs except connectors and mounting holes.
-    final_collisions = _count_collisions(ctx.positions, ctx.fp_sizes)
-    if final_collisions:
-        _log.info(
-            "FINAL: %d collisions after all phases — running final resolution",
-            len(final_collisions),
-        )
-        final_fixed = ctx.fixed_refs | {
-            r for r in ctx.positions
-            if r.startswith(("J", "K", "H", "MH"))
-        }
-        ctx.positions = _resolve_collisions(
-            dict(ctx.positions), ctx.fp_sizes, ctx.bounds, final_fixed,
-        )
-        remaining = _count_collisions(ctx.positions, ctx.fp_sizes)
-        _log.info(
-            "FINAL: resolved to %d collisions",
-            len(remaining),
-        )
 
     # Sync final positions to best_positions — _phase_build_final reads best_positions
     ctx.best_positions = dict(ctx.positions)
