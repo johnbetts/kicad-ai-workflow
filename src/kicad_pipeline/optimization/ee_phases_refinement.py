@@ -1751,12 +1751,12 @@ def _enforce_connector_rules(ctx: PlacementContext) -> None:
                 ctx.positions[ref] = (rx, new_y, 0.0)
                 _log.info("  Connector fix: %s USB-C to bottom edge, rot=0", ref)
 
-        # ── RJ45: at right edge ──
+        # ── RJ45: flush with right edge ──
         elif "rj45" in lib or "rjhse" in lib:
-            # RJ45 at right edge facing right
-            new_x = bx2 - w / 2.0 - 0.5
+            # RJ45 flush with right edge — body overhangs board
+            new_x = bx2 - 1.0  # 1mm from edge (body extends beyond)
             ctx.positions[ref] = (new_x, ry, 270.0)
-            _log.info("  Connector fix: %s RJ45 to right edge, rot=270", ref)
+            _log.info("  Connector fix: %s RJ45 flush right edge, rot=270", ref)
 
     # ── U8 (magnetics) must be adjacent to J13 (RJ45) ──
     j13_pos = ctx.positions.get("J13")
@@ -1766,34 +1766,33 @@ def _enforce_connector_rules(ctx: PlacementContext) -> None:
         u8x, u8y, u8rot = u8_pos
         import math
         dist = math.hypot(u8x - j13x, u8y - j13y)
-        if dist > 15.0:
-            # Place U8 to the left of J13, same Y
+        if dist > 5.0:
+            # Place U8 immediately left of J13 — must be <5mm for SI
             u8w, _ = ctx.fp_sizes.get("U8", (5.0, 5.0))
             j13w, _ = ctx.fp_sizes.get("J13", (16.0, 16.0))
-            new_x = j13x - j13w / 2.0 - u8w / 2.0 - 2.0
+            new_x = j13x - j13w / 2.0 - u8w / 2.0 - 0.5
             ctx.positions["U8"] = (new_x, j13y, u8rot)
-            _log.info("  Connector fix: U8 moved to (%.1f,%.1f) adjacent to J13", new_x, j13y)
+            _log.info("  Connector fix: U8 moved to (%.1f,%.1f) adjacent to J13 (was %.0fmm)", new_x, j13y, dist)
 
-    # ── J16 (SD card), J15 should be near MCU, not far corner ──
-    u3_pos = ctx.positions.get("U3")
-    if u3_pos:
-        u3x, u3y, _ = u3_pos
-        u3w, u3h = ctx.fp_sizes.get("U3", (19.5, 25.4))
+    # ── J16 (SD card), J15 should be NEXT TO J2 (USB-C), left of MCU ──
+    # Owner requirement: "J16, J13 should be next to J2 to the left of the MCU"
+    j2_pos = ctx.positions.get("J2")
+    if j2_pos:
+        j2x, j2y, _ = j2_pos
+        j2w, _ = ctx.fp_sizes.get("J2", (9.0, 7.0))
+        cursor_x = j2x - j2w / 2.0 - 3.0  # start left of J2
         for jref in ("J16", "J15"):
             if jref not in ctx.positions:
                 continue
             jx, jy, jrot = ctx.positions[jref]
-            dist = math.hypot(jx - u3x, jy - u3y)
-            if dist > 30.0:
-                # Place near MCU left side
-                jw, jh = ctx.fp_sizes.get(jref, (5.0, 5.0))
-                new_x = u3x - u3w / 2.0 - jw / 2.0 - 3.0
-                new_y = u3y
-                # Clamp to board
-                new_x = max(bx1 + jw / 2.0 + 1, min(bx2 - jw / 2.0 - 1, new_x))
-                new_y = max(by1 + jh / 2.0 + 1, min(by2 - jh / 2.0 - 1, new_y))
-                ctx.positions[jref] = (new_x, new_y, jrot)
-                _log.info("  Connector fix: %s moved near MCU at (%.1f,%.1f)", jref, new_x, new_y)
+            jw, jh = ctx.fp_sizes.get(jref, (5.0, 5.0))
+            new_x = cursor_x - jw / 2.0
+            new_y = j2y  # same Y as J2
+            new_x = max(bx1 + jw / 2.0 + 1, min(bx2 - jw / 2.0 - 1, new_x))
+            new_y = max(by1 + jh / 2.0 + 1, min(by2 - jh / 2.0 - 1, new_y))
+            ctx.positions[jref] = (new_x, new_y, jrot)
+            cursor_x = new_x - jw / 2.0 - 2.0  # next component left of this one
+            _log.info("  Connector fix: %s placed next to J2 at (%.1f,%.1f)", jref, new_x, new_y)
 
 
 def _aabbs_overlap(

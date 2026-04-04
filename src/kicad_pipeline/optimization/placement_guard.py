@@ -235,7 +235,15 @@ def validate_placement(
     _guard_antenna_isolation(pcb, issues)
     _guard_ethernet_adjacency(pcb, positions_dict, issues)
 
-    passed = len(off_board) == 0 and len(collision_tuples) <= 5
+    # RECURRING issues BLOCK the build — the board owner requires that every
+    # known bug is caught before they see the board.  A RECURRING issue means
+    # a previously-reported bug has regressed.
+    recurring_count = sum(1 for i in issues if "RECURRING" in i)
+    passed = (
+        len(off_board) == 0
+        and len(collision_tuples) <= 5
+        and recurring_count == 0
+    )
     return PlacementGuardResult(
         passed=passed,
         off_board_refs=tuple(sorted(off_board)),
@@ -364,8 +372,8 @@ def _guard_ethernet_adjacency(
         return
 
     dist = math.hypot(u8_pos[0] - j13_pos[0], u8_pos[1] - j13_pos[1])
-    if dist > 15.0:
+    if dist > 5.0:
         issues.append(
             f"RECURRING: U8 (magnetics) is {dist:.0f}mm from J13 (RJ45) — "
-            f"should be <15mm for signal integrity"
+            f"should be <5mm for signal integrity"
         )
