@@ -219,6 +219,16 @@ def _run_level3_phases(ctx: object, **phases: object) -> object:
     phases["template_refinement"](ctx)  # type: ignore[operator]
     phases["late_decoupling"](ctx)  # type: ignore[operator]
     phases["pad_facing"](ctx)  # type: ignore[operator]
+
+    # Zone containment enforcement — pull components that leaked into the
+    # WRONG group's zone back to their correct zone. Only targets cross-zone
+    # contamination (component in zone X that should be in zone Y), not
+    # components outside all zones (e.g., edge-pinned connectors).
+    from kicad_pipeline.optimization.ee_phases_refinement import (
+        _enforce_zone_boundaries,
+    )
+    _enforce_zone_boundaries(ctx)  # type: ignore[arg-type]
+
     phases["collision"](ctx)  # type: ignore[operator]
     phases["first_clamp"](ctx)  # type: ignore[operator]
     phases["review_loop"](ctx)  # type: ignore[operator]

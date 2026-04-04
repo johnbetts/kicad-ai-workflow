@@ -152,37 +152,59 @@ def _build_zone_bboxes(
 
 
 def _enforce_zone_boundaries(ctx: PlacementContext) -> int:
-    """Clamp all components back to their assigned zone boundaries.
+    """Pull components that leaked into the WRONG group's zone back.
 
-    Called between destructive L3 phases to prevent cross-zone scatter.
-    Components without zone membership or connectors (edge-pinned) are
-    skipped.
+    Uses the group-to-zone mapping (from FeatureBlock → zone keyword match)
+    rather than L2's zone_membership. Only moves components that are inside
+    a different group's zone — components outside all zones (e.g., at board
+    edges) are left alone since they may be connectors or intentional.
 
     Returns the number of components moved.
     """
-    if not ctx.zone_membership or not ctx.zones:
+    if not ctx.zones:
         return 0
 
+    from kicad_pipeline.optimization.group_helpers import _build_group_map
+    from kicad_pipeline.optimization.zone_partitioner import _match_group_to_zone
+
+    group_map = _build_group_map(ctx.requirements)
     zone_by_name = {z.name: z for z in ctx.zones}
+
     moved = 0
-    for ref, zone_name in ctx.zone_membership.items():
-        if ref not in ctx.positions or ref in ctx.fixed_refs:
+    for ref in list(ctx.positions):
+        if ref in ctx.fixed_refs or ref.startswith("J"):
             continue
-        if ref.startswith("J"):
-            continue  # connectors are edge-pinned by design
+        group = group_map.get(ref)
+        if not group:
+            continue
+        expected_zone_name = _match_group_to_zone(group)
+        expected_zone = zone_by_name.get(expected_zone_name)
+        if expected_zone is None:
+            continue
+
         rx, ry, rot = ctx.positions[ref]
-        zone = zone_by_name.get(zone_name)
-        if zone is None:
-            continue
-        if zone.contains(rx, ry):
-            continue
-        # Clamp to zone boundary
-        cx, cy = zone.clamp(rx, ry)
+        if expected_zone.contains(rx, ry):
+            continue  # already in correct zone
+
+        # Check if it's in a DIFFERENT zone (cross-contamination)
+        in_wrong_zone = False
+        for z in ctx.zones:
+            if z.name == expected_zone_name:
+                continue
+            if z.contains(rx, ry):
+                in_wrong_zone = True
+                break
+
+        if not in_wrong_zone:
+            continue  # outside all zones — leave it (edge component)
+
+        # Move toward the nearest point inside the expected zone
+        cx, cy = expected_zone.clamp(rx, ry)
         ctx.positions[ref] = (cx, cy, rot)
         moved += 1
 
     if moved:
-        _log.debug("  Zone enforcement: %d components clamped back to zones", moved)
+        _log.info("  Zone enforcement: pulled %d components back to correct zones", moved)
     return moved
 
 
