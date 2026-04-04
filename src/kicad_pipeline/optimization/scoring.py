@@ -296,7 +296,12 @@ def _score_collisions(
             if dx < gap_x and dy < gap_y:
                 collisions.append(f"Collision: {ref_a} overlaps {ref_b}")
 
-    score = _clamp01(1.0 - len(collisions) * _COLLISION_PENALTY)
+    # Diminishing penalty: first 5 collisions cost 0.05 each (0.25 total),
+    # next 15 cost 0.025 each (0.375), beyond 20 cost 0.01 each.
+    # This avoids the cliff at 20 collisions where score drops to 0.0.
+    n = len(collisions)
+    penalty = min(n, 5) * 0.05 + max(0, min(n - 5, 15)) * 0.025 + max(0, n - 20) * 0.01
+    score = _clamp01(1.0 - penalty)
     return score, collisions
 
 
