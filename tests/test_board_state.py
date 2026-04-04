@@ -418,7 +418,7 @@ class TestZoneOccupancy:
         fp2 = _make_footprint("R2", "10k", "R_0402", 35.0, 25.0)
         pcb = _make_pcb(footprints=(fp1, fp2))
         req = _make_requirements()
-        zone = BoardZone(
+        zone = BoardZone.from_rect(
             name="power",
             rect=(0.0, 0.0, 50.0, 50.0),
             edge_affinity=None,
@@ -542,7 +542,7 @@ class TestTextReport:
         fp = _make_footprint("R1", "10k", "R_0402", 25.0, 25.0)
         pcb = _make_pcb(footprints=(fp,))
         req = _make_requirements()
-        zone = BoardZone(
+        zone = BoardZone.from_rect(
             name="power",
             rect=(0.0, 0.0, 50.0, 50.0),
             edge_affinity=None,

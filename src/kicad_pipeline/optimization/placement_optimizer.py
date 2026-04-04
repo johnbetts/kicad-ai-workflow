@@ -154,6 +154,44 @@ def _build_placement_context(
     )
 
 
+def _seed_anchor_ics_to_zones(ctx: PlacementContext) -> None:
+    """Move anchor ICs to their assigned zone centers.
+
+    L3 phases compute subcircuit layouts relative to anchor ICs (relays K*,
+    MCU U*, regulators, PHY, ADC ICs). If the anchor starts in the zone
+    center, L3 layouts naturally fall within the zone.
+
+    Only moves ICs (U*) and relays (K*) — passives and connectors are
+    positioned by L3 phases relative to these anchors.
+    """
+    if not ctx.zones or not ctx.zone_membership:
+        return
+
+    zone_by_name = {z.name: z for z in ctx.zones}
+    seeded = 0
+    for ref, (rx, ry, rot) in list(ctx.positions.items()):
+        if ref in ctx.fixed_refs:
+            continue
+        # Only seed ICs and relays — the anchors that L3 builds around
+        prefix = ref.rstrip("0123456789")
+        if prefix not in ("U", "K"):
+            continue
+        zone_name = ctx.zone_membership.get(ref)
+        if not zone_name:
+            continue
+        zone = zone_by_name.get(zone_name)
+        if zone is None:
+            continue
+        zcx, zcy = zone.center
+        # Only move if the IC is far from its zone center (>5mm)
+        if abs(rx - zcx) > 5.0 or abs(ry - zcy) > 5.0:
+            ctx.positions[ref] = (zcx, zcy, rot)
+            seeded += 1
+
+    if seeded:
+        _log.info("  Level 2.75: Seeded %d anchor ICs to zone centers", seeded)
+
+
 def _run_level3_phases(ctx: object, **phases: object) -> object:
     """Execute all Level 3 intra-group refinement phases in order.
 
@@ -192,6 +230,7 @@ def optimize_placement_ee(
     initial_pcb: PCBDesign,
     max_review_passes: int = 5,
     level3: str = "legacy",
+    reference_positions: dict[str, tuple[float, float, float]] | None = None,
 ) -> PlacementResult:
     """3-level hierarchical placement optimizer (v5).
 
@@ -218,6 +257,12 @@ def optimize_placement_ee(
         requirements: Project requirements with components and nets.
         initial_pcb: Starting PCB with initial placement.
         max_review_passes: Max iterations of the review-fix loop.
+        level3: Level 3 strategy — ``"legacy"`` (25-phase) or ``"simple"``.
+        reference_positions: Optional ref -> (x, y, rotation) from a
+            human-routed reference board.  Used for diagnostic
+            comparison only — the optimizer runs its full pipeline
+            normally, then logs per-group similarity to the reference
+            so framework improvements can be measured.
 
     Returns:
         PlacementResult with PCB, review, render paths, and visual findings.
@@ -270,13 +315,12 @@ def optimize_placement_ee(
     _log.info("=== Level 2: Group Placement ===")
     _phase_group_placement(ctx)
 
-    # Record which zone each component belongs to after L2 placement.
+    # Record which zone each component belongs to after L1+L2.
     # This map is used by collision resolution and late phases to prevent
     # components from being pushed across zone boundaries.
     for zone in ctx.zones:
-        zx1, zy1, zx2, zy2 = zone.rect
         for ref, (rx, ry, _rot) in ctx.positions.items():
-            if zx1 <= rx <= zx2 and zy1 <= ry <= zy2:
+            if zone.contains(rx, ry):
                 ctx.zone_membership[ref] = zone.name
     _log.info("  Zone membership recorded: %d refs assigned to zones",
               len(ctx.zone_membership))
@@ -298,6 +342,12 @@ def optimize_placement_ee(
                 _preprotect_count += 1
     _log.info("  Pre-protected %d subcircuit refs from collision scatter",
               _preprotect_count)
+
+    # Level 2.75: Seed anchor ICs at zone centers.
+    # L3 phases compute subcircuit layouts relative to anchor ICs (relays,
+    # MCU, regulators, PHY). If the anchor starts in its zone center,
+    # the subcircuit layout naturally stays within the zone.
+    _seed_anchor_ics_to_zones(ctx)
 
     # Level 3: Placement
     if level3 == "simple":
@@ -375,6 +425,24 @@ def optimize_placement_ee(
 
     # Sync final positions to best_positions — _phase_build_final reads best_positions
     ctx.best_positions = dict(ctx.positions)
+
+    # ── Reference comparison (diagnostic) ──────────────────────────────
+    if reference_positions is not None:
+        from kicad_pipeline.optimization.reference_comparator import (
+            build_group_map_from_requirements,
+            compare_to_reference,
+        )
+        group_map = build_group_map_from_requirements(requirements)
+        # ctx.positions is in centroid space; reference_positions is in KiCad
+        # origin space.  Convert current positions to origin space for comparison.
+        current_origin: dict[str, tuple[float, float, float]] = {}
+        for fp in initial_pcb.footprints:
+            if fp.ref in ctx.positions:
+                cx, cy, rot = ctx.positions[fp.ref]
+                ox, oy = centroid_to_origin(fp, cx, cy, rot)
+                current_origin[fp.ref] = (ox, oy, rot)
+        _log.info("=== Reference Comparison (diagnostic) ===")
+        compare_to_reference(current_origin, reference_positions, group_map)
 
     return _phase_build_final(ctx)
 

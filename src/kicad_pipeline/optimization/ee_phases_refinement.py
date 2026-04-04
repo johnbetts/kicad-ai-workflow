@@ -151,6 +151,41 @@ def _build_zone_bboxes(
     return {zone.name: zone.rect for zone in ctx.zones}
 
 
+def _enforce_zone_boundaries(ctx: PlacementContext) -> int:
+    """Clamp all components back to their assigned zone boundaries.
+
+    Called between destructive L3 phases to prevent cross-zone scatter.
+    Components without zone membership or connectors (edge-pinned) are
+    skipped.
+
+    Returns the number of components moved.
+    """
+    if not ctx.zone_membership or not ctx.zones:
+        return 0
+
+    zone_by_name = {z.name: z for z in ctx.zones}
+    moved = 0
+    for ref, zone_name in ctx.zone_membership.items():
+        if ref not in ctx.positions or ref in ctx.fixed_refs:
+            continue
+        if ref.startswith("J"):
+            continue  # connectors are edge-pinned by design
+        rx, ry, rot = ctx.positions[ref]
+        zone = zone_by_name.get(zone_name)
+        if zone is None:
+            continue
+        if zone.contains(rx, ry):
+            continue
+        # Clamp to zone boundary
+        cx, cy = zone.clamp(rx, ry)
+        ctx.positions[ref] = (cx, cy, rot)
+        moved += 1
+
+    if moved:
+        _log.debug("  Zone enforcement: %d components clamped back to zones", moved)
+    return moved
+
+
 def _is_within_zone(ref: str, x: float, y: float, ctx: PlacementContext) -> bool:
     """Return True if (x, y) is within the zone assigned to *ref* after Level 2.
 
@@ -162,8 +197,7 @@ def _is_within_zone(ref: str, x: float, y: float, ctx: PlacementContext) -> bool
         return True
     for zone in ctx.zones:
         if zone.name == zone_name:
-            zx1, zy1, zx2, zy2 = zone.rect
-            return zx1 <= x <= zx2 and zy1 <= y <= zy2
+            return zone.contains(x, y)
     return True
 
 
@@ -863,13 +897,17 @@ def _evict_contaminations(ctx: PlacementContext) -> None:
         if ref.startswith("J"):  # connectors are edge-pinned, skip
             continue
         rx, ry, rot = ctx.positions[ref]
-        zbbox = zone_bboxes.get(zone_name)
-        if zbbox is None:
+        # Find the assigned zone object
+        assigned_zone = None
+        for z in ctx.zones:
+            if z.name == zone_name:
+                assigned_zone = z
+                break
+        if assigned_zone is None:
             continue
-        zx1, zy1, zx2, zy2 = zbbox
 
         # Check if component is inside its assigned zone
-        if zx1 <= rx <= zx2 and zy1 <= ry <= zy2:
+        if assigned_zone.contains(rx, ry):
             continue  # already in correct zone
 
         # Check if it's inside a DIFFERENT zone (contamination)
@@ -877,8 +915,7 @@ def _evict_contaminations(ctx: PlacementContext) -> None:
         for z in ctx.zones:
             if z.name == zone_name:
                 continue
-            wx1, wy1, wx2, wy2 = z.rect
-            if wx1 <= rx <= wx2 and wy1 <= ry <= wy2:
+            if z.contains(rx, ry):
                 in_wrong_zone = True
                 break
 
@@ -887,6 +924,7 @@ def _evict_contaminations(ctx: PlacementContext) -> None:
 
         # Move toward center of assigned zone
         w, h = ctx.fp_sizes.get(ref, (2.0, 2.0))
+        zx1, zy1, zx2, zy2 = assigned_zone.rect
         target_x = max(zx1 + w / 2 + 1, min(zx2 - w / 2 - 1, (zx1 + zx2) / 2))
         target_y = max(zy1 + h / 2 + 1, min(zy2 - h / 2 - 1, (zy1 + zy2) / 2))
 

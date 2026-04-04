@@ -153,8 +153,8 @@ def test_partition_board_edge_affinity() -> None:
 def test_zone_for_group_found() -> None:
     """zone_for_group finds a zone containing the group."""
     zones = [
-        BoardZone("mcu", (0, 0, 50, 50), None, ("MCU",)),
-        BoardZone("power", (50, 0, 100, 50), "top", ("Power",)),
+        BoardZone.from_rect("mcu", (0, 0, 50, 50), None, ("MCU",)),
+        BoardZone.from_rect("power", (50, 0, 100, 50), "top", ("Power",)),
     ]
     z = zone_for_group("MCU", zones)
     assert z is not None
@@ -163,13 +163,13 @@ def test_zone_for_group_found() -> None:
 
 def test_zone_for_group_not_found() -> None:
     """zone_for_group returns None when group is not in any zone."""
-    zones = [BoardZone("mcu", (0, 0, 50, 50), None, ("MCU",))]
+    zones = [BoardZone.from_rect("mcu", (0, 0, 50, 50), None, ("MCU",))]
     assert zone_for_group("Unknown", zones) is None
 
 
 def test_zone_center() -> None:
     """zone_center returns the midpoint of the zone rect."""
-    z = BoardZone("test", (10.0, 20.0, 50.0, 60.0), None, ())
+    z = BoardZone.from_rect("test", (10.0, 20.0, 50.0, 60.0), None, ())
     cx, cy = zone_center(z)
     assert cx == pytest.approx(30.0)
     assert cy == pytest.approx(40.0)
@@ -256,7 +256,7 @@ def test_zone_for_group_empty_zones() -> None:
 
 def test_zone_for_group_multiple_groups_in_zone() -> None:
     """Zone with multiple groups finds the correct one."""
-    z = BoardZone("power", (0, 0, 50, 50), "top", ("Power Supply", "Power Regulator"))
+    z = BoardZone.from_rect("power", (0, 0, 50, 50), "top", ("Power Supply", "Power Regulator"))
     result = zone_for_group("Power Regulator", [z])
     assert result is not None
     assert result.name == "power"
@@ -264,7 +264,7 @@ def test_zone_for_group_multiple_groups_in_zone() -> None:
 
 def test_zone_for_group_case_sensitive() -> None:
     """Group name matching is case-sensitive."""
-    z = BoardZone("mcu", (0, 0, 50, 50), None, ("MCU",))
+    z = BoardZone.from_rect("mcu", (0, 0, 50, 50), None, ("MCU",))
     assert zone_for_group("mcu", [z]) is None  # lowercase doesn't match "MCU"
 
 
@@ -275,7 +275,7 @@ def test_zone_for_group_case_sensitive() -> None:
 
 def test_zone_center_zero_origin() -> None:
     """Zone at origin gives expected center."""
-    z = BoardZone("test", (0.0, 0.0, 20.0, 10.0), None, ())
+    z = BoardZone.from_rect("test", (0.0, 0.0, 20.0, 10.0), None, ())
     cx, cy = zone_center(z)
     assert cx == pytest.approx(10.0)
     assert cy == pytest.approx(5.0)
@@ -283,7 +283,7 @@ def test_zone_center_zero_origin() -> None:
 
 def test_zone_center_offset() -> None:
     """Zone with non-zero origin."""
-    z = BoardZone("test", (100.0, 200.0, 140.0, 240.0), None, ())
+    z = BoardZone.from_rect("test", (100.0, 200.0, 140.0, 240.0), None, ())
     cx, cy = zone_center(z)
     assert cx == pytest.approx(120.0)
     assert cy == pytest.approx(220.0)
@@ -373,7 +373,7 @@ def test_partition_board_zones_have_positive_area() -> None:
 
 def test_board_zone_is_frozen() -> None:
     """BoardZone is immutable."""
-    z = BoardZone("test", (0, 0, 10, 10), None, ("A",))
+    z = BoardZone.from_rect("test", (0, 0, 10, 10), None, ("A",))
     with pytest.raises((AttributeError, TypeError)):
         z.name = "mutated"  # type: ignore[misc]
 

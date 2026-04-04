@@ -208,7 +208,19 @@ class PipelineService:
             auto_route=request.auto_route,
             project_name=request.board_name,
         )
-        pcb, _review = optimize_placement_ee(req, pcb)
+        # Load reference positions if a reference board was provided
+        ref_positions = None
+        if request.reference_pcb_path is not None:
+            from kicad_pipeline.optimization.reference_comparator import (
+                load_reference_positions,
+            )
+            ref_positions = load_reference_positions(request.reference_pcb_path)
+            logger.info("Loaded %d reference positions from %s",
+                        len(ref_positions), request.reference_pcb_path)
+
+        pcb, _review = optimize_placement_ee(
+            req, pcb, reference_positions=ref_positions,
+        )
 
         out_dir = request.output_dir / request.board_name
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +232,19 @@ class PipelineService:
         score_overall = quality.overall_score
         score_grade = quality.grade
         logger.info("PCB scored %.3f (%s)", score_overall, score_grade)
+
+        # Log reference similarity if in reference-seeded mode
+        if ref_positions is not None:
+            from kicad_pipeline.optimization.reference_comparator import (
+                build_group_map_from_requirements,
+                compare_to_reference,
+            )
+            from kicad_pipeline.pcb.position_extractor import positions_from_pcb_file
+
+            current_positions = positions_from_pcb_file(pcb_path)
+            group_map = build_group_map_from_requirements(req)
+            similarity = compare_to_reference(current_positions, ref_positions, group_map)
+            logger.info("Reference similarity: %.1f%%", similarity.get("overall", 0.0))
 
         containment_violations = check_board_containment(pcb)
         for cv in containment_violations:

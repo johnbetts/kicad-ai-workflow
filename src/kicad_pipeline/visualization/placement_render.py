@@ -482,7 +482,6 @@ def render_zones(
     # Draw zones
     zone_colors = list(_GROUP_COLOR_MAP.values()) + list(_FALLBACK_GROUP_PALETTE)
     for i, zone in enumerate(zones):
-        zx1, zy1, zx2, zy2 = zone.rect  # type: ignore[attr-defined]
         color = zone_colors[i % len(zone_colors)]
 
         # Match zone name to color
@@ -491,16 +490,31 @@ def render_zones(
                 color = c
                 break
 
-        rect = Rectangle(
-            (zx1, zy1), zx2 - zx1, zy2 - zy1,
-            fill=True, facecolor=color, edgecolor="black",
-            alpha=0.3, linewidth=1.5,
-        )
-        ax.add_patch(rect)
+        # Draw zone as polygon (supports non-rectangular zones)
+        if hasattr(zone, "polygon") and zone.polygon:
+            from matplotlib.patches import Polygon as MplPolygon
+            verts = [(p.x, p.y) for p in zone.polygon]
+            patch = MplPolygon(
+                verts, closed=True,
+                facecolor=color, edgecolor="black",
+                alpha=0.3, linewidth=1.5,
+            )
+        else:
+            zx1, zy1, zx2, zy2 = zone.rect  # type: ignore[attr-defined]
+            patch = Rectangle(
+                (zx1, zy1), zx2 - zx1, zy2 - zy1,
+                fill=True, facecolor=color, edgecolor="black",
+                alpha=0.3, linewidth=1.5,
+            )
+        ax.add_patch(patch)
 
-        # Zone label
+        # Zone label at centroid
+        cx, cy = zone.center if hasattr(zone, "center") else (  # type: ignore[attr-defined]
+            (zone.rect[0] + zone.rect[2]) / 2,
+            (zone.rect[1] + zone.rect[3]) / 2,
+        )
         ax.text(
-            (zx1 + zx2) / 2, (zy1 + zy2) / 2,
+            cx, cy,
             f"{zone.name}\n({', '.join(zone.groups)})",  # type: ignore[attr-defined]
             ha="center", va="center",
             fontsize=8, fontweight="bold",

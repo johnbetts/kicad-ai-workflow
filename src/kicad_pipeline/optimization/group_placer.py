@@ -255,29 +255,56 @@ def _place_single_group(
     )
 
     # Auto-rotate group to fit zone: if group aspect ratio doesn't match
-    # zone aspect ratio, rotate the internal layout 90° so the group's
-    # long axis aligns with the zone's long axis. This prevents e.g.
-    # a 19×99mm relay strip from overflowing a 151×32mm horizontal zone.
+    # zone aspect ratio, rotate the internal layout 90 deg so the group's
+    # long axis aligns with the zone's long axis.
     zone = zone_map.get(group.name)
     if zone is not None:
         zx1, zy1, zx2, zy2 = zone.rect
         zone_w = zx2 - zx1
         zone_h = zy2 - zy1
-        group_is_tall = gh > gw * 1.3  # group is tall/narrow
-        zone_is_wide = zone_w > zone_h * 1.3  # zone is wide/short
+        group_is_tall = gh > gw * 1.3
+        zone_is_wide = zone_w > zone_h * 1.3
         if group_is_tall and zone_is_wide:
             _log.info(
-                "  Auto-rotating group '%s' (%.0fx%.0fmm → %.0fx%.0fmm) "
+                "  Auto-rotating group '%s' (%.0fx%.0fmm -> %.0fx%.0fmm) "
                 "to fit zone '%s' (%.0fx%.0fmm)",
                 group.name, gw, gh, gh, gw, zone.name, zone_w, zone_h,
             )
-            # Rotate all internal positions 90° CW: (x, y) → (y, -x)
             rotated_layout: dict[str, tuple[float, float, float]] = {}
             for ref, (rx, ry, rot) in layout.items():
                 rotated_layout[ref] = (ry, -rx, (rot + 90.0) % 360.0)
             layout = rotated_layout
             gw, gh = _group_dimensions(layout, fp_sizes)
             gox, goy = _group_internal_origin(layout, fp_sizes)
+
+        # Compact group to fit zone: if the group exceeds the zone in
+        # either dimension, scale internal positions down proportionally.
+        # This replaces the old approach where oversized groups got clamped
+        # per-component, destroying internal arrangement.
+        if gw > zone_w or gh > zone_h:
+            scale_x = min(1.0, (zone_w - 2.0) / max(gw, 1.0))
+            scale_y = min(1.0, (zone_h - 2.0) / max(gh, 1.0))
+            scale = min(scale_x, scale_y)
+            if scale < 1.0:
+                _log.info(
+                    "  Compacting group '%s' by %.0f%% to fit zone '%s'",
+                    group.name, (1.0 - scale) * 100, zone.name,
+                )
+                # Scale positions around layout centroid
+                all_x = [v[0] for v in layout.values()]
+                all_y = [v[1] for v in layout.values()]
+                lcx = sum(all_x) / len(all_x)
+                lcy = sum(all_y) / len(all_y)
+                compacted: dict[str, tuple[float, float, float]] = {}
+                for ref, (rx, ry, rot) in layout.items():
+                    compacted[ref] = (
+                        lcx + (rx - lcx) * scale,
+                        lcy + (ry - lcy) * scale,
+                        rot,
+                    )
+                layout = compacted
+                gw, gh = _group_dimensions(layout, fp_sizes)
+                gox, goy = _group_internal_origin(layout, fp_sizes)
 
     cx, cy = grid.find_free_pos(target_x, target_y, gw, gh)
 

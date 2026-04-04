@@ -184,8 +184,7 @@ def _guard_cross_group(
             for z in zones:
                 if own_zone and z.name == own_zone.name:
                     continue
-                zx1, zy1, zx2, zy2 = z.rect
-                if zx1 <= cx <= zx2 and zy1 <= cy <= zy2:
+                if z.contains(cx, cy):
                     cross_group.append(ref)
                     break
     except Exception as exc:

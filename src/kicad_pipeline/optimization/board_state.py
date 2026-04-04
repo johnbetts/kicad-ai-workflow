@@ -315,7 +315,7 @@ def _compute_zone_occupancy(
         comp_area = 0.0
         for c in components:
             cx, cy = c.centroid
-            if zx0 <= cx <= zx1 and zy0 <= cy <= zy1:
+            if z.contains(cx, cy):
                 refs_in_zone.append(c.ref)
                 cw, ch = c.courtyard_size
                 comp_area += cw * ch

@@ -11,9 +11,10 @@ This is Level 1 of the 3-level hierarchical placement engine.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from kicad_pipeline.models.pcb import Point
 
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import (
@@ -182,20 +183,69 @@ _ZONE_GAP_MM: float = 5.0
 
 @dataclass(frozen=True)
 class BoardZone:
-    """A rectangular zone on the board assigned to one or more feature groups.
+    """A polygon zone on the board assigned to one or more feature groups.
+
+    Zones are defined by an ordered sequence of vertices (CCW winding).
+    The ``rect`` property returns the axis-aligned bounding box for
+    backward compatibility with code that destructures zone bounds.
 
     Attributes:
         name: Zone identifier (e.g. "power", "relay", "mcu").
-        rect: Absolute board coordinates (x_min, y_min, x_max, y_max) in mm.
+        polygon: Ordered vertices defining the zone boundary.
         edge_affinity: Preferred board edge ("top", "bottom", "left", "right")
             or None if no edge preference.
         groups: FeatureBlock names assigned to this zone.
     """
 
     name: str
-    rect: tuple[float, float, float, float]
+    polygon: tuple[Point, ...]
     edge_affinity: str | None
     groups: tuple[str, ...]
+
+    @classmethod
+    def from_rect(
+        cls,
+        name: str,
+        rect: tuple[float, float, float, float],
+        edge_affinity: str | None,
+        groups: tuple[str, ...],
+    ) -> BoardZone:
+        """Create a rectangular zone from ``(x1, y1, x2, y2)`` bounds."""
+        x1, y1, x2, y2 = rect
+        return cls(
+            name=name,
+            polygon=(Point(x1, y1), Point(x2, y1), Point(x2, y2), Point(x1, y2)),
+            edge_affinity=edge_affinity,
+            groups=groups,
+        )
+
+    @property
+    def rect(self) -> tuple[float, float, float, float]:
+        """Axis-aligned bounding box ``(x_min, y_min, x_max, y_max)``."""
+        from kicad_pipeline.optimization.geometry import polygon_bbox
+        return polygon_bbox(self.polygon)
+
+    def contains(self, x: float, y: float) -> bool:
+        """True if ``(x, y)`` is inside the zone polygon."""
+        from kicad_pipeline.optimization.geometry import point_in_polygon
+        return point_in_polygon(x, y, self.polygon)
+
+    def clamp(self, x: float, y: float) -> tuple[float, float]:
+        """Project ``(x, y)`` to nearest polygon edge if outside."""
+        from kicad_pipeline.optimization.geometry import clamp_to_polygon
+        return clamp_to_polygon(x, y, self.polygon)
+
+    @property
+    def center(self) -> tuple[float, float]:
+        """Polygon centroid."""
+        from kicad_pipeline.optimization.geometry import polygon_centroid
+        return polygon_centroid(self.polygon)
+
+    @property
+    def dimensions(self) -> tuple[float, float]:
+        """``(width, height)`` of the axis-aligned bounding box."""
+        from kicad_pipeline.optimization.geometry import polygon_dimensions
+        return polygon_dimensions(self.polygon)
 
 
 def _match_group_to_zone(group_name: str) -> str:
@@ -390,87 +440,18 @@ def partition_board(
             zone_footprint_area.get(zn, 0.0),
         )
 
-    # Step 2: Compute zone rects using fully area-proportional allocation.
+    # Step 2: Assign zone rects from reference-derived fractions.
     #
-    # Row heights AND column widths are both proportional to zone content.
-    # This replaces the old fixed-fraction layout that produced 25mm-tall
-    # strips regardless of content.
+    # The default zone fractions are derived from the human-routed reference
+    # board and produce a proven layout.  Area-proportional computation was
+    # tried (Run 3) but produced zones too small for their groups, causing
+    # clamping and scattered placement.  The reference fractions are now the
+    # primary strategy — area-proportional is only used for zones that don't
+    # appear in the default set.
     half_gap = _ZONE_GAP_MM / 2.0
 
     # When there's only one zone, give it the full board area
     single_zone = len(zone_groups) == 1
-
-    # 3-row layout preserves the connector row for edge-pinned terminals.
-    # Row order is fixed — L3 phases have implicit dependencies on zone positions.
-    # Traffic analysis (Run 3, iter 26-28) confirmed: reordering rows makes
-    # crossings WORSE because L3 relay/MCU/ethernet phases assume specific
-    # zone positions. The existing order (power-relay, analog-ethernet-mcu)
-    # already satisfies the strongest adjacency (ethernet↔mcu = 8 nets).
-    row_definitions: list[tuple[str, list[str]]] = [
-        ("row0", ["input_connectors"]),
-        ("row1", ["power", "relay"]),
-        ("row2", ["analog", "ethernet", "mcu"]),
-    ]
-
-    # Compute which rows are active and their total areas.
-    active_rows: list[tuple[str, list[str], float, float]] = []
-    for row_name, row_zone_names in row_definitions:
-        active = [z for z in row_zone_names if z in zone_groups]
-        if not active:
-            continue
-        row_area = sum(zone_footprint_area.get(z, 0.0) for z in active)
-        # Minimum row height: short side of tallest component × 2.5
-        # (component height + clearance + surrounding passives).
-        # Uses min(w,h) since components can be rotated.
-        row_min_h_mm = max(
-            zone_min_height.get(z, 0.0) for z in active
-        ) * 2.5 + _ZONE_GAP_MM
-        active_rows.append(
-            (row_name, active, max(row_area, 1.0), row_min_h_mm),
-        )
-
-    # Distribute row heights: first satisfy minimums, then distribute
-    # remaining space proportionally to area.
-    total_min_h = sum(min_h for _, _, _, min_h in active_rows)
-    total_row_area = sum(ra for _, _, ra, _ in active_rows) or 1.0
-
-    # If minimums exceed board height, scale them down proportionally.
-    if total_min_h > board_h:
-        scale = board_h / total_min_h
-        active_rows = [
-            (n, z, a, m * scale) for n, z, a, m in active_rows
-        ]
-        total_min_h = board_h
-
-    remaining_h = board_h - total_min_h
-
-    # Build fraction rects for each zone.
-    adjusted_fracs: dict[str, tuple[float, float, float, float]] = {}
-    y_cursor = 0.0
-    for _row_name, row_zones, row_area, row_min_h in active_rows:
-        # Base height from minimum + proportional share of remaining space.
-        row_h_mm = row_min_h + remaining_h * (row_area / total_row_area)
-        row_h_frac = row_h_mm / board_h
-        y_start = y_cursor
-        y_end = y_cursor + row_h_frac
-        y_cursor = y_end
-
-        if len(row_zones) == 1:
-            adjusted_fracs[row_zones[0]] = (0.0, y_start, 1.0, y_end)
-            continue
-
-        # Multiple zones in row — distribute width proportionally to area.
-        areas = [
-            max(zone_footprint_area.get(z, 1.0), 1.0) for z in row_zones
-        ]
-        total_area = sum(areas) or 1.0
-        min_x_frac = 0.12
-        remaining_x = 1.0 - min_x_frac * len(row_zones)
-        x_cursor = 0.0
-        for i, z in enumerate(row_zones):
-            frac = min_x_frac + remaining_x * (areas[i] / total_area)
-            adjusted_fracs[z] = (x_cursor, y_start, x_cursor + frac, y_end)
-            x_cursor += frac
 
     board_area = board_w * board_h
 
@@ -478,12 +459,11 @@ def partition_board(
     for zone_name, group_names in zone_groups.items():
         if single_zone:
             fracs = (0.0, 0.0, 1.0, 1.0)
-        elif zone_name in adjusted_fracs:
-            fracs = adjusted_fracs[zone_name]
+        elif zone_name in _DEFAULT_ZONE_FRACTIONS:
+            fracs = _DEFAULT_ZONE_FRACTIONS[zone_name]
         else:
-            fracs = _DEFAULT_ZONE_FRACTIONS.get(zone_name)
-            if fracs is None:
-                fracs = (0.30, 0.30, 0.70, 0.70)
+            # Fallback for zones not in the default set: center of board.
+            fracs = (0.30, 0.30, 0.70, 0.70)
 
         fx1, fy1, fx2, fy2 = fracs
 
@@ -524,7 +504,12 @@ def partition_board(
 
         zones.append(BoardZone(
             name=zone_name,
-            rect=(abs_x1, abs_y1, abs_x2, abs_y2),
+            polygon=(
+                Point(abs_x1, abs_y1),
+                Point(abs_x2, abs_y1),
+                Point(abs_x2, abs_y2),
+                Point(abs_x1, abs_y2),
+            ),
             edge_affinity=_edge_affinity_for_zone(zone_name),
             groups=tuple(sorted(group_names)),
         ))
@@ -545,6 +530,5 @@ def zone_for_group(
 
 
 def zone_center(zone: BoardZone) -> tuple[float, float]:
-    """Return the center point of a zone."""
-    x1, y1, x2, y2 = zone.rect
-    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+    """Return the centroid of a zone."""
+    return zone.center

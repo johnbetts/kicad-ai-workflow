@@ -122,6 +122,14 @@ class PipelineRequest:
     web_check: bool = False
     """Whether to perform live web lookups for part validation."""
 
+    reference_pcb_path: Path | None = None
+    """Path to a human-routed reference ``.kicad_pcb`` file.
+
+    When provided, the placement optimizer seeds component positions from
+    the reference board and skips zone partitioning / group placement,
+    running only intra-group refinement (drift-correction mode).
+    """
+
 
 @dataclass(frozen=True)
 class PipelineResult:

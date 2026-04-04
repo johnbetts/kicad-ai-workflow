@@ -91,16 +91,25 @@ def _phase_group_placement(ctx: PlacementContext) -> None:
         place_groups,
     )
 
-    # Extract internal layouts per group from current positions
+    # Extract internal layouts per group from current positions.
+    # Normalize to centroid-relative coordinates so group dimensions
+    # reflect actual component spread, not absolute board positions.
+    # Without this, groups are board-sized and overflow their zones.
     internal_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
     for block in ctx.requirements.features:
         layout: dict[str, tuple[float, float, float]] = {}
         refs_in_pos = [r for r in block.components if r in ctx.positions]
         if not refs_in_pos:
             continue
+        # Compute group centroid
+        sum_x = sum(ctx.positions[r][0] for r in refs_in_pos)
+        sum_y = sum(ctx.positions[r][1] for r in refs_in_pos)
+        n = len(refs_in_pos)
+        gcx, gcy = sum_x / n, sum_y / n
+        # Store positions relative to centroid
         for ref in refs_in_pos:
             x, y, rot = ctx.positions[ref]
-            layout[ref] = (x, y, rot)
+            layout[ref] = (x - gcx, y - gcy, rot)
         internal_layouts[block.name] = layout
 
     placed_groups = place_groups(

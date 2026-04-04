@@ -93,7 +93,7 @@ def _make_feature(name: str, refs: tuple[str, ...]) -> FeatureBlock:
 def test_place_groups_single() -> None:
     """Single group is placed within its zone."""
     zones = [
-        BoardZone("power", (10.0, 10.0, 60.0, 40.0), "top", ("Power",)),
+        BoardZone.from_rect("power", (10.0, 10.0, 60.0, 40.0), "top", ("Power",)),
     ]
     groups = [_make_feature("Power", ("U1", "C1", "R1"))]
     internal_layouts = {
@@ -124,8 +124,8 @@ def test_place_groups_single() -> None:
 def test_place_groups_multiple_no_overlap() -> None:
     """Two groups placed in different zones don't overlap."""
     zones = [
-        BoardZone("power", (10.0, 10.0, 50.0, 40.0), "top", ("Power",)),
-        BoardZone("mcu", (50.0, 40.0, 90.0, 70.0), None, ("MCU",)),
+        BoardZone.from_rect("power", (10.0, 10.0, 50.0, 40.0), "top", ("Power",)),
+        BoardZone.from_rect("mcu", (50.0, 40.0, 90.0, 70.0), None, ("MCU",)),
     ]
     groups = [
         _make_feature("Power", ("U1", "C1")),
@@ -147,7 +147,7 @@ def test_place_groups_multiple_no_overlap() -> None:
 
 def test_place_groups_no_layout_skipped() -> None:
     """Group without internal layout is skipped."""
-    zones = [BoardZone("power", (10.0, 10.0, 50.0, 40.0), "top", ("Power",))]
+    zones = [BoardZone.from_rect("power", (10.0, 10.0, 50.0, 40.0), "top", ("Power",))]
     groups = [_make_feature("Power", ("U1",))]
     internal_layouts: dict[str, dict[str, tuple[float, float, float]]] = {}
     fp_sizes = {"U1": (5.0, 5.0)}
@@ -213,7 +213,7 @@ def test_group_exceeds_zone_warning(caplog: pytest.LogCaptureFixture) -> None:
 
     # Create a tiny zone
     zones = [
-        BoardZone("mcu", (40.0, 40.0, 55.0, 55.0), None, ("MCU Core",)),
+        BoardZone.from_rect("mcu", (40.0, 40.0, 55.0, 55.0), None, ("MCU Core",)),
     ]
     groups = [
         FeatureBlock(
