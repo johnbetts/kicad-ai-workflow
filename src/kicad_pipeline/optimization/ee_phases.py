@@ -723,7 +723,7 @@ def _place_relay_driver_columns(
         raw_w, raw_h = ctx.fp_sizes.get(anchor, (15.0, 15.0))
         krot = ctx.positions[anchor][2]
         relay_h = raw_w if krot % 180 in (90, 270) else raw_h
-    gap = 3.0  # increased from 1.5 — prevents Q/D courtyard collisions
+    gap = 3.0  # prevents Q/D courtyard collisions
     cursor_y = ky + relay_h / 2.0 + gap
 
     for refs, rot in chain:
