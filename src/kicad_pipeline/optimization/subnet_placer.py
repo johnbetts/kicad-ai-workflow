@@ -100,6 +100,18 @@ def _try_place_passive_facing_ic(
     ic_ref: str = first_conn.ic_ref
     ic_pin: str = first_conn.ic_pin
 
+    # Zone guard: don't pull a passive toward an IC in a different zone.
+    # Cross-zone pulls scatter components (e.g., ADC passives toward relays).
+    if ctx.zone_membership:
+        passive_zone = ctx.zone_membership.get(passive_ref)
+        ic_zone = ctx.zone_membership.get(ic_ref)
+        if passive_zone and ic_zone and passive_zone != ic_zone:
+            _log.debug(
+                "Skipping %s: cross-zone pull (%s -> %s via %s.%s)",
+                passive_ref, passive_zone, ic_zone, ic_ref, ic_pin,
+            )
+            return False
+
     try:
         result: tuple[float, float, str] = resolve_ic_pin(
             ic_ref, ic_pin, ctx.initial_pcb,
