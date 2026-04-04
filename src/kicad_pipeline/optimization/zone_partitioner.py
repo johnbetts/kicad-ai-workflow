@@ -177,8 +177,10 @@ _DEFAULT_ZONE_FRACTIONS: dict[str, tuple[float, float, float, float]] = {
     "ethernet":         (0.30, 0.55, 0.55, 0.90),
 }
 
-# Minimum inter-zone gap (mm)
-_ZONE_GAP_MM: float = 5.0
+# Minimum inter-zone gap (mm) — 2mm leaves routing clearance while
+# keeping zones close enough that components at zone edges don't fall
+# into the gap and become "outside all zones".
+_ZONE_GAP_MM: float = 2.0
 
 
 @dataclass(frozen=True)

@@ -404,6 +404,13 @@ def optimize_placement_ee(
     _phase_mcu_decoupling_repull(ctx)
     _phase_final_clamp(ctx)
 
+    # Second zone enforcement pass — late realignment phases are destructive
+    # and can push components back across zone boundaries.
+    from kicad_pipeline.optimization.ee_phases_refinement import (
+        _enforce_zone_boundaries,
+    )
+    _enforce_zone_boundaries(ctx)
+
     # FINAL enforcement: THT connectors MUST be at board edges.
     # Earlier enforcement (in phase 3g) gets undone by the review loop and
     # late phases.  This is the last word — no phase runs after this.
