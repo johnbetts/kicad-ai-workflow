@@ -449,59 +449,9 @@ def optimize_placement_ee(
                 if abs(dx) < need_dx and abs(dy) < need_dy:
                     push_x = need_dx - abs(dx) if abs(dx) < need_dx else 0
                     push_y = need_dy - abs(dy) if abs(dy) < need_dy else 0
-                    # When components share the same axis (dx~0 or dy~0),
-                    # push perpendicular to avoid creating a chain.
-                    # Try BOTH axes and pick the one that doesn't create
-                    # a new collision. Handles both large and small overlaps.
-                    if push_x > 2.0 or push_y > 2.0:
-                        candidates: list[tuple[float, float]] = []
-                        # Try X push
-                        nx = mx + (push_x + 1.0) * (1 if dx >= 0 else -1)
-                        nx = max(ctx.bounds[0] + mw/2, min(ctx.bounds[2] - mw/2, nx))
-                        candidates.append((nx, my))
-                        # Try Y push
-                        ny = my + (push_y + 1.0) * (1 if dy >= 0 else -1)
-                        ny = max(ctx.bounds[1] + mh/2, min(ctx.bounds[3] - mh/2, ny))
-                        candidates.append((mx, ny))
-                        # Try both axes simultaneously
-                        candidates.append((nx, ny))
-                        # Try larger pushes in each direction AND opposite
-                        for mult in (1.5, 2.0, 3.0, -1.0, -1.5, -2.0):
-                            nx2 = mx + (push_x * mult + 1.0) * (1 if dx >= 0 else -1)
-                            ny2 = my + (push_y * mult + 1.0) * (1 if dy >= 0 else -1)
-                            nx2 = max(ctx.bounds[0]+mw/2, min(ctx.bounds[2]-mw/2, nx2))
-                            ny2 = max(ctx.bounds[1]+mh/2, min(ctx.bounds[3]-mh/2, ny2))
-                            candidates.append((nx2, my))
-                            candidates.append((mx, ny2))
-                            candidates.append((nx2, ny2))
-                        # Pick first that doesn't collide
-                        from kicad_pipeline.optimization.collision_resolver import (
-                            _count_collisions_at,
-                        )
-                        placed = False
-                        for cx, cy in candidates:
-                            tw, th = mw, mh
-                            new_cols = _count_collisions_at(
-                                mover, cx, cy, tw, th, positions, ctx.fp_sizes,
-                            )
-                            if new_cols == 0:
-                                positions[mover] = (cx, cy, mrot)
-                                placed = True
-                                break
-                        if not placed:
-                            # Force the smallest push
-                            if push_x <= push_y:
-                                positions[mover] = (candidates[0][0], my, mrot)
-                            else:
-                                positions[mover] = (mx, candidates[1][1], mrot)
-                    elif abs(dx) < 0.5 and push_x > push_y:
-                        # Same X column — push in X (alternating direction)
-                        direction = 1 if (_push_round % 2 == 0) else -1
-                        nx = mx + (push_x + 0.3) * direction
-                        nx = max(ctx.bounds[0] + mw / 2, min(ctx.bounds[2] - mw / 2, nx))
-                        positions[mover] = (nx, my, mrot)
-                    elif push_x <= push_y:
+                    if push_x <= push_y:
                         nx = mx + (push_x + 0.2) * (1 if dx >= 0 else -1)
+                        # Clamp to board
                         nx = max(ctx.bounds[0] + mw / 2, min(ctx.bounds[2] - mw / 2, nx))
                         positions[mover] = (nx, my, mrot)
                     else:
@@ -521,20 +471,6 @@ def optimize_placement_ee(
             "FINAL: push-apart → %d collisions",
             len(remaining),
         )
-
-        # If collisions still remain, run one more grid resolution with
-        # NO fixed refs except mounting holes. This is the absolute last
-        # resort — it can move anything to achieve zero collisions.
-        if remaining:
-            _log.info("FINAL: %d stubborn collisions — last-resort resolution", len(remaining))
-            last_resort_fixed = ctx.fixed_refs | {
-                r for r in ctx.positions if r.startswith(("H", "MH"))
-            }
-            ctx.positions = _resolve_collisions(
-                dict(ctx.positions), ctx.fp_sizes, ctx.bounds, last_resort_fixed,
-            )
-            final_remaining = _count_collisions(ctx.positions, ctx.fp_sizes)
-            _log.info("FINAL: last-resort → %d collisions", len(final_remaining))
 
     # Sync final positions to best_positions — _phase_build_final reads best_positions
     ctx.best_positions = dict(ctx.positions)

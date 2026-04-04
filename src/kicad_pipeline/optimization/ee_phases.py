@@ -1303,9 +1303,8 @@ def _phase_relay_power_isolation(ctx: PlacementContext) -> None:
     ordered.extend(l_refs[1:])      # L2+ at end
     ordered.extend(other_refs)
 
-    # Gap for power filter cluster — both caps must be <8mm from L1.
-    # Was 0.2mm which caused L5/C27 collisions. 2.0mm prevents courtyard overlap.
-    gap = 2.0
+    # Tight gap for power filter cluster — both caps must be <8mm from L1.
+    gap = 0.2
 
     for ref in ordered:
         w, _h = ctx.fp_sizes.get(ref, (2.0, 2.0))
