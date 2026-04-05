@@ -1821,18 +1821,26 @@ def _relay_spdt_graphics(
     # Outer arc radius and inner arc radius from COM center (0,0)
     outer_r = u_half + sw
     inner_r = u_half - sw
+    # X offset: shift the U-shape in -X so pin 1 sits INSIDE the U
+    # near the open end.  The closed arc moves further from pin 1,
+    # and the U sides isolate pin 1 from adjacent coil pins.
+    # At rot=90, local -X becomes board -Y (upward toward terminals).
+    _x_shift = -7.0  # shift closed end below pin 1
+    # Shorten the arms — only extend 2mm past pin 1, not all the way
+    # to open_x.  This keeps the U compact.
+    arm_end_x = 0.0  # arms end at pin 1 X position (origin)
     # Points for arms (straight segments)
-    b = Point(open_x, -u_half - sw)   # top arm outer end
-    c = Point(open_x, -u_half + sw)   # top arm inner end
-    f = Point(open_x, u_half - sw)    # bottom arm inner end
-    g = Point(open_x, u_half + sw)    # bottom arm outer end
-    # Arc endpoints on the closed side
-    outer_top = Point(0.0, -outer_r)      # outer arc start (top)
-    outer_bot = Point(0.0, outer_r)       # outer arc end (bottom)
-    outer_mid = Point(closed_x - sw, 0.0) # outer arc midpoint (leftmost)
-    inner_top = Point(0.0, -inner_r)      # inner arc start (top)
-    inner_bot = Point(0.0, inner_r)       # inner arc end (bottom)
-    inner_mid = Point(closed_x + sw, 0.0) # inner arc midpoint (leftmost)
+    b = Point(arm_end_x, -u_half - sw)   # top arm outer end
+    c = Point(arm_end_x, -u_half + sw)   # top arm inner end
+    f = Point(arm_end_x, u_half - sw)    # bottom arm inner end
+    g = Point(arm_end_x, u_half + sw)    # bottom arm outer end
+    # Arc endpoints on the closed side (shifted away from pin 1)
+    outer_top = Point(_x_shift, -outer_r)
+    outer_bot = Point(_x_shift, outer_r)
+    outer_mid = Point(closed_x - sw + _x_shift, 0.0)
+    inner_top = Point(_x_shift, -inner_r)
+    inner_bot = Point(_x_shift, inner_r)
+    inner_mid = Point(closed_x + sw + _x_shift, 0.0)
     return (
         FootprintLine(
             start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh),
