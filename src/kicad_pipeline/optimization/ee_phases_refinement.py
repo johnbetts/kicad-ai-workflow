@@ -1786,13 +1786,18 @@ def _enforce_connector_rules(ctx: PlacementContext) -> None:
                 continue
             jx, jy, jrot = ctx.positions[jref]
             jw, jh = ctx.fp_sizes.get(jref, (5.0, 5.0))
+            # J15 (2x5 POE header): rotate to 0 (vertical) to avoid
+            # collision with J16 and reduce ratsnest crossings
+            if jref == "J15":
+                jrot = 0.0
+                jw, jh = jh, jw  # swap for vertical orientation
             new_x = cursor_x - jw / 2.0
             new_y = j2y  # same Y as J2
             new_x = max(bx1 + jw / 2.0 + 1, min(bx2 - jw / 2.0 - 1, new_x))
             new_y = max(by1 + jh / 2.0 + 1, min(by2 - jh / 2.0 - 1, new_y))
             ctx.positions[jref] = (new_x, new_y, jrot)
-            cursor_x = new_x - jw / 2.0 - 2.0  # next component left of this one
-            _log.info("  Connector fix: %s placed next to J2 at (%.1f,%.1f)", jref, new_x, new_y)
+            cursor_x = new_x - jw / 2.0 - 2.0
+            _log.info("  Connector fix: %s placed next to J2 at (%.1f,%.1f) rot=%.0f", jref, new_x, new_y, jrot)
 
     # ── MCU: ensure antenna end is INSIDE board (not overhanging) ──
     # ESP32 at rot=180: antenna points toward +Y (bottom edge).
@@ -2121,7 +2126,7 @@ def _build_antenna_keepout_polygon(rf_fp: object) -> tuple[object, float, float]
 
     esp32_body_w = 18.0
     esp32_body_h = 25.5
-    antenna_ext = 3.5
+    antenna_ext = 1.5  # just the antenna stub + 1mm clearance (was 3.5 — too tall)
     half_w = esp32_body_w / 2.0
     half_h = esp32_body_h / 2.0
 

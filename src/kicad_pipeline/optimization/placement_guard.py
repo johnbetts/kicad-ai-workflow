@@ -289,8 +289,11 @@ def _guard_connector_rotation(
         dist_bottom = abs(y - max_y)
         min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
 
-        # Connector should be within 10mm of an edge
-        if min_dist > 10.0:
+        # THT connectors with external cables should be within 10mm of an edge.
+        # Pin headers (PinHeader) are internal connectors — exempt from edge rule.
+        fp_lib = fp.lib_id.lower()
+        is_pin_header = "pinheader" in fp_lib or "pin_header" in fp_lib
+        if min_dist > 10.0 and not is_pin_header:
             issues.append(
                 f"RECURRING: {fp.ref} is {min_dist:.0f}mm from nearest edge "
                 f"(connectors should be <10mm from edge)"

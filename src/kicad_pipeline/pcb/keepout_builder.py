@@ -35,11 +35,13 @@ Must be <= ``MOUNTING_HOLE_INSET_MM`` (3.5 mm) to prevent keepout
 circles from extending past the board edge.
 """
 
-ANTENNA_KEEPOUT_WIDTH_MM: float = 15.0
-"""Width of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
+ANTENNA_KEEPOUT_WIDTH_MM: float = 18.0
+"""Width of the no-copper keepout zone reserved for an ESP32 antenna in mm.
+Matches the ESP32-S3-WROOM-1 module body width."""
 
-ANTENNA_KEEPOUT_HEIGHT_MM: float = 10.0
-"""Height of the no-copper keepout zone reserved for an ESP32 antenna in mm."""
+ANTENNA_KEEPOUT_HEIGHT_MM: float = 5.0
+"""Height of the no-copper keepout zone reserved for an ESP32 antenna in mm.
+Only needs to cover the antenna stub area (~3.5mm) plus clearance."""
 
 RF_MODULE_BODY_WIDTH_MM: float = 18.0
 """Width of the ESP32-S3-WROOM-1 module body in mm."""
@@ -271,21 +273,14 @@ def make_antenna_keepout(
         x0 = board_width - width
         y0 = 0.0
 
-    # Extend the keepout to the nearest board edge on the antenna side.
-    # The antenna needs clear copper all the way to the board edge.
-    # Determine which edge is closest to the keepout center.
-    keepout_center_y = y0 + height / 2.0
-    dist_to_top = keepout_center_y
-    dist_to_bottom = board_height - keepout_center_y
-    if dist_to_bottom <= dist_to_top:
-        # Antenna faces bottom edge — extend keepout to board bottom
-        y_bottom = board_height
-    else:
-        # Antenna faces top edge — extend keepout to board top
-        y0 = 0.0
-        y_bottom = y0 + height
+    # Keepout covers the antenna area only — do NOT extend to board edge
+    # (that made the keepout twice as tall as needed and half off-board).
+    # Clamp to board bounds so keepout never extends past the edge.
+    y_bottom = y0 + height
+    x0 = max(0.0, min(x0, board_width - width))
+    y0 = max(0.0, y0)
+    y_bottom = min(board_height, y_bottom)
 
-    # Do NOT explicitly close -- KiCad auto-closes polygons for keepouts.
     raw_polygon = [
         Point(x=x0, y=y0),
         Point(x=x0 + width, y=y0),
