@@ -359,6 +359,25 @@ def _guard_relay_orientation(pcb: PCBDesign, issues: list[str]) -> None:
                     f"top edge toward screw terminals. Try rot={((rot + 180) % 360):.0f}"
                 )
 
+        # Verify isolation cutout is BELOW COM pin (not centered on it).
+        # The cutout Edge.Cuts arcs should have their center X < pin 1 X
+        # in the rotated frame (meaning the arc is on the far side of COM).
+        edge_cuts = [g for g in fp.graphics
+                     if hasattr(g, "layer") and "Edge" in getattr(g, "layer", "")]
+        if edge_cuts:
+            # Check that at least one arc midpoint is shifted away from COM
+            for g in edge_cuts:
+                if hasattr(g, "mid"):  # FootprintArc
+                    # Arc mid should be offset from origin (shifted cutout)
+                    mid_dist = math.hypot(g.mid.x, g.mid.y)
+                    if mid_dist < 2.0:
+                        issues.append(
+                            f"RECURRING: {fp.ref} isolation cutout centered ON pin 1 "
+                            f"(arc mid at {g.mid.x:.1f},{g.mid.y:.1f}) — must be "
+                            f"shifted below pin 1 so COM sits inside the U"
+                        )
+                    break
+
 
 def _guard_antenna_isolation(pcb: PCBDesign, issues: list[str]) -> None:
     """Check that antenna keepout zone exists near the antenna end of the MCU.
