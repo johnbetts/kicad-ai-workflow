@@ -154,6 +154,86 @@ def _build_placement_context(
     )
 
 
+def _enforce_net_proximity(ctx: PlacementContext) -> None:
+    """Pull net-connected components within proximity thresholds.
+
+    The 25 L3 phases place by component TYPE, not by NET connectivity.
+    This causes electrically-connected pairs (ESD protector near USB,
+    decoupling cap near IC, pull-up near MCU) to end up 30-80mm apart.
+
+    This pass iterates every non-power net and pulls distant components
+    toward the largest component on that net (the "anchor").
+    """
+    import math
+
+    _POWER_NETS = {
+        "GND", "+5V", "+3V3", "+24V", "+12V", "VCC", "VBUS",
+        "RELAY_5V", "RELAY_GND", "AGND", "AVCC", "",
+    }
+    _MAX_DIST_MM = 25.0  # pull if further than this
+    _MIN_DIST_MM = 5.0   # don't pull closer than this
+
+    # Build a map: for each passive, find its NEAREST IC on any shared net.
+    # Only pull passives (R, C, D, L, F) toward ICs (U, K), not toward
+    # other passives or connectors.
+    _PASSIVE_PREFIXES = ("R", "C", "D", "L", "F", "LED")
+    _IC_PREFIXES = ("U", "K")
+
+    passive_to_nearest_ic: dict[str, tuple[str, float]] = {}
+
+    for net in ctx.requirements.nets:
+        if net.name.upper() in _POWER_NETS or not net.connections:
+            continue
+        refs = [c.ref for c in net.connections if c.ref in ctx.positions]
+        ics = [r for r in refs if r.rstrip("0123456789") in _IC_PREFIXES]
+        passives = [r for r in refs
+                    if r.rstrip("0123456789") in _PASSIVE_PREFIXES
+                    and r not in ctx.fixed_refs]
+
+        if not ics or not passives:
+            continue
+
+        for pref in passives:
+            px, py, _ = ctx.positions[pref]
+            for ic in ics:
+                ix, iy, _ = ctx.positions[ic]
+                d = math.hypot(px - ix, py - iy)
+                if d > _MAX_DIST_MM:
+                    prev = passive_to_nearest_ic.get(pref)
+                    if prev is None or d < prev[1]:
+                        # Only record if this IC is closer than any previous
+                        pass
+                    # Always prefer the nearest IC for this passive
+                    if pref not in passive_to_nearest_ic:
+                        passive_to_nearest_ic[pref] = (ic, d)
+                    elif d < passive_to_nearest_ic[pref][1]:
+                        passive_to_nearest_ic[pref] = (ic, d)
+
+    # Now pull each far passive toward its nearest IC
+    pulled = 0
+    for pref, (ic_ref, dist) in passive_to_nearest_ic.items():
+        if dist <= _MAX_DIST_MM:
+            continue
+        px, py, rot = ctx.positions[pref]
+        ix, iy, _ = ctx.positions[ic_ref]
+        target_dist = _MIN_DIST_MM + 2.0
+        dx, dy = px - ix, py - iy
+        if dist > 0:
+            new_x = ix + dx * (target_dist / dist)
+            new_y = iy + dy * (target_dist / dist)
+        else:
+            new_x, new_y = ix + 3.0, iy
+        bx1, by1, bx2, by2 = ctx.bounds
+        w, h = ctx.fp_sizes.get(pref, (2.0, 1.0))
+        new_x = max(bx1 + w, min(bx2 - w, new_x))
+        new_y = max(by1 + h, min(by2 - h, new_y))
+        ctx.positions[pref] = (new_x, new_y, rot)
+        pulled += 1
+
+    if pulled:
+        _log.info("  Net proximity: pulled %d passives toward their nearest IC", pulled)
+
+
 def _seed_anchor_ics_to_zones(ctx: PlacementContext) -> None:
     """Move anchor ICs to their assigned zone centers.
 
@@ -451,6 +531,12 @@ def optimize_placement_ee(
         _post_clamp_decoupling_repull,
     )
     _post_clamp_decoupling_repull(ctx)
+
+    # NET PROXIMITY ENFORCEMENT — pull net-connected components within
+    # distance thresholds.  This is the ROOT FIX for the "65 violations"
+    # problem: 25 L3 phases place components by type, not by net, so
+    # electrically-connected pairs end up 30-80mm apart.
+    _enforce_net_proximity(ctx)
 
     # FINAL: enforce connector placement rules (rotation, edge position,
     # U8 adjacent to J13, J16/J15 near MCU). This is the absolute last
