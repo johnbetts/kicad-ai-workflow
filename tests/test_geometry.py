@@ -8,12 +8,26 @@ from kicad_pipeline.models.pcb import Point
 from kicad_pipeline.optimization.geometry import (
     clamp_to_polygon,
     closest_point_on_segment,
+    convex_hull,
+    convex_polygon_gap,
+    convex_polygons_overlap,
+    inflate_convex_polygon,
     point_in_polygon,
     polygon_area,
     polygon_bbox,
     polygon_centroid,
     polygon_dimensions,
+    transform_polygon,
 )
+
+
+def _unit_square(cx: float, cy: float, half: float) -> tuple[Point, ...]:
+    return (
+        Point(cx - half, cy - half),
+        Point(cx + half, cy - half),
+        Point(cx + half, cy + half),
+        Point(cx - half, cy + half),
+    )
 
 
 @pytest.fixture
@@ -123,3 +137,83 @@ class TestClampToPolygon:
         dist_to_vertical = abs(cx - 10)
         dist_to_horizontal = abs(cy - 10)
         assert min(dist_to_vertical, dist_to_horizontal) < 0.1
+
+
+class TestConvexHull:
+    def test_square_with_interior_point(self) -> None:
+        hull = convex_hull((*_unit_square(0, 0, 1), Point(0.0, 0.0)))
+        assert len(hull) == 4
+        assert {(p.x, p.y) for p in hull} == {(-1, -1), (1, -1), (1, 1), (-1, 1)}
+
+    def test_drops_collinear_points(self) -> None:
+        pts = (Point(0, 0), Point(1, 0), Point(2, 0), Point(2, 1), Point(0, 1))
+        hull = convex_hull(pts)
+        assert {(p.x, p.y) for p in hull} == {(0, 0), (2, 0), (2, 1), (0, 1)}
+
+    def test_degenerate_two_points(self) -> None:
+        assert len(convex_hull((Point(1, 1), Point(2, 2), Point(1, 1)))) == 2
+
+    def test_hull_area(self) -> None:
+        hull = convex_hull(_unit_square(5, 5, 2))
+        assert polygon_area(hull) == pytest.approx(16.0)
+
+
+class TestTransformPolygon:
+    def test_translate_only(self) -> None:
+        moved = transform_polygon(_unit_square(0, 0, 1), 10.0, 5.0)
+        assert {(p.x, p.y) for p in moved} == {(9, 4), (11, 4), (11, 6), (9, 6)}
+
+    def test_rotate_90_about_origin(self) -> None:
+        (p,) = transform_polygon((Point(1.0, 0.0),), 0.0, 0.0, 90.0)
+        assert p.x == pytest.approx(0.0, abs=1e-9)
+        assert p.y == pytest.approx(1.0)
+
+    def test_rotation_preserves_area(self) -> None:
+        rotated = transform_polygon(_unit_square(0, 0, 1.5), 3.0, 4.0, 45.0)
+        assert polygon_area(rotated) == pytest.approx(9.0)
+
+    def test_full_turn_is_identity(self) -> None:
+        poly = _unit_square(2, 3, 1)
+        out = transform_polygon(poly, 0.0, 0.0, 360.0)
+        for a, b in zip(poly, out, strict=False):
+            assert a.x == pytest.approx(b.x)
+            assert a.y == pytest.approx(b.y)
+
+
+class TestInflateConvexPolygon:
+    def test_inflate_square_grows_to_3x3(self) -> None:
+        out = inflate_convex_polygon(_unit_square(0, 0, 1), 0.5)
+        assert polygon_area(out) == pytest.approx(9.0)
+
+    def test_inflate_zero_is_identity(self) -> None:
+        poly = _unit_square(0, 0, 1)
+        assert inflate_convex_polygon(poly, 0.0) == poly
+
+    def test_inflate_handles_either_winding(self) -> None:
+        cw = tuple(reversed(_unit_square(0, 0, 1)))
+        out = inflate_convex_polygon(cw, 0.5)
+        assert polygon_area(out) == pytest.approx(9.0)
+
+
+class TestOverlapAndGap:
+    def test_disjoint_squares_do_not_overlap(self) -> None:
+        assert not convex_polygons_overlap(_unit_square(0, 0, 1), _unit_square(5, 0, 1))
+
+    def test_intersecting_squares_overlap(self) -> None:
+        assert convex_polygons_overlap(_unit_square(0, 0, 1), _unit_square(1.5, 0, 1))
+
+    def test_clearance_treats_near_touch_as_overlap(self) -> None:
+        a, b = _unit_square(0, 0, 1), _unit_square(2.4, 0, 1)  # gap = 0.4
+        assert not convex_polygons_overlap(a, b)
+        assert convex_polygons_overlap(a, b, clearance_mm=0.5)
+
+    def test_gap_between_separated_squares(self) -> None:
+        gap = convex_polygon_gap(_unit_square(0, 0, 1), _unit_square(4, 0, 1))
+        assert gap == pytest.approx(2.0)
+
+    def test_gap_zero_when_overlapping(self) -> None:
+        assert convex_polygon_gap(_unit_square(0, 0, 1), _unit_square(0.5, 0.5, 1)) == 0.0
+
+    def test_diagonal_gap(self) -> None:
+        gap = convex_polygon_gap(_unit_square(0, 0, 1), _unit_square(3, 3, 1))
+        assert gap == pytest.approx(2.0**0.5)

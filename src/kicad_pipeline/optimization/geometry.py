@@ -11,10 +11,8 @@ Consolidates duplicated implementations from ``evals/dfm_gates.py``,
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from kicad_pipeline.models.pcb import Point
+from kicad_pipeline.models.pcb import Point
 
 
 def point_in_polygon(
@@ -156,3 +154,177 @@ def clamp_to_polygon(
             best_x, best_y = cx, cy
 
     return (best_x, best_y)
+
+
+def convex_hull(points: tuple[Point, ...]) -> tuple[Point, ...]:
+    """Compute the convex hull of a point set (Andrew's monotone chain).
+
+    Returns hull vertices in counter-clockwise order (in the PCB
+    coordinate convention where Y grows downward, this is screen-space
+    clockwise). Collinear interior points are dropped. Degenerate
+    inputs (<3 distinct points) are returned deduplicated and sorted.
+    """
+    pts = sorted({(p.x, p.y) for p in points})
+    if len(pts) < 3:
+        return tuple(Point(x, y) for x, y in pts)
+
+    def cross(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[float, float]] = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1] + upper[:-1]
+    return tuple(Point(x, y) for x, y in hull)
+
+
+def transform_polygon(
+    polygon: tuple[Point, ...], dx: float, dy: float, rotation_deg: float = 0.0,
+) -> tuple[Point, ...]:
+    """Rotate a polygon about the origin, then translate it.
+
+    Rotation is counter-clockwise in mathematical convention; in the
+    PCB coordinate system (Y down) a positive angle appears clockwise
+    on screen, matching KiCad footprint rotation.
+    """
+    if rotation_deg % 360.0 == 0.0:
+        return tuple(Point(p.x + dx, p.y + dy) for p in polygon)
+    rad = math.radians(rotation_deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return tuple(
+        Point(p.x * c - p.y * s + dx, p.x * s + p.y * c + dy) for p in polygon
+    )
+
+
+def inflate_convex_polygon(
+    polygon: tuple[Point, ...], margin_mm: float,
+) -> tuple[Point, ...]:
+    """Offset a convex polygon outward by *margin_mm* (miter joins).
+
+    Each edge is shifted along its outward normal and consecutive
+    offset edges are re-intersected. The polygon may be given in either
+    winding order. Margin 0 returns the polygon unchanged.
+    """
+    n = len(polygon)
+    if n < 3 or margin_mm == 0.0:
+        return polygon
+
+    # Determine winding via the shoelace sign so normals point outward.
+    signed = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        signed += polygon[i].x * polygon[j].y - polygon[j].x * polygon[i].y
+    sign = 1.0 if signed > 0 else -1.0
+
+    offset_lines: list[tuple[float, float, float, float]] = []
+    for i in range(n):
+        j = (i + 1) % n
+        ex, ey = polygon[j].x - polygon[i].x, polygon[j].y - polygon[i].y
+        length = math.hypot(ex, ey)
+        if length < 1e-12:
+            continue
+        # Outward normal for this winding.
+        nx, ny = sign * ey / length, -sign * ex / length
+        offset_lines.append(
+            (polygon[i].x + nx * margin_mm, polygon[i].y + ny * margin_mm, ex, ey)
+        )
+
+    result: list[Point] = []
+    m = len(offset_lines)
+    for i in range(m):
+        ax, ay, adx, ady = offset_lines[i - 1]
+        bx, by, bdx, bdy = offset_lines[i]
+        denom = adx * bdy - ady * bdx
+        if abs(denom) < 1e-12:
+            result.append(Point(bx, by))  # parallel edges — use edge start
+            continue
+        t = ((bx - ax) * bdy - (by - ay) * bdx) / denom
+        result.append(Point(ax + t * adx, ay + t * ady))
+    return tuple(result)
+
+
+def _project_polygon(
+    polygon: tuple[Point, ...], ax: float, ay: float,
+) -> tuple[float, float]:
+    """Project polygon vertices onto axis (ax, ay); return (min, max)."""
+    dots = [p.x * ax + p.y * ay for p in polygon]
+    return (min(dots), max(dots))
+
+
+def _sat_axes(polygon: tuple[Point, ...]) -> list[tuple[float, float]]:
+    """Edge-normal axes for separating-axis tests."""
+    axes: list[tuple[float, float]] = []
+    n = len(polygon)
+    for i in range(n):
+        j = (i + 1) % n
+        ex, ey = polygon[j].x - polygon[i].x, polygon[j].y - polygon[i].y
+        length = math.hypot(ex, ey)
+        if length > 1e-12:
+            axes.append((ey / length, -ex / length))
+    return axes
+
+
+def convex_polygons_overlap(
+    a: tuple[Point, ...], b: tuple[Point, ...], clearance_mm: float = 0.0,
+) -> bool:
+    """Separating-axis overlap test for two convex polygons.
+
+    With a positive *clearance_mm*, also returns ``True`` when the
+    polygons are closer than the clearance (treats near-touching as
+    overlap).
+    """
+    if len(a) < 3 or len(b) < 3:
+        return False
+    for ax, ay in _sat_axes(a) + _sat_axes(b):
+        a_min, a_max = _project_polygon(a, ax, ay)
+        b_min, b_max = _project_polygon(b, ax, ay)
+        if a_max + clearance_mm < b_min or b_max + clearance_mm < a_min:
+            return False
+    return True
+
+
+def segment_distance(
+    a1x: float, a1y: float, a2x: float, a2y: float,
+    b1x: float, b1y: float, b2x: float, b2y: float,
+) -> float:
+    """Minimum distance between two line segments."""
+    d = math.inf
+    for px, py, sx1, sy1, sx2, sy2 in (
+        (a1x, a1y, b1x, b1y, b2x, b2y),
+        (a2x, a2y, b1x, b1y, b2x, b2y),
+        (b1x, b1y, a1x, a1y, a2x, a2y),
+        (b2x, b2y, a1x, a1y, a2x, a2y),
+    ):
+        cx, cy = closest_point_on_segment(px, py, sx1, sy1, sx2, sy2)
+        d = min(d, math.hypot(cx - px, cy - py))
+    return d
+
+
+def convex_polygon_gap(a: tuple[Point, ...], b: tuple[Point, ...]) -> float:
+    """Minimum edge-to-edge gap between two convex polygons.
+
+    Returns 0.0 when the polygons overlap or touch.
+    """
+    if convex_polygons_overlap(a, b):
+        return 0.0
+    na, nb = len(a), len(b)
+    gap = math.inf
+    for i in range(na):
+        i2 = (i + 1) % na
+        for j in range(nb):
+            j2 = (j + 1) % nb
+            gap = min(
+                gap,
+                segment_distance(
+                    a[i].x, a[i].y, a[i2].x, a[i2].y,
+                    b[j].x, b[j].y, b[j2].x, b[j2].y,
+                ),
+            )
+    return gap
