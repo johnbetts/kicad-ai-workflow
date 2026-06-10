@@ -1007,8 +1007,18 @@ _RELAY_CONTACT_PAD_DIAM: float = 3.0
 _RELAY_CONTACT_DRILL: float = 1.3
 _RELAY_COIL_PAD_DIAM: float = 2.5
 _RELAY_COIL_DRILL: float = 1.0
-_RELAY_CUTOUT_WIDTH: float = 1.0
-_RELAY_CUTOUT_CLEARANCE: float = 2.0
+# Isolation slot sized to the human reference board (nl-s-3c-complete):
+# 0.3mm kerf horseshoe hugging the COM pad (arc ~2.2mm from the pad
+# center, arms ~3.9mm past it) — a creepage barrier, not a moat.
+_RELAY_CUTOUT_WIDTH: float = 0.3
+_RELAY_CUTOUT_CLEARANCE: float = 0.7
+_RELAY_CUTOUT_ARM_PAST_PAD_MM: float = 3.9
+# Empirical 3D model anchor correction (mm, footprint frame): the
+# SANYOU SRD STEP body lands ~1.8mm +X of the pads when anchored at
+# pin 1 — calibrated over two isolated-render measurements
+# (single_relay_3d_top.png, 2026-06-10): -2.5 overshot by 0.7, -1.8
+# restores the 2.8mm COM-side / 2.0mm contact-side body margins.
+_RELAY_MODEL_X_CORRECTION_MM: float = -1.8
 
 # Tact switch dimension tiers (mm)
 _TACT_SMALL_HALF_X: float = 2.0
@@ -1063,11 +1073,15 @@ _MICROSD_SHIELD_PAD_H: float = 2.0
 _MICROSD_BODY_W: float = 15.0
 _MICROSD_BODY_H: float = 14.5
 
-# Relay body outline coordinates (mm)
-_RELAY_BODY_X_MIN: float = -1.4
-_RELAY_BODY_X_MAX: float = 18.4
-_RELAY_BODY_Y_MIN: float = -7.8
-_RELAY_BODY_Y_MAX: float = 7.8
+# Relay body outline in pin-1 coordinates (mm), matching KiCad's
+# official SANYOU SRD fab outline: 19.0 x 15.5 body with ~2.8mm
+# overhang past the COM pin and ~2.0mm past NO/NC. The old -1.4..18.4
+# span put the slack on the WRONG end — the COM pad ring and isolation
+# slot poked out past the body edge (Gate B vision finding).
+_RELAY_BODY_X_MIN: float = -2.8
+_RELAY_BODY_X_MAX: float = 16.2
+_RELAY_BODY_Y_MIN: float = -7.75
+_RELAY_BODY_Y_MAX: float = 7.75
 
 # Text offset from body edge (mm)
 _TEXT_OFFSET_SMALL: float = 1.0
@@ -1769,20 +1783,21 @@ def make_relay_spdt(
     body_h = _RELAY_BODY_Y_MAX - _RELAY_BODY_Y_MIN
     cx = (_RELAY_BODY_X_MIN + _RELAY_BODY_X_MAX) / 2.0 + _sx
     cy = (_RELAY_BODY_Y_MIN + _RELAY_BODY_Y_MAX) / 2.0 + _sy
-    graphics = _relay_spdt_graphics(cx, cy, body_w, body_h)
+    graphics = _relay_spdt_graphics(cx, cy, body_w, body_h, px=_sx, py=_sy)
     texts = (
         _ref_text(ref, cy - (body_h / 2.0 + _TEXT_OFFSET_LARGE), LAYER_F_SILKSCREEN),
         _val_text(value, cy + body_h / 2.0 + _TEXT_OFFSET_LARGE, LAYER_F_FAB),
     )
     lib_id = "Relay_THT:Relay_SPDT_SANYOU_SRD_Series_Form_C"
-    # STEP model has its origin at pin 1 (in the original KiCad footprint).
-    # After centering pads, pin 1 moved to (_sx, _sy). Place model there
-    # so its pin-1 origin aligns with the actual pin 1 pad.
+    # STEP model is nominally pin-1-origin; after centering pads, pin 1
+    # moved to (_sx, _sy). An empirical X correction is applied on top:
+    # measured from an isolated render, the body otherwise lands ~2.5mm
+    # toward the contact end (COM ring exposed, contact end overhung).
     model = _model_for_package(lib_id)
     if model is not None:
         model = Footprint3DModel(
             path=model.path, scale=model.scale,
-            offset=(_sx, _sy, 0.0),
+            offset=(_sx + _RELAY_MODEL_X_CORRECTION_MM, _sy, 0.0),
             rotate=model.rotate,
         )
     models = (model,) if model is not None else ()
@@ -1795,8 +1810,13 @@ def make_relay_spdt(
 
 def _relay_spdt_graphics(
     cx: float, cy: float, body_w: float, body_h: float,
+    px: float = 0.0, py: float = 0.0,
 ) -> tuple[FootprintLine, ...]:
-    """Build courtyard and U-shaped Edge.Cuts graphics for make_relay_spdt."""
+    """Courtyard + U-shaped Edge.Cuts isolation slot for make_relay_spdt.
+
+    *(px, py)* is the COM pad center in footprint coordinates — the
+    slot is anchored on it.
+    """
     hw = body_w / 2.0 + PCB_COURTYARD_CLEARANCE_MM
     hh = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM
     # U-shaped isolation cutout around COM pin.  The closed end (bottom
@@ -1814,33 +1834,27 @@ def _relay_spdt_graphics(
     com_pad_r = _RELAY_CONTACT_PAD_DIAM / 2.0
     u_half = com_pad_r + cutout_clr
     sw = cutout_w / 2.0  # half channel width
-    # Closed wall on left (toward contacts), open on right (safe side)
-    closed_x = -(com_pad_r + cutout_clr)
-    open_x = com_pad_r + cutout_clr
     _lw = 0.05  # thin outline
-    # Outer arc radius and inner arc radius from COM center (0,0)
+    # Outer arc radius and inner arc radius around the COM pad center.
     outer_r = u_half + sw
     inner_r = u_half - sw
-    # X offset: shift the U-shape in -X so pin 1 sits INSIDE the U
-    # near the open end.  The closed arc moves further from pin 1,
-    # and the U sides isolate pin 1 from adjacent coil pins.
-    # At rot=90, local -X becomes board -Y (upward toward terminals).
-    _x_shift = -7.0  # shift closed end below pin 1
-    # Shorten the arms — only extend 2mm past pin 1, not all the way
-    # to open_x.  This keeps the U compact.
-    arm_end_x = 0.0  # arms end at pin 1 X position (origin)
+    # The U is anchored EXPLICITLY on the COM pad (px, py): closed arc
+    # wraps the pad on the body-edge side, arms extend toward the body
+    # interior (reference-board proportions). The previous -7.0 "shift"
+    # only worked because it happened to equal the pad-centering offset.
+    arm_end_x = px + _RELAY_CUTOUT_ARM_PAST_PAD_MM
     # Points for arms (straight segments)
-    b = Point(arm_end_x, -u_half - sw)   # top arm outer end
-    c = Point(arm_end_x, -u_half + sw)   # top arm inner end
-    f = Point(arm_end_x, u_half - sw)    # bottom arm inner end
-    g = Point(arm_end_x, u_half + sw)    # bottom arm outer end
-    # Arc endpoints on the closed side (shifted away from pin 1)
-    outer_top = Point(_x_shift, -outer_r)
-    outer_bot = Point(_x_shift, outer_r)
-    outer_mid = Point(closed_x - sw + _x_shift, 0.0)
-    inner_top = Point(_x_shift, -inner_r)
-    inner_bot = Point(_x_shift, inner_r)
-    inner_mid = Point(closed_x + sw + _x_shift, 0.0)
+    b = Point(arm_end_x, py - u_half - sw)   # top arm outer end
+    c = Point(arm_end_x, py - u_half + sw)   # top arm inner end
+    f = Point(arm_end_x, py + u_half - sw)   # bottom arm inner end
+    g = Point(arm_end_x, py + u_half + sw)   # bottom arm outer end
+    # Arc endpoints on the closed (body-edge) side
+    outer_top = Point(px, py - outer_r)
+    outer_bot = Point(px, py + outer_r)
+    outer_mid = Point(px - outer_r, py)
+    inner_top = Point(px, py - inner_r)
+    inner_bot = Point(px, py + inner_r)
+    inner_mid = Point(px - inner_r, py)
     return (
         FootprintLine(
             start=Point(cx - hw, cy - hh), end=Point(cx + hw, cy - hh),
@@ -3458,7 +3472,6 @@ def _postprocess_relay_footprint(fp: Footprint) -> Footprint:
         # contact pads on the far side of the relay body (e.g. pin 3 at x=+7.1
         # when the coil pad is at x=-7.1). Only pads within half the body
         # width of the coil pad are considered adjacent.
-        import math as _m
         body_half_x = max(abs(x) for x, _ in contact_pads_xy) * 0.8
         adjacent_contacts = [
             (x, y) for x, y in contact_pads_xy

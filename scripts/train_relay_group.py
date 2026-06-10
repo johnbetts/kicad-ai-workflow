@@ -345,8 +345,10 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
         RELAY_COIL: Q collector (pin 2) → K pad 2 (coil-) → D_flyback anode (pin 1)
                     → R_LED pad 1 (LED indicator taps off collector node)
         +5V_RELAY:  K pad 5 (coil+), D_flyback cathode (pin 2)
-        RELAY_COM:  K pad 1 → J pin 1
-        RELAY_NO:   K pad 3 → J pin 2
+        RELAY_COM:  K pad 1 → J pin 2 (COM on the CENTER terminal pin:
+                    it routes from behind the relay straight down the
+                    channel midline — no crossing with NO/NC)
+        RELAY_NO:   K pad 3 → J pin 1
         RELAY_NC:   K pad 4 → J pin 3
         LED_A:      R_LED pad 2 → D_LED anode (pin 1)
     """
@@ -375,14 +377,14 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
             name=f"RELAY_COM{ch}",
             connections=(
                 NetConnection(f"K{ch}", "1"),
-                NetConnection(f"J{ch}", "1"),
+                NetConnection(f"J{ch}", "2"),
             ),
         ),
         Net(
             name=f"RELAY_NO{ch}",
             connections=(
                 NetConnection(f"K{ch}", "3"),
-                NetConnection(f"J{ch}", "2"),
+                NetConnection(f"J{ch}", "1"),
             ),
         ),
         Net(

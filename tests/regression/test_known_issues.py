@@ -532,3 +532,19 @@ def test_relay_training_nets_match_sanyou_pinout() -> None:
             f"K1 pin {pin.number}: Component says {pin.net}, "
             f"Net list says {net_of_pad[pin.number]}"
         )
+
+    # Terminal pin order: COM belongs on the CENTER pin (J pin 2) so it
+    # routes down the channel midline without crossing NO/NC. The Net
+    # list once disagreed with the Component pins here too.
+    j_net_of_pad: dict[str, str] = {}
+    for net in reqs.nets:
+        for conn in net.connections:
+            if conn.ref == "J1":
+                j_net_of_pad[conn.pin] = net.name
+    assert j_net_of_pad["2"] == "RELAY_COM1", j_net_of_pad
+    j1 = next(c for c in reqs.components if c.ref == "J1")
+    for pin in j1.pins:
+        assert pin.net == j_net_of_pad[pin.number], (
+            f"J1 pin {pin.number}: Component says {pin.net}, "
+            f"Net list says {j_net_of_pad[pin.number]}"
+        )

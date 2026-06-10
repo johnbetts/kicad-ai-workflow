@@ -17,6 +17,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.exceptions import PCBError
@@ -290,6 +291,85 @@ def _place_sequences(
     return frozenset(done)
 
 
+@dataclass
+class _BandMember:
+    """A chain-resolved attachment awaiting band placement."""
+
+    ref: str
+    host: str
+    dst_pin: str
+    depth: int  # chain hops from the band root
+
+
+def _resolve_chains(
+    footprints: Mapping[str, Footprint],
+    attachments: tuple[PinAttach, ...],
+    placed: dict[str, PlacedMember],
+    skip: frozenset[str],
+    anchor_normal_override: dict[str, tuple[float, float]] | None,
+) -> dict[tuple[str, tuple[float, float]], list[_BandMember]]:
+    """Group attachments into bands keyed by (root host, side normal).
+
+    Chain members (LED hanging off a resistor hanging off a transistor)
+    inherit their root's band so a whole signal chain lays out as one
+    organized block on one side of its root.
+    """
+    bands: dict[tuple[str, tuple[float, float]], list[_BandMember]] = {}
+    member_band: dict[str, tuple[tuple[str, tuple[float, float]], int]] = {}
+    pending = [
+        a for a in attachments
+        if a.src.ref in footprints and a.src.ref not in skip
+        and a.src.ref not in placed
+    ]
+    for _ in range(len(pending) + 1):
+        progressed = False
+        for a in sorted(pending, key=lambda a: (a.dst.ref, a.src.ref)):
+            if a.src.ref in member_band:
+                continue  # first attachment wins; rest are verified only
+            if a.dst.ref in placed:
+                host = placed[a.dst.ref]
+                host_fp = footprints[a.dst.ref]
+                normal = (
+                    (anchor_normal_override or {}).get(a.dst.ref)
+                )
+                if normal is None:
+                    hw, hh = courtyard_halfdims(host_fp)
+                    tx, ty = pad_position_in_frame(
+                        host_fp, a.dst.pin, host.x, host.y, host.rotation_deg
+                    )
+                    normal = _side_normal(tx, ty, host.x, host.y, hw, hh)
+                key = (a.dst.ref, normal)
+                depth = 1
+            elif a.dst.ref in member_band:
+                key, host_depth = member_band[a.dst.ref]
+                depth = host_depth + 1
+            else:
+                continue
+            bands.setdefault(key, []).append(
+                _BandMember(ref=a.src.ref, host=a.dst.ref,
+                            dst_pin=a.dst.pin, depth=depth)
+            )
+            member_band[a.src.ref] = (key, depth)
+            progressed = True
+        if not progressed:
+            break
+    return bands
+
+
+def _grid_rotation(
+    fp: Footprint, src_pin: str,
+    center: tuple[float, float], target: tuple[float, float],
+) -> float:
+    """Rotation minimizing the member's src-pad distance to its target."""
+    best_rot, best_d = 0.0, math.inf
+    for rot in _CARDINAL_ROTATIONS:
+        sx, sy = pad_position_in_frame(fp, src_pin, center[0], center[1], rot)
+        d = math.hypot(sx - target[0], sy - target[1])
+        if d < best_d - 1e-9:
+            best_d, best_rot = d, rot
+    return best_rot
+
+
 def _place_attachments(
     footprints: Mapping[str, Footprint],
     attachments: tuple[PinAttach, ...],
@@ -299,55 +379,124 @@ def _place_attachments(
     normals: dict[str, tuple[float, float]] | None = None,
     anchor_normal_override: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, tuple[float, float]]:
-    """Place attached members at their target pads in BFS waves.
+    """Lay each host side's halo out as a GRID BAND of rows.
 
-    Each member lands pad-aligned at its constraint's ideal depth along
-    the host side's outward normal. Members of a chain INHERIT their
-    host's normal (signal flows outward in one direction — the
-    reference-board driver column: coil -> flyback -> Q -> LED/R), and
-    same-spot conflicts are stacked in DEPTH by overlap resolution
-    rather than shifted sideways, which keeps channel cells no wider
-    than their anchor. Returns the outward normal per placed ref.
+    Members fill rows no wider than their root host (the reference
+    board's driver band: flyback+transistor row, then resistor row,
+    then LED row), each row one chain-depth further out. Within a row
+    members sit at their target pad's coordinate, and each picks the
+    rotation (horizontal/vertical) that minimizes its actual pad-to-pad
+    distance — not a fixed orientation. Returns the outward normal per
+    placed ref (used by overlap resolution to push deeper, not
+    sideways).
     """
     if normals is None:
         normals = {}
-    pending = [
-        a for a in attachments
-        if a.src.ref in footprints and a.src.ref not in skip
-    ]
-    for _wave in range(len(pending) + 1):
-        ready = [
-            a for a in pending
-            if a.src.ref not in placed and a.dst.ref in placed
-        ]
-        if not ready:
-            break
-        for a in sorted(ready, key=lambda a: (a.dst.ref, a.src.ref)):
-            if a.src.ref in placed:
-                continue  # first attachment wins; rest are verified only
-            host = placed[a.dst.ref]
-            host_fp = footprints[a.dst.ref]
-            hw, hh = courtyard_halfdims(host_fp)
-            tx, ty = pad_position_in_frame(
-                host_fp, a.dst.pin, host.x, host.y, host.rotation_deg
-            )
-            # Chain continuation: keep growing along the host's own
-            # outward direction when the host is itself an attachment.
-            # THT anchors with a clear interface side override the
-            # per-pad geometry: their halo stacks anti-interface.
-            normal = normals.get(a.dst.ref)
-            if normal is None and anchor_normal_override is not None:
-                normal = anchor_normal_override.get(a.dst.ref)
-            if normal is None:
-                normal = _side_normal(tx, ty, host.x, host.y, hw, hh)
-            fp = footprints[a.src.ref]
-            rot = _best_rotation(fp, a.src.pin, normal)
-            x, y = _attach_position(fp, a.src.pin, rot, tx, ty, normal, a.ideal_mm)
-            placed[a.src.ref] = PlacedMember(
-                ref=a.src.ref, x=x, y=y, rotation_deg=rot
-            )
-            normals[a.src.ref] = normal
+    bands = _resolve_chains(
+        footprints, attachments, placed, skip, anchor_normal_override,
+    )
+    for (root, normal), members in sorted(
+        bands.items(), key=lambda kv: (kv[0][0], kv[0][1])
+    ):
+        root_m = placed[root]
+        rb = courtyard_in_frame(
+            footprints[root], root_m.x, root_m.y, root_m.rotation_deg
+        )
+        rxs = [p.x for p in rb]
+        rys = [p.y for p in rb]
+        horizontal_band = normal[1] != 0  # rows run along x
+        if horizontal_band:
+            budget_lo, budget_hi = min(rxs) - clearance_mm, max(rxs) + clearance_mm
+            depth_edge = max(rys) if normal[1] > 0 else min(rys)
+        else:
+            budget_lo, budget_hi = min(rys) - clearance_mm, max(rys) + clearance_mm
+            depth_edge = max(rxs) if normal[0] > 0 else min(rxs)
+        depth_sign = normal[1] if horizontal_band else normal[0]
+        depth_cursor = depth_edge
+
+        # Levels (chain depth) -> rows. Rows are laid out as WHOLE
+        # units centered near their members' mean target coordinate, so
+        # same-level members sit SIDE BY SIDE in a band row (the
+        # reference driver band) instead of each wrapping into its own
+        # row when they covet the same pad.
+        by_level: dict[int, list[_BandMember]] = {}
+        for m in members:
+            by_level.setdefault(m.depth, []).append(m)
+
+        for level in sorted(by_level):
+            level_members = sorted(by_level[level], key=lambda m: m.ref)
+            # Targets + tentative rotation/extents per member.
+            infos: list[tuple[_BandMember, float, float, float, float, float, float]] = []
+            for m in level_members:
+                fp = footprints[m.ref]
+                host_m = placed[m.host]
+                tx, ty = pad_position_in_frame(
+                    footprints[m.host], m.dst_pin,
+                    host_m.x, host_m.y, host_m.rotation_deg,
+                )
+                desired = tx if horizontal_band else ty
+                hw0, hh0 = courtyard_halfdims(fp)
+                tentative_depth = depth_cursor + depth_sign * (
+                    hh0 if horizontal_band else hw0
+                )
+                center = (
+                    (desired, tentative_depth)
+                    if horizontal_band else
+                    (tentative_depth, desired)
+                )
+                rot = _grid_rotation(
+                    fp, _src_pin_of(attachments, m.ref), center, (tx, ty),
+                )
+                hw_r, hh_r = (hw0, hh0) if rot % 180 == 0 else (hh0, hw0)
+                half_along = hw_r if horizontal_band else hh_r
+                half_depth = hh_r if horizontal_band else hw_r
+                infos.append((m, desired, rot, half_along, half_depth, tx, ty))
+            infos.sort(key=lambda i: (i[1], i[0].ref))
+
+            # Split into rows that fit the budget, then center each row
+            # near its members' mean desired coordinate.
+            rows: list[list[tuple[_BandMember, float, float, float, float, float, float]]] = [[]]
+            width = 0.0
+            budget_span = budget_hi - budget_lo
+            for info in infos:
+                w = 2 * info[3] + (clearance_mm if rows[-1] else 0.0)
+                if rows[-1] and width + w > budget_span:
+                    rows.append([])
+                    width = 0.0
+                    w = 2 * info[3]
+                rows[-1].append(info)
+                width += w
+
+            for row in rows:
+                if not row:
+                    continue
+                total = sum(2 * i[3] for i in row) + clearance_mm * (len(row) - 1)
+                mean_desired = sum(i[1] for i in row) / len(row)
+                start = min(
+                    max(mean_desired - total / 2, budget_lo),
+                    max(budget_hi - total, budget_lo),
+                )
+                row_extent = max(2 * i[4] for i in row)
+                cursor = start
+                for m, _desired, rot, half_along, _half_depth, _tx, _ty in row:
+                    along = cursor + half_along
+                    depth = depth_cursor + depth_sign * (row_extent / 2)
+                    x, y = (along, depth) if horizontal_band else (depth, along)
+                    placed[m.ref] = PlacedMember(
+                        ref=m.ref, x=x, y=y, rotation_deg=rot,
+                    )
+                    normals[m.ref] = normal
+                    cursor = along + half_along + clearance_mm
+                depth_cursor += depth_sign * (row_extent + clearance_mm)
     return normals
+
+
+def _src_pin_of(attachments: tuple[PinAttach, ...], ref: str) -> str:
+    """The src pin of *ref*'s first (placement-driving) attachment."""
+    for a in attachments:
+        if a.src.ref == ref:
+            return a.src.pin
+    return "1"
 
 
 def _place_orphans(
