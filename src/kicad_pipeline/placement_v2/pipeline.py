@@ -7,12 +7,11 @@ phases and no partially-correct output.
 
 Coordinate conventions at the boundary:
 
-* v2 cells work in CENTROID space with mathematical CCW rotation
-  (which reads clockwise on the Y-down board).
-* KiCad footprints store ORIGIN positions with screen-CCW rotation
-  (``-rotation`` in Y-down math, see ``pin_map.centroid_to_origin``).
-* :func:`emit_layout` converts both: ``kicad_rot = (360 - r) % 360``
-  and centroid -> origin via the blessed ``pin_map`` helpers.
+* v2 cells work in CENTROID space using the KICAD rotation convention
+  natively (positive = screen-CCW on the Y-down board) — solver-frame
+  geometry is identical to the artifact, no conversion seam.
+* :func:`emit_layout` only converts centroid -> ORIGIN positions via
+  the blessed ``pin_map`` helpers.
 """
 
 from __future__ import annotations
@@ -295,8 +294,14 @@ def run_placement_v2(
     by_group: dict[str, list[Cell]] = {}
     for cell in cells:
         by_group.setdefault(_group_for(cell.refs, requirements), []).append(cell)
+    edge_pinned = frozenset(ep.ref for ep in constraints.edge_pins)
     plans = tuple(
-        pack_group(gname, tuple(sorted(gcells, key=lambda c: c.name)))
+        pack_group(
+            gname,
+            tuple(sorted(gcells, key=lambda c: c.name)),
+            sequences=constraints.sequences,
+            edge_pinned=edge_pinned,
+        )
         for gname, gcells in sorted(by_group.items())
     )
     try:
@@ -338,8 +343,12 @@ def run_placement_v2(
 
 
 def to_kicad_rotation(v2_rotation_deg: float) -> float:
-    """Convert a v2 (math-CCW, Y-down) rotation to KiCad screen-CCW."""
-    return (360.0 - v2_rotation_deg) % 360.0
+    """v2 rotations ARE KiCad rotations (no conversion seam).
+
+    The whole placement_v2 package uses the KiCad convention natively
+    (see ``cells`` module docstring); this normalizes to [0, 360).
+    """
+    return v2_rotation_deg % 360.0
 
 
 def emit_layout(

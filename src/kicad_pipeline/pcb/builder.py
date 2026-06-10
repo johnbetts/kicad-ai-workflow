@@ -85,7 +85,7 @@ from kicad_pipeline.pcb.keepout_builder import (
 )
 from kicad_pipeline.pcb.netclasses import classify_nets
 from kicad_pipeline.pcb.outline_builder import make_board_outline as _make_board_outline
-from kicad_pipeline.pcb.placement import layout_pcb, place_groups_off_board
+from kicad_pipeline.pcb.placement import LayoutResult, layout_pcb, place_groups_off_board
 from kicad_pipeline.pcb.silkscreen import (
     add_silkscreen_to_footprint,
 )
@@ -106,7 +106,6 @@ from kicad_pipeline.sexp.writer import SExpNode, write_file
 if TYPE_CHECKING:
     from kicad_pipeline.models.requirements import Component, ProjectRequirements
     from kicad_pipeline.pcb.board_templates import BoardTemplate
-    from kicad_pipeline.pcb.placement import LayoutResult
 
 log = logging.getLogger(__name__)
 
@@ -768,6 +767,39 @@ def _build_pre_placement_keepouts(
     ctx.keepouts.extend(corner_keepouts)
 
 
+def _run_placement_v2(
+    ctx: _BuildContext,
+    requirements: ProjectRequirements,
+    pre_footprints: list[Footprint],
+) -> LayoutResult:
+    """Placement engine v2: cells/contracts/proofs (placement_mode="v2").
+
+    Halts the build with the violated constraints when any v2 stage
+    fails — there is no degraded output.
+    """
+    from pathlib import Path as _Path
+
+    from kicad_pipeline.placement_v2.pipeline import run_placement_v2
+
+    part_rules = _Path(__file__).resolve().parents[3] / "data" / "part_rules.json"
+    result = run_placement_v2(
+        requirements,
+        {fp.ref: fp for fp in pre_footprints},
+        board_width_mm=ctx.board_width_mm,
+        board_height_mm=ctx.board_height_mm,
+        part_rules_path=part_rules if part_rules.exists() else None,
+    )
+    if not result.ok:
+        details = "; ".join(v.message for v in result.violations[:10])
+        raise PCBError(
+            f"placement v2 halted at stage {result.halted_stage!r}: {details}"
+        )
+    return LayoutResult(
+        positions=result.positions_dict(),
+        rotations=result.rotations_dict(),
+    )
+
+
 def _run_placement(
     ctx: _BuildContext,
     requirements: ProjectRequirements,
@@ -776,7 +808,9 @@ def _run_placement(
 ) -> list[Footprint]:
     """Run placement and apply positions/rotations to footprints."""
     layout_result: LayoutResult
-    if placement_mode == "grouped":
+    if placement_mode == "v2":
+        layout_result = _run_placement_v2(ctx, requirements, pre_footprints)
+    elif placement_mode == "grouped":
         layout_result = place_groups_off_board(
             footprints=tuple(pre_footprints),
             features=requirements.features,

@@ -171,11 +171,11 @@ class TestRunPlacementV2:
 
 
 class TestRotationConvention:
-    def test_v2_to_kicad_rotation_mapping(self) -> None:
+    def test_v2_rotations_are_kicad_rotations(self) -> None:
         assert to_kicad_rotation(0.0) == 0.0
-        assert to_kicad_rotation(90.0) == 270.0
-        assert to_kicad_rotation(180.0) == 180.0
-        assert to_kicad_rotation(270.0) == 90.0
+        assert to_kicad_rotation(90.0) == 90.0
+        assert to_kicad_rotation(270.0) == 270.0
+        assert to_kicad_rotation(-90.0) == 270.0
 
     def test_round_trip_pad_position(self) -> None:
         """A pad placed by v2 math lands at the same board point when
@@ -189,7 +189,7 @@ class TestRotationConvention:
         cx, cy = 30.0, 20.0
         # v2 frame: where the cell math believes pad 1 is.
         v2_pad = pad_position_in_frame(fp, "1", cx, cy, v2_rot)
-        # KiCad frame: rotate pad offset by -kicad_rot (pin_map convention).
+        # KiCad frame: rotate pad offset by -rotation (pin_map convention).
         kicad_rot = to_kicad_rotation(v2_rot)
         rad = math.radians(-kicad_rot)
         px, py = -0.5, 0.0  # pad 1 offset from centroid

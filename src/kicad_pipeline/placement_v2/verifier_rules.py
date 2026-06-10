@@ -1,0 +1,435 @@
+"""Gate A check rules — each re-derives one constraint class from the artifact.
+
+Every function here consumes only the :class:`~kicad_pipeline.models.pcb.PCBDesign`
+artifact and the Constraint IR objects the solvers used; nothing is read from
+solver state. All board-space math uses the KiCad rotation convention from
+:mod:`kicad_pipeline.pcb.pin_map` (positive angle negated before the standard
+CCW matrix — see :func:`pad_extent_in_board_space`), NOT the cell-space
+``transform_polygon`` convention, because the verifier checks the artifact as
+KiCad will interpret it.
+
+Courtyards are derived via :func:`placement_v2.footprint_geom.courtyard_polygon`
+(centroid-relative) and converted to board space through
+:func:`pin_map.origin_to_centroid` — correctness over reuse: the cell-space
+``courtyard_in_frame`` uses the opposite rotation sign and is not used here.
+"""
+
+from __future__ import annotations
+
+import math
+from itertools import pairwise
+from typing import TYPE_CHECKING
+
+from kicad_pipeline.models.pcb import Point
+from kicad_pipeline.optimization.geometry import point_in_polygon, polygon_bbox
+from kicad_pipeline.pcb.pin_map import origin_to_centroid
+from kicad_pipeline.placement_v2.footprint_geom import courtyard_polygon, pad_by_number
+from kicad_pipeline.placement_v2.ir import Axis, Edge, Severity, Violation
+
+if TYPE_CHECKING:
+    from kicad_pipeline.models.pcb import BoardOutline, Footprint, Pad, PCBDesign
+    from kicad_pipeline.placement_v2.ir import (
+        BoardContain,
+        CellKeepout,
+        EdgePin,
+        IsolationGap,
+        PinAttach,
+        Polygon,
+        SequenceAlong,
+    )
+
+#: Tolerance when checking a SequenceAlong's fixed pitch.
+PITCH_TOL_MM = 0.1
+#: Tolerance when matching a derived keepout bbox to a board keepout zone.
+KEEPOUT_BBOX_TOL_MM = 1.0
+
+_EPS = 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Board-space geometry (KiCad rotation convention)
+# ---------------------------------------------------------------------------
+
+
+def _rotate_kicad(px: float, py: float, rotation_deg: float) -> tuple[float, float]:
+    """Rotate a footprint-local point by the KiCad rotation convention.
+
+    Matches :func:`kicad_pipeline.pcb.pin_map.pad_extent_in_board_space`:
+    the positive KiCad angle is negated, then the standard CCW rotation
+    matrix is applied (KiCad rotates CCW on screen with Y down).
+    """
+    rad = math.radians(-rotation_deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return (px * c - py * s, px * s + py * c)
+
+
+def _pad_center(fp: Footprint, pad: Pad) -> tuple[float, float]:
+    """Pad center in board space: footprint origin + rotated local offset."""
+    rx, ry = _rotate_kicad(pad.position.x, pad.position.y, fp.rotation)
+    return (fp.position.x + rx, fp.position.y + ry)
+
+
+def _pad_corners(fp: Footprint, pad: Pad) -> Polygon:
+    """The pad rectangle's four corners in board space (rotation-aware)."""
+    hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+    out: list[Point] = []
+    for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        rx, ry = _rotate_kicad(
+            pad.position.x + sx * hx, pad.position.y + sy * hy, fp.rotation,
+        )
+        out.append(Point(fp.position.x + rx, fp.position.y + ry))
+    return tuple(out)
+
+
+def _local_to_board(fp: Footprint, polygon: Polygon) -> Polygon:
+    """Centroid-local polygon -> board space via the owner's actual placement."""
+    cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+    pts: list[Point] = []
+    for p in polygon:
+        rx, ry = _rotate_kicad(p.x, p.y, fp.rotation)
+        pts.append(Point(cx + rx, cy + ry))
+    return tuple(pts)
+
+
+def _courtyard_in_board(fp: Footprint) -> Polygon:
+    """Footprint courtyard polygon (centroid-relative, unrotated) in board space."""
+    return _local_to_board(fp, courtyard_polygon(fp))
+
+
+def _outline_points(outline: BoardOutline) -> Polygon:
+    """Outline polygon, expanding the 2-point rect shorthand if present."""
+    poly = outline.polygon
+    if len(poly) == 2:
+        a, b = poly
+        return (Point(a.x, a.y), Point(b.x, a.y), Point(b.x, b.y), Point(a.x, b.y))
+    return poly
+
+
+# ---------------------------------------------------------------------------
+# Polygon overlap / distance (convex polygons — courtyards are rectangles)
+# ---------------------------------------------------------------------------
+
+
+def _project(poly: Polygon, ax: float, ay: float) -> tuple[float, float]:
+    dots = [p.x * ax + p.y * ay for p in poly]
+    return (min(dots), max(dots))
+
+
+def _overlap_depth(a: Polygon, b: Polygon) -> float:
+    """Penetration depth of two convex polygons; 0.0 when separated (SAT)."""
+    depth = math.inf
+    for poly in (a, b):
+        n = len(poly)
+        for i in range(n):
+            p1, p2 = poly[i], poly[(i + 1) % n]
+            ax, ay = -(p2.y - p1.y), p2.x - p1.x
+            length = math.hypot(ax, ay)
+            if length < _EPS:
+                continue
+            a_min, a_max = _project(a, ax / length, ay / length)
+            b_min, b_max = _project(b, ax / length, ay / length)
+            overlap = min(a_max, b_max) - max(a_min, b_min)
+            if overlap <= 0.0:
+                return 0.0
+            depth = min(depth, overlap)
+    return 0.0 if math.isinf(depth) else depth
+
+
+def _pt_seg_dist(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float,
+) -> float:
+    """Distance from a point to a line segment."""
+    dx, dy = x2 - x1, y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq < _EPS:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _boundary_dist(px: float, py: float, poly: Polygon) -> float:
+    """Distance from a point to the polygon boundary (any winding)."""
+    n = len(poly)
+    dists = [
+        _pt_seg_dist(px, py, poly[i].x, poly[i].y, poly[(i + 1) % n].x, poly[(i + 1) % n].y)
+        for i in range(n)
+    ]
+    return min(dists) if dists else 0.0
+
+
+def _polygon_gap(a: Polygon, b: Polygon) -> float:
+    """Minimum edge-to-edge gap between two convex polygons (0 if touching)."""
+    if _overlap_depth(a, b) > 0.0:
+        return 0.0
+    gaps = [_boundary_dist(p.x, p.y, dst) for src, dst in ((a, b), (b, a)) for p in src]
+    return min(gaps) if gaps else 0.0
+
+
+def _missing(constraint: object, ref: str, what: str) -> Violation:
+    return Violation(
+        repr(constraint), (ref,), Severity.CRITICAL, 0.0, 0.0,
+        f"constraint references {what} but it is not on the board",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Checks — one function per constraint class
+# ---------------------------------------------------------------------------
+
+
+def check_pin_attach(
+    pcb: PCBDesign, attaches: tuple[PinAttach, ...],
+) -> tuple[Violation, ...]:
+    """Each PinAttach: euclidean src->dst pad-center distance <= max_mm (MAJOR)."""
+    out: list[Violation] = []
+    for attach in attaches:
+        centers: list[tuple[float, float]] = []
+        for pad_ref in (attach.src, attach.dst):
+            fp = pcb.get_footprint(pad_ref.ref)
+            if fp is None:
+                out.append(_missing(attach, pad_ref.ref, f"footprint {pad_ref.ref!r}"))
+                continue
+            pad = pad_by_number(fp, pad_ref.pin)
+            if pad is None:
+                out.append(_missing(attach, pad_ref.ref, f"pad {pad_ref}"))
+                continue
+            centers.append(_pad_center(fp, pad))
+        if len(centers) < 2:
+            continue
+        (sx, sy), (dx, dy) = centers
+        dist = math.hypot(dx - sx, dy - sy)
+        if dist > attach.max_mm:
+            out.append(Violation(
+                repr(attach), (attach.src.ref, attach.dst.ref), Severity.MAJOR,
+                dist, attach.max_mm,
+                f"{attach.src} is {dist:.3f}mm from {attach.dst} "
+                f"(max {attach.max_mm}mm, net {attach.net})",
+            ))
+    return tuple(out)
+
+
+def check_sequences(
+    pcb: PCBDesign, sequences: tuple[SequenceAlong, ...],
+) -> tuple[Violation, ...]:
+    """Each SequenceAlong: pad-centroid coordinate strictly monotonic (MAJOR).
+
+    Monotonic in EITHER direction is accepted ("in order along axis" is
+    direction-agnostic, per the IR docstring's "strictly monotonic").
+    Also checks ``pitch_mm`` (+-0.1mm) and ``max_span_mm`` when set.
+    """
+    out: list[Violation] = []
+    for seq in sequences:
+        coords: list[float] = []
+        missing = False
+        for ref in seq.refs:
+            fp = pcb.get_footprint(ref)
+            if fp is None:
+                out.append(_missing(seq, ref, f"footprint {ref!r}"))
+                missing = True
+                continue
+            cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
+            coords.append(cx if seq.axis is Axis.HORIZONTAL else cy)
+        if missing or len(coords) < 2:
+            continue
+        deltas = [b - a for a, b in pairwise(coords)]
+        increasing = all(d > _EPS for d in deltas)
+        decreasing = all(d < -_EPS for d in deltas)
+        if not (increasing or decreasing):
+            out.append(Violation(
+                repr(seq), seq.refs, Severity.MAJOR,
+                min(abs(d) for d in deltas), 0.0,
+                f"refs {seq.refs} are not in order along {seq.axis.value}: "
+                f"coordinates {tuple(round(c, 3) for c in coords)}",
+            ))
+        if seq.pitch_mm is not None:
+            worst = max(abs(abs(d) - seq.pitch_mm) for d in deltas)
+            if worst > PITCH_TOL_MM:
+                out.append(Violation(
+                    repr(seq), seq.refs, Severity.MAJOR, worst, PITCH_TOL_MM,
+                    f"refs {seq.refs} deviate {worst:.3f}mm from pitch {seq.pitch_mm}mm",
+                ))
+        if seq.max_span_mm is not None:
+            span = max(coords) - min(coords)
+            if span > seq.max_span_mm:
+                out.append(Violation(
+                    repr(seq), seq.refs, Severity.MAJOR, span, seq.max_span_mm,
+                    f"refs {seq.refs} span {span:.3f}mm > {seq.max_span_mm}mm",
+                ))
+    return tuple(out)
+
+
+def _edge_distance(
+    fp_bbox: tuple[float, float, float, float],
+    board_bbox: tuple[float, float, float, float],
+    edge: Edge,
+) -> float:
+    fx1, fy1, fx2, fy2 = fp_bbox
+    bx1, by1, bx2, by2 = board_bbox
+    if edge is Edge.WEST:
+        return fx1 - bx1
+    if edge is Edge.EAST:
+        return bx2 - fx2
+    if edge is Edge.NORTH:
+        return fy1 - by1
+    return by2 - fy2
+
+
+def check_edge_pins(
+    pcb: PCBDesign, edge_pins: tuple[EdgePin, ...],
+) -> tuple[Violation, ...]:
+    """Each EdgePin: courtyard within max_edge_distance_mm of the edge (MAJOR).
+
+    Distance is measured from the COURTYARD (body) extent, not pad
+    centers: "connector at the edge" means the housing is flush so the
+    cable can exit — terminal blocks carry pads several mm inside the
+    body and would never satisfy a pad-center bound. Only the DISTANCE
+    part of the constraint is checked here; the ``face_out``
+    orientation check is not implemented yet (recorded as a skipped
+    check in the Gate A report so coverage stays honest).
+    """
+    board_bbox = polygon_bbox(_outline_points(pcb.outline))
+    out: list[Violation] = []
+    for pin in edge_pins:
+        fp = pcb.get_footprint(pin.ref)
+        if fp is None:
+            out.append(_missing(pin, pin.ref, f"footprint {pin.ref!r}"))
+            continue
+        fp_bbox = polygon_bbox(_courtyard_in_board(fp))
+        if pin.edge is not None:
+            dist, edge_name = _edge_distance(fp_bbox, board_bbox, pin.edge), pin.edge.value
+        else:
+            dist, edge_name = min(
+                ((_edge_distance(fp_bbox, board_bbox, e), e.value) for e in Edge),
+                key=lambda item: item[0],
+            )
+        if dist > pin.max_edge_distance_mm:
+            out.append(Violation(
+                repr(pin), (pin.ref,), Severity.MAJOR, dist, pin.max_edge_distance_mm,
+                f"{pin.ref} is {dist:.3f}mm from the {edge_name} edge "
+                f"(max {pin.max_edge_distance_mm}mm)",
+            ))
+    return tuple(out)
+
+
+def check_contain(pcb: PCBDesign, contain: BoardContain) -> tuple[Violation, ...]:
+    """Every pad corner inside the outline with >= margin clearance (CRITICAL)."""
+    outline = _outline_points(pcb.outline)
+    out: list[Violation] = []
+    for fp in pcb.footprints:
+        worst: float | None = None
+        for pad in fp.pads:
+            for corner in _pad_corners(fp, pad):
+                boundary = _boundary_dist(corner.x, corner.y, outline)
+                clearance = (
+                    boundary if point_in_polygon(corner.x, corner.y, outline) else -boundary
+                )
+                if worst is None or clearance < worst:
+                    worst = clearance
+        if worst is not None and worst < contain.margin_mm - _EPS:
+            out.append(Violation(
+                repr(contain), (fp.ref,), Severity.CRITICAL, worst, contain.margin_mm,
+                f"{fp.ref} pad clearance to board edge is {worst:.3f}mm "
+                f"(margin {contain.margin_mm}mm; negative = off board)",
+            ))
+    return tuple(out)
+
+
+def check_courtyards(pcb: PCBDesign) -> tuple[Violation, ...]:
+    """Zero courtyard overlaps between same-layer footprint pairs (CRITICAL)."""
+    out: list[Violation] = []
+    fps = pcb.footprints
+    polys = [_courtyard_in_board(fp) if fp.pads else None for fp in fps]
+    for i in range(len(fps)):
+        for j in range(i + 1, len(fps)):
+            poly_i, poly_j = polys[i], polys[j]
+            if poly_i is None or poly_j is None or fps[i].layer != fps[j].layer:
+                continue
+            depth = _overlap_depth(poly_i, poly_j)
+            if depth > _EPS:
+                out.append(Violation(
+                    "courtyard_collision", (fps[i].ref, fps[j].ref), Severity.CRITICAL,
+                    depth, 0.0,
+                    f"courtyards of {fps[i].ref} and {fps[j].ref} overlap by {depth:.3f}mm",
+                ))
+    return tuple(out)
+
+
+def check_keepouts(
+    pcb: PCBDesign, keepouts: tuple[CellKeepout, ...],
+) -> tuple[Violation, ...]:
+    """Each CellKeepout re-derived from the owner's actual placement (CRITICAL).
+
+    Two assertions: (a) no OTHER footprint's pad center lies inside the
+    derived board-frame polygon; (b) a board-level keepout zone exists
+    whose bbox matches the derived polygon bbox within 1.0mm. The keepout
+    polygon is owner-local relative to the owner's pad centroid (the cell
+    coordinate convention), so it transforms with the owner's actual
+    board position and rotation.
+    """
+    out: list[Violation] = []
+    for keepout in keepouts:
+        owner = pcb.get_footprint(keepout.owner)
+        if owner is None:
+            out.append(_missing(keepout, keepout.owner, f"owner {keepout.owner!r}"))
+            continue
+        derived = _local_to_board(owner, keepout.polygon)
+        for fp in pcb.footprints:
+            if fp.ref == keepout.owner:
+                continue
+            for pad in fp.pads:
+                px, py = _pad_center(fp, pad)
+                if point_in_polygon(px, py, derived):
+                    out.append(Violation(
+                        repr(keepout), (keepout.owner, fp.ref), Severity.CRITICAL,
+                        0.0, 0.0,
+                        f"{fp.ref} pad {pad.number} is inside the "
+                        f"{keepout.kind.value} keepout owned by {keepout.owner}",
+                    ))
+                    break
+        d_bbox = polygon_bbox(derived)
+        matched = any(
+            all(
+                abs(z - d) <= KEEPOUT_BBOX_TOL_MM
+                for z, d in zip(polygon_bbox(zone.polygon), d_bbox, strict=True)
+            )
+            for zone in pcb.keepouts
+        )
+        if not matched:
+            out.append(Violation(
+                repr(keepout), (keepout.owner,), Severity.CRITICAL,
+                0.0, KEEPOUT_BBOX_TOL_MM,
+                f"no board keepout zone matches the derived {keepout.kind.value} "
+                f"polygon of {keepout.owner} "
+                f"(expected bbox {tuple(round(v, 3) for v in d_bbox)})",
+            ))
+    return tuple(out)
+
+
+def check_isolation(
+    pcb: PCBDesign,
+    isolation: tuple[IsolationGap, ...],
+    domains: tuple[tuple[str, str], ...],
+) -> tuple[Violation, ...]:
+    """Each IsolationGap: courtyard gap between the two domains >= min_mm (MAJOR)."""
+    domain_of = dict(domains)
+    out: list[Violation] = []
+    for gap in isolation:
+        refs_a = [r for r, d in domain_of.items() if d == gap.domain_a]
+        refs_b = [r for r, d in domain_of.items() if d == gap.domain_b]
+        for ref_a in refs_a:
+            fp_a = pcb.get_footprint(ref_a)
+            if fp_a is None or not fp_a.pads:
+                continue
+            poly_a = _courtyard_in_board(fp_a)
+            for ref_b in refs_b:
+                fp_b = pcb.get_footprint(ref_b)
+                if fp_b is None or not fp_b.pads:
+                    continue
+                measured = _polygon_gap(poly_a, _courtyard_in_board(fp_b))
+                if measured < gap.min_mm - _EPS:
+                    out.append(Violation(
+                        repr(gap), (ref_a, ref_b), Severity.MAJOR, measured, gap.min_mm,
+                        f"{ref_a} ({gap.domain_a}) is {measured:.3f}mm from "
+                        f"{ref_b} ({gap.domain_b}), min {gap.min_mm}mm",
+                    ))
+    return tuple(out)

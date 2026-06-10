@@ -48,9 +48,15 @@ def pad_position_in_frame(
     fp: Footprint, pin: str, member_x: float, member_y: float,
     member_rotation_deg: float,
 ) -> tuple[float, float]:
-    """Pad center in the cell/board frame for a member placed by centroid."""
+    """Pad center in the cell/board frame for a member placed by centroid.
+
+    Rotation follows the KICAD convention (positive angle negated, then
+    the standard CCW matrix — see ``pin_map.pad_extent_in_board_space``)
+    so solver-frame geometry is identical to the written artifact. v2
+    rotations ARE KiCad rotations; there is no conversion seam.
+    """
     px, py = pad_offset_from_centroid(fp, pin)
-    rad = math.radians(member_rotation_deg)
+    rad = math.radians(-member_rotation_deg)
     c, s = math.cos(rad), math.sin(rad)
     return (member_x + px * c - py * s, member_y + px * s + py * c)
 
@@ -102,8 +108,14 @@ def courtyard_halfdims(fp: Footprint) -> tuple[float, float]:
 def courtyard_in_frame(
     fp: Footprint, x: float, y: float, rotation_deg: float,
 ) -> Polygon:
-    """Courtyard polygon transformed to a member's frame position."""
-    rad = math.radians(rotation_deg)
+    """Courtyard polygon transformed to a member's frame position.
+
+    KiCad rotation convention (negated angle) — critical for OFF-CENTER
+    courtyards (THT relays, connectors): with the mathematical
+    convention the body bulge would land mirrored about the centroid in
+    the written file at 90/270 degrees.
+    """
+    rad = math.radians(-rotation_deg)
     c, s = math.cos(rad), math.sin(rad)
     return tuple(
         Point(x + p.x * c - p.y * s, y + p.x * s + p.y * c)

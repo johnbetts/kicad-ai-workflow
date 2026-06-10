@@ -70,7 +70,8 @@ class CellGenerationError(PCBError):
 
 
 def _rotated(px: float, py: float, deg: float) -> tuple[float, float]:
-    rad = math.radians(deg)
+    """Rotate a local offset by the KiCad convention (negated angle)."""
+    rad = math.radians(-deg)
     c, s = math.cos(rad), math.sin(rad)
     return (px * c - py * s, px * s + py * c)
 

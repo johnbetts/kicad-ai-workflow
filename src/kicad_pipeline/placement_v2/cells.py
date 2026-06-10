@@ -1,5 +1,10 @@
 """Immutable placement cells — the bottom-up rigid bodies of v2.
 
+All rotations use the KICAD convention (positive = screen-CCW on the
+Y-down board; implemented as angle negation before the standard CCW
+matrix). Solver-frame geometry is therefore IDENTICAL to the written
+artifact — there is no conversion seam to get wrong.
+
 A :class:`Cell` is a fully laid-out subcircuit in its own local frame:
 member positions, a bounding polygon, ports (where external nets exit),
 and keepouts. After its internal constraints are proven (recorded in
@@ -133,9 +138,9 @@ class PlacedCell:
         return PlacedCell(self.cell, self.dx, self.dy, rotation)
 
     def polygon_in_board(self) -> Polygon:
-        """Cell hull in board frame."""
+        """Cell hull in board frame (KiCad rotation convention)."""
         return transform_polygon(
-            self.cell.polygon, self.dx, self.dy, float(self.rotation)
+            self.cell.polygon, self.dx, self.dy, -float(self.rotation)
         )
 
     def members_in_board(self) -> tuple[PlacedMember, ...]:
@@ -144,7 +149,7 @@ class PlacedCell:
             tuple(Point(m.x, m.y) for m in self.cell.members),
             self.dx,
             self.dy,
-            float(self.rotation),
+            -float(self.rotation),
         )
         return tuple(
             PlacedMember(
@@ -162,7 +167,7 @@ class PlacedCell:
             tuple(Point(p.x, p.y) for p in self.cell.ports),
             self.dx,
             self.dy,
-            float(self.rotation),
+            -float(self.rotation),
         )
         return tuple(
             Port(net=port.net, x=p.x, y=p.y)
@@ -183,10 +188,10 @@ class PlacedCell:
             if owner is None:
                 continue
             local = transform_polygon(
-                ko.polygon, owner.x, owner.y, owner.rotation_deg
+                ko.polygon, owner.x, owner.y, -owner.rotation_deg
             )
             board = transform_polygon(
-                local, self.dx, self.dy, float(self.rotation)
+                local, self.dx, self.dy, -float(self.rotation)
             )
             result.append(
                 CellKeepout(owner=ko.owner, polygon=board, kind=ko.kind,

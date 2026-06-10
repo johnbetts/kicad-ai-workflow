@@ -61,10 +61,12 @@ class TestFootprintGeom:
 
     def test_pad_position_with_rotation(self) -> None:
         fp = passive_fp("R1")
-        # Member at (10, 5) rotated 90 deg: pad 1 local (-0.5, 0) -> (0, -0.5)
+        # KiCad convention (negated angle): member at (10, 5) rotated 90,
+        # pad 1 local (-0.5, 0) -> (0, +0.5) -> (10.0, 5.5). Matches
+        # pin_map.pad_extent_in_board_space exactly.
         x, y = pad_position_in_frame(fp, "1", 10.0, 5.0, 90.0)
         assert x == pytest.approx(10.0)
-        assert y == pytest.approx(4.5)
+        assert y == pytest.approx(5.5)
 
     def test_courtyard_fallback_includes_pads(self) -> None:
         hw, hh = courtyard_halfdims(passive_fp("R1"))
@@ -224,8 +226,8 @@ class TestPlacedCellTransforms:
     def test_members_rotate_with_cell(self) -> None:
         pc = PlacedCell(_proven_cell(), dx=50.0, dy=40.0, rotation=90)
         by_ref = {m.ref: m for m in pc.members_in_board()}
-        # Q1 local (0, 3) rotated 90 -> (-3, 0), translated -> (47, 40).
-        assert by_ref["Q1"].x == pytest.approx(47.0)
+        # KiCad convention: Q1 local (0, 3) at 90 -> (3, 0) -> (53, 40).
+        assert by_ref["Q1"].x == pytest.approx(53.0)
         assert by_ref["Q1"].y == pytest.approx(40.0)
         assert by_ref["Q1"].rotation_deg == pytest.approx(90.0)
 
