@@ -196,10 +196,10 @@ DEFAULT_FP_SIZE_MM: tuple[float, float] = (2.0, 2.0)
 DEFAULT_IC_SIZE_MM: tuple[float, float] = (5.0, 5.0)
 """Default IC footprint bounding-box size when actual size is unknown (mm)."""
 
-BOARD_EDGE_MARGIN_MM: float = 2.0
+BOARD_EDGE_MARGIN_MM: float = 3.0
 """Minimum margin from board edge for component placement (mm)."""
 
-COMPONENT_CLEARANCE_GAP_MM: float = 0.5
+COMPONENT_CLEARANCE_GAP_MM: float = 1.0
 """Minimum clearance gap between component courtyards (mm)."""
 
 COLLISION_GROUP_EXPANSION_MM: float = 5.0

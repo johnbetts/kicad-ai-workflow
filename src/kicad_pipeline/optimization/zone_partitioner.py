@@ -445,11 +445,13 @@ def partition_board(
     # Step 2: Assign zone rects from reference-derived fractions.
     #
     # The default zone fractions are derived from the human-routed reference
-    # board and produce a proven layout.  Area-proportional computation was
-    # tried (Run 3) but produced zones too small for their groups, causing
-    # clamping and scattered placement.  The reference fractions are now the
-    # primary strategy — area-proportional is only used for zones that don't
-    # appear in the default set.
+    # board (160x80mm).  When the board is larger, zones keep the same
+    # proportions but may still be undersized for their content.
+    #
+    # To fix this, we scale zones with demand/allocation > 1.0: expand
+    # overflowing zones by increasing their fraction, stealing proportionally
+    # from underflowing zones.  The layout topology (rows, columns) is
+    # preserved — only the fraction boundaries shift.
     half_gap = _ZONE_GAP_MM / 2.0
 
     # When there's only one zone, give it the full board area
@@ -457,15 +459,70 @@ def partition_board(
 
     board_area = board_w * board_h
 
+    # Pre-compute demand ratios and apply demand-based scaling.
+    # Group zones by row (same y-range) and scale widths within each row.
+    raw_fracs: dict[str, tuple[float, float, float, float]] = {}
+    for zone_name in zone_groups:
+        if single_zone:
+            raw_fracs[zone_name] = (0.0, 0.0, 1.0, 1.0)
+        elif zone_name in _DEFAULT_ZONE_FRACTIONS:
+            raw_fracs[zone_name] = _DEFAULT_ZONE_FRACTIONS[zone_name]
+        else:
+            raw_fracs[zone_name] = (0.30, 0.30, 0.70, 0.70)
+
+    if not single_zone:
+        # Expand only overflowing zones by stealing from underflowing ones
+        # within the same row.  Never shrink a zone below its default fraction.
+        rows: dict[tuple[float, float], list[str]] = {}
+        for zn, (fx1, fy1, fx2, fy2) in raw_fracs.items():
+            row_key = (round(fy1, 2), round(fy2, 2))
+            rows.setdefault(row_key, []).append(zn)
+
+        for (_ry1, _ry2), row_zones in rows.items():
+            if len(row_zones) < 2:
+                continue
+            # Compute overflow ratio for each zone (>1.0 means overflow)
+            overflow: dict[str, float] = {}
+            for zn in row_zones:
+                frac = raw_fracs[zn]
+                alloc_area = (frac[2] - frac[0]) * board_w * (frac[3] - frac[1]) * board_h
+                needed = zone_footprint_area.get(zn, 0.0)
+                overflow[zn] = needed / max(alloc_area, 1.0)
+
+            # Only adjust if any zone overflows
+            has_overflow = any(v > 1.0 for v in overflow.values())
+            if not has_overflow:
+                continue
+
+            # Compute expanded widths: overflow zones grow, others keep
+            # their default width.  Total width is preserved.
+            total_width_frac = sum(raw_fracs[zn][2] - raw_fracs[zn][0] for zn in row_zones)
+            default_widths = {zn: raw_fracs[zn][2] - raw_fracs[zn][0] for zn in row_zones}
+
+            # Grow overflowing zones by their overflow ratio (capped at 2x)
+            target_widths = {}
+            for zn in row_zones:
+                if overflow[zn] > 1.0:
+                    target_widths[zn] = default_widths[zn] * min(overflow[zn], 2.0)
+                else:
+                    target_widths[zn] = default_widths[zn]
+
+            # Normalize to preserve total width
+            total_target = sum(target_widths.values())
+            scale = total_width_frac / total_target
+            for zn in row_zones:
+                target_widths[zn] *= scale
+
+            # Apply — maintain zone order
+            x_cursor = min(raw_fracs[zn][0] for zn in row_zones)
+            for zn in sorted(row_zones, key=lambda z: raw_fracs[z][0]):
+                fx1, fy1, fx2, fy2 = raw_fracs[zn]
+                raw_fracs[zn] = (x_cursor, fy1, x_cursor + target_widths[zn], fy2)
+                x_cursor += target_widths[zn]
+
     zones: list[BoardZone] = []
     for zone_name, group_names in zone_groups.items():
-        if single_zone:
-            fracs = (0.0, 0.0, 1.0, 1.0)
-        elif zone_name in _DEFAULT_ZONE_FRACTIONS:
-            fracs = _DEFAULT_ZONE_FRACTIONS[zone_name]
-        else:
-            # Fallback for zones not in the default set: center of board.
-            fracs = (0.30, 0.30, 0.70, 0.70)
+        fracs = raw_fracs[zone_name]
 
         fx1, fy1, fx2, fy2 = fracs
 

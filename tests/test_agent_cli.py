@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from kicad_pipeline.cli.main import main
+from kicad_pipeline.cli import main
 
 if TYPE_CHECKING:
     from pathlib import Path

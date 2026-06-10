@@ -265,17 +265,17 @@
       "pins": [
         {
           "number": "1",
-          "name": "COM",
-          "pin_type": "passive",
-          "function": null,
-          "net": "RELAY_COM1"
-        },
-        {
-          "number": "2",
           "name": "NO",
           "pin_type": "passive",
           "function": null,
           "net": "RELAY_NO1"
+        },
+        {
+          "number": "2",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM1"
         },
         {
           "number": "3",
@@ -468,17 +468,17 @@
       "pins": [
         {
           "number": "1",
-          "name": "COM",
-          "pin_type": "passive",
-          "function": null,
-          "net": "RELAY_COM2"
-        },
-        {
-          "number": "2",
           "name": "NO",
           "pin_type": "passive",
           "function": null,
           "net": "RELAY_NO2"
+        },
+        {
+          "number": "2",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM2"
         },
         {
           "number": "3",
@@ -671,17 +671,17 @@
       "pins": [
         {
           "number": "1",
-          "name": "COM",
-          "pin_type": "passive",
-          "function": null,
-          "net": "RELAY_COM3"
-        },
-        {
-          "number": "2",
           "name": "NO",
           "pin_type": "passive",
           "function": null,
           "net": "RELAY_NO3"
+        },
+        {
+          "number": "2",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM3"
         },
         {
           "number": "3",
@@ -874,17 +874,17 @@
       "pins": [
         {
           "number": "1",
-          "name": "COM",
-          "pin_type": "passive",
-          "function": null,
-          "net": "RELAY_COM4"
-        },
-        {
-          "number": "2",
           "name": "NO",
           "pin_type": "passive",
           "function": null,
           "net": "RELAY_NO4"
+        },
+        {
+          "number": "2",
+          "name": "COM",
+          "pin_type": "passive",
+          "function": null,
+          "net": "RELAY_COM4"
         },
         {
           "number": "3",

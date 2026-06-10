@@ -2934,7 +2934,13 @@ def _adc_place_decoupling_caps(
     bounds: tuple[float, float, float, float],
     ctx: PlacementContext,
 ) -> None:
-    """Place decoupling caps connected to *ic_ref* directly below it."""
+    """Place decoupling caps connected to *ic_ref* in a column below it.
+
+    Each cap is offset by 2.5mm along Y to avoid stacking them all at
+    the same position (which created ~36 collisions in Run 5).
+    """
+    cap_idx = 0
+    _CAP_PITCH = 2.5  # mm between cap centers in the column
     for net in ctx.requirements.nets:
         if not any(c.ref == ic_ref for c in net.connections):
             continue
@@ -2943,10 +2949,14 @@ def _adc_place_decoupling_caps(
                     and c.ref in ctx.positions
                     and c.ref not in ctx.adc_channel_refs
                     and c.ref not in ctx.fixed_refs):
-                cap_x, cap_y = _clamp_to_bounds(ic_x, ic_y + 3.3 * sy, bounds)
+                y_offset = 3.3 + cap_idx * _CAP_PITCH
+                cap_x, cap_y = _clamp_to_bounds(
+                    ic_x, ic_y + y_offset * sy, bounds,
+                )
                 ctx.positions[c.ref] = (cap_x, cap_y, 180.0)
                 ctx.adc_channel_refs.add(c.ref)
                 ctx.fixed_refs.add(c.ref)
+                cap_idx += 1
                 _log.info("    3c2: ADC decoupling %s -> (%.1f, %.1f)", c.ref, cap_x, cap_y)
 
 

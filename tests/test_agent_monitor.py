@@ -15,8 +15,8 @@ from kicad_pipeline.agents.models import (
     BugStatus,
     CommandType,
 )
-from kicad_pipeline.agents.monitor import AgentMonitor
-from kicad_pipeline.agents.registry import save_registry
+from kicad_pipeline.agents.executor.monitor import AgentMonitor
+from kicad_pipeline.agents.reporter.registry import save_registry
 from kicad_pipeline.agents.status import save_status
 from kicad_pipeline.constants import AGENT_COMMANDS_FILENAME, AGENT_STATUS_FILENAME
 

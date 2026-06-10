@@ -273,7 +273,7 @@ _NUDGE_COMPASS: tuple[tuple[float, float], ...] = (
     (-1.0, -1.0),  # NW
 )
 _NUDGE_SMALL_MM = (2.0, 3.5, 5.0)
-_NUDGE_LARGE_MM = (5.0, 7.5, 10.0)
+_NUDGE_LARGE_MM = (5.0, 7.5, 10.0, 15.0, 20.0)
 
 
 def _random_nudge_fallback(
@@ -309,39 +309,40 @@ def _random_nudge_fallback(
     best_pos: tuple[float, float] | None = None
     best_hits = current_hits  # must beat current to be accepted
 
-    for nudge_set in (_NUDGE_SMALL_MM, _NUDGE_LARGE_MM):
-        # Randomise compass order so repeated calls explore different directions
-        compass_order = list(_NUDGE_COMPASS)
-        random.shuffle(compass_order)
-        for dist in nudge_set:
-            for dx_unit, dy_unit in compass_order:
-                cx = rx + dx_unit * dist
-                cy = ry + dy_unit * dist
-                # Clamp to board
-                cx = max(bmin_x, min(bmax_x, cx))
-                cy = max(bmin_y, min(bmax_y, cy))
-                # Respect proximity constraints
-                if _violates_proximity(ref, cx, cy, proximity_constraints, positions):
-                    continue
-                # Respect zone boundary — reject nudge if it exits the assigned zone
-                if (zone_membership is not None and zone_bboxes is not None
-                        and ref in zone_membership):
-                    zname = zone_membership[ref]
-                    zbbox = zone_bboxes.get(zname)
-                    if zbbox is not None:
-                        zx1, zy1, zx2, zy2 = zbbox
-                        if not (zx1 <= cx <= zx2 and zy1 <= cy <= zy2):
-                            continue
-                hits = _count_collisions_at(ref, cx, cy, w, h, positions, fp_sizes)
-                if hits < best_hits:
-                    best_hits = hits
-                    best_pos = (cx, cy)
-                    if hits == 0:
-                        # Collision-free — accept immediately
-                        return best_pos
+    # Two attempts: first with zone enforcement, then relaxed if no improvement.
+    for enforce_zone in (True, False):
+        for nudge_set in (_NUDGE_SMALL_MM, _NUDGE_LARGE_MM):
+            compass_order = list(_NUDGE_COMPASS)
+            random.shuffle(compass_order)
+            for dist in nudge_set:
+                for dx_unit, dy_unit in compass_order:
+                    cx = rx + dx_unit * dist
+                    cy = ry + dy_unit * dist
+                    cx = max(bmin_x, min(bmax_x, cx))
+                    cy = max(bmin_y, min(bmax_y, cy))
+                    if _violates_proximity(ref, cx, cy, proximity_constraints, positions):
+                        continue
+                    # Zone boundary: enforce on first pass, relax on second
+                    if (enforce_zone
+                            and zone_membership is not None and zone_bboxes is not None
+                            and ref in zone_membership):
+                        zname = zone_membership[ref]
+                        zbbox = zone_bboxes.get(zname)
+                        if zbbox is not None:
+                            zx1, zy1, zx2, zy2 = zbbox
+                            if not (zx1 <= cx <= zx2 and zy1 <= cy <= zy2):
+                                continue
+                    hits = _count_collisions_at(ref, cx, cy, w, h, positions, fp_sizes)
+                    if hits < best_hits:
+                        best_hits = hits
+                        best_pos = (cx, cy)
+                        if hits == 0:
+                            return best_pos
+            if best_pos is not None:
+                return best_pos
+        # If zone-enforced pass found nothing, try again without zone limits
         if best_pos is not None:
-            # Found improvement in small nudge set — stop here
-            return best_pos
+            break
 
     return best_pos
 

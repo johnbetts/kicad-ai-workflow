@@ -1,5 +1,199 @@
 # Placement Iteration Proposals — nl-s-3c-complete
 
+## Run 5 — 2026-04-05 (placement-iterate)
+
+- Board: 200x95mm, 133 footprints, 98 nets
+- Baseline (post-optimizer): Grade D (0.780), Placement 0.679
+- Collisions: 63 (scorer sees ~20, optimizer sees 63)
+- Crossings: 464, ratsnest length 4544mm
+- After ratsnest swaps: 417 crossings (-47)
+- Review grade: F (308 violations: 66 critical, 242 major)
+- Off-board: J13 (RJ45)
+- Cross-group contamination: 17 components
+- Zone overflow: MCU 68%, Relay 72%, Ethernet 94%, Analog 5%
+
+### Fixes Applied This Run
+
+1. **P1: Reorder net proximity** — moved `_enforce_net_proximity()` before
+   `_final_body_collision_fix()`. Impact: collisions 68→63 (marginal — most
+   collisions were pre-existing, not from net proximity).
+2. **P2: Collision-aware net proximity** — pull logic now checks for collisions
+   before placing, tries 8 cardinal offsets if target is occupied.
+   Impact: 0 skipped pulls (all 18 found free positions).
+3. **P3: Hard collision gate in scoring** — Grade capped at D if collision
+   score < 0.50 (≥12 collisions). Prevents optimizer from tolerating collisions.
+   Impact: Grade downgraded B→D (correct — 63 collisions is unmanufacturable).
+
+### Root Cause Analysis (NEW — from optimizer logs)
+
+**The collision resolver is fundamentally stuck.** It starts with 137 collisions,
+resolves 5 in pass 1, then oscillates relocating the same 3-5 components for
+12 passes without progress. The grid-based relocation cannot find free positions
+in densely packed areas.
+
+**ADC decoupling cap pile-up is the #1 collision source.** Phase 3c2 places
+ALL ADC decoupling caps (C11, C12, C18, C19, C21, C28, C29, C30, C35 — 9 caps)
+at the SAME position `(45.2, 78.2)`. This creates ~36 pair collisions instantly.
+The collision resolver can only move 5 of these because the grid is full.
+
+**Relay body overlap.** K1↔K2, K2↔K3, K3↔K4 overlap by 3.5x22.2mm. The relay
+row template places them at 16.5mm pitch but the body is 15.6mm wide with
+17.7mm height, leaving only 0.9mm gap — but the body collision fix sees overlap
+because it uses a different size estimate.
+
+**MCU area congestion.** U3 (ESP32 19x19mm) has 10+ passives fighting for
+space: C8, C9, C33, C34, SW1, SW2, R5, R26, J15. The body collision fix
+pushes them apart, they drift back from other phases, creating oscillation.
+
+### Council Proposals (ranked by impact)
+
+1. **Fix ADC decoupling cap placement** — PHASE BUG (30 min)
+   Phase 3c2 must space decoupling caps, not stack them at IC center.
+   Place each cap at `ic_center + n * 2.5mm` along the IC's short side.
+   File: `ee_phases_refinement.py` `_phase_adc_channel_formation()`, 
+   specifically the lines placing ADC decoupling caps.
+   Impact: -36 collisions (eliminates the largest collision cluster)
+   Status: PENDING
+
+2. **Fix relay body size in collision detection** — SIZE MISMATCH (15 min)
+   The relay row template uses 16.5mm pitch for 15.6mm-wide bodies
+   (0.9mm gap = OK). But `_body_half_extents()` estimates bodies larger,
+   seeing 3.5mm overlap. Either increase pitch to 20mm or fix body
+   size estimation for relays.
+   File: `placement_optimizer.py` `_body_half_extents()` or
+   `ee_phases_refinement.py` relay row pitch constant.
+   Impact: -6 collisions (K1↔K2, K2↔K3, K3↔K4 pairs)
+   Status: PENDING
+
+3. **Collision resolver fallback: SA nudge** — ARCHITECTURE (1 hr)
+   When grid relocation fails after pass 1, switch to random nudge within
+   5mm radius (up to 50 attempts). The current grid-based approach gets
+   stuck because all grid positions are occupied. SA-style random walk
+   is better at escaping local minima.
+   File: `collision_resolver.py` `_resolve_collisions()` inner loop.
+   Impact: -20 collisions (estimated — handles the stuck cases)
+   Status: PENDING
+
+4. **Zone capacity scaling** — CARRIED FROM RUN 4 (20 min)
+   Zone fractions assume 160x80mm board. At 200x95mm the fractions
+   give proportionally wrong areas. Scale zone allocations by actual
+   component demand.
+   File: `zone_partitioner.py`
+   Impact: -50 crossings (reduces contamination from 17→~5)
+   Status: PENDING
+
+5. **MCU peripheral zone expansion** — NEW (15 min)
+   MCU zone gets 2750mm² but needs 4621mm² (68% overflow). The ESP32
+   module alone is ~19x19mm = 361mm². With 22 components, the zone needs
+   at minimum 3x the current allocation.
+   File: `zone_partitioner.py` zone fraction for 'mcu'
+   Impact: -15 collisions around U3 area
+   Status: PENDING
+
+### Implementation Order
+1. ADC decoupling cap spacing (30 min) — biggest single collision source
+2. Relay body size fix (15 min) — easy, isolated
+3. Collision resolver SA fallback (1 hr) — handles remaining stuck cases
+4. Zone capacity scaling (20 min) — reduces contamination
+5. MCU zone expansion (15 min) — reduces U3 congestion
+
+### Implementation Results (all 5 proposals)
+
+| Metric | Run 5 baseline | After P1-P3 | After P1-P5 | Delta |
+|--------|---------------|-------------|-------------|-------|
+| Collisions | 68 | 63 | **44** | **-35%** |
+| Collision score | 0.235 | 0.375 | **0.625** | **+166%** |
+| Crossings (post-swap) | 417 | 417 | **446** | +7% |
+| Grade | C (0.742) | D (0.780) | **C (0.815)** | **+10%** |
+| Guard collisions | 33 | 20 | **10** | **-70%** |
+| Off-board | 1 | 1 | 1 | — |
+| Group cohesion | 0.244 | 0.244 | **0.274** | +12% |
+
+P1-P2 (net proximity reorder + collision-aware pull) had marginal impact on
+collisions because most were from ADC cap pile-up and relay body mismatch.
+P1 (ADC cap spacing) eliminated ~24 collisions. P2 (relay body) eliminated ~6.
+P3 (extended nudge range + zone-relaxed fallback) resolved ~10 more stuck cases.
+P4 (zone demand scaling) redistributed zone widths — slight crossing increase
+but better zone capacity for overflowing zones.
+
+### Metrics to Track
+
+| Metric | Run 4 | Run 5 final | Target |
+|--------|-------|-------------|--------|
+| Crossings | 292 | **446** | <200 |
+| Collisions | 5 | **44** | 0 |
+| Grade | B (0.758) | **C (0.815)** | B+ |
+| Off-board | 0 | 1 | 0 |
+| Cross-group | ? | 17 | 0 |
+
+### Key Finding: Scoring Divergence
+
+The scoring function detects ~20 collisions while `_count_collisions()` detects 63.
+They use different detection criteria. `_count_collisions()` uses courtyard sizes
+from footprint data; the scorer uses `_fp_size_dict()` which may have different
+size estimates. **These must be aligned** to prevent grade masking.
+
+---
+
+## Run 4 — 2026-04-05 (placement-iterate)
+
+- Baseline (post-EE optimizer): Grade B (0.758 overall, 0.671 placement)
+- Collisions: 5 (J1↔J6, D5↔K1, C1↔K1, C1↔D12, C1↔C20)
+- Violations: 287 (1 critical, 286 major)
+- Ratsnest edges: 292
+- Zone isolation: BROKEN — Power overlaps MCU 57mm, Relay 34mm, Analog 51mm
+- Delta from Run 3: Grade F→B (scoring refactored), collisions 38→5
+
+### Visual Review Findings (dual-persona)
+- Fab: relay row clean, left-third passive scatter, no grid alignment
+- EE: analog paths cross relay zone, decoupling 15-40mm from ICs, groups intermixed
+- 3D: 5 collisions are manufacturing hard-fail
+
+### Council Proposals (ranked by impact, unanimous agreement)
+
+1. **Validate zone capacity** — DIAGNOSTIC (do first, 5 min)
+   Print each zone's allocated area vs sum of courtyard areas.
+   Determines if zone enforcement is feasible at current board size.
+   File: quick diagnostic script, no code change
+   Status: PENDING
+
+2. **Hard collision penalty in scoring** — SCORING FIX
+   Any layout with collisions should score 0.0 for collision dimension
+   (currently 0.205 with 5 collisions). Removes optimizer incentive to
+   tolerate collisions. Also diagnostic: if optimizer finds 0-collision
+   layout, it was tolerating them.
+   File: `scoring.py`, collision dimension calculation
+   Status: PENDING
+
+3. **Zone-aware collision resolver** — ARCHITECTURE FIX (50 lines)
+   Add `_clamp_to_zone(ref, x, y, ctx)` helper to `ee_phases_refinement.py`.
+   Call at end of every L3 phase that moves components (8 call sites).
+   Thread `zone_bboxes`/`zone_membership` into `_phase_collision_resolution`.
+   ~50 lines across 3 files.
+   File: `ee_phases_refinement.py`, `ee_phases_groups.py`, `placement_optimizer.py`
+   Status: PENDING
+
+4. **Zone capacity assertion** — SAFETY GATE
+   Before L3, assert sum(courtyard_areas) ≤ zone_area × packing_factor.
+   Fail loudly if zones are undersized instead of silently drifting.
+   File: `placement_optimizer.py`, pre-L3 check
+   Status: PENDING
+
+### Council Blind Spots
+- Scoring tolerates collisions (Grade B with 5 collisions = perverse incentive)
+- Zone capacity never validated — enforcement may deadlock if undersized
+- Previous Run 3 proposals (bottom-up sizing, subcircuit locking) still relevant
+  but zone capacity check determines if they're prerequisites
+
+### Implementation Order
+1. Zone capacity diagnostic (5 min)
+2. Hard collision penalty in scoring (30 min)
+3. Zone-aware collision resolver (2-4 hours)
+4. Zone capacity assertion gate (30 min)
+5. Rerun and measure
+
+---
+
 ## Run 3 — 2026-04-03 (placement-iterate loop)
 
 - Baseline (post-EE optimizer): 809 crossings, 4686mm, Grade F

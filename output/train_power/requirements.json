@@ -103,6 +103,13 @@
         },
         {
           "number": "8",
+          "name": "PH",
+          "pin_type": "output",
+          "function": null,
+          "net": "SW"
+        },
+        {
+          "number": "EP",
           "name": "PAD",
           "pin_type": "power_in",
           "function": "gnd",

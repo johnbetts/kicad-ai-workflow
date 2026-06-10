@@ -209,8 +209,12 @@ def _enforce_net_proximity(ctx: PlacementContext) -> None:
                     elif d < passive_to_nearest_ic[pref][1]:
                         passive_to_nearest_ic[pref] = (ic, d)
 
-    # Now pull each far passive toward its nearest IC
+    # Now pull each far passive toward its nearest IC — collision-aware.
+    # Instead of blindly overwriting positions, check if the target
+    # position collides with any existing component.  If it does, try
+    # offsets along the 4 cardinal directions at 1mm steps.
     pulled = 0
+    skipped = 0
     for pref, (ic_ref, dist) in passive_to_nearest_ic.items():
         if dist <= _MAX_DIST_MM:
             continue
@@ -219,19 +223,54 @@ def _enforce_net_proximity(ctx: PlacementContext) -> None:
         target_dist = _MIN_DIST_MM + 2.0
         dx, dy = px - ix, py - iy
         if dist > 0:
-            new_x = ix + dx * (target_dist / dist)
-            new_y = iy + dy * (target_dist / dist)
+            cand_x = ix + dx * (target_dist / dist)
+            cand_y = iy + dy * (target_dist / dist)
         else:
-            new_x, new_y = ix + 3.0, iy
+            cand_x, cand_y = ix + 3.0, iy
         bx1, by1, bx2, by2 = ctx.bounds
         w, h = ctx.fp_sizes.get(pref, (2.0, 1.0))
-        new_x = max(bx1 + w, min(bx2 - w, new_x))
-        new_y = max(by1 + h, min(by2 - h, new_y))
-        ctx.positions[pref] = (new_x, new_y, rot)
-        pulled += 1
+        cand_x = max(bx1 + w, min(bx2 - w, cand_x))
+        cand_y = max(by1 + h, min(by2 - h, cand_y))
 
-    if pulled:
-        _log.info("  Net proximity: pulled %d passives toward their nearest IC", pulled)
+        # Check for collision at candidate position
+        def _has_collision(cx: float, cy: float) -> bool:
+            for other_ref, (ox, oy, _orot) in ctx.positions.items():
+                if other_ref == pref:
+                    continue
+                ow, oh = ctx.fp_sizes.get(other_ref, (2.0, 1.0))
+                gap = 0.3  # minimum courtyard gap
+                if (abs(cx - ox) < (w + ow) / 2 + gap
+                        and abs(cy - oy) < (h + oh) / 2 + gap):
+                    return True
+            return False
+
+        if not _has_collision(cand_x, cand_y):
+            ctx.positions[pref] = (cand_x, cand_y, rot)
+            pulled += 1
+        else:
+            # Try offsets in cardinal directions (1mm steps, up to 8mm)
+            placed = False
+            for step in range(1, 9):
+                for ddx, ddy in ((step, 0), (-step, 0), (0, step), (0, -step),
+                                 (step, step), (-step, step), (step, -step), (-step, -step)):
+                    tx = max(bx1 + w, min(bx2 - w, cand_x + ddx))
+                    ty = max(by1 + h, min(by2 - h, cand_y + ddy))
+                    if not _has_collision(tx, ty):
+                        ctx.positions[pref] = (tx, ty, rot)
+                        pulled += 1
+                        placed = True
+                        break
+                if placed:
+                    break
+            if not placed:
+                skipped += 1
+
+    if pulled or skipped:
+        _log.info(
+            "  Net proximity: pulled %d passives toward their nearest IC"
+            " (%d skipped — no collision-free position)",
+            pulled, skipped,
+        )
 
 
 def _seed_anchor_ics_to_zones(ctx: PlacementContext) -> None:
@@ -515,13 +554,20 @@ def optimize_placement_ee(
     # anchor so relay driver subcircuits stay within 25mm spread limit.
     _clamp_subcircuit_spread(ctx)
 
+    # NET PROXIMITY ENFORCEMENT — pull net-connected components within
+    # distance thresholds.  Runs BEFORE collision resolution so that
+    # pulled components get de-collided by subsequent passes.
+    # (Previously ran after all collision resolution, creating ~60
+    # collisions that nothing subsequently resolved — Run 5 regression.)
+    _enforce_net_proximity(ctx)
+
     # FINAL: push apart any components whose bodies still overlap.
     # NOTE: _phase_build_final reads from ctx.best_positions, not ctx.positions.
     # After all final fixes, sync positions → best_positions.
     # The connector enforcement and collision resolver check courtyard (pads)
     # but miss 3D body collisions — especially connector bodies extending
-    # beyond their pads.  Must run AFTER spread clamp, which can pull
-    # components back together and re-create overlaps.
+    # beyond their pads.  Must run AFTER spread clamp AND net proximity,
+    # which can pull components together and create overlaps.
     _final_body_collision_fix(ctx)
 
     # FINAL: re-pull any decoupling caps that drifted during late phases
@@ -531,12 +577,6 @@ def optimize_placement_ee(
         _post_clamp_decoupling_repull,
     )
     _post_clamp_decoupling_repull(ctx)
-
-    # NET PROXIMITY ENFORCEMENT — pull net-connected components within
-    # distance thresholds.  This is the ROOT FIX for the "65 violations"
-    # problem: 25 L3 phases place components by type, not by net, so
-    # electrically-connected pairs end up 30-80mm apart.
-    _enforce_net_proximity(ctx)
 
     # FINAL: enforce connector placement rules (rotation, edge position,
     # U8 adjacent to J13, J16/J15 near MCU). This is the absolute last
@@ -570,7 +610,10 @@ def optimize_placement_ee(
     return _phase_build_final(ctx)
 
 
-_BODY_OVERHANG: dict[str, float] = {"J": 3.0, "P": 3.0, "K": 2.0}
+# Body overhang: connectors extend beyond their courtyard (THT pins, housing).
+# Relays (K) do NOT overhang — courtyard already includes the body.
+# Adding K overhang caused false 3.5mm overlap at 16.5mm relay pitch.
+_BODY_OVERHANG: dict[str, float] = {"J": 3.0, "P": 3.0}
 
 
 def _body_half_extents(

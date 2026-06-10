@@ -1,0 +1,231 @@
+{
+  "iterations": [
+    {
+      "n": 1,
+      "change": "Fix J13/U8 ethernet: courtyard-aware separation in ee_phases_refinement (both connector fix and post-clamp critical fixups)",
+      "drc_before": 35,
+      "drc_after": 16,
+      "kept": true
+    },
+    {
+      "n": 2,
+      "change": "Increase _COIL_GAP from 6 to 12mm in subcircuit_layout.py for relay Edge.Cuts clearance",
+      "drc_before": 16,
+      "drc_after": 12,
+      "kept": true
+    },
+    {
+      "n": 3,
+      "change": "Add mounting hole clearance push in placement_guard.py enforce_placement",
+      "drc_before": 12,
+      "drc_after": 14,
+      "kept": false
+    },
+    {
+      "n": 4,
+      "change": "Add mounting hole avoidance in ee_phases_refinement _post_clamp_critical_fixups",
+      "drc_before": 12,
+      "drc_after": 24,
+      "kept": false
+    },
+    {
+      "n": 5,
+      "change": "Increase _COIL_GAP to 14mm",
+      "drc_before": 12,
+      "drc_after": 14,
+      "kept": false
+    },
+    {
+      "n": 6,
+      "change": "Fix SOP-4 (U7) pad clearance: shrink pads from 2.50 to 2.32mm in footprints.py JLCPCB cache path",
+      "drc_before": 12,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 7,
+      "change": "Increase _COLLISION_GAP_MM from 0.5 to 0.8mm in placement_guard.py",
+      "drc_before": 10,
+      "drc_after": 18,
+      "kept": false
+    },
+    {
+      "n": 8,
+      "change": "Increase _BOARD_EDGE_MARGIN_MM from 2.0 to 3.0mm in board_packer.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 9,
+      "change": "Increase _ZONE_INSET_MM from 2.0 to 4.0mm in group_placer.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 10,
+      "change": "Increase _PASSIVE_GAP from 4.0 to 5.0mm in subcircuit_layout.py",
+      "drc_before": 10,
+      "drc_after": 12,
+      "kept": false
+    },
+    {
+      "n": 11,
+      "change": "Increase _IC_PASSIVE_GAP from 4.0 to 5.0mm in subcircuit_layout.py",
+      "drc_before": 10,
+      "drc_after": 12,
+      "kept": false
+    },
+    {
+      "n": 12,
+      "change": "Increase _CONNECTOR_EDGE_MARGIN_MM from 3.0 to 5.0mm in board_packer.py",
+      "drc_before": 10,
+      "drc_after": 13,
+      "kept": false
+    },
+    {
+      "n": 13,
+      "change": "Increase _CLAMP_MARGIN_MM from 2.0 to 3.0mm in placement_guard.py",
+      "drc_before": 10,
+      "drc_after": 11,
+      "kept": false
+    },
+    {
+      "n": 14,
+      "change": "Increase _CONNECTOR_TARGET_MM from 3.0 to 5.0mm in placement_guard.py",
+      "drc_before": 10,
+      "drc_after": 17,
+      "kept": false
+    },
+    {
+      "n": 15,
+      "change": "Increase _MAX_COLLISION_ITERS from 30 to 50 in placement_guard.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 16,
+      "change": "Increase BOARD_EDGE_MARGIN_MM from 2.0 to 3.0mm in constants.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 17,
+      "change": "Increase COMPONENT_CLEARANCE_GAP_MM from 0.5 to 1.0mm in constants.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 18,
+      "change": "Increase _ROW_GAP from 3.0 to 4.0mm in subcircuit_layout.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 19,
+      "change": "Increase _LINEAR_GAP from 3.0 to 4.0mm in subcircuit_layout.py",
+      "drc_before": 10,
+      "drc_after": 10,
+      "kept": true
+    },
+    {
+      "n": 20,
+      "change": "Increase collision push distance from 1.5 to 2.0mm in placement_guard.py",
+      "drc_before": 10,
+      "drc_after": 13,
+      "kept": false
+    },
+    {
+      "n": 21,
+      "change": "Add _post_clamp_courtyard_fixups v1: push small components outside large IC courtyards, push components away from mounting holes, push passives outside non-IC courtyards",
+      "drc_before": 10,
+      "drc_after": 6,
+      "kept": false,
+      "notes": "Reduced shorting/solder_mask/npth to 0, but 6 courtyard overlaps remain from cascading pushes"
+    },
+    {
+      "n": 22,
+      "change": "Rewrite _post_clamp_courtyard_fixups as generic iterative pair-wise push with oscillation detection",
+      "drc_before": 10,
+      "drc_after": 2,
+      "kept": false,
+      "notes": "C10/C33 oscillating between U3 and LED1/R9 vertically; switched to horizontal but then oscillated with C8"
+    },
+    {
+      "n": 23,
+      "change": "Add trapped component handler: when oscillating on both axes, scan perimeter of IC courtyard for free spot nearest original position",
+      "drc_before": 10,
+      "drc_after": 0,
+      "kept": true,
+      "notes": "All 10 DRC errors resolved: 7 courtyard overlaps, 1 shorting, 1 npth_inside_courtyard, 1 solder_mask_bridge. Score improved from 0.899 to 0.935. Zero raw collisions."
+    },
+    {
+      "n": 24,
+      "timestamp": "2026-04-05T19:35:44.574295",
+      "change": "fix(guard): cascade-push blockers for connector pad-extent clamp (KI-005)",
+      "drc_before": 0,
+      "drc_after": 0,
+      "score_before": 0.935,
+      "score_after": 0.9353,
+      "collisions": 0,
+      "regression_passed": true,
+      "kept": true,
+      "notes": "J13 RJ45 pads were extending 3.6mm past right board edge. Added _cascade_push_blockers() to move blocking components when connector pad-extent clamp cannot shift due to collision. All 8 regression tests now pass."
+    },
+    {
+      "n": 25,
+      "change": "Add _post_clamp_connector_edge_push: re-enforce connector edge proximity after pad-extent clamp, before courtyard fixups",
+      "score_before": 0.9353,
+      "score_after": 0.9375,
+      "drc_before": 0,
+      "drc_after": 0,
+      "kept": true,
+      "dimension": "Connector Edge: 0.4845 -> 0.6170"
+    },
+    {
+      "n": 26,
+      "change": "Move connector edge push to run LAST + reduce edge_m for connectors \u2014 created DRC violations (courtyard overlaps)",
+      "score_before": 0.9375,
+      "score_after": 0.9015,
+      "drc_before": 0,
+      "drc_after": 5,
+      "kept": false,
+      "dimension": "Connector Edge: 0.617 -> higher but DRC failed"
+    },
+    {
+      "n": 27,
+      "change": "Reduce decoupling repull threshold from 5.0 to 3.0mm \u2014 no effect, caps not moved",
+      "score_before": 0.9375,
+      "score_after": 0.9375,
+      "drc_before": 0,
+      "drc_after": 2,
+      "kept": false
+    },
+    {
+      "n": 28,
+      "change": "Reduce _COIL_GAP from 12 to 10/11mm \u2014 copper_edge_clearance DRC violations",
+      "score_before": 0.9375,
+      "score_after": 0.9375,
+      "drc_before": 0,
+      "drc_after": 2,
+      "kept": false
+    },
+    {
+      "n": 29,
+      "change": "Fix connectors in courtyard fixups \u2014 J4/H4 collision, courtyard overlap DRC",
+      "score_before": 0.9375,
+      "score_after": 0.9375,
+      "drc_before": 0,
+      "drc_after": 2,
+      "kept": false
+    }
+  ],
+  "final_drc_errors": 0,
+  "final_score": 0.9353,
+  "total_iterations": 24
+}

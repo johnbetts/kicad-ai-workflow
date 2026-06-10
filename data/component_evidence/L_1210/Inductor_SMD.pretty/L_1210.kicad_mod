@@ -53,6 +53,16 @@
       (hide yes)
     )
   )
+  (property "LCSC" "C96950"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
   (fp_line
     (start -2.7 -0.5625)
     (end -2.7 0.5625)

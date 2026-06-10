@@ -30,7 +30,7 @@
     },
     "src/kicad_pipeline": {
       "path": "src/kicad_pipeline",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 2284,
       "public_functions": 78,
@@ -63,11 +63,17 @@
         "requirements",
         "tooling/kicad",
         "hardware/pcb"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/core",
+        "src/kicad_pipeline/utils",
+        "src/kicad_pipeline/handlers",
+        "src/kicad_pipeline/models"
       ]
     },
     "src/kicad_pipeline/agents": {
       "path": "src/kicad_pipeline/agents",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 2142,
       "public_functions": 100,
@@ -81,11 +87,17 @@
         "reliability/logging",
         "reliability/monitoring",
         "reliability/validation"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/agents/planner",
+        "src/kicad_pipeline/agents/executor",
+        "src/kicad_pipeline/agents/validator",
+        "src/kicad_pipeline/agents/reporter"
       ]
     },
     "src/kicad_pipeline/cli": {
       "path": "src/kicad_pipeline/cli",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 2234,
       "public_functions": 16,
@@ -98,11 +110,17 @@
         "reliability/logging",
         "tooling",
         "tooling/kicad"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/cli/core",
+        "src/kicad_pipeline/cli/utils",
+        "src/kicad_pipeline/cli/handlers",
+        "src/kicad_pipeline/cli/models"
       ]
     },
     "src/kicad_pipeline/config": {
       "path": "src/kicad_pipeline/config",
-      "status": "active",
+      "status": "decomposed",
       "health": "yellow",
       "loc": 1414,
       "public_functions": 6,
@@ -115,11 +133,17 @@
         "infrastructure/config",
         "reliability/logging",
         "tooling/kicad"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/config/core",
+        "src/kicad_pipeline/config/utils",
+        "src/kicad_pipeline/config/handlers",
+        "src/kicad_pipeline/config/models"
       ]
     },
     "src/kicad_pipeline/github": {
       "path": "src/kicad_pipeline/github",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 1236,
       "public_functions": 52,
@@ -133,11 +157,17 @@
         "data",
         "infrastructure/production",
         "reliability/logging"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/github/core",
+        "src/kicad_pipeline/github/utils",
+        "src/kicad_pipeline/github/handlers",
+        "src/kicad_pipeline/github/models"
       ]
     },
     "src/kicad_pipeline/ipc": {
       "path": "src/kicad_pipeline/ipc",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 874,
       "public_functions": 36,
@@ -151,11 +181,17 @@
         "reliability/logging",
         "tooling/cli",
         "tooling/kicad"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/ipc/core",
+        "src/kicad_pipeline/ipc/utils",
+        "src/kicad_pipeline/ipc/handlers",
+        "src/kicad_pipeline/ipc/models"
       ]
     },
     "src/kicad_pipeline/models": {
       "path": "src/kicad_pipeline/models",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 1694,
       "public_functions": 180,
@@ -169,11 +205,17 @@
         "hardware/pcb",
         "hardware/pcb/fabrication",
         "hardware/pcb/footprints"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/models/core",
+        "src/kicad_pipeline/models/utils",
+        "src/kicad_pipeline/models/handlers",
+        "src/kicad_pipeline/models/models"
       ]
     },
     "src/kicad_pipeline/optimization": {
       "path": "src/kicad_pipeline/optimization",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 17730,
       "public_functions": 144,
@@ -187,11 +229,17 @@
         "hardware/pcb/placement",
         "infrastructure",
         "infrastructure/config"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/optimization/placement",
+        "src/kicad_pipeline/optimization/routing",
+        "src/kicad_pipeline/optimization/thermal",
+        "src/kicad_pipeline/optimization/cost"
       ]
     },
     "src/kicad_pipeline/orchestrator": {
       "path": "src/kicad_pipeline/orchestrator",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 2996,
       "public_functions": 66,
@@ -205,11 +253,17 @@
         "hardware/pcb/footprints",
         "ml",
         "reliability/logging"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/orchestrator/core",
+        "src/kicad_pipeline/orchestrator/utils",
+        "src/kicad_pipeline/orchestrator/handlers",
+        "src/kicad_pipeline/orchestrator/models"
       ]
     },
     "src/kicad_pipeline/parts": {
       "path": "src/kicad_pipeline/parts",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 1930,
       "public_functions": 46,
@@ -223,11 +277,17 @@
         "hardware/pcb",
         "hardware/pcb/fabrication",
         "hardware/pcb/footprints"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/parts/core",
+        "src/kicad_pipeline/parts/utils",
+        "src/kicad_pipeline/parts/handlers",
+        "src/kicad_pipeline/parts/models"
       ]
     },
     "src/kicad_pipeline/pcb": {
       "path": "src/kicad_pipeline/pcb",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 21316,
       "public_functions": 260,
@@ -241,11 +301,18 @@
         "api-design",
         "data",
         "hardware/pcb"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/pcb/core",
+        "src/kicad_pipeline/pcb/layout",
+        "src/kicad_pipeline/pcb/routing",
+        "src/kicad_pipeline/pcb/validation",
+        "src/kicad_pipeline/pcb/export"
       ]
     },
     "src/kicad_pipeline/production": {
       "path": "src/kicad_pipeline/production",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 2422,
       "public_functions": 68,
@@ -259,11 +326,17 @@
         "hardware/pcb",
         "hardware/pcb/placement",
         "infrastructure"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/production/core",
+        "src/kicad_pipeline/production/utils",
+        "src/kicad_pipeline/production/handlers",
+        "src/kicad_pipeline/production/models"
       ]
     },
     "src/kicad_pipeline/requirements": {
       "path": "src/kicad_pipeline/requirements",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 2696,
       "public_functions": 86,
@@ -277,11 +350,17 @@
         "hardware/pcb/fabrication",
         "infrastructure",
         "reliability/logging"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/requirements/core",
+        "src/kicad_pipeline/requirements/utils",
+        "src/kicad_pipeline/requirements/handlers",
+        "src/kicad_pipeline/requirements/models"
       ]
     },
     "src/kicad_pipeline/research": {
       "path": "src/kicad_pipeline/research",
-      "status": "active",
+      "status": "decomposed",
       "health": "yellow",
       "loc": 902,
       "public_functions": 6,
@@ -293,11 +372,17 @@
         "reliability/logging",
         "requirements",
         "tooling/kicad"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/research/core",
+        "src/kicad_pipeline/research/utils",
+        "src/kicad_pipeline/research/handlers",
+        "src/kicad_pipeline/research/models"
       ]
     },
     "src/kicad_pipeline/routing": {
       "path": "src/kicad_pipeline/routing",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 6862,
       "public_functions": 66,
@@ -311,11 +396,17 @@
         "hardware/pcb/routing",
         "reliability/logging",
         "reliability/monitoring"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/routing/core",
+        "src/kicad_pipeline/routing/utils",
+        "src/kicad_pipeline/routing/handlers",
+        "src/kicad_pipeline/routing/models"
       ]
     },
     "src/kicad_pipeline/schematic": {
       "path": "src/kicad_pipeline/schematic",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 9152,
       "public_functions": 108,
@@ -329,11 +420,17 @@
         "api-design",
         "data",
         "hardware/pcb/placement"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/schematic/core",
+        "src/kicad_pipeline/schematic/symbols",
+        "src/kicad_pipeline/schematic/netlist",
+        "src/kicad_pipeline/schematic/validation"
       ]
     },
     "src/kicad_pipeline/sexp": {
       "path": "src/kicad_pipeline/sexp",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 798,
       "public_functions": 14,
@@ -343,11 +440,17 @@
       "manager": false,
       "domains": [
         "tooling/kicad"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/sexp/core",
+        "src/kicad_pipeline/sexp/utils",
+        "src/kicad_pipeline/sexp/handlers",
+        "src/kicad_pipeline/sexp/models"
       ]
     },
     "src/kicad_pipeline/validation": {
       "path": "src/kicad_pipeline/validation",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 6218,
       "public_functions": 162,
@@ -361,11 +464,17 @@
         "api-design",
         "hardware/pcb",
         "hardware/pcb/footprints"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/validation/core",
+        "src/kicad_pipeline/validation/utils",
+        "src/kicad_pipeline/validation/handlers",
+        "src/kicad_pipeline/validation/models"
       ]
     },
     "src/kicad_pipeline/visualization": {
       "path": "src/kicad_pipeline/visualization",
-      "status": "active",
+      "status": "decomposed",
       "health": "red",
       "loc": 1536,
       "public_functions": 12,
@@ -379,7 +488,925 @@
         "hardware/pcb/placement",
         "ml",
         "reliability/logging"
+      ],
+      "decomposed_into": [
+        "src/kicad_pipeline/visualization/core",
+        "src/kicad_pipeline/visualization/utils",
+        "src/kicad_pipeline/visualization/handlers",
+        "src/kicad_pipeline/visualization/models"
       ]
+    },
+    "src/kicad_pipeline/core": {
+      "path": "src/kicad_pipeline/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/utils": {
+      "path": "src/kicad_pipeline/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/handlers": {
+      "path": "src/kicad_pipeline/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/agents/planner": {
+      "path": "src/kicad_pipeline/agents/planner",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/agents/executor": {
+      "path": "src/kicad_pipeline/agents/executor",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/agents/validator": {
+      "path": "src/kicad_pipeline/agents/validator",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/agents/reporter": {
+      "path": "src/kicad_pipeline/agents/reporter",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/cli/core": {
+      "path": "src/kicad_pipeline/cli/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/cli/utils": {
+      "path": "src/kicad_pipeline/cli/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/cli/handlers": {
+      "path": "src/kicad_pipeline/cli/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/cli/models": {
+      "path": "src/kicad_pipeline/cli/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/config/core": {
+      "path": "src/kicad_pipeline/config/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/config/utils": {
+      "path": "src/kicad_pipeline/config/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/config/handlers": {
+      "path": "src/kicad_pipeline/config/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/config/models": {
+      "path": "src/kicad_pipeline/config/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/github/core": {
+      "path": "src/kicad_pipeline/github/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/github/utils": {
+      "path": "src/kicad_pipeline/github/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/github/handlers": {
+      "path": "src/kicad_pipeline/github/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/github/models": {
+      "path": "src/kicad_pipeline/github/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/ipc/core": {
+      "path": "src/kicad_pipeline/ipc/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/ipc/utils": {
+      "path": "src/kicad_pipeline/ipc/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/ipc/handlers": {
+      "path": "src/kicad_pipeline/ipc/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/ipc/models": {
+      "path": "src/kicad_pipeline/ipc/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/models/core": {
+      "path": "src/kicad_pipeline/models/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/models/utils": {
+      "path": "src/kicad_pipeline/models/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/models/handlers": {
+      "path": "src/kicad_pipeline/models/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/models/models": {
+      "path": "src/kicad_pipeline/models/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/optimization/placement": {
+      "path": "src/kicad_pipeline/optimization/placement",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/optimization/routing": {
+      "path": "src/kicad_pipeline/optimization/routing",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/optimization/thermal": {
+      "path": "src/kicad_pipeline/optimization/thermal",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/optimization/cost": {
+      "path": "src/kicad_pipeline/optimization/cost",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/orchestrator/core": {
+      "path": "src/kicad_pipeline/orchestrator/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/orchestrator/utils": {
+      "path": "src/kicad_pipeline/orchestrator/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/orchestrator/handlers": {
+      "path": "src/kicad_pipeline/orchestrator/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/orchestrator/models": {
+      "path": "src/kicad_pipeline/orchestrator/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/parts/core": {
+      "path": "src/kicad_pipeline/parts/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/parts/utils": {
+      "path": "src/kicad_pipeline/parts/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/parts/handlers": {
+      "path": "src/kicad_pipeline/parts/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/parts/models": {
+      "path": "src/kicad_pipeline/parts/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/pcb/core": {
+      "path": "src/kicad_pipeline/pcb/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/pcb/layout": {
+      "path": "src/kicad_pipeline/pcb/layout",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/pcb/routing": {
+      "path": "src/kicad_pipeline/pcb/routing",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/pcb/validation": {
+      "path": "src/kicad_pipeline/pcb/validation",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/pcb/export": {
+      "path": "src/kicad_pipeline/pcb/export",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/production/core": {
+      "path": "src/kicad_pipeline/production/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/production/utils": {
+      "path": "src/kicad_pipeline/production/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/production/handlers": {
+      "path": "src/kicad_pipeline/production/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/production/models": {
+      "path": "src/kicad_pipeline/production/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/requirements/core": {
+      "path": "src/kicad_pipeline/requirements/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/requirements/utils": {
+      "path": "src/kicad_pipeline/requirements/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/requirements/handlers": {
+      "path": "src/kicad_pipeline/requirements/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/requirements/models": {
+      "path": "src/kicad_pipeline/requirements/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/research/core": {
+      "path": "src/kicad_pipeline/research/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/research/utils": {
+      "path": "src/kicad_pipeline/research/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/research/handlers": {
+      "path": "src/kicad_pipeline/research/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/research/models": {
+      "path": "src/kicad_pipeline/research/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/routing/core": {
+      "path": "src/kicad_pipeline/routing/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/routing/utils": {
+      "path": "src/kicad_pipeline/routing/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/routing/handlers": {
+      "path": "src/kicad_pipeline/routing/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/routing/models": {
+      "path": "src/kicad_pipeline/routing/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/schematic/core": {
+      "path": "src/kicad_pipeline/schematic/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/schematic/symbols": {
+      "path": "src/kicad_pipeline/schematic/symbols",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/schematic/netlist": {
+      "path": "src/kicad_pipeline/schematic/netlist",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/schematic/validation": {
+      "path": "src/kicad_pipeline/schematic/validation",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/sexp/core": {
+      "path": "src/kicad_pipeline/sexp/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/sexp/utils": {
+      "path": "src/kicad_pipeline/sexp/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/sexp/handlers": {
+      "path": "src/kicad_pipeline/sexp/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/sexp/models": {
+      "path": "src/kicad_pipeline/sexp/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/validation/core": {
+      "path": "src/kicad_pipeline/validation/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/validation/utils": {
+      "path": "src/kicad_pipeline/validation/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/validation/handlers": {
+      "path": "src/kicad_pipeline/validation/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/validation/models": {
+      "path": "src/kicad_pipeline/validation/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/visualization/core": {
+      "path": "src/kicad_pipeline/visualization/core",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/visualization/utils": {
+      "path": "src/kicad_pipeline/visualization/utils",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/visualization/handlers": {
+      "path": "src/kicad_pipeline/visualization/handlers",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
+    },
+    "src/kicad_pipeline/visualization/models": {
+      "path": "src/kicad_pipeline/visualization/models",
+      "status": "active",
+      "health": "new",
+      "loc": 0,
+      "public_functions": 0,
+      "test_coverage": 0,
+      "last_change": "2026-04-05",
+      "sub_modules": [],
+      "manager": false,
+      "domains": []
     }
   }
 }

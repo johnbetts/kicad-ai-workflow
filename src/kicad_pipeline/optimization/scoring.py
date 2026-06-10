@@ -1658,6 +1658,19 @@ def compute_fast_placement_score(
     overall = _weighted_geometric_mean(scores)
     grade = score_to_grade(overall)
 
+    # Hard collision gate: any board with collisions is penalized.
+    # The collision score uses diminishing penalties, so even boards with
+    # many collisions can score C or B overall.  Cap grade to prevent the
+    # optimizer from settling on collision-tolerant layouts.
+    # collision_score < 0.75 means ≥5 collisions; < 0.50 means ≥12.
+    collision_dim_score = dims["collision"][0]
+    if collision_dim_score < 0.50 and grade in ("A", "B", "C"):
+        grade = "D"
+    elif collision_dim_score < 0.75 and grade in ("A", "B"):
+        grade = "C"
+    elif collision_dim_score < 1.0 and grade == "A":
+        grade = "B"
+
     return QualityScore(
         board_cost=0.0,
         electrical_score=round(electrical_score, 4),

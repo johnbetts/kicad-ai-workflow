@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from kicad_pipeline.cli.main import main
+from kicad_pipeline.cli import main
 from kicad_pipeline.models.requirements import (
     Component,
     Net,

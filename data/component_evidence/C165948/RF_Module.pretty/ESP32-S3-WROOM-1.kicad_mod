@@ -654,7 +654,7 @@
   )
   (model "${KICAD10_3DMODEL_DIR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step"
     (offset
-      (xyz 0.0 0.0 0.0)
+      (xyz 0.0 -8.88178e-16 0.0)
     )
     (scale
       (xyz 1.0 1.0 1.0)

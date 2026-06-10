@@ -1,0 +1,86 @@
+[
+  {
+    "iteration": 1,
+    "board_w": 160,
+    "board_h": 80,
+    "crossings": 803,
+    "length_mm": 5096,
+    "collisions": 48,
+    "cross_group": 10,
+    "zone_overflows": 1,
+    "elapsed_s": 15.4,
+    "notes": "baseline"
+  },
+  {
+    "iteration": 2,
+    "board_w": 170,
+    "board_h": 85,
+    "crossings": 789,
+    "length_mm": 4963,
+    "collisions": 47,
+    "cross_group": 9,
+    "zone_overflows": 0,
+    "elapsed_s": 13.6,
+    "notes": "+6%"
+  },
+  {
+    "iteration": 3,
+    "board_w": 180,
+    "board_h": 90,
+    "crossings": 832,
+    "length_mm": 5308,
+    "collisions": 36,
+    "cross_group": 9,
+    "zone_overflows": 0,
+    "elapsed_s": 13.4,
+    "notes": "+12%"
+  },
+  {
+    "iteration": 4,
+    "board_w": 190,
+    "board_h": 95,
+    "crossings": 705,
+    "length_mm": 5333,
+    "collisions": 24,
+    "cross_group": 12,
+    "zone_overflows": 0,
+    "elapsed_s": 14.9,
+    "notes": "+19%"
+  },
+  {
+    "iteration": 5,
+    "board_w": 200,
+    "board_h": 100,
+    "crossings": 748,
+    "length_mm": 5635,
+    "collisions": 24,
+    "cross_group": 12,
+    "zone_overflows": 0,
+    "elapsed_s": 11.5,
+    "notes": "+25%"
+  },
+  {
+    "iteration": 6,
+    "board_w": 180,
+    "board_h": 100,
+    "crossings": 855,
+    "length_mm": 5415,
+    "collisions": 28,
+    "cross_group": 12,
+    "zone_overflows": 0,
+    "elapsed_s": 15.7,
+    "notes": "wide"
+  },
+  {
+    "iteration": 7,
+    "board_w": 200,
+    "board_h": 90,
+    "crossings": 721,
+    "length_mm": 5694,
+    "collisions": 24,
+    "cross_group": 12,
+    "zone_overflows": 0,
+    "elapsed_s": 16.6,
+    "notes": "tall"
+  }
+]

@@ -115,7 +115,7 @@
       (xyz 1.0 1.0 1.0)
     )
     (rotate
-      (xyz 0.0 0.0 0.0)
+      (xyz 0.0 0.0 90.0)
     )
   )
   (embedded_fonts no)

@@ -262,5 +262,16 @@
     (layers "*.Cu" "*.Mask")
     (drill 3.3)
   )
+  (model "${KICAD10_3DMODEL_DIR}/Connector_RJ.3dshapes/RJ45_Amphenol_RJHSE538X.step"
+    (offset
+      (xyz -4.45 -4.35 0.0)
+    )
+    (scale
+      (xyz 1.0 1.0 1.0)
+    )
+    (rotate
+      (xyz 0.0 0.0 0.0)
+    )
+  )
   (embedded_fonts no)
 )

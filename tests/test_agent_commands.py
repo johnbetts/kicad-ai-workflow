@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from kicad_pipeline.agents.commands import (
+from kicad_pipeline.agents import (
     _command_from_dict,
     _command_to_dict,
     acknowledge_command,

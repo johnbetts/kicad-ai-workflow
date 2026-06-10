@@ -53,29 +53,15 @@
       (hide yes)
     )
   )
-  (fp_line
-    (start -1.85 -1.05)
-    (end 1.85 -1.05)
-    (layer "F.CrtYd")
-    (width 0.153)
-  )
-  (fp_line
-    (start 1.85 -1.05)
-    (end 1.85 1.05)
-    (layer "F.CrtYd")
-    (width 0.153)
-  )
-  (fp_line
-    (start 1.85 1.05)
-    (end -1.85 1.05)
-    (layer "F.CrtYd")
-    (width 0.153)
-  )
-  (fp_line
-    (start -1.85 1.05)
-    (end -1.85 -1.05)
-    (layer "F.CrtYd")
-    (width 0.153)
+  (property "LCSC" "C15849"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
   )
   (fp_line
     (start -2.7 -0.36)
@@ -87,6 +73,30 @@
     (start 2.7 -0.36)
     (end 2.7 0.36)
     (layer "F.SilkS")
+    (width 0.153)
+  )
+  (fp_line
+    (start -2.6 -1.1)
+    (end 2.6 -1.1)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 2.6 -1.1)
+    (end 2.6 1.1)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 2.6 1.1)
+    (end -2.6 1.1)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start -2.6 1.1)
+    (end -2.6 -1.1)
+    (layer "F.CrtYd")
     (width 0.153)
   )
   (pad "1" smd rect
