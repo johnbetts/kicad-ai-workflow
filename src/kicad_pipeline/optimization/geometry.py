@@ -277,15 +277,17 @@ def convex_polygons_overlap(
     """Separating-axis overlap test for two convex polygons.
 
     With a positive *clearance_mm*, also returns ``True`` when the
-    polygons are closer than the clearance (treats near-touching as
-    overlap).
+    polygons are strictly closer than the clearance; a gap of exactly
+    the clearance satisfies a "minimum gap" requirement and is NOT an
+    overlap (epsilon-tolerant for float round-off).
     """
     if len(a) < 3 or len(b) < 3:
         return False
+    eps = 1e-9
     for ax, ay in _sat_axes(a) + _sat_axes(b):
         a_min, a_max = _project_polygon(a, ax, ay)
         b_min, b_max = _project_polygon(b, ax, ay)
-        if a_max + clearance_mm < b_min or b_max + clearance_mm < a_min:
+        if a_max + clearance_mm < b_min + eps or b_max + clearance_mm < a_min + eps:
             return False
     return True
 

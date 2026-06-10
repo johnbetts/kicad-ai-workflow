@@ -1,0 +1,27 @@
+{
+  "rules": [
+    {
+      "match": {"footprint_contains": "ESP32"},
+      "keepout": {
+        "kind": "rf_antenna",
+        "polygon_mm": [[-9.0, -19.0], [9.0, -19.0], [9.0, -12.0], [-9.0, -12.0]]
+      },
+      "edge_pin": true
+    },
+    {
+      "match": {"ref_prefix": "K", "footprint_contains": "Relay"},
+      "isolation_domain": "MAINS"
+    },
+    {
+      "match": {"footprint_contains": "RJ45"},
+      "edge_pin": true
+    },
+    {
+      "match": {"footprint_contains": "USB"},
+      "edge_pin": true
+    }
+  ],
+  "isolation_gaps": [
+    {"domain_a": "MAINS", "domain_b": "LOGIC", "min_mm": 6.0}
+  ]
+}
