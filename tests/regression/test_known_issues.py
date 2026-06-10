@@ -495,3 +495,40 @@ class TestKI019AntennaKeepoutPosition:
                     f"ESP32 at ({esp_fp.position.x:.1f}, {esp_fp.position.y:.1f}) — "
                     f"likely a hardcoded fallback (KI-019)"
                 )
+
+
+def test_relay_training_nets_match_sanyou_pinout() -> None:
+    """KI: relay coil/contact nets were swapped onto the wrong pads.
+
+    The SANYOU SRD footprint pinout is pad1=COM, pad2=Coil-, pad3=NO,
+    pad4=NC, pad5=Coil+. The relay training board once wired the coil
+    drive to pad 4 (the NC contact) and +5V to pad 1 (the COM blade) —
+    an electrically dead board that no placement score could catch.
+    Both the Component pin list and the Net list must agree with the
+    physical pinout.
+    """
+    import importlib
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    mod = importlib.import_module("train_relay_group")
+    reqs = mod._build_requirements()
+
+    net_of_pad = {}
+    for net in reqs.nets:
+        for conn in net.connections:
+            if conn.ref == "K1":
+                net_of_pad[conn.pin] = net.name
+    assert net_of_pad["1"] == "RELAY_COM1", net_of_pad
+    assert net_of_pad["2"] == "RELAY_COIL1", net_of_pad
+    assert net_of_pad["3"] == "RELAY_NO1", net_of_pad
+    assert net_of_pad["4"] == "RELAY_NC1", net_of_pad
+    assert net_of_pad["5"] == "+5V_RELAY", net_of_pad
+
+    k1 = next(c for c in reqs.components if c.ref == "K1")
+    for pin in k1.pins:
+        assert pin.net == net_of_pad[pin.number], (
+            f"K1 pin {pin.number}: Component says {pin.net}, "
+            f"Net list says {net_of_pad[pin.number]}"
+        )

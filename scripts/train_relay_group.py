@@ -366,7 +366,7 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
             name=f"RELAY_COIL{ch}",
             connections=(
                 NetConnection(f"Q{ch}", "2"),
-                NetConnection(f"K{ch}", "4"),
+                NetConnection(f"K{ch}", "2"),
                 NetConnection(f"D{ch}", "1"),
                 NetConnection(f"R{ch + 4}", "1"),
             ),
@@ -374,7 +374,7 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
         Net(
             name=f"RELAY_COM{ch}",
             connections=(
-                NetConnection(f"K{ch}", "5"),
+                NetConnection(f"K{ch}", "1"),
                 NetConnection(f"J{ch}", "1"),
             ),
         ),
@@ -388,7 +388,7 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
         Net(
             name=f"RELAY_NC{ch}",
             connections=(
-                NetConnection(f"K{ch}", "2"),
+                NetConnection(f"K{ch}", "4"),
                 NetConnection(f"J{ch}", "3"),
             ),
         ),
@@ -459,7 +459,7 @@ def _build_requirements() -> ProjectRequirements:
         NetConnection("C2", "1"),
     ]
     for ch in range(1, 5):
-        relay_5v_conns.append(NetConnection(f"K{ch}", "1"))
+        relay_5v_conns.append(NetConnection(f"K{ch}", "5"))
         relay_5v_conns.append(NetConnection(f"D{ch}", "2"))
 
     # GND: source/logic side — connects to L2 input

@@ -94,6 +94,8 @@ class _Index:
 
     def _is_power_net(self, net: Net) -> bool:
         upper = net.name.upper()
+        if net.name.startswith("+"):
+            return True  # KiCad rail convention: +5V_RELAY, +3V3_A, ...
         if _POWER_NET_RE.match(net.name) or any(t in upper for t in _POWER_NAME_TOKENS):
             return True
         # A net feeding an IC POWER_IN pin is a power net even if oddly named.
@@ -276,6 +278,77 @@ def _connector_support_attaches(idx: _Index) -> list[PinAttach]:
     return out
 
 
+#: Partner preference for chain completion: actively-driving parts first.
+_CHAIN_PARTNER_RANK = {"Q": 0, "U": 1, "K": 2, "R": 3, "D": 4, "C": 5, "L": 6}
+_CHAIN_MAX_MM = 8.0
+
+
+def _chain_completion_attaches(
+    idx: _Index, attached_srcs: frozenset[str],
+) -> list[PinAttach]:
+    """Attach leftover 2-3 pad passives through their most private net.
+
+    Indicator chains (relay LED + series resistor), snubbers, and other
+    support parts that no specific rule caught would otherwise fall to
+    the cell's orphan shelf and break the column layout the reference
+    board demonstrates. Each unattached R/C/D/L component is linked to
+    the best partner (driver Q first, then U/K/...) on its smallest
+    signal net, so the generator's chain inheritance can stack it.
+    """
+    conn_count = {n.name: len(n.connections) for n in idx.nets}
+    out: list[PinAttach] = []
+    new_dst: dict[str, str] = {}  # src ref -> dst ref emitted by THIS pass
+    for comp in sorted(idx.components, key=lambda c: _ref_sort_key(c.ref)):
+        if ref_alpha_prefix(comp.ref) not in ("R", "C", "D", "L"):
+            continue
+        if comp.ref in attached_srcs:
+            continue
+        fp_lower = comp.footprint.lower()
+        if any(t in fp_lower for t in _CONNECTOR_FP_TOKENS):
+            continue
+        for net_name in sorted(
+            (n for n in idx.nets_of(comp.ref) if idx.is_signal_net(n)),
+            key=lambda n: (conn_count.get(n, 0), n),
+        ):
+            partners = sorted(
+                (
+                    (other, pins)
+                    for net in idx.nets
+                    if net.name == net_name
+                    for other, pins in (
+                        (c.ref, c.pin) for c in net.connections
+                    )
+                    if other != comp.ref and other in idx.by_ref
+                    # No 2-cycles: a partner already attached TO this
+                    # component would leave both unreachable from the
+                    # anchor (the generator places hosts before tails).
+                    and new_dst.get(other) != comp.ref
+                    and not any(
+                        t in idx.by_ref[other].footprint.lower()
+                        for t in _CONNECTOR_FP_TOKENS
+                    )
+                ),
+                key=lambda rp: (
+                    _CHAIN_PARTNER_RANK.get(ref_alpha_prefix(rp[0]), 9),
+                    _ref_sort_key(rp[0]),
+                ),
+            )
+            if not partners:
+                continue
+            partner_ref, partner_pin = partners[0]
+            src_pin = idx.nets_of(comp.ref)[net_name][0]
+            out.append(PinAttach(
+                src=PadRef(comp.ref, src_pin),
+                dst=PadRef(partner_ref, partner_pin),
+                net=net_name,
+                max_mm=_CHAIN_MAX_MM,
+                ideal_mm=_CHAIN_MAX_MM / 2.0,
+            ))
+            new_dst[comp.ref] = partner_ref
+            break
+    return out
+
+
 def _group_sequences(idx: _Index) -> list[SequenceAlong]:
     """``placement_group`` + ``placement_order`` become horizontal sequences."""
     groups: dict[str, list[Component]] = {}
@@ -342,6 +415,9 @@ def compile_constraints(
         + _relay_driver_attaches(idx)
         + _connector_support_attaches(idx)
     ):
+        attaches.setdefault((pa.src.ref, pa.src.pin, pa.dst.ref, pa.dst.pin), pa)
+    attached_srcs = frozenset(k[0] for k in attaches)
+    for pa in _chain_completion_attaches(idx, attached_srcs):
         attaches.setdefault((pa.src.ref, pa.src.pin, pa.dst.ref, pa.dst.pin), pa)
     sequences: dict[tuple[str, ...], SequenceAlong] = {
         s.refs: s for s in _group_sequences(idx) + _array_sequences(idx)

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.exceptions import PCBError
+from kicad_pipeline.models.pcb import Point
 from kicad_pipeline.optimization.geometry import (
     convex_polygons_overlap,
     polygon_bbox,
@@ -229,6 +230,41 @@ def _strip_extent(
     )
 
 
+def _ladder_facing_rotation(
+    ref_cells: list[Cell],
+    paired_cells: list[Cell],
+    horizontal: bool,
+) -> CardinalRotation | None:
+    """Rotation pointing ladder-shared ports at the paired connector strip.
+
+    Evaluated over ALL four rotations — choosing the relay's AXIS as
+    well as its flip: a relay whose contact pins must reach the
+    terminal row needs its long axis perpendicular to that row, even
+    when a sideways orientation would give a shorter strip. The shared
+    ports' mean coordinate toward the paired strip (stacked at greater
+    other-axis position) is maximized; ties prefer the smaller cell
+    extent along the strip, then the smaller angle. Returns ``None``
+    when the strips share no nets.
+    """
+    shared = {p.net for p in ref_cells[0].ports} & {
+        p.net for p in paired_cells[0].ports
+    }
+    if not shared:
+        return None
+    shared_pts = tuple(
+        Point(p.x, p.y) for p in ref_cells[0].ports if p.net in shared
+    )
+
+    def score(rot: CardinalRotation) -> tuple[float, float, float]:
+        pts = transform_polygon(shared_pts, 0.0, 0.0, -float(rot))
+        outward = sum(p.y if horizontal else p.x for p in pts) / len(pts)
+        extent = _strip_extent(ref_cells, rot, horizontal)
+        return (-outward, extent, float(rot))
+
+    best: CardinalRotation = min(_ROTATIONS, key=score)
+    return best
+
+
 def _sequence_strips(
     cells: tuple[Cell, ...],
     sequences: tuple[SequenceAlong, ...],
@@ -266,27 +302,14 @@ def _sequence_strips(
         if ok and len(ref_cells) >= 2:
             resolved.append((seq, ref_cells))
 
-    # Ladder pairing: equal-length strips whose elements are pairwise
-    # net-connected (relay K_i <-> terminal J_i) share the larger pitch,
-    # so element i of each strip lands at the same along-axis coordinate
-    # — "the terminal sits under its relay" by construction.
-    shared_pitch: dict[int, float] = {}
-    naturals: list[float] = []
-    for seq, ref_cells in resolved:
-        horizontal = seq.axis is Axis.HORIZONTAL
-        rotation: CardinalRotation = (
-            0 if _strip_extent(ref_cells, 0, horizontal)
-            <= _strip_extent(ref_cells, 90, horizontal) else 90
+    def _is_edge_strip(item: tuple[SequenceAlong, list[Cell]]) -> bool:
+        return any(
+            ref in edge_pinned for c in item[1] for ref in c.refs
         )
-        naturals.append(seq.pitch_mm if seq.pitch_mm is not None else (
-            max(
-                (c.width if rotation in (0, 180) else c.height)
-                if horizontal else
-                (c.height if rotation in (0, 180) else c.width)
-                for c in ref_cells
-            )
-            + clearance
-        ))
+
+    # Ladder pairing FIRST (needs only ports): equal-length strips whose
+    # elements are pairwise net-connected (relay K_i <-> terminal J_i).
+    ladder_pairs: dict[int, int] = {}
     for i, (seq_a, cells_a) in enumerate(resolved):
         for j in range(i + 1, len(resolved)):
             seq_b, cells_b = resolved[j]
@@ -296,22 +319,62 @@ def _sequence_strips(
                 {p.net for p in ca.ports} & {p.net for p in cb.ports}
                 for ca, cb in zip(cells_a, cells_b, strict=True)
             ):
-                pitch = max(
-                    shared_pitch.get(i, naturals[i]),
-                    shared_pitch.get(j, naturals[j]),
-                )
-                shared_pitch[i] = pitch
-                shared_pitch[j] = pitch
+                ladder_pairs[i] = j
+                ladder_pairs[j] = i
+
+    # Rotations: edge strips native 0; strips ladder-paired with an
+    # edge strip face their shared ports at it (axis AND flip chosen
+    # together); the rest minimize extent. Decided before pitch so the
+    # natural pitch is computed with the rotation actually used.
+    rotations: list[CardinalRotation] = []
+    for idx_, (seq, ref_cells) in enumerate(resolved):
+        horizontal = seq.axis is Axis.HORIZONTAL
+        if _is_edge_strip((seq, ref_cells)):
+            rotations.append(0)
+            continue
+        pair = ladder_pairs.get(idx_)
+        facing_rot: CardinalRotation | None = None
+        if pair is not None and _is_edge_strip(resolved[pair]):
+            facing_rot = _ladder_facing_rotation(
+                ref_cells, resolved[pair][1], horizontal,
+            )
+        if facing_rot is not None:
+            rotations.append(facing_rot)
+        else:
+            rotations.append(
+                0 if _strip_extent(ref_cells, 0, horizontal)
+                <= _strip_extent(ref_cells, 90, horizontal) else 90
+            )
+
+    # Paired strips share the larger pitch so element i of each strip
+    # lands at the same along-axis coordinate — "the terminal sits
+    # under its relay" by construction.
+    shared_pitch: dict[int, float] = {}
+    naturals: list[float] = []
+    for idx_, (seq, ref_cells) in enumerate(resolved):
+        horizontal = seq.axis is Axis.HORIZONTAL
+        rotation = rotations[idx_]
+        naturals.append(seq.pitch_mm if seq.pitch_mm is not None else (
+            max(
+                (c.width if rotation in (0, 180) else c.height)
+                if horizontal else
+                (c.height if rotation in (0, 180) else c.width)
+                for c in ref_cells
+            )
+            + clearance
+        ))
+    for i, j in sorted(ladder_pairs.items()):
+        pitch = max(
+            shared_pitch.get(i, naturals[i]),
+            shared_pitch.get(j, naturals[j]),
+        )
+        shared_pitch[i] = pitch
+        shared_pitch[j] = pitch
 
     # Edge-pinned strips (connector banks) go LAST so they form the
     # group's outermost row — the side that will be snapped flush to a
     # board edge. They keep native rotation 0 (connector openings are
     # designed outward in the footprint frame).
-    def _is_edge_strip(item: tuple[SequenceAlong, list[Cell]]) -> bool:
-        return any(
-            ref in edge_pinned for c in item[1] for ref in c.refs
-        )
-
     ordered = sorted(
         enumerate(resolved), key=lambda kv: (_is_edge_strip(kv[1]), kv[0])
     )
@@ -319,14 +382,9 @@ def _sequence_strips(
     cursor_other = 0.0
     for seq_idx, (seq, ref_cells) in ordered:
         horizontal = seq.axis is Axis.HORIZONTAL
+        strip_rot = rotations[seq_idx]
         if _is_edge_strip((seq, ref_cells)):
-            strip_rot: CardinalRotation = 0
             facing = Edge.SOUTH if horizontal else Edge.EAST
-        else:
-            strip_rot = (
-                0 if _strip_extent(ref_cells, 0, horizontal)
-                <= _strip_extent(ref_cells, 90, horizontal) else 90
-            )
         pitch = shared_pitch.get(seq_idx, naturals[seq_idx])
         strip_thickness = max(
             (c.height if strip_rot in (0, 180) else c.width)

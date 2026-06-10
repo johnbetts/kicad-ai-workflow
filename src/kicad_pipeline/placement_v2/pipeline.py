@@ -263,6 +263,14 @@ def run_placement_v2(
         if sub.anchor_ref not in member_refs or len(member_refs) < 2:
             continue
         refs_set = frozenset(member_refs)
+        externals = _external_nets_for(refs_set, net_pads)
+        # Connector-facing nets orient THT anchors (contacts toward the
+        # terminals, support halo away) — power rails carry no direction.
+        edge_refs = frozenset(ep.ref for ep in constraints.edge_pins)
+        interface = frozenset(
+            net for net in externals
+            if any(pr.ref in edge_refs for pr in net_pads.get(net, ()))
+        )
         try:
             cell = generate_cell(
                 name=f"{sub.circuit_type.value}:{sub.anchor_ref}",
@@ -270,7 +278,8 @@ def run_placement_v2(
                 anchor=sub.anchor_ref,
                 footprints={r: footprints[r] for r in member_refs},
                 constraints=constraints.for_refs(refs_set),
-                external_nets=_external_nets_for(refs_set, net_pads),
+                external_nets=externals,
+                interface_nets=interface,
             )
         except CellGenerationError as exc:
             cell_violations.extend(exc.violations)

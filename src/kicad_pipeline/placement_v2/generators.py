@@ -29,6 +29,7 @@ from kicad_pipeline.placement_v2.cells import Cell, CellProof, PlacedMember, Por
 from kicad_pipeline.placement_v2.footprint_geom import (
     courtyard_halfdims,
     courtyard_in_frame,
+    pad_offset_from_centroid,
     pad_position_in_frame,
 )
 from kicad_pipeline.placement_v2.ir import (
@@ -98,8 +99,6 @@ def _best_rotation(
     outward normal (the pad should point back toward the host pad).
     Deterministic tie-break: smallest angle.
     """
-    from kicad_pipeline.placement_v2.footprint_geom import pad_offset_from_centroid
-
     px, py = pad_offset_from_centroid(fp, src_pin)
     best_rot = 0.0
     best_dot = math.inf
@@ -119,8 +118,6 @@ def _attach_position(
 ) -> tuple[float, float]:
     """Member centroid such that its src pad sits *ideal_mm* outward of
     the target pad along *normal*."""
-    from kicad_pipeline.placement_v2.footprint_geom import pad_offset_from_centroid
-
     px, py = pad_offset_from_centroid(fp, src_pin)
     rx, ry = _rotated(px, py, rotation)
     pad_target_x = target_x + normal[0] * ideal_mm
@@ -136,6 +133,7 @@ def generate_cell(
     constraints: ConstraintSet,
     external_nets: Mapping[str, tuple[PadRef, ...]] | None = None,
     clearance_mm: float = _CLEARANCE_MM,
+    interface_nets: frozenset[str] = frozenset(),
 ) -> Cell:
     """Lay out one subcircuit and prove its internal constraints.
 
@@ -143,6 +141,9 @@ def generate_cell(
     footprint. *constraints* should already be subset to this cell via
     ``ConstraintSet.for_refs``. *external_nets* maps each net leaving
     the cell to the internal pads that carry it (becomes ports).
+    *interface_nets* names the connector-facing subset of those nets
+    (they reach an edge-pinned ref); on THT anchors the support halo
+    stacks on the opposite side of those pads.
     """
     refs = set(footprints)
     if anchor not in refs:
@@ -155,11 +156,19 @@ def generate_cell(
     seq_refs = _place_sequences(
         name, anchor, footprints, constraints.sequences, placed, clearance_mm
     )
-    _place_attachments(
-        footprints, constraints.pin_attach, placed, seq_refs, clearance_mm
+    anchor_normal = _anti_interface_normal(
+        footprints[anchor],
+        {
+            net: pads for net, pads in (external_nets or {}).items()
+            if net in interface_nets
+        },
+    )
+    normals = _place_attachments(
+        footprints, constraints.pin_attach, placed, seq_refs, clearance_mm,
+        anchor_normal_override={anchor: anchor_normal} if anchor_normal else None,
     )
     _place_orphans(footprints, refs, placed, clearance_mm)
-    _resolve_overlaps(footprints, placed, clearance_mm)
+    _resolve_overlaps(footprints, placed, clearance_mm, normals)
 
     violations = _verify_cell(footprints, constraints, placed, clearance_mm)
     checks = (
@@ -187,6 +196,44 @@ def generate_cell(
         keepouts=keepouts,
         proof=CellProof(checks=checks),
     )
+
+
+def _anti_interface_normal(
+    anchor_fp: Footprint,
+    external_nets: Mapping[str, tuple[PadRef, ...]],
+) -> tuple[float, float] | None:
+    """For a THT anchor: the direction AWAY from its interface pads.
+
+    Through-hole anchors (relays, transformers, bulky connectors) talk
+    to their connectors through one end — their support halo belongs on
+    the opposite end, in a column along the body axis (the reference
+    board's driver-band doctrine). *external_nets* here must already be
+    restricted to the connector-facing interface nets: power rails span
+    the whole board and carry no direction. Returns the unit direction
+    opposite the mean interface pad offset, snapped to a cardinal axis;
+    ``None`` for SMD anchors or when there is no clear interface side
+    (supports then follow per-pad geometry as usual).
+    """
+    if anchor_fp.attr != "through_hole":
+        return None
+    offsets: list[tuple[float, float]] = []
+    for pads in external_nets.values():
+        for pr in pads:
+            if pr.ref != anchor_fp.ref:
+                continue
+            try:
+                offsets.append(pad_offset_from_centroid(anchor_fp, pr.pin))
+            except KeyError:
+                continue
+    if not offsets:
+        return None
+    mx = sum(o[0] for o in offsets) / len(offsets)
+    my = sum(o[1] for o in offsets) / len(offsets)
+    if math.hypot(mx, my) < 1.0:
+        return None  # interface pads surround the body: no clear side
+    if abs(mx) >= abs(my):
+        return (-1.0, 0.0) if mx > 0 else (1.0, 0.0)
+    return (0.0, -1.0) if my > 0 else (0.0, 1.0)
 
 
 def _place_sequences(
@@ -249,9 +296,21 @@ def _place_attachments(
     placed: dict[str, PlacedMember],
     skip: frozenset[str],
     clearance_mm: float,
-) -> None:
-    """Shelf-pack attached members along the side of their target pad,
-    in BFS waves out from already-placed hosts."""
+    normals: dict[str, tuple[float, float]] | None = None,
+    anchor_normal_override: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Place attached members at their target pads in BFS waves.
+
+    Each member lands pad-aligned at its constraint's ideal depth along
+    the host side's outward normal. Members of a chain INHERIT their
+    host's normal (signal flows outward in one direction — the
+    reference-board driver column: coil -> flyback -> Q -> LED/R), and
+    same-spot conflicts are stacked in DEPTH by overlap resolution
+    rather than shifted sideways, which keeps channel cells no wider
+    than their anchor. Returns the outward normal per placed ref.
+    """
+    if normals is None:
+        normals = {}
     pending = [
         a for a in attachments
         if a.src.ref in footprints and a.src.ref not in skip
@@ -263,11 +322,8 @@ def _place_attachments(
         ]
         if not ready:
             break
-        # Group by (host, side) for shelf packing.
-        groups: dict[tuple[str, tuple[float, float]], list[PinAttach]] = {}
-        plan: dict[str, tuple[PinAttach, tuple[float, float], tuple[float, float]]] = {}
-        for a in ready:
-            if a.src.ref in plan:
+        for a in sorted(ready, key=lambda a: (a.dst.ref, a.src.ref)):
+            if a.src.ref in placed:
                 continue  # first attachment wins; rest are verified only
             host = placed[a.dst.ref]
             host_fp = footprints[a.dst.ref]
@@ -275,38 +331,23 @@ def _place_attachments(
             tx, ty = pad_position_in_frame(
                 host_fp, a.dst.pin, host.x, host.y, host.rotation_deg
             )
-            normal = _side_normal(tx, ty, host.x, host.y, hw, hh)
-            plan[a.src.ref] = (a, (tx, ty), normal)
-            groups.setdefault((a.dst.ref, normal), []).append(a)
-
-        for (_host_ref, normal), group in sorted(
-            groups.items(), key=lambda kv: (kv[0][0], kv[0][1])
-        ):
-            along_axis = (abs(normal[1]), abs(normal[0]))  # perpendicular
-            group.sort(
-                key=lambda a: (
-                    plan[a.src.ref][1][0] * along_axis[0]
-                    + plan[a.src.ref][1][1] * along_axis[1],
-                    a.src.ref,
-                )
+            # Chain continuation: keep growing along the host's own
+            # outward direction when the host is itself an attachment.
+            # THT anchors with a clear interface side override the
+            # per-pad geometry: their halo stacks anti-interface.
+            normal = normals.get(a.dst.ref)
+            if normal is None and anchor_normal_override is not None:
+                normal = anchor_normal_override.get(a.dst.ref)
+            if normal is None:
+                normal = _side_normal(tx, ty, host.x, host.y, hw, hh)
+            fp = footprints[a.src.ref]
+            rot = _best_rotation(fp, a.src.pin, normal)
+            x, y = _attach_position(fp, a.src.pin, rot, tx, ty, normal, a.ideal_mm)
+            placed[a.src.ref] = PlacedMember(
+                ref=a.src.ref, x=x, y=y, rotation_deg=rot
             )
-            cursor = -math.inf
-            for a in group:
-                _, (tx, ty), nrm = plan[a.src.ref]
-                fp = footprints[a.src.ref]
-                rot = _best_rotation(fp, a.src.pin, nrm)
-                x, y = _attach_position(fp, a.src.pin, rot, tx, ty, nrm, a.ideal_mm)
-                hw, hh = courtyard_halfdims(fp)
-                extent = hw if along_axis[0] else hh
-                desired = x * along_axis[0] + y * along_axis[1]
-                pos_along = max(cursor + extent + clearance_mm, desired)
-                shift = pos_along - desired
-                x += shift * along_axis[0]
-                y += shift * along_axis[1]
-                cursor = pos_along + extent
-                placed[a.src.ref] = PlacedMember(
-                    ref=a.src.ref, x=x, y=y, rotation_deg=rot
-                )
+            normals[a.src.ref] = normal
+    return normals
 
 
 def _place_orphans(
@@ -336,12 +377,27 @@ def _resolve_overlaps(
     footprints: Mapping[str, Footprint],
     placed: dict[str, PlacedMember],
     clearance_mm: float,
+    normals: dict[str, tuple[float, float]] | None = None,
 ) -> None:
-    """Push later members outward from the anchor until courtyards clear.
+    """Push later members outward until courtyards clear.
 
-    Bounded and deterministic; residual overlaps surface as violations
-    in :func:`_verify_cell` — never silently accepted.
+    A member with a recorded attachment normal is pushed along THAT
+    direction (deeper into its chain), so same-pad attachments stack as
+    a column — flyback, then transistor, then LED/resistor — instead of
+    spreading sideways. Members without a normal fall back to the
+    centroid-difference direction. Bounded and deterministic; residual
+    overlaps surface as violations in :func:`_verify_cell`.
     """
+    normals = normals or {}
+
+    def _depth(ref: str) -> float:
+        """How far out a member sits along its own attachment direction."""
+        n = normals.get(ref)
+        if n is None:
+            return -math.inf  # anchors/sequence members are never pushed first
+        m = placed[ref]
+        return m.x * n[0] + m.y * n[1]
+
     order = sorted(placed)
     for _ in range(_MAX_PUSH_STEPS):
         moved = False
@@ -352,15 +408,24 @@ def _resolve_overlaps(
                 pb = courtyard_in_frame(footprints[ref_b], b.x, b.y, b.rotation_deg)
                 if not convex_polygons_overlap(pa, pb, clearance_mm=clearance_mm):
                     continue
-                dx, dy = b.x - a.x, b.y - a.y
-                norm = math.hypot(dx, dy)
-                if norm < 1e-9:
-                    dx, dy, norm = 0.0, 1.0, 1.0
-                placed[ref_b] = PlacedMember(
-                    ref_b,
-                    b.x + dx / norm * _PUSH_STEP_MM,
-                    b.y + dy / norm * _PUSH_STEP_MM,
-                    b.rotation_deg,
+                # Push the DEEPER chain member further out, never the
+                # host it hangs from (which would drag the host past
+                # its own attachment bound).
+                pushee = ref_b if _depth(ref_b) >= _depth(ref_a) else ref_a
+                target = placed[pushee]
+                push = normals.get(pushee)
+                if push is None:
+                    other = placed[ref_a if pushee == ref_b else ref_b]
+                    dx, dy = target.x - other.x, target.y - other.y
+                    norm = math.hypot(dx, dy)
+                    if norm < 1e-9:
+                        dx, dy, norm = 0.0, 1.0, 1.0
+                    push = (dx / norm, dy / norm)
+                placed[pushee] = PlacedMember(
+                    pushee,
+                    target.x + push[0] * _PUSH_STEP_MM,
+                    target.y + push[1] * _PUSH_STEP_MM,
+                    target.rotation_deg,
                 )
                 moved = True
         if not moved:
