@@ -1,0 +1,224 @@
+"""Constraint IR — the single source of truth for placement intent.
+
+Every placement rule is a frozen dataclass here. The same constraint
+objects are consumed by the solvers (cell generators, floorplanner)
+and by the sign-off verifier, so enforcement and checking can never
+drift apart. Constraints are compiled from three sources, in priority
+order: netlist topology, per-part-class rules, and persisted human
+feedback locks (see ``compile.py``).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
+from kicad_pipeline.models.pcb import Point
+
+Polygon = tuple[Point, ...]
+"""Ordered polygon vertices in mm. Frame depends on context (cell-local
+for :class:`CellKeepout`, board frame after placement)."""
+
+
+class Edge(Enum):
+    """A board edge in the PCB coordinate convention (Y grows down)."""
+
+    NORTH = "north"  # y = y_min
+    SOUTH = "south"  # y = y_max
+    EAST = "east"  # x = x_max
+    WEST = "west"  # x = x_min
+
+
+class Axis(Enum):
+    """Layout axis for sequence constraints."""
+
+    HORIZONTAL = "horizontal"
+    VERTICAL = "vertical"
+
+
+class KeepoutKind(Enum):
+    """Why a keepout region exists; drives what may violate it."""
+
+    RF_ANTENNA = "rf_antenna"  # no copper, no components
+    ISOLATION = "isolation"  # creepage slot / clearance region
+    THERMAL = "thermal"  # heat-sensitive exclusion
+
+
+class Severity(Enum):
+    """Violation severity. CRITICAL and MAJOR block sign-off."""
+
+    CRITICAL = "critical"
+    MAJOR = "major"
+    MINOR = "minor"
+
+
+class ConstraintSource(Enum):
+    """Where a constraint came from (priority: feedback > part > netlist)."""
+
+    NETLIST = "netlist"
+    PART_RULE = "part_rule"
+    HUMAN_FEEDBACK = "human_feedback"
+
+
+@dataclass(frozen=True)
+class PadRef:
+    """A specific pad: component ref + pin number."""
+
+    ref: str  # "U1"
+    pin: str  # "3", "A1"
+
+    def __str__(self) -> str:
+        return f"{self.ref}.{self.pin}"
+
+
+@dataclass(frozen=True)
+class PinAttach:
+    """*src* pad must sit within *max_mm* of *dst* pad (edge-to-edge intent).
+
+    The canonical decoupling/ESD/snubber constraint: the cap's pad is
+    attached to the IC pad it serves, identified by the shared net.
+    """
+
+    src: PadRef  # the supporting component's pad (e.g. C3.1)
+    dst: PadRef  # the served pad (e.g. U1.VDD pad)
+    net: str  # shared net that justifies the attachment
+    max_mm: float  # hard limit, verified at sign-off
+    ideal_mm: float  # solver target (<= max_mm)
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
+class SequenceAlong:
+    """*refs* must appear in order along *axis* (signal-flow chains, arrays).
+
+    Verified by checking the relevant coordinate of each ref is strictly
+    monotonic in sequence order. ``pitch_mm`` of ``None`` means spacing
+    is free; a value pins members to a fixed pitch (relay/ADC arrays).
+    """
+
+    axis: Axis
+    refs: tuple[str, ...]
+    pitch_mm: float | None = None
+    max_span_mm: float | None = None  # whole chain must fit in this span
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
+class EdgePin:
+    """*ref* must sit on a board edge with its opening facing outward."""
+
+    ref: str
+    edge: Edge | None = None  # None = solver picks nearest edge
+    face_out: bool = True
+    max_edge_distance_mm: float = 5.0
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
+class CellKeepout:
+    """A keepout region owned by a component, in CELL-LOCAL frame.
+
+    The polygon transforms with the owning cell (rotation included), so
+    "the keepout is under the antenna" is true by construction. The
+    verifier re-derives the board-frame polygon from the owner's final
+    position and rotation and asserts the board file matches.
+    """
+
+    owner: str  # ref of the owning component ("U1")
+    polygon: Polygon  # local frame, relative to owner origin
+    kind: KeepoutKind
+    source: ConstraintSource = ConstraintSource.PART_RULE
+
+
+@dataclass(frozen=True)
+class IsolationGap:
+    """Minimum edge-to-edge gap between two voltage domains' cells."""
+
+    domain_a: str  # e.g. "MAINS"
+    domain_b: str  # e.g. "LOGIC"
+    min_mm: float
+    source: ConstraintSource = ConstraintSource.PART_RULE
+
+
+@dataclass(frozen=True)
+class BoardContain:
+    """Every pad, courtyard, and 3D body must sit inside the outline."""
+
+    margin_mm: float = 0.5
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
+class Violation:
+    """A failed constraint check, produced by generators and the verifier.
+
+    ``measured`` vs ``limit`` makes every violation quantitative — there
+    is no "looks wrong" verdict at this layer.
+    """
+
+    constraint: str  # repr of the violated constraint
+    refs: tuple[str, ...]
+    severity: Severity
+    measured: float
+    limit: float
+    message: str
+
+
+@dataclass(frozen=True)
+class ConstraintSet:
+    """The complete compiled placement intent for one board."""
+
+    pin_attach: tuple[PinAttach, ...] = ()
+    sequences: tuple[SequenceAlong, ...] = ()
+    edge_pins: tuple[EdgePin, ...] = ()
+    keepouts: tuple[CellKeepout, ...] = ()
+    isolation: tuple[IsolationGap, ...] = ()
+    contain: BoardContain = field(default_factory=BoardContain)
+
+    def for_refs(self, refs: frozenset[str]) -> ConstraintSet:
+        """Subset of constraints whose participants all lie within *refs*.
+
+        Used by cell generators to extract the constraints they must
+        prove internally; board-level constraints (edge pins, isolation,
+        containment) are kept only when they name a member ref.
+        """
+        return ConstraintSet(
+            pin_attach=tuple(
+                c for c in self.pin_attach
+                if c.src.ref in refs and c.dst.ref in refs
+            ),
+            sequences=tuple(
+                c for c in self.sequences if all(r in refs for r in c.refs)
+            ),
+            edge_pins=tuple(c for c in self.edge_pins if c.ref in refs),
+            keepouts=tuple(c for c in self.keepouts if c.owner in refs),
+            isolation=(),  # domain-level, never intra-cell
+            contain=self.contain,
+        )
+
+    def merged_with(self, other: ConstraintSet) -> ConstraintSet:
+        """Union of two constraint sets (containment: tighter margin wins)."""
+        contain = (
+            self.contain
+            if self.contain.margin_mm >= other.contain.margin_mm
+            else other.contain
+        )
+        return ConstraintSet(
+            pin_attach=self.pin_attach + other.pin_attach,
+            sequences=self.sequences + other.sequences,
+            edge_pins=self.edge_pins + other.edge_pins,
+            keepouts=self.keepouts + other.keepouts,
+            isolation=self.isolation + other.isolation,
+            contain=contain,
+        )
+
+    def count(self) -> int:
+        """Total number of constraints (containment counts as one)."""
+        return (
+            len(self.pin_attach)
+            + len(self.sequences)
+            + len(self.edge_pins)
+            + len(self.keepouts)
+            + len(self.isolation)
+            + 1
+        )
