@@ -492,3 +492,70 @@ def test_footprint_for_component_uses_standard_lib_id() -> None:
 
     led = footprint_for_component("D1", "RED", "LED_0805")
     assert "LED_SMD" in led.lib_id
+
+
+def _courtyard_extent(fp: object) -> tuple[float, float, float, float]:
+    """(min_x, min_y, max_x, max_y) of .CrtYd graphics in footprint frame."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for g in fp.graphics:  # type: ignore[attr-defined]
+        if getattr(g, "layer", "").endswith(".CrtYd"):
+            for attr in ("start", "end"):
+                p = getattr(g, attr, None)
+                if p is not None:
+                    xs.append(p.x)
+                    ys.append(p.y)
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def test_rj45_model_anchored_at_pin1_3d_frame() -> None:
+    """Gate C 2026-06-11 item 5: RJ45 shell rendered ~3.6mm east / 2mm
+    south of its pads. The STEP origin is the ORIGINAL pin-1 origin, so
+    after pad centering the model offset must be the centered pin-1
+    position — with Y NEGATED, because KiCad model offsets are in the
+    3D viewer frame (+Y visually up = board -Y). Verified against the
+    official KiCad footprint+model render (body 8.7mm north / 6.6mm
+    south of the shield rings)."""
+    from kicad_pipeline.pcb.footprints import make_rj45
+
+    fp = make_rj45("J2")
+    pad1 = next(p for p in fp.pads if p.number == "1")
+    assert fp.models, "RJ45 must carry a 3D model"
+    off = fp.models[0].offset
+    assert off[0] == pytest.approx(pad1.position.x)
+    assert off[1] == pytest.approx(-pad1.position.y)
+
+
+def test_rj45_courtyard_matches_official_extents() -> None:
+    """The RJ45 courtyard must match the official KiCad footprint's
+    (asymmetric) courtyard, not a centroid-symmetric rectangle: the
+    jack overhangs ~10.5mm north of the pad centroid toward its mouth."""
+    from kicad_pipeline.pcb.footprints import make_rj45
+
+    x1, y1, x2, y2 = _courtyard_extent(make_rj45("J2"))
+    assert x1 == pytest.approx(-9.78, abs=0.05)
+    assert x2 == pytest.approx(9.78, abs=0.05)
+    assert y1 == pytest.approx(-10.53, abs=0.05)
+    assert y2 == pytest.approx(6.22, abs=0.05)
+
+
+def test_esp32_courtyard_covers_full_module_body() -> None:
+    """Gate C 2026-06-11 item 4: the ESP32 module body (18x25.5mm,
+    antenna at north) hung off the board while a pad-extent courtyard
+    passed every check. The courtyard must cover the body anchored from
+    pad 1 at (-8.75, -5.26) in the body-center frame — on BOTH the
+    parametric and JLCPCB-cache paths."""
+    parametric = footprint_for_component("U1", "ESP32-S3-WROOM-1", "ESP32-S3-WROOM-1")
+    jlcpcb = footprint_for_component(
+        "U1", "ESP32-S3-WROOM-1", "RF_Module:ESP32-S3-WROOM-1", lcsc="C2913202",
+    )
+    for fp in (parametric, jlcpcb):
+        pad1 = next(p for p in fp.pads if p.number == "1")
+        body_cx = pad1.position.x - (-8.75)
+        body_cy = pad1.position.y - (-5.26)
+        x1, y1, x2, y2 = _courtyard_extent(fp)
+        assert x1 <= body_cx - 9.0 and x2 >= body_cx + 9.0, fp.lib_id
+        assert y1 <= body_cy - 12.75 and y2 >= body_cy + 12.75, (
+            f"{fp.lib_id}: courtyard y [{y1:.2f}, {y2:.2f}] does not cover "
+            f"module body y [{body_cy - 12.75:.2f}, {body_cy + 12.75:.2f}]"
+        )

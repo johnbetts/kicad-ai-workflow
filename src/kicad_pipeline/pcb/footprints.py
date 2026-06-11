@@ -2163,6 +2163,12 @@ def _esp32_enrich_antenna_keepout(fp: Footprint) -> tuple[list[FootprintKeepout]
     return [zone], []
 
 
+# KiCad ESP32-S3-WROOM-1 pad 1 position relative to the BODY CENTER
+# (the standard footprint origin) — verified from RF_Module.pretty in
+# KiCad 10. Anchors both the 3D model and the body courtyard.
+_KICAD_ESP32_PAD1: tuple[float, float] = (-8.75, -5.26)
+
+
 def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
     """Return the KiCad standard ESP32-S3-WROOM-1 3D model with offset.
 
@@ -2171,12 +2177,7 @@ def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
     at a different position, so we compute the offset from the pad-1
     position difference.  This aligns all 28 side pads perfectly (they
     have a uniform offset from the standard).
-
-    KiCad ESP32-S3-WROOM-1 pad 1 position (from standard library):
-    (-8.75, -5.26) — verified from RF_Module.pretty in KiCad 10.
     """
-    _KICAD_ESP32_PAD1 = (-8.75, -5.26)
-
     # Find our pad 1 position
     pad1 = next((p for p in fp.pads if p.number == "1"), None)
     if pad1 is not None:
@@ -2192,8 +2193,37 @@ def _esp32_enrich_3d_model(fp: Footprint) -> tuple[Footprint3DModel, ...]:
     ),)
 
 
+def _esp32_enrich_body_courtyard(fp: Footprint) -> tuple[FootprintLine, ...]:
+    """Replacement courtyard covering the FULL 18x25.5mm module body.
+
+    JLCPCB/easyeda ESP32 footprints carry a pad-extent courtyard that
+    omits the antenna end of the module. The floorplanner and Gate A
+    contain both reason over the courtyard, so the module body hung off
+    the board edge while every check passed (Gate C 2026-06-11 item 4).
+    The body rectangle is anchored from pad 1 (at (-8.75, -5.26) in the
+    body-center frame), unioned with the pad extent (castellated pads
+    protrude past the body). Returns () when the existing courtyard
+    already covers that extent.
+    """
+    pad1 = next((p for p in fp.pads if p.number == "1"), None)
+    if pad1 is None or len(fp.pads) < 40:
+        return ()
+    body_cx = pad1.position.x - _KICAD_ESP32_PAD1[0]
+    body_cy = pad1.position.y - _KICAD_ESP32_PAD1[1]
+    px1, py1, px2, py2 = _pad_bounding_box(fp.pads)
+    x1 = min(body_cx - _ESP32_BODY_W / 2.0, px1)
+    x2 = max(body_cx + _ESP32_BODY_W / 2.0, px2)
+    y1 = min(body_cy - _ESP32_BODY_H / 2.0, py1)
+    y2 = max(body_cy + _ESP32_BODY_H / 2.0, py2)
+    if not _courtyard_needs_replacement(fp.graphics, x1, y1, x2, y2):
+        return ()
+    return _courtyard_rect(
+        x2 - x1, y2 - y1, cx=(x1 + x2) / 2.0, cy=(y1 + y2) / 2.0,
+    )
+
+
 def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
-    """Add pin name labels, antenna keepout, and 3D model to an ESP32 footprint.
+    """Add pin name labels, body courtyard, and 3D model to an ESP32 footprint.
 
     Works on footprints from any source (JLCPCB cache, parametric generator,
     or parsed .kicad_mod files).  Idempotent — skips enrichment that already
@@ -2209,6 +2239,15 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
 
     extra_texts = _esp32_enrich_pin_labels(fp, fab_layer)
     models = _esp32_enrich_3d_model(fp)
+    body_courtyard = _esp32_enrich_body_courtyard(fp)
+    if body_courtyard:
+        courtyard_layers = (LAYER_F_COURTYARD, LAYER_B_COURTYARD)
+        graphics = tuple(
+            g for g in fp.graphics
+            if getattr(g, "layer", "") not in courtyard_layers
+        ) + body_courtyard
+    else:
+        graphics = fp.graphics
 
     # Antenna keepout and via fence are handled at BOARD level by
     # _refresh_antenna_keepout in ee_phases_refinement.py. This correctly
@@ -2216,14 +2255,14 @@ def _enrich_esp32_footprint(fp: Footprint) -> Footprint:
     # would rotate to the wrong position (e.g., rot=180 flips +Y to -Y).
     extra_pads: list[Pad] = []
 
-    if not extra_texts and models is fp.models:
+    if not extra_texts and models is fp.models and not body_courtyard:
         return fp
 
     return Footprint(
         lib_id=fp.lib_id, ref=fp.ref, value=fp.value,
         position=fp.position, rotation=fp.rotation, layer=fp.layer,
         pads=(*fp.pads, *extra_pads) if extra_pads else fp.pads,
-        graphics=fp.graphics,
+        graphics=graphics,
         texts=(*fp.texts, *extra_texts),
         lcsc=fp.lcsc, uuid=fp.uuid, attr=fp.attr,
         models=models,
@@ -3040,9 +3079,20 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     _log.debug("make_rj45 ref=%s", ref)
     pads = _center_pads(_rj45_build_pads())
 
+    # Courtyard anchored like the official KiCad footprint: center
+    # (3.56, -0.125) in the PIN-1 frame, re-expressed in the centered
+    # pad frame via the centered pin-1 position. A centroid-symmetric
+    # courtyard sat ~2.2mm south of the actual jack body (isolated-
+    # render measurement, Gate C 2026-06-11 item 5). W/H already
+    # include the official clearance, so none is added here.
+    pad1_pos = next(p.position for p in pads if p.number == "1")
     body_w = _RJ45_COURTYARD_W
     body_h = _RJ45_COURTYARD_H
-    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(body_w, body_h),)
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(
+        body_w, body_h, clearance=0.0,
+        cx=_RJ45_COURTYARD_CX + pad1_pos.x,
+        cy=_RJ45_COURTYARD_CY + pad1_pos.y,
+    ),)
     _rj45_ref_y = -(body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM)
     _rj45_val_y = body_h / 2.0 + PCB_COURTYARD_CLEARANCE_MM + _TEXT_MARGIN_MM
     texts = (
@@ -3051,6 +3101,25 @@ def make_rj45(ref: str, value: str = "RJ45") -> Footprint:
     )
     lib_id = "Connector_RJ:RJ45_Amphenol_RJHSE538X"
     model = _model_for_package(lib_id)
+    # 3D model anchor: the Amphenol RJHSE538X STEP origin sits at the
+    # ORIGINAL footprint origin (pin 1 at (0,0) in the KiCad library
+    # table above). _center_pads moved pin 1 into the centroid frame,
+    # so the model must be re-anchored at the CENTERED pin-1 position —
+    # with offset (0,0,0) the shell rendered ~3.6mm east / 2mm south of
+    # its pads (Gate C 2026-06-11 item 5, isolated-render measurement).
+    # KiCad model offsets are in the 3D VIEWER frame: +Y is visually up
+    # in the top view, i.e. board -Y — the board-frame pad-1 Y must be
+    # NEGATED (verified against the official footprint+model render;
+    # the un-negated offset displaced the shell 2x pad1.y south).
+    if model is not None:
+        pad1 = next((p for p in pads if p.number == "1"), None)
+        if pad1 is not None:
+            model = Footprint3DModel(
+                path=model.path,
+                offset=(pad1.position.x, -pad1.position.y, model.offset[2]),
+                scale=model.scale,
+                rotate=model.rotate,
+            )
     models = (model,) if model is not None else ()
     return Footprint(
         lib_id=lib_id, ref=ref, value=value,

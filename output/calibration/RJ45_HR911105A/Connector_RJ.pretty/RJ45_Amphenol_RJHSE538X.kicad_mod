@@ -1,0 +1,198 @@
+(footprint "RJ45_Amphenol_RJHSE538X"
+  (version 20260206)
+  (generator "kicad-ai-pipeline")
+  (generator_version "10.0")
+  (layer "F.Cu")
+  (attr through_hole)
+  (property "Reference" "REF**"
+    (at 0.0 0.0 0.0)
+    (layer "F.SilkS")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+    )
+  )
+  (property "Value" "RJ45_Amphenol_RJHSE538X"
+    (at 0.0 0.0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Footprint" ""
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Datasheet" ""
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Description" ""
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "LCSC" "C12074"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (fp_line
+    (start -9.78 -10.53)
+    (end 9.78 -10.53)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 9.78 -10.53)
+    (end 9.78 6.22)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 9.78 6.22)
+    (end -9.78 6.22)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start -9.78 6.22)
+    (end -9.78 -10.53)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (pad "1" thru_hole roundrect
+    (at -3.56 -2.03)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "2" thru_hole circle
+    (at -2.544 -0.25)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "3" thru_hole circle
+    (at -1.528 -2.03)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "4" thru_hole circle
+    (at -0.512 -0.25)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "5" thru_hole circle
+    (at 0.504 -2.03)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "6" thru_hole circle
+    (at 1.52 -0.25)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "7" thru_hole circle
+    (at 2.536 -2.03)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "8" thru_hole circle
+    (at 3.552 -0.25)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "9" thru_hole circle
+    (at -6.86 4.57)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "10" thru_hole circle
+    (at -4.57 4.57)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "11" thru_hole circle
+    (at 4.57 4.57)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "12" thru_hole circle
+    (at 6.86 4.57)
+    (size 1.5 1.5)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 0.89)
+  )
+  (pad "SH" thru_hole circle
+    (at -8.13 -1.14)
+    (size 2.3 2.3)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 1.57)
+  )
+  (pad "SH" thru_hole circle
+    (at 8.13 -1.14)
+    (size 2.3 2.3)
+    (layers "F.Cu" "B.Cu" "F.Mask" "B.Mask")
+    (drill 1.57)
+  )
+  (pad "" np_thru_hole circle
+    (at -6.35 -4.57)
+    (size 3.25 3.25)
+    (layers "F.Cu" "B.Cu")
+    (drill 3.25)
+  )
+  (pad "" np_thru_hole circle
+    (at 6.35 -4.57)
+    (size 3.25 3.25)
+    (layers "F.Cu" "B.Cu")
+    (drill 3.25)
+  )
+  (model "${KICAD10_3DMODEL_DIR}/Connector_RJ.3dshapes/RJ45_Amphenol_RJHSE538X.step"
+    (offset
+      (xyz -3.56 2.03 0.0)
+    )
+    (scale
+      (xyz 1.0 1.0 1.0)
+    )
+    (rotate
+      (xyz 0.0 0.0 0.0)
+    )
+  )
+  (embedded_fonts no)
+)
