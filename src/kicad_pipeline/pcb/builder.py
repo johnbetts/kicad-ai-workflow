@@ -778,6 +778,7 @@ def _run_placement_v2(
     requirements: ProjectRequirements,
     pre_footprints: list[Footprint],
     v2_ledger_path: Path | None = None,
+    v2_feedback_locks_path: Path | None = None,
 ) -> LayoutResult:
     """Placement engine v2: cells/contracts/proofs (placement_mode="v2").
 
@@ -805,6 +806,7 @@ def _run_placement_v2(
         board_width_mm=ctx.board_width_mm if explicit else None,
         board_height_mm=ctx.board_height_mm if explicit else None,
         part_rules_path=part_rules if part_rules.exists() else None,
+        feedback_locks_path=v2_feedback_locks_path,
         ledger_path=v2_ledger_path,
         timestamp=datetime.now(timezone.utc).isoformat() if v2_ledger_path else "",
     )
@@ -841,12 +843,14 @@ def _run_placement(
     pre_footprints: list[Footprint],
     placement_mode: str,
     v2_ledger_path: Path | None = None,
+    v2_feedback_locks_path: Path | None = None,
 ) -> list[Footprint]:
     """Run placement and apply positions/rotations to footprints."""
     layout_result: LayoutResult
     if placement_mode == "v2":
         layout_result = _run_placement_v2(
             ctx, requirements, pre_footprints, v2_ledger_path,
+            v2_feedback_locks_path,
         )
     elif placement_mode == "grouped":
         layout_result = place_groups_off_board(
@@ -1718,6 +1722,7 @@ def build_pcb(
     skip_inner_zones: bool = False,
     project_name: str | None = None,
     v2_ledger_path: str | Path | None = None,
+    v2_feedback_locks_path: str | Path | None = None,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
@@ -1754,6 +1759,10 @@ def build_pcb(
     footprints_with_pos = _run_placement(
         ctx, requirements, pre_footprints, placement_mode,
         v2_ledger_path=Path(v2_ledger_path) if v2_ledger_path is not None else None,
+        v2_feedback_locks_path=(
+            Path(v2_feedback_locks_path)
+            if v2_feedback_locks_path is not None else None
+        ),
     )
     # Captured AFTER placement: v2 may adopt a shrink-to-fit board size
     # and regenerate the mounting-hole corner keepouts for it.

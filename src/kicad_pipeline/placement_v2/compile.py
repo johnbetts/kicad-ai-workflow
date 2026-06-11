@@ -647,6 +647,18 @@ def compile_constraints(
         for seq in locks.sequences:
             sequences[seq.refs] = seq
         for ep in locks.edge_pins:
+            # A lock pins the EDGE; the part-rule CALIBRATED opening is
+            # orthogonal measured data and must survive the merge — a
+            # wholesale replace once dropped the RJ45/ESP32 openings,
+            # so the floorplan aimed them by the courtyard-bulge proxy
+            # and faced them the wrong way (nl-s-3c, 2026-06-11).
+            prior = edge_pins.get(ep.ref)
+            if prior is not None and prior.opening is not None and ep.opening is None:
+                ep = EdgePin(
+                    ref=ep.ref, edge=ep.edge, face_out=ep.face_out,
+                    max_edge_distance_mm=ep.max_edge_distance_mm,
+                    opening=prior.opening, source=ep.source,
+                )
             edge_pins[ep.ref] = ep
 
     result = ConstraintSet(

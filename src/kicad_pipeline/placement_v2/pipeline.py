@@ -314,6 +314,7 @@ def run_placement_v2(
     board_width_mm: float | None = None,
     board_height_mm: float | None = None,
     part_rules_path: Path | None = None,
+    feedback_locks_path: Path | None = None,
     certificate_store_path: Path | None = None,
     bootstrap_certificates: bool = True,
     ledger_path: Path | None = None,
@@ -350,6 +351,7 @@ def run_placement_v2(
     # ---- Compile constraint IR -------------------------------------------
     constraints = compile_constraints(
         requirements, part_rules_path=part_rules_path,
+        feedback_locks_path=feedback_locks_path,
     )
     _log.info("v2: compiled %d constraints", constraints.count())
 

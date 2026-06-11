@@ -557,6 +557,36 @@ def pack_group(
     )
 
 
+_EDGE_NORMALS: dict[Edge, tuple[float, float]] = {
+    Edge.WEST: (-1.0, 0.0), Edge.EAST: (1.0, 0.0),
+    Edge.NORTH: (0.0, -1.0), Edge.SOUTH: (0.0, 1.0),
+}
+
+
+def _aim_at_edge(
+    pc: PlacedCell, edge: Edge, bdir: tuple[float, float] | None,
+) -> PlacedCell:
+    """Rotate a connector cell so its opening (or long axis) faces *edge*."""
+    if bdir is not None:
+        nx, ny = _EDGE_NORMALS[edge]
+        best_rot: CardinalRotation = 0
+        best_dot = -float("inf")
+        for rot in _ROTATIONS:
+            pts = transform_polygon(
+                (Point(bdir[0], bdir[1]),), 0.0, 0.0, -float(rot),
+            )
+            dot = pts[0].x * nx + pts[0].y * ny
+            if dot > best_dot + 1e-9:
+                best_dot, best_rot = dot, rot
+        return pc.rotated(best_rot)
+    bb = polygon_bbox(pc.polygon_in_board())
+    tall = (bb[3] - bb[1]) > (bb[2] - bb[0])
+    wants_horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+    if tall == wants_horizontal:
+        return pc.rotated(90)
+    return pc
+
+
 def pack_board(
     groups: tuple[GroupPlan, ...],
     constraints: ConstraintSet,
@@ -581,25 +611,90 @@ def pack_board(
     }
     composites = {g.name: compose_group_cell(g) for g in groups}
 
+    board = (
+        (board_width, board_height)
+        if board_width is not None and board_height is not None
+        else None
+    )
+
+    # Connectors with an EXPLICIT edge (human lock / part rule) pre-
+    # place flush on that edge BEFORE the interior pack, as immovable
+    # obstacles — packing the interior first left no coordinated room
+    # and legalization pushed groups off the outline (nl-s-3c,
+    # 2026-06-11). Shelf order: name-sorted along each edge.
+    locked_placed: list[PlacedCell] = []
+    locked_names: set[str] = set()
+    if board is not None:
+        bw0, bh0 = board
+        shelf: dict[Edge, float] = dict.fromkeys(Edge, _EDGE_MARGIN_MM)
+        for g in sorted(groups, key=lambda g: g.name):
+            if not g.name.startswith("conn:"):
+                continue
+            cell = composites[g.name]
+            edge = next(
+                (edge_pins[r] for r in cell.refs
+                 if edge_pins.get(r) is not None),
+                None,
+            )
+            if edge is None:
+                continue
+            pc = _aim_at_edge(
+                PlacedCell(cell, 0.0, 0.0, 0), edge,
+                (body_dirs or {}).get(f"group:{g.name}"),
+            )
+            bb = polygon_bbox(pc.polygon_in_board())
+            horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+            span = (bb[2] - bb[0]) if horizontal else (bb[3] - bb[1])
+            depth = (bb[3] - bb[1]) if horizontal else (bb[2] - bb[0])
+            # Corner-aware: skip past locked cells from PERPENDICULAR
+            # edges that reach into this edge's band (the north and
+            # west shelves once collided at the NW corner).
+            if edge in (Edge.NORTH, Edge.WEST):
+                band_lo, band_hi = _EDGE_MARGIN_MM, _EDGE_MARGIN_MM + depth
+            elif edge is Edge.EAST:
+                band_lo, band_hi = bw0 - _EDGE_MARGIN_MM - depth, bw0 - _EDGE_MARGIN_MM
+            else:
+                band_lo, band_hi = bh0 - _EDGE_MARGIN_MM - depth, bh0 - _EDGE_MARGIN_MM
+            along = shelf[edge]
+            for other in locked_placed:
+                ob = polygon_bbox(other.polygon_in_board())
+                o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
+                if o_perp[0] >= band_hi + clearance_mm or o_perp[1] <= band_lo - clearance_mm:
+                    continue
+                o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
+                if o_along[1] + clearance_mm > along and o_along[0] < along + span:
+                    along = o_along[1] + clearance_mm
+            if horizontal:
+                pc = pc.moved_to(pc.dx + (along - bb[0]), pc.dy)
+                bb = polygon_bbox(pc.polygon_in_board())
+                pc = (pc.moved_to(pc.dx, pc.dy - (bb[1] - _EDGE_MARGIN_MM))
+                      if edge is Edge.NORTH else
+                      pc.moved_to(pc.dx, pc.dy + (bh0 - _EDGE_MARGIN_MM - bb[3])))
+            else:
+                pc = pc.moved_to(pc.dx, pc.dy + (along - bb[1]))
+                bb = polygon_bbox(pc.polygon_in_board())
+                pc = (pc.moved_to(pc.dx - (bb[0] - _EDGE_MARGIN_MM), pc.dy)
+                      if edge is Edge.WEST else
+                      pc.moved_to(pc.dx + (bw0 - _EDGE_MARGIN_MM - bb[2]), pc.dy))
+            shelf[edge] = along + span + clearance_mm
+            locked_placed.append(pc)
+            locked_names.add(g.name)
+
     # Functional groups first (largest anchors the interior); lifted
     # connector groups LAST — they end up flush on an edge anyway, so
     # letting a big RJ45 grab the board center starves the real groups.
     ordered = sorted(
-        groups,
+        (g for g in groups if f"group:{g.name}" not in locked_names
+         and g.name not in locked_names),
         key=lambda g: (
             g.name.startswith("conn:"), -g.width * g.height, g.name,
         ),
     )
     cells = tuple(composites[g.name] for g in ordered)
 
-    board = (
-        (board_width, board_height)
-        if board_width is not None and board_height is not None
-        else None
-    )
     # Reserved regions (mounting-hole corners) participate as immovable
     # pre-placed cells; they are only meaningful with explicit board dims.
-    pre = list(obstacles) if board is not None else []
+    pre = (list(obstacles) + locked_placed) if board is not None else []
     placed = _place_greedy_around(
         cells, pre, clearance_mm, board, allow_rotation=True,
     )
@@ -623,6 +718,7 @@ def pack_board(
     }
     placed = _snap_pinned_groups(
         placed, edge_pins, facing_by_name, bw, bh, body_dirs or {},
+        final_names=frozenset(f"group:{n}" for n in locked_names),
     )
     return Floorplan(placed=tuple(placed), board_width=bw, board_height=bh)
 
@@ -634,6 +730,7 @@ def _snap_pinned_groups(
     bw: float,
     bh: float,
     body_dirs: dict[str, tuple[float, float]] | None = None,
+    final_names: frozenset[str] = frozenset(),
 ) -> list[PlacedCell]:
     """Translate groups containing edge-pinned refs flush to their edge.
 
@@ -666,10 +763,12 @@ def _snap_pinned_groups(
     movable = [
         i for i in range(len(out))
         if out[i].cell.name.startswith("group:conn:")
+        and out[i].cell.name not in final_names  # pre-placed locked cells
     ]
     preferred: dict[str, Edge] = {}
     order = sorted(
-        (i for i in range(len(out)) if i not in movable),
+        (i for i in range(len(out))
+         if i not in movable and out[i].cell.name not in final_names),
         key=lambda i: out[i].cell.name,
     )
     for i in order:
@@ -715,7 +814,13 @@ def _snap_pinned_groups(
             e = edge_pins.get(r)
             if e is not None:
                 preferred[out[i].cell.name] = e
-    return _place_conn_groups(out, movable, body_dirs or {}, preferred, bw, bh)
+    pinned_names = set(snapped_edge) | set(final_names) | {
+        out[i].cell.name for i in range(len(out))
+        if out[i].cell.name.startswith("reserved:")
+    }
+    return _place_conn_groups(
+        out, movable, body_dirs or {}, preferred, bw, bh, pinned_names,
+    )
 
 
 def _place_conn_groups(
@@ -725,6 +830,7 @@ def _place_conn_groups(
     preferred: dict[str, Edge],
     bw: float,
     bh: float,
+    pinned_names: frozenset[str] | set[str] = frozenset(),
 ) -> list[PlacedCell]:
     """Place each lifted connector group flush on an edge with room.
 
@@ -748,7 +854,7 @@ def _place_conn_groups(
         pref = preferred.get(cells[i].cell.name)
         bdir0 = body_dirs.get(cells[i].cell.name)
 
-        def _needs_rotation(e: Edge) -> bool:
+        def _needs_rotation(e: Edge, _bdir0: tuple[float, float] | None = bdir0) -> bool:
             """Does facing *e* require rotating away from the current pose?
 
             Rotation stability: an ESP32 whose antenna already points
@@ -756,10 +862,10 @@ def _place_conn_groups(
             rotating flips its pin geometry relative to every already-
             ordered header pinout (mcu_core regression, 2026-06-11).
             """
-            if bdir0 is None:
+            if _bdir0 is None:
                 return False
             nx, ny = normals[e]
-            return bdir0[0] * nx + bdir0[1] * ny < 1e-9
+            return _bdir0[0] * nx + _bdir0[1] * ny < 1e-9
 
         edges = sorted(
             Edge, key=lambda e: (e is not pref, _needs_rotation(e), dists[e], e.value),
@@ -834,39 +940,87 @@ def _place_conn_groups(
                 if abs(pos - cur_lo) < best_dist - 1e-9:
                     best_dist, best_pos = abs(pos - cur_lo), pos
             if best_pos is None:
-                if edge is not edges[-1]:
+                # An EXPLICIT preferred edge (human lock / part rule)
+                # is hard: force-place flush there at the nearest
+                # along-position — the overlap is pushed onto INTERIOR
+                # groups by legalization (conn groups are pinned).
+                # Politely scanning other edges once sent a locked-
+                # south RJ45 to the north edge because the interior
+                # pack already covered the south band (nl-s-3c,
+                # 2026-06-11). Without a preference, scan all edges
+                # and only force on the nearest as a last resort.
+                if pref is not None and edge is not pref:
+                    continue
+                if pref is None and edge is not edges[-1]:
                     continue  # no room on this edge: try the next
-                # NO edge has a free interval: force-place flush on the
-                # PREFERRED edge at the nearest along-position anyway —
-                # edge presence is the hard constraint; the overlap is
-                # pushed onto INTERIOR groups by legalization (conn
-                # groups are pinned). 'Stays put' once stranded a 6-pin
-                # harness terminal 23mm inland with a whole group in
-                # its forefield (nl-s-3c, 2026-06-11).
-                edge = pref if pref is not None else edges[0]
-                pc = cells[i]
-                bdir2 = body_dirs.get(pc.cell.name)
-                if bdir2 is not None:
-                    nx, ny = normals[edge]
-                    fb_rot: CardinalRotation = 0
-                    fb_dot = -float("inf")
-                    for rot in _ROTATIONS:
-                        pts = transform_polygon(
-                            (Point(bdir2[0], bdir2[1]),), 0.0, 0.0, -float(rot),
-                        )
-                        dot = pts[0].x * nx + pts[0].y * ny
-                        if dot > fb_dot + 1e-9:
-                            fb_dot, fb_rot = dot, rot
-                    pc = pc.rotated(fb_rot)
-                b = polygon_bbox(pc.polygon_in_board())
-                horizontal = edge in (Edge.NORTH, Edge.SOUTH)
-                span = (b[2] - b[0]) if horizontal else (b[3] - b[1])
-                limit = bw if horizontal else bh
-                cur_lo = b[0] if horizontal else b[1]
-                best_pos = min(
-                    max(cur_lo, _EDGE_MARGIN_MM),
-                    limit - _EDGE_MARGIN_MM - span,
-                )
+                if pref is None:
+                    edge = edges[0]
+                    pc = cells[i]
+                    bdir2 = body_dirs.get(pc.cell.name)
+                    if bdir2 is not None:
+                        nx, ny = normals[edge]
+                        fb_rot: CardinalRotation = 0
+                        fb_dot = -float("inf")
+                        for rot in _ROTATIONS:
+                            pts = transform_polygon(
+                                (Point(bdir2[0], bdir2[1]),), 0.0, 0.0, -float(rot),
+                            )
+                            dot = pts[0].x * nx + pts[0].y * ny
+                            if dot > fb_dot + 1e-9:
+                                fb_dot, fb_rot = dot, rot
+                        pc = pc.rotated(fb_rot)
+                    b = polygon_bbox(pc.polygon_in_board())
+                    horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+                    span = (b[2] - b[0]) if horizontal else (b[3] - b[1])
+                    depth = (b[3] - b[1]) if horizontal else (b[2] - b[0])
+                    limit = bw if horizontal else bh
+                    cur_lo = b[0] if horizontal else b[1]
+                    if edge is Edge.WEST or edge is Edge.NORTH:
+                        band = (_EDGE_MARGIN_MM, _EDGE_MARGIN_MM + depth)
+                    elif edge is Edge.EAST:
+                        band = (bw - _EDGE_MARGIN_MM - depth, bw - _EDGE_MARGIN_MM)
+                    else:
+                        band = (bh - _EDGE_MARGIN_MM - depth, bh - _EDGE_MARGIN_MM)
+                # Forced placement coordinates ONLY with fellow pinned
+                # cells (other connectors, snapped strips, reserved
+                # corners) — interior groups yield via legalization.
+                # Blocking on interior groups made every forced south
+                # cell clamp to the same spot and overlap its
+                # neighbors (nl-s-3c, 2026-06-11).
+                pinned_blocked: list[tuple[float, float]] = []
+                for j, other in enumerate(cells):
+                    if j == i:
+                        continue
+                    if j not in movable and other.cell.name not in pinned_names:
+                        continue
+                    ob = polygon_bbox(other.polygon_in_board())
+                    o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
+                    if (o_perp[0] >= band[1] + _BOARD_CLEARANCE_MM
+                            or o_perp[1] <= band[0] - _BOARD_CLEARANCE_MM):
+                        continue
+                    o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
+                    pinned_blocked.append((o_along[0] - _BOARD_CLEARANCE_MM,
+                                           o_along[1] + _BOARD_CLEARANCE_MM))
+                pinned_blocked.sort()
+                p_gaps: list[tuple[float, float]] = []
+                cursor2 = _EDGE_MARGIN_MM
+                for b_lo, b_hi in pinned_blocked:
+                    if b_lo > cursor2:
+                        p_gaps.append((cursor2, min(b_lo, limit - _EDGE_MARGIN_MM)))
+                    cursor2 = max(cursor2, b_hi)
+                if cursor2 < limit - _EDGE_MARGIN_MM:
+                    p_gaps.append((cursor2, limit - _EDGE_MARGIN_MM))
+                for g_lo, g_hi in p_gaps:
+                    if g_hi - g_lo < span:
+                        continue
+                    pos = min(max(cur_lo, g_lo), g_hi - span)
+                    if best_pos is None or abs(pos - cur_lo) < abs(best_pos - cur_lo):
+                        best_pos = pos
+                if best_pos is None:
+                    best_pos = min(
+                        max(cur_lo, _EDGE_MARGIN_MM),
+                        limit - _EDGE_MARGIN_MM - span,
+                    )
             # Flush at the edge, at the chosen along-position.
             if horizontal:
                 pc = pc.moved_to(pc.dx + (best_pos - b[0]), pc.dy)
