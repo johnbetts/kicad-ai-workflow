@@ -35,9 +35,11 @@ if TYPE_CHECKING:
     from kicad_pipeline.placement_v2.cells import CardinalRotation, Cell
     from kicad_pipeline.placement_v2.ir import ConstraintSet, SequenceAlong
 
-_GROUP_CLEARANCE_MM = 1.0
+_GROUP_CLEARANCE_MM = 0.5
 _BOARD_CLEARANCE_MM = 2.0
-_EDGE_MARGIN_MM = 1.0
+# Matches the IR's BoardContain margin (0.5mm) — a stricter packing
+# margin than the verifier enforces just rejects boards that would pass.
+_EDGE_MARGIN_MM = 0.5
 _ROTATIONS: tuple[CardinalRotation, ...] = (0, 90, 180, 270)
 
 
@@ -168,10 +170,21 @@ def _place_greedy_around(
     placed: list[PlacedCell] = list(preplaced)
     if not cells:
         return placed
-    order = sorted(cells, key=lambda c: (-c.area, c.name))
+    # Caller-supplied order is AUTHORITATIVE (pack_board sends lifted
+    # connector groups last) — re-sorting here silently defeated it.
+    order = list(cells)
     if not placed:
         first = order[0]
         fx1, fy1, fx2, fy2 = _center_offset(first, 0)
+        if board is not None and (
+            fx2 - fx1 > board[0] - 2 * _EDGE_MARGIN_MM
+            or fy2 - fy1 > board[1] - 2 * _EDGE_MARGIN_MM
+        ):
+            raise PCBError(
+                f"floorplan: no feasible slot for cell {first.name!r} "
+                f"({fx2 - fx1:.1f}x{fy2 - fy1:.1f}mm) on "
+                f"{board[0]}x{board[1]}mm board"
+            )
         if board is not None:
             # Anchor the largest cell at the board center.
             bx, by = board[0] / 2, board[1] / 2
@@ -209,9 +222,20 @@ def _place_greedy_around(
                 if score < best_score - 1e-9:
                     best_score = score
                     best = cand
+        if best is None and board is not None:
+            # No overlap-free slot, but the board may still have room
+            # once UNPINNED neighbors shift: place at the least-
+            # overlapping in-board candidate and let legalization
+            # separate them (it reports honestly if it cannot).
+            best = _least_overlap_fallback(
+                cell, placed, clearance, board,
+                _ROTATIONS if allow_rotation else (0,),
+            )
         if best is None:
+            x1, y1, x2, y2 = _center_offset(cell, 0)
             raise PCBError(
-                f"floorplan: no feasible slot for cell {cell.name!r}"
+                f"floorplan: no feasible slot for cell {cell.name!r} "
+                f"({x2 - x1:.1f}x{y2 - y1:.1f}mm)"
                 + (f" on {board[0]}x{board[1]}mm board" if board else "")
             )
         placed.append(best)
@@ -405,6 +429,48 @@ def _sequence_strips(
     return placed, used, facing
 
 
+def _least_overlap_fallback(
+    cell: Cell,
+    placed: list[PlacedCell],
+    clearance: float,
+    board: tuple[float, float],
+    rotations: tuple[CardinalRotation, ...],
+) -> PlacedCell | None:
+    """Best in-board candidate by (overlap area proxy, HPWL)."""
+    bw, bh = board
+    best: PlacedCell | None = None
+    best_key = (float("inf"), float("inf"))
+    for rot in rotations:
+        x1, y1, x2, y2 = _center_offset(cell, rot)
+        w, h = x2 - x1, y2 - y1
+        if w > bw - 2 * _EDGE_MARGIN_MM or h > bh - 2 * _EDGE_MARGIN_MM:
+            continue
+        slots = [
+            *_candidate_offsets(placed, w, h, clearance),
+            (_EDGE_MARGIN_MM + w / 2, _EDGE_MARGIN_MM + h / 2),
+            (bw - _EDGE_MARGIN_MM - w / 2, _EDGE_MARGIN_MM + h / 2),
+            (_EDGE_MARGIN_MM + w / 2, bh - _EDGE_MARGIN_MM - h / 2),
+            (bw - _EDGE_MARGIN_MM - w / 2, bh - _EDGE_MARGIN_MM - h / 2),
+        ]
+        for sx, sy in slots:
+            # Clamp the slot center so the cell stays in-board.
+            sx = min(max(sx, _EDGE_MARGIN_MM + w / 2), bw - _EDGE_MARGIN_MM - w / 2)
+            sy = min(max(sy, _EDGE_MARGIN_MM + h / 2), bh - _EDGE_MARGIN_MM - h / 2)
+            cand = PlacedCell(cell, sx - (x1 + x2) / 2, sy - (y1 + y2) / 2, rot)
+            cb = polygon_bbox(cand.polygon_in_board())
+            overlap = 0.0
+            for other in placed:
+                ob = polygon_bbox(other.polygon_in_board())
+                ow = min(cb[2], ob[2]) - max(cb[0], ob[0])
+                oh = min(cb[3], ob[3]) - max(cb[1], ob[1])
+                if ow > 0 and oh > 0:
+                    overlap += ow * oh
+            key = (overlap, _hpwl(_collect_ports(placed, cand)))
+            if key < best_key:
+                best_key, best = key, cand
+    return best
+
+
 def pack_group(
     name: str,
     cells: tuple[Cell, ...],
@@ -430,7 +496,10 @@ def pack_group(
             outer_limit = (facing, max(b[3] for b in bounds))
         else:  # EAST
             outer_limit = (facing, max(b[2] for b in bounds))
-    rest = tuple(c for c in cells if c.name not in used)
+    rest = tuple(sorted(
+        (c for c in cells if c.name not in used),
+        key=lambda c: (-c.area, c.name),
+    ))
     placed = _place_greedy_around(
         rest, strip_cells, clearance_mm, board=None, allow_rotation=True,
         outer_limit=outer_limit,
@@ -448,12 +517,6 @@ def pack_group(
     )
 
 
-def _has_edge_pin(plan: GroupPlan, edge_pins: dict[str, Edge | None]) -> bool:
-    return any(
-        ref in edge_pins for pc in plan.cells for ref in pc.cell.refs
-    )
-
-
 def pack_board(
     groups: tuple[GroupPlan, ...],
     constraints: ConstraintSet,
@@ -461,6 +524,7 @@ def pack_board(
     board_height: float | None = None,
     clearance_mm: float = _BOARD_CLEARANCE_MM,
     shrink_margin_mm: float = 3.0,
+    obstacles: tuple[PlacedCell, ...] = (),
 ) -> Floorplan:
     """Pack groups onto the board; shrink-to-fit when no size is given.
 
@@ -476,11 +540,14 @@ def pack_board(
     }
     composites = {g.name: compose_group_cell(g) for g in groups}
 
-    pinned = [g for g in groups if _has_edge_pin(g, edge_pins)]
-    free = [g for g in groups if not _has_edge_pin(g, edge_pins)]
-    ordered = (
-        sorted(pinned, key=lambda g: (-g.width * g.height, g.name))
-        + sorted(free, key=lambda g: (-g.width * g.height, g.name))
+    # Functional groups first (largest anchors the interior); lifted
+    # connector groups LAST — they end up flush on an edge anyway, so
+    # letting a big RJ45 grab the board center starves the real groups.
+    ordered = sorted(
+        groups,
+        key=lambda g: (
+            g.name.startswith("conn:"), -g.width * g.height, g.name,
+        ),
     )
     cells = tuple(composites[g.name] for g in ordered)
 
@@ -489,7 +556,12 @@ def pack_board(
         if board_width is not None and board_height is not None
         else None
     )
-    placed = _place_greedy(cells, clearance_mm, board, allow_rotation=True)
+    # Reserved regions (mounting-hole corners) participate as immovable
+    # pre-placed cells; they are only meaningful with explicit board dims.
+    pre = list(obstacles) if board is not None else []
+    placed = _place_greedy_around(
+        cells, pre, clearance_mm, board, allow_rotation=True,
+    )
 
     # Resolve final outline.
     if board is None:
@@ -527,33 +599,140 @@ def _snap_pinned_groups(
     verifier re-checks edge distance afterwards; this snap is a solver
     convenience, not the source of truth.
     """
-    out: list[PlacedCell] = []
-    for pc in placed:
+    def _snap_to(pc: PlacedCell, edge: Edge) -> PlacedCell:
+        x1, y1, x2, y2 = polygon_bbox(pc.polygon_in_board())
+        if edge is Edge.WEST:
+            return pc.moved_to(pc.dx - (x1 - _EDGE_MARGIN_MM), pc.dy)
+        if edge is Edge.EAST:
+            return pc.moved_to(pc.dx + (bw - _EDGE_MARGIN_MM - x2), pc.dy)
+        if edge is Edge.NORTH:
+            return pc.moved_to(pc.dx, pc.dy - (y1 - _EDGE_MARGIN_MM))
+        return pc.moved_to(pc.dx, pc.dy + (bh - _EDGE_MARGIN_MM - y2))
+
+    def _edge_load(edge: Edge, claims: dict[Edge, float]) -> float:
+        return claims.get(edge, 0.0)
+
+    # Two passes: functional groups (own their edge span) first, then
+    # lifted connector groups pick the nearest UNCONGESTED edge — a
+    # power group covering the whole south edge means the pin headers
+    # belong on east/west, not wedged into it.
+    out: list[PlacedCell] = list(placed)
+    snapped_edge: dict[str, Edge] = {}
+    edge_claims: dict[Edge, float] = {}
+    order = sorted(
+        range(len(out)),
+        key=lambda i: (out[i].cell.name.startswith("group:conn:"),
+                       out[i].cell.name),
+    )
+    for i in order:
+        pc = out[i]
         pinned_refs = [r for r in pc.cell.refs if r in edge_pins]
         facing = facing_by_name.get(pc.cell.name)
         if not pinned_refs and facing is None:
-            out.append(pc)
             continue
         x1, y1, x2, y2 = polygon_bbox(pc.polygon_in_board())
         edge = facing
         if edge is None and pinned_refs:
             edge = edge_pins[pinned_refs[0]]
         if edge is None:
-            # Nearest edge by current position.
-            dists = {
-                Edge.WEST: x1,
-                Edge.EAST: bw - x2,
-                Edge.NORTH: y1,
-                Edge.SOUTH: bh - y2,
+            spans = {
+                Edge.WEST: y2 - y1, Edge.EAST: y2 - y1,
+                Edge.NORTH: x2 - x1, Edge.SOUTH: x2 - x1,
             }
-            edge = min(sorted(dists, key=lambda e: e.value), key=lambda e: dists[e])
-        if edge is Edge.WEST:
-            pc = pc.moved_to(pc.dx - (x1 - _EDGE_MARGIN_MM), pc.dy)
-        elif edge is Edge.EAST:
-            pc = pc.moved_to(pc.dx + (bw - _EDGE_MARGIN_MM - x2), pc.dy)
-        elif edge is Edge.NORTH:
-            pc = pc.moved_to(pc.dx, pc.dy - (y1 - _EDGE_MARGIN_MM))
-        else:  # SOUTH
-            pc = pc.moved_to(pc.dx, pc.dy + (bh - _EDGE_MARGIN_MM - y2))
-        out.append(pc)
-    return out
+            limits = {
+                Edge.WEST: bh, Edge.EAST: bh,
+                Edge.NORTH: bw, Edge.SOUTH: bw,
+            }
+            dists = {
+                Edge.WEST: x1, Edge.EAST: bw - x2,
+                Edge.NORTH: y1, Edge.SOUTH: bh - y2,
+            }
+            edge = min(
+                sorted(Edge, key=lambda e: e.value),
+                key=lambda e: (
+                    # Congested edge (claims + me would overflow): last.
+                    _edge_load(e, edge_claims) + spans[e]
+                    > limits[e] - 2 * _EDGE_MARGIN_MM,
+                    dists[e],
+                ),
+            )
+        out[i] = _snap_to(pc, edge)
+        snapped_edge[out[i].cell.name] = edge
+        b = polygon_bbox(out[i].polygon_in_board())
+        span = (b[2] - b[0]) if edge in (Edge.NORTH, Edge.SOUTH) else (b[3] - b[1])
+        edge_claims[edge] = edge_claims.get(edge, 0.0) + span + _BOARD_CLEARANCE_MM
+    return _slide_same_edge(out, snapped_edge, bw, bh)
+
+
+def _slide_same_edge(
+    cells: list[PlacedCell],
+    snapped_edge: dict[str, Edge],
+    bw: float,
+    bh: float,
+) -> list[PlacedCell]:
+    """Slide snapped CONNECTOR groups along their edge to a free spot.
+
+    A connector snapped flush can land on anything — another connector
+    on the same edge, or the flank of a functional group that owns the
+    board's south half. Connectors are pinned during legalization, so
+    conflicts must be resolved here: for each movable conn group (in
+    deterministic order) find the free interval along its edge nearest
+    its current position, treating ALL other cells as obstacles.
+    """
+    movable = sorted(
+        (i for i, pc in enumerate(cells)
+         if pc.cell.name in snapped_edge
+         and pc.cell.name.startswith("group:conn:")),
+        key=lambda i: cells[i].cell.name,
+    )
+    for i in movable:
+        edge = snapped_edge[cells[i].cell.name]
+        horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+        limit = bw if horizontal else bh
+        b = polygon_bbox(cells[i].polygon_in_board())
+        lo, hi = (b[0], b[2]) if horizontal else (b[1], b[3])
+        span = hi - lo
+        # Blocked intervals along this edge from every OTHER cell that
+        # overlaps the connector's PERPENDICULAR band.
+        perp = (b[1], b[3]) if horizontal else (b[0], b[2])
+        blocked: list[tuple[float, float]] = []
+        for j, other in enumerate(cells):
+            if j == i:
+                continue
+            ob = polygon_bbox(other.polygon_in_board())
+            o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
+            if o_perp[0] >= perp[1] + _BOARD_CLEARANCE_MM or \
+                    o_perp[1] <= perp[0] - _BOARD_CLEARANCE_MM:
+                continue
+            o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
+            blocked.append((o_along[0] - _BOARD_CLEARANCE_MM,
+                            o_along[1] + _BOARD_CLEARANCE_MM))
+        blocked.sort()
+        # Free gaps between merged blocked intervals.
+        gaps: list[tuple[float, float]] = []
+        cursor = _EDGE_MARGIN_MM
+        for b_lo, b_hi in blocked:
+            if b_lo > cursor:
+                gaps.append((cursor, min(b_lo, limit - _EDGE_MARGIN_MM)))
+            cursor = max(cursor, b_hi)
+        if cursor < limit - _EDGE_MARGIN_MM:
+            gaps.append((cursor, limit - _EDGE_MARGIN_MM))
+        # Nearest gap that fits, by distance from the current position.
+        best_pos: float | None = None
+        best_dist = float("inf")
+        for g_lo, g_hi in gaps:
+            if g_hi - g_lo < span:
+                continue
+            pos = min(max(lo, g_lo), g_hi - span)
+            dist = abs(pos - lo)
+            if dist < best_dist - 1e-9:
+                best_dist, best_pos = dist, pos
+        if best_pos is None or abs(best_pos - lo) < 1e-9:
+            continue  # stay (verifier/legalize will judge) or no move needed
+        shift = best_pos - lo
+        pc = cells[i]
+        cells[i] = (
+            pc.moved_to(pc.dx + shift, pc.dy) if horizontal
+            else pc.moved_to(pc.dx, pc.dy + shift)
+        )
+    return cells

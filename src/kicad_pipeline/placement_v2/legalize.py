@@ -24,6 +24,7 @@ from kicad_pipeline.optimization.geometry import (
     convex_polygons_overlap,
     polygon_bbox,
 )
+from kicad_pipeline.placement_v2.floorplan import _EDGE_MARGIN_MM
 from kicad_pipeline.placement_v2.ir import Severity, Violation
 
 if TYPE_CHECKING:
@@ -31,7 +32,6 @@ if TYPE_CHECKING:
     from kicad_pipeline.placement_v2.floorplan import Floorplan
 
 _MAX_SWEEPS = 50
-_EDGE_MARGIN_MM = 1.0
 
 
 class LegalizationError(PCBError):
@@ -77,7 +77,12 @@ def _separation_vector(
 def _containment_shift(
     pc: PlacedCell, bw: float, bh: float,
 ) -> tuple[float, float]:
-    """Minimal translation pulling a cell fully inside the outline."""
+    """Minimal translation pulling a cell fully inside the outline.
+
+    Sub-micron residuals are clamped to zero: a connector snapped to
+    EXACTLY the edge margin would otherwise register as a violation
+    through float round-off.
+    """
     x1, y1, x2, y2 = polygon_bbox(pc.polygon_in_board())
     dx = 0.0
     dy = 0.0
@@ -89,6 +94,10 @@ def _containment_shift(
         dy = _EDGE_MARGIN_MM - y1
     elif y2 > bh - _EDGE_MARGIN_MM:
         dy = (bh - _EDGE_MARGIN_MM) - y2
+    if abs(dx) < 1e-6:
+        dx = 0.0
+    if abs(dy) < 1e-6:
+        dy = 0.0
     return (dx, dy)
 
 

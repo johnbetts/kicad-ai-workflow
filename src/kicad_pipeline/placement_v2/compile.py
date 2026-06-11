@@ -59,6 +59,7 @@ _RELAY_DRIVER_MAX_MM = 10.0
 _FLYBACK_MAX_MM = 8.0
 _BASE_RESISTOR_MAX_MM = 6.0
 _ESD_MAX_MM = 8.0
+_ESD_MAX_PINS = 6  # connector-support parts are small (ESD diodes/arrays)
 _NEAR_DEFAULT_MAX_MM = 5.0
 _BOARD_MARGIN_MM = 0.5
 _ESD_NET_MAX_CONNECTIONS = 3
@@ -129,7 +130,13 @@ def _decoupling_attaches(idx: _Index) -> list[PinAttach]:
     out: list[PinAttach] = []
     for cap in idx.refs_with_prefix("C"):
         nets = idx.nets_of(cap.ref)
-        power = sorted(n for n in nets if n in idx.power_nets)
+        # GND itself is in power_nets (IC ground pins are POWER_IN
+        # typed): a true decoupling cap straddles a NON-GND rail and
+        # ground — without the exclusion, crystal load caps (XTAL+GND)
+        # matched and got attached to the IC's ground pad.
+        power = sorted(
+            n for n in nets if n in idx.power_nets and n not in idx.gnd_nets
+        )
         gnd = sorted(n for n in nets if n in idx.gnd_nets)
         if not power or not gnd:
             continue
@@ -261,7 +268,15 @@ def _connector_support_attaches(idx: _Index) -> list[PinAttach]:
         if not idx.is_signal_net(net.name) or len(net.connections) > _ESD_NET_MAX_CONNECTIONS:
             continue
         j_conns = [c for c in net.connections if ref_alpha_prefix(c.ref) == "J"]
-        supports = [c for c in net.connections if ref_alpha_prefix(c.ref) in ("D", "U")]
+        # Only SMALL parts are connector support (ESD diodes/arrays):
+        # without the pin-count cap, the ESP32 itself was attached to
+        # the USB connector with an 8mm bound it can never satisfy.
+        supports = [
+            c for c in net.connections
+            if ref_alpha_prefix(c.ref) in ("D", "U")
+            and (comp := idx.by_ref.get(c.ref)) is not None
+            and len(comp.pins) <= _ESD_MAX_PINS
+        ]
         if not j_conns or not supports:
             continue
         j_pad = PadRef(j_conns[0].ref, j_conns[0].pin)
@@ -328,7 +343,12 @@ def _chain_completion_attaches(
                         for t in _CONNECTOR_FP_TOKENS
                     )
                 ),
+                # Prefer the most LOCAL partner — the one touching the
+                # fewest nets (a crystal over the MCU, a transistor
+                # over the relay): small neighbors keep the chain
+                # inside one cell, where its bound is enforceable.
                 key=lambda rp: (
+                    len(idx.nets_of(rp[0])),
                     _CHAIN_PARTNER_RANK.get(ref_alpha_prefix(rp[0]), 9),
                     _ref_sort_key(rp[0]),
                 ),
@@ -349,11 +369,22 @@ def _chain_completion_attaches(
     return out
 
 
-def _group_sequences(idx: _Index) -> list[SequenceAlong]:
-    """``placement_group`` + ``placement_order`` become horizontal sequences."""
+def _group_sequences(
+    idx: _Index, attached_srcs: frozenset[str] = frozenset(),
+) -> list[SequenceAlong]:
+    """``placement_group`` + ``placement_order`` become horizontal sequences.
+
+    Refs that already have a pin attachment are EXCLUDED: a decoupling
+    cap hugs its regulator pad exactly; slotting it at sequence pitch
+    instead breaks the attachment bound (power-chain cells halted on
+    this). The sequence keeps the signal-flow backbone (ICs,
+    inductors); attached passives ride along with their hosts.
+    """
     groups: dict[str, list[Component]] = {}
     for comp in idx.components:
         if comp.placement_group is not None and comp.placement_order is not None:
+            if comp.ref in attached_srcs:
+                continue
             groups.setdefault(comp.placement_group, []).append(comp)
     out: list[SequenceAlong] = []
     for name in sorted(groups):
@@ -419,8 +450,10 @@ def compile_constraints(
     attached_srcs = frozenset(k[0] for k in attaches)
     for pa in _chain_completion_attaches(idx, attached_srcs):
         attaches.setdefault((pa.src.ref, pa.src.pin, pa.dst.ref, pa.dst.pin), pa)
+    all_attached = frozenset(k[0] for k in attaches)
     sequences: dict[tuple[str, ...], SequenceAlong] = {
-        s.refs: s for s in _group_sequences(idx) + _array_sequences(idx)
+        s.refs: s
+        for s in _group_sequences(idx, all_attached) + _array_sequences(idx)
     }
     edge_pins: dict[str, EdgePin] = {e.ref: e for e in _connector_edge_pins(idx)}
     keepouts: tuple[CellKeepout, ...] = ()

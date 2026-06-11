@@ -118,12 +118,23 @@ class TestPackBoard:
         fp = pack_board(groups, cs, board_width=80.0, board_height=60.0)
         conn = next(pc for pc in fp.placed if pc.cell.name == "group:conn")
         _, _, _, y2 = polygon_bbox(conn.polygon_in_board())
-        assert y2 == pytest.approx(59.0)  # flush at south edge margin
+        assert y2 == pytest.approx(59.5)  # flush at the 0.5mm edge margin
 
-    def test_infeasible_board_raises(self) -> None:
+    def test_infeasible_board_caught_by_legalize(self) -> None:
+        """Packing no longer hard-fails: it places the least-overlapping
+        candidate and LEGALIZE is the stage that proves infeasibility."""
         groups = (
             pack_group("g1", (_cell("a", 30, 30),)),
             pack_group("g2", (_cell("b", 30, 30),)),
+        )
+        plan = pack_board(groups, ConstraintSet(), board_width=35.0, board_height=35.0)
+        with pytest.raises(LegalizationError):
+            legalize(plan)
+
+    def test_cell_larger_than_board_still_raises(self) -> None:
+        groups = (
+            pack_group("g1", (_cell("a", 30, 30),)),
+            pack_group("g2", (_cell("b", 50, 50),)),
         )
         with pytest.raises(Exception, match="no feasible slot"):
             pack_board(groups, ConstraintSet(), board_width=35.0, board_height=35.0)
@@ -145,7 +156,7 @@ class TestLegalize:
         fp = Floorplan(placed=(a,), board_width=60.0, board_height=40.0)
         out = legalize(fp)
         x1, _, _, _ = polygon_bbox(out.placed[0].polygon_in_board())
-        assert x1 >= 1.0 - 1e-9
+        assert x1 >= 0.5 - 1e-9  # the shared 0.5mm edge margin
 
     def test_pinned_cell_does_not_move(self) -> None:
         a = PlacedCell(_cell("a", 10, 10), 20.0, 20.0, 0)

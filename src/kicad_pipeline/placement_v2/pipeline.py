@@ -23,7 +23,13 @@ from typing import TYPE_CHECKING
 from kicad_pipeline.models.pcb import Point
 from kicad_pipeline.pcb.pin_map import centroid_to_origin
 from kicad_pipeline.placement_v2.arrays import instantiate_array
-from kicad_pipeline.placement_v2.cells import Cell, CellProof, PlacedMember, Port
+from kicad_pipeline.placement_v2.cells import (
+    Cell,
+    CellProof,
+    PlacedCell,
+    PlacedMember,
+    Port,
+)
 from kicad_pipeline.placement_v2.certify import (
     CertificateStore,
     build_certificate,
@@ -51,6 +57,7 @@ if TYPE_CHECKING:
 
     from kicad_pipeline.models.pcb import Footprint
     from kicad_pipeline.models.requirements import ProjectRequirements
+    from kicad_pipeline.optimization.functional_grouper import DetectedSubCircuit
     from kicad_pipeline.placement_v2.ir import ConstraintSet
 
 _log = logging.getLogger(__name__)
@@ -161,6 +168,132 @@ def _external_nets_for(
     return out
 
 
+def _plan_cell_members(
+    detected: tuple[DetectedSubCircuit, ...],
+    constraints: ConstraintSet,
+    all_refs: set[str],
+    frozen_refs: frozenset[str] = frozenset(),
+) -> dict[str, list[str]]:
+    """Final member list per anchor: detection + merges + absorption.
+
+    Three steps, all driven by the attachment graph (a pin-attach bound
+    is only enforceable INSIDE one rigid cell):
+
+    1. Mirror the claiming the generation loop will do (first sub wins
+       a ref), counting only subs that actually become cells — seeding
+       from skipped subs left strays looking "claimed".
+    2. MERGE small linked subcircuits: an attachment crossing two cells
+       (voltage divider <-> ADC clamp/connector) folds the smaller cell
+       into the larger one's member list.
+    3. ABSORB unclaimed strays in BOTH directions: a stray src joins
+       its dst's cell (pull-up -> MCU) and a stray dst joins its src's
+       cell (button <- pull-up), to a fixpoint.
+    """
+    members: dict[str, list[str]] = {}
+    ref_to_anchor: dict[str, str] = {}
+    for sub in detected:
+        refs = [r for r in sub.refs if r in all_refs and r not in ref_to_anchor]
+        if sub.anchor_ref not in refs or len(refs) < 2:
+            continue
+        members[sub.anchor_ref] = refs
+        for r in refs:
+            ref_to_anchor[r] = sub.anchor_ref
+
+    def _merge(into: str, victim: str) -> None:
+        for r in members.pop(victim):
+            ref_to_anchor[r] = into
+            members[into].append(r)
+
+    for _ in range(len(constraints.pin_attach) + 1):
+        progressed = False
+        for a in sorted(
+            constraints.pin_attach, key=lambda a: (a.src.ref, a.dst.ref)
+        ):
+            src_a = ref_to_anchor.get(a.src.ref)
+            dst_a = ref_to_anchor.get(a.dst.ref)
+            if src_a is not None and dst_a is not None:
+                # Merge only true FRAGMENTS (a 2-resistor divider) into
+                # their partner, and never grow past 8 members — a
+                # looser rule cascaded whole power chains into one
+                # unpackable mega-cell.
+                if src_a != dst_a and (
+                    min(len(members[src_a]), len(members[dst_a])) <= 2
+                    and len(members[src_a]) + len(members[dst_a]) <= 8
+                ):
+                    small, big = sorted(
+                        (src_a, dst_a), key=lambda x: (len(members[x]), x)
+                    )
+                    _merge(big, small)
+                    progressed = True
+                continue
+            # Edge-pinned connectors are never absorbed: pulling a J
+            # into a cell bloats the group and forfeits the
+            # connector's freedom to find its own board edge.
+            if (src_a is None and dst_a is not None
+                    and a.src.ref in all_refs
+                    and a.src.ref not in frozen_refs):
+                ref_to_anchor[a.src.ref] = dst_a
+                members[dst_a].append(a.src.ref)
+                progressed = True
+            elif (dst_a is None and src_a is not None
+                    and a.dst.ref in all_refs
+                    and a.dst.ref not in frozen_refs):
+                ref_to_anchor[a.dst.ref] = src_a
+                members[src_a].append(a.dst.ref)
+                progressed = True
+        if not progressed:
+            break
+    return members
+
+
+def _obstacle_cell(name: str, polygon: tuple[Point, ...]) -> PlacedCell:
+    """An immovable reserved region (mounting-hole corner) as a cell.
+
+    The pseudo member's ref never appears in the footprint map, so it
+    is skipped at emission; its only job is to keep real cells out.
+    """
+    cx = sum(p.x for p in polygon) / len(polygon)
+    cy = sum(p.y for p in polygon) / len(polygon)
+    local = tuple(Point(p.x - cx, p.y - cy) for p in polygon)
+    cell = Cell(
+        name=f"reserved:{name}",
+        kind="reserved",
+        members=(PlacedMember(ref=f"__{name}", x=0.0, y=0.0, rotation_deg=0.0),),
+        polygon=local,
+        ports=(),
+        proof=CellProof(checks=("reserved",)),
+    )
+    return PlacedCell(cell, cx, cy, 0)
+
+
+def _attachment_islands(
+    constraints: ConstraintSet, unclaimed: set[str],
+) -> list[list[str]]:
+    """Connected components (size >= 2) of the attachment graph over
+    refs no detected subcircuit claimed."""
+    adj: dict[str, set[str]] = {}
+    for a in constraints.pin_attach:
+        if a.src.ref in unclaimed and a.dst.ref in unclaimed:
+            adj.setdefault(a.src.ref, set()).add(a.dst.ref)
+            adj.setdefault(a.dst.ref, set()).add(a.src.ref)
+    seen: set[str] = set()
+    islands: list[list[str]] = []
+    for start in sorted(adj):
+        if start in seen:
+            continue
+        stack, comp = [start], []
+        while stack:
+            r = stack.pop()
+            if r in seen:
+                continue
+            seen.add(r)
+            comp.append(r)
+            stack.extend(adj.get(r, ()))
+        if len(comp) >= 2:
+            islands.append(sorted(comp))
+    return islands
+
+
 def _group_for(
     refs: frozenset[str], requirements: ProjectRequirements,
 ) -> str:
@@ -184,6 +317,7 @@ def run_placement_v2(
     bootstrap_certificates: bool = True,
     ledger_path: Path | None = None,
     timestamp: str = "",
+    reserved_zones: tuple[tuple[str, tuple[Point, ...]], ...] = (),
 ) -> PlacementV2Result:
     """Run the full v2 pipeline. Halts (with ledger evidence) on failure.
 
@@ -196,11 +330,17 @@ def run_placement_v2(
     log_ = _StageLog(ledger=ledger, timestamp=timestamp)
     req_hash = sha256_text(repr(requirements))
 
-    def _halt(stage: str, violations: tuple[Violation, ...]) -> PlacementV2Result:
+    def _halt(
+        stage: str,
+        violations: tuple[Violation, ...],
+        floorplan: Floorplan | None = None,
+    ) -> PlacementV2Result:
         return PlacementV2Result(
             positions=(), rotations=(),
             board_width=0.0, board_height=0.0,
-            floorplan=Floorplan((), 0.0, 0.0),
+            # The failed floorplan (when one exists) rides along for
+            # diagnosis — halted results are never emitted as boards.
+            floorplan=floorplan or Floorplan((), 0.0, 0.0),
             constraints=constraints,
             violations=violations,
             halted_stage=stage,
@@ -256,9 +396,14 @@ def run_placement_v2(
     cells: list[Cell] = []
     cell_violations: list[Violation] = []
     claimed: set[str] = set()
+    planned = _plan_cell_members(
+        detected, constraints, set(footprints),
+        frozen_refs=frozenset(ep.ref for ep in constraints.edge_pins),
+    )
     for sub in detected:
         member_refs = [
-            r for r in sub.refs if r in footprints and r not in claimed
+            r for r in planned.get(sub.anchor_ref, ())
+            if r in footprints and r not in claimed
         ]
         if sub.anchor_ref not in member_refs or len(member_refs) < 2:
             continue
@@ -286,6 +431,29 @@ def run_placement_v2(
             continue
         cells.append(cell)
         claimed.update(member_refs)
+    # Attachment islands: unclaimed refs bound to EACH OTHER (pull-up
+    # <-> button) form their own cluster cell so the bound is enforced
+    # inside one rigid body instead of dangling across singletons.
+    for island in _attachment_islands(
+        constraints, set(footprints) - claimed,
+    ):
+        anchor_ref = max(
+            island, key=lambda r: (len(footprints[r].pads), r),
+        )
+        refs_set = frozenset(island)
+        try:
+            cells.append(generate_cell(
+                name=f"cluster:{anchor_ref}",
+                kind="attachment_cluster",
+                anchor=anchor_ref,
+                footprints={r: footprints[r] for r in island},
+                constraints=constraints.for_refs(refs_set),
+                external_nets=_external_nets_for(refs_set, net_pads),
+            ))
+        except CellGenerationError as exc:
+            cell_violations.extend(exc.violations)
+            continue
+        claimed.update(island)
     for ref in sorted(set(footprints) - claimed):
         cells.append(_singleton_cell(ref, footprints[ref], net_pads))
 
@@ -300,10 +468,25 @@ def run_placement_v2(
         return _halt("cells", tuple(cell_violations))
 
     # ---- Stages 2+3: floorplan + legalize ---------------------------------
-    by_group: dict[str, list[Cell]] = {}
-    for cell in cells:
-        by_group.setdefault(_group_for(cell.refs, requirements), []).append(cell)
     edge_pinned = frozenset(ep.ref for ep in constraints.edge_pins)
+    seq_refs = frozenset(r for s in constraints.sequences for r in s.refs)
+    by_group: dict[str, list[Cell]] = {}
+    lifted: list[Cell] = []
+    for cell in cells:
+        # LONE edge-pinned connectors outside a ladder strip become
+        # board-level groups of their own: the group snap can only
+        # satisfy ONE edge per group, so each free connector must be
+        # free to find its own edge (USB north, power south, ...).
+        # Multi-member cells (a connector with its ESD island) stay in
+        # their functional group — splitting them would break their
+        # own attachment bounds.
+        if (len(cell.refs) == 1 and (cell.refs & edge_pinned)
+                and not (cell.refs & seq_refs)):
+            lifted.append(cell)
+        else:
+            by_group.setdefault(
+                _group_for(cell.refs, requirements), []
+            ).append(cell)
     plans = tuple(
         pack_group(
             gname,
@@ -312,17 +495,30 @@ def run_placement_v2(
             edge_pinned=edge_pinned,
         )
         for gname, gcells in sorted(by_group.items())
+    ) + tuple(
+        pack_group(f"conn:{sorted(cell.refs)[0]}", (cell,))
+        for cell in sorted(lifted, key=lambda c: c.name)
     )
+    obstacles = tuple(_obstacle_cell(n, poly) for n, poly in reserved_zones)
+    plan = None
     try:
         plan = pack_board(
             plans, constraints,
             board_width=board_width_mm, board_height=board_height_mm,
+            obstacles=obstacles,
         )
-        plan = legalize(plan)
+        # Edge-snapped groups stay put during legalization: residual
+        # overlaps push the INTERIOR groups, never a connector off
+        # its edge.
+        pinned_groups = frozenset(
+            f"group:{p.name}" for p in plans
+            if p.edge_facing is not None or p.name.startswith("conn:")
+        ) | frozenset(o.cell.name for o in obstacles)
+        plan = legalize(plan, pinned=pinned_groups)
     except LegalizationError as exc:
         log_.add("floorplan", False, ("pack_board", "legalize"),
                  exc.violations, req_hash, "")
-        return _halt("floorplan", exc.violations)
+        return _halt("floorplan", exc.violations, floorplan=plan)
     except Exception as exc:
         v = Violation(
             constraint="floorplan", refs=(), severity=Severity.CRITICAL,

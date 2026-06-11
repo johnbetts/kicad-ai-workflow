@@ -85,6 +85,7 @@ from kicad_pipeline.pcb.keepout_builder import (
 )
 from kicad_pipeline.pcb.netclasses import classify_nets
 from kicad_pipeline.pcb.outline_builder import make_board_outline as _make_board_outline
+from kicad_pipeline.pcb.pin_map import origin_to_centroid
 from kicad_pipeline.pcb.placement import LayoutResult, layout_pcb, place_groups_off_board
 from kicad_pipeline.pcb.silkscreen import (
     add_silkscreen_to_footprint,
@@ -782,6 +783,9 @@ def _run_placement_v2(
     from kicad_pipeline.placement_v2.pipeline import run_placement_v2
 
     part_rules = _Path(__file__).resolve().parents[3] / "data" / "part_rules.json"
+    # Mounting-hole corners are NOT reserved: the hole placer shifts
+    # holes along the edge when a corner is occupied (collision check
+    # below), which beats starving edge-snapped groups of corner space.
     result = run_placement_v2(
         requirements,
         {fp.ref: fp for fp in pre_footprints},
@@ -1018,11 +1022,17 @@ def _mounting_hole_collides_with_footprints(
             w, h = h, w
         half_w = w / 2.0
         half_h = h / 2.0
+        # Center the AABB on the pad CENTROID, not the KiCad origin:
+        # THT connectors keep their origin at pin 1, which shifted the
+        # box and let holes overlap the far side of the body (J4/H3).
+        fcx, fcy = origin_to_centroid(
+            fp, fp.position.x, fp.position.y, fp.rotation,
+        )
         # AABB overlap check
-        if (mx - mh_half < fp.position.x + half_w
-                and mx + mh_half > fp.position.x - half_w
-                and my - mh_half < fp.position.y + half_h
-                and my + mh_half > fp.position.y - half_h):
+        if (mx - mh_half < fcx + half_w
+                and mx + mh_half > fcx - half_w
+                and my - mh_half < fcy + half_h
+                and my + mh_half > fcy - half_h):
             return True
     return False
 
