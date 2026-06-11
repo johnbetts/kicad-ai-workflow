@@ -18,6 +18,7 @@ constraint.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,8 +33,14 @@ from kicad_pipeline.placement_v2.cells import PlacedCell
 from kicad_pipeline.placement_v2.ir import Axis, Edge
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from kicad_pipeline.models.pcb import Footprint
     from kicad_pipeline.placement_v2.cells import CardinalRotation, Cell
     from kicad_pipeline.placement_v2.ir import ConstraintSet, SequenceAlong
+
+_log = logging.getLogger(__name__)
+_EPS = 1e-9
 
 _GROUP_CLEARANCE_MM = 0.5
 _BOARD_CLEARANCE_MM = 2.0
@@ -721,6 +728,136 @@ def pack_board(
         final_names=frozenset(f"group:{n}" for n in locked_names),
     )
     return Floorplan(placed=tuple(placed), board_width=bw, board_height=bh)
+
+
+#: Edge-flushness tolerance when classifying connector cells per edge.
+_REORDER_FLUSH_TOL_MM = 1.5
+#: Permutation search cap per edge (6! = 720 objective evaluations).
+_REORDER_MAX_CELLS = 6
+
+
+def reorder_edge_connectors(
+    plan: Floorplan,
+    footprints: Mapping[str, Footprint],
+    constraints: ConstraintSet,
+) -> Floorplan:
+    """Reorder same-edge connector cells to minimize ratsnest crossings.
+
+    The board owner's method, made deterministic (council 2026-06-11):
+    "look at the lines and see what cross is avoidable by moving
+    components." For each edge, the flush connector cells are re-packed
+    in every permutation within their original along-extent; the order
+    with the fewest avoidable crossings (the SAME counter Gate A
+    scores) wins. Bounded: permutations only, never new edges, never
+    interior cells, and a permutation that would collide with any other
+    cell is discarded.
+    """
+    from itertools import permutations
+
+    from kicad_pipeline.placement_v2.crossings import count_crossings
+
+    if not constraints.fanouts and not constraints.bundles:
+        return plan
+
+    cells = list(plan.placed)
+    bw, bh = plan.board_width, plan.board_height
+
+    def _positions() -> dict[str, tuple[float, float, float]]:
+        out: dict[str, tuple[float, float, float]] = {}
+        for pc in cells:
+            for m in pc.members_in_board():
+                out[m.ref] = (m.x, m.y, m.rotation_deg)
+        return out
+
+    def _edge_of(pc: PlacedCell) -> Edge | None:
+        b = polygon_bbox(pc.polygon_in_board())
+        if abs(b[1] - _EDGE_MARGIN_MM) <= _REORDER_FLUSH_TOL_MM:
+            return Edge.NORTH
+        if abs(bh - _EDGE_MARGIN_MM - b[3]) <= _REORDER_FLUSH_TOL_MM:
+            return Edge.SOUTH
+        if abs(b[0] - _EDGE_MARGIN_MM) <= _REORDER_FLUSH_TOL_MM:
+            return Edge.WEST
+        if abs(bw - _EDGE_MARGIN_MM - b[2]) <= _REORDER_FLUSH_TOL_MM:
+            return Edge.EAST
+        return None
+
+    by_edge: dict[Edge, list[int]] = {}
+    for i, pc in enumerate(cells):
+        if not pc.cell.name.startswith("group:conn:"):
+            continue
+        edge = _edge_of(pc)
+        if edge is not None:
+            by_edge.setdefault(edge, []).append(i)
+
+    best_total = count_crossings(
+        _positions(), footprints, constraints.fanouts, constraints.bundles,
+    )
+    for edge, idxs in sorted(by_edge.items(), key=lambda kv: kv[0].value):
+        if not (2 <= len(idxs) <= _REORDER_MAX_CELLS):
+            continue
+        horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+        bbs = {i: polygon_bbox(cells[i].polygon_in_board()) for i in idxs}
+        alongs = {
+            i: (bbs[i][0], bbs[i][2]) if horizontal else (bbs[i][1], bbs[i][3])
+            for i in idxs
+        }
+        union_lo = min(a[0] for a in alongs.values())
+        union_hi = max(a[1] for a in alongs.values())
+        spans = {i: alongs[i][1] - alongs[i][0] for i in idxs}
+        free = union_hi - union_lo - sum(spans.values())
+        n = len(idxs)
+        gap = free / (n - 1) if n > 1 else 0.0
+        if gap < 0.0:
+            continue  # cells already tighter than their union: skip
+        others = [
+            polygon_bbox(cells[j].polygon_in_board())
+            for j in range(len(cells)) if j not in idxs
+        ]
+        original = {i: cells[i] for i in idxs}
+        best_cells: dict[int, PlacedCell] | None = None
+        for perm in permutations(sorted(idxs)):
+            cursor = union_lo
+            trial: dict[int, PlacedCell] = {}
+            ok = True
+            for i in perm:
+                pc = original[i]
+                b = bbs[i]
+                if horizontal:
+                    moved = pc.moved_to(pc.dx + (cursor - b[0]), pc.dy)
+                else:
+                    moved = pc.moved_to(pc.dx, pc.dy + (cursor - b[1]))
+                mb = polygon_bbox(moved.polygon_in_board())
+                for ob in others:
+                    if (mb[0] < ob[2] - _EPS and mb[2] > ob[0] + _EPS
+                            and mb[1] < ob[3] - _EPS and mb[3] > ob[1] + _EPS):
+                        ok = False
+                        break
+                if not ok:
+                    break
+                trial[i] = moved
+                cursor += spans[i] + gap
+            if not ok:
+                continue
+            for i, moved in trial.items():
+                cells[i] = moved
+            total = count_crossings(
+                _positions(), footprints, constraints.fanouts, constraints.bundles,
+            )
+            if total < best_total:
+                best_total = total
+                best_cells = dict(trial)
+            for i in idxs:
+                cells[i] = original[i]
+        if best_cells is not None:
+            for i, moved in best_cells.items():
+                cells[i] = moved
+            for i in idxs:
+                original[i] = cells[i]
+            _log.info(
+                "reorder_edge_connectors: %s edge reordered, crossings -> %d",
+                edge.value, best_total,
+            )
+    return Floorplan(placed=tuple(cells), board_width=bw, board_height=bh)
 
 
 def _snap_pinned_groups(

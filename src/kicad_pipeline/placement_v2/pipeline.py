@@ -38,7 +38,12 @@ from kicad_pipeline.placement_v2.certify import (
     compute_footprint_sha256,
 )
 from kicad_pipeline.placement_v2.compile import compile_constraints
-from kicad_pipeline.placement_v2.floorplan import Floorplan, pack_board, pack_group
+from kicad_pipeline.placement_v2.floorplan import (
+    Floorplan,
+    pack_board,
+    pack_group,
+    reorder_edge_connectors,
+)
 from kicad_pipeline.placement_v2.footprint_geom import (
     courtyard_polygon,
     pad_position_in_frame,
@@ -547,6 +552,10 @@ def run_placement_v2(
             if p.edge_facing is not None or p.name.startswith("conn:")
         ) | frozenset(o.cell.name for o in obstacles)
         plan = legalize(plan, pinned=pinned_groups)
+        # The board owner's method, made deterministic: reorder same-
+        # edge connectors to remove avoidable ratsnest crossings (the
+        # same counter Gate A scores). Council first-action 2026-06-11.
+        plan = reorder_edge_connectors(plan, footprints, constraints)
     except LegalizationError as exc:
         log_.add("floorplan", False, ("pack_board", "legalize"),
                  exc.violations, req_hash, "")
