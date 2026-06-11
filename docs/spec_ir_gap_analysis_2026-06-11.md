@@ -93,3 +93,36 @@ boards get this WITHOUT writing a spec file.
 - Steps 1 (default cohorts) through 5 are the placement-v2 work queue,
   ahead of the silkscreen pass and utilization objective from
   `gate_c_resolution_2026-06-11.md`.
+
+
+## Addendum (2026-06-11, evening): connector-as-subgroup supersedes edge-sliding
+
+The crossing-reorder pass (shipped) fixed along-edge ORDER (J1 landed
+right-of-terminals above the relays with zero hints — the acceptance
+test). But the J14 case exposed the next layer, stated by the board
+owner: "Not just across edges — this is part of grouping and
+subgrouping. J14 should be a subgroup of the IC group and naturally be
+closer to the IC."
+
+Design consequence: an edge-pinned connector whose nets terminate
+overwhelmingly in ONE group (J14 -> U3 SPI) is that group's EDGE
+SUBGROUP — it must claim the edge SEGMENT adjacent to its parent
+group's placement, not an independent shelf slot. This replaces the
+lone-connector slide for associated connectors:
+
+1. compile: derive connector->group association (majority of the
+   connector's signal-net partners in one FeatureBlock) — emit it on
+   the EdgePin (or a new GroupAssoc IR).
+2. floorplan: locked/lifted connectors WITH an association pre-place
+   on their edge at the along-position nearest their parent group's
+   packed position (group first, connector second), then the
+   crossing-reorder permutes within that neighborhood only.
+3. Gate A: connector-to-parent-group distance check (the K3/K4
+   "stranded from serving terminals" fab finding, generalized).
+
+Known issue: the lone-connector slide does not fire for J14 on the
+final plan despite an offline probe showing a strict improvement at
+centroid y~43 (collision-clear) — discrepancy unresolved; superseded
+by the subgroup mechanism above for associated connectors, but the
+probe/slide mismatch should be root-caused before the slide is
+trusted for genuinely unassociated connectors.

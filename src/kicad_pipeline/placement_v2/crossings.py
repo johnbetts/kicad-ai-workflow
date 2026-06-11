@@ -56,20 +56,23 @@ def _pad_xy(
         return None
 
 
-def count_crossings(
+def crossings_and_length(
     positions: Mapping[str, Position],
     footprints: Mapping[str, Footprint],
     fanouts: tuple[ConnectorFanout, ...],
     bundles: tuple[AttachBundle, ...] = (),
-) -> int:
-    """Total avoidable crossings at the given (centroid-frame) positions.
+) -> tuple[int, float]:
+    """(avoidable crossings, total ratsnest length) at the given positions.
 
     Fanouts: each connector pad's line runs to its NEAREST same-net pad
     (the rendered-ratsnest proxy); crossings are counted pairwise per
     connector. Bundles: pairwise crossings among a part pair's attach
-    lines. Matches Gate A's violation counting exactly.
+    lines. The crossing count matches Gate A's violation counting
+    exactly; the length is the lexicographic tiebreak ("closer is more
+    logical" when no order change removes a crossing).
     """
     total = 0
+    length = 0.0
     for fanout in fanouts:
         segs: list[tuple[tuple[float, float], tuple[float, float]]] = []
         for line in fanout.lines:
@@ -86,6 +89,7 @@ def count_crossings(
                     best = (d, pt)
             if best is not None:
                 segs.append((src, best[1]))
+                length += best[0]
         for i in range(len(segs)):
             for j in range(i + 1, len(segs)):
                 if _segments_cross(segs[i][0], segs[i][1], segs[j][0], segs[j][1]):
@@ -97,11 +101,22 @@ def count_crossings(
             b = _pad_xy(positions, footprints, pad_b.ref, pad_b.pin)
             if a is not None and b is not None:
                 bsegs.append((a, b))
+                length += math.hypot(b[0] - a[0], b[1] - a[1])
         for i in range(len(bsegs)):
             for j in range(i + 1, len(bsegs)):
                 if _segments_cross(bsegs[i][0], bsegs[i][1], bsegs[j][0], bsegs[j][1]):
                     total += 1
-    return total
+    return total, length
 
 
-__all__ = ["Position", "count_crossings"]
+def count_crossings(
+    positions: Mapping[str, Position],
+    footprints: Mapping[str, Footprint],
+    fanouts: tuple[ConnectorFanout, ...],
+    bundles: tuple[AttachBundle, ...] = (),
+) -> int:
+    """Crossing count only (see :func:`crossings_and_length`)."""
+    return crossings_and_length(positions, footprints, fanouts, bundles)[0]
+
+
+__all__ = ["Position", "count_crossings", "crossings_and_length"]

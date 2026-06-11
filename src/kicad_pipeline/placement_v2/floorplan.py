@@ -30,6 +30,7 @@ from kicad_pipeline.optimization.geometry import (
     transform_polygon,
 )
 from kicad_pipeline.placement_v2.cells import PlacedCell
+from kicad_pipeline.placement_v2.footprint_geom import courtyard_in_frame
 from kicad_pipeline.placement_v2.ir import Axis, Edge
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 
     from kicad_pipeline.models.pcb import Footprint
     from kicad_pipeline.placement_v2.cells import CardinalRotation, Cell
-    from kicad_pipeline.placement_v2.ir import ConstraintSet, SequenceAlong
+    from kicad_pipeline.placement_v2.ir import ConstraintSet, Polygon, SequenceAlong
 
 _log = logging.getLogger(__name__)
 _EPS = 1e-9
@@ -734,6 +735,8 @@ def pack_board(
 _REORDER_FLUSH_TOL_MM = 1.5
 #: Permutation search cap per edge (6! = 720 objective evaluations).
 _REORDER_MAX_CELLS = 6
+#: Along-edge step when sliding a lone connector toward its targets.
+_REORDER_SLIDE_STEP_MM = 4.0
 
 
 def reorder_edge_connectors(
@@ -745,16 +748,18 @@ def reorder_edge_connectors(
 
     The board owner's method, made deterministic (council 2026-06-11):
     "look at the lines and see what cross is avoidable by moving
-    components." For each edge, the flush connector cells are re-packed
-    in every permutation within their original along-extent; the order
-    with the fewest avoidable crossings (the SAME counter Gate A
-    scores) wins. Bounded: permutations only, never new edges, never
-    interior cells, and a permutation that would collide with any other
-    cell is discarded.
+    components." For each edge with 2+ flush connector cells, every
+    permutation within their original along-extent is tried; a LONE
+    connector instead SLIDES along its whole edge toward its targets
+    ("J14 is more logical closer to U3"). Objective is lexicographic
+    (avoidable crossings, total ratsnest length) — the SAME counter
+    Gate A scores, with length as the closer-is-better tiebreak.
+    Bounded: never new edges, never interior cells; any move that would
+    collide with another cell is discarded.
     """
     from itertools import permutations
 
-    from kicad_pipeline.placement_v2.crossings import count_crossings
+    from kicad_pipeline.placement_v2.crossings import crossings_and_length
 
     if not constraints.fanouts and not constraints.bundles:
         return plan
@@ -768,6 +773,11 @@ def reorder_edge_connectors(
             for m in pc.members_in_board():
                 out[m.ref] = (m.x, m.y, m.rotation_deg)
         return out
+
+    def _score() -> tuple[int, float]:
+        return crossings_and_length(
+            _positions(), footprints, constraints.fanouts, constraints.bundles,
+        )
 
     def _edge_of(pc: PlacedCell) -> Edge | None:
         b = polygon_bbox(pc.polygon_in_board())
@@ -789,74 +799,130 @@ def reorder_edge_connectors(
         if edge is not None:
             by_edge.setdefault(edge, []).append(i)
 
-    best_total = count_crossings(
-        _positions(), footprints, constraints.fanouts, constraints.bundles,
-    )
-    for edge, idxs in sorted(by_edge.items(), key=lambda kv: kv[0].value):
-        if not (2 <= len(idxs) <= _REORDER_MAX_CELLS):
-            continue
-        horizontal = edge in (Edge.NORTH, Edge.SOUTH)
-        bbs = {i: polygon_bbox(cells[i].polygon_in_board()) for i in idxs}
-        alongs = {
-            i: (bbs[i][0], bbs[i][2]) if horizontal else (bbs[i][1], bbs[i][3])
-            for i in idxs
-        }
-        union_lo = min(a[0] for a in alongs.values())
-        union_hi = max(a[1] for a in alongs.values())
-        spans = {i: alongs[i][1] - alongs[i][0] for i in idxs}
-        free = union_hi - union_lo - sum(spans.values())
-        n = len(idxs)
-        gap = free / (n - 1) if n > 1 else 0.0
-        if gap < 0.0:
-            continue  # cells already tighter than their union: skip
-        others = [
-            polygon_bbox(cells[j].polygon_in_board())
-            for j in range(len(cells)) if j not in idxs
-        ]
-        original = {i: cells[i] for i in idxs}
-        best_cells: dict[int, PlacedCell] | None = None
-        for perm in permutations(sorted(idxs)):
-            cursor = union_lo
-            trial: dict[int, PlacedCell] = {}
-            ok = True
-            for i in perm:
-                pc = original[i]
-                b = bbs[i]
-                if horizontal:
-                    moved = pc.moved_to(pc.dx + (cursor - b[0]), pc.dy)
-                else:
-                    moved = pc.moved_to(pc.dx, pc.dy + (cursor - b[1]))
-                mb = polygon_bbox(moved.polygon_in_board())
-                for ob in others:
-                    if (mb[0] < ob[2] - _EPS and mb[2] > ob[0] + _EPS
-                            and mb[1] < ob[3] - _EPS and mb[3] > ob[1] + _EPS):
-                        ok = False
-                        break
-                if not ok:
-                    break
-                trial[i] = moved
-                cursor += spans[i] + gap
-            if not ok:
-                continue
-            for i, moved in trial.items():
-                cells[i] = moved
-            total = count_crossings(
-                _positions(), footprints, constraints.fanouts, constraints.bundles,
-            )
-            if total < best_total:
-                best_total = total
-                best_cells = dict(trial)
-            for i in idxs:
-                cells[i] = original[i]
-        if best_cells is not None:
-            for i, moved in best_cells.items():
-                cells[i] = moved
-            for i in idxs:
-                original[i] = cells[i]
-            _log.info(
-                "reorder_edge_connectors: %s edge reordered, crossings -> %d",
-                edge.value, best_total,
-            )
+    best_score = _score()
+    # Two rounds: a later edge's reorder can unlock an earlier edge's
+    # improvement (the J14 slide toward U3 only pays off AFTER the
+    # south edge reorder moves U3's neighbors). Deterministic, bounded.
+    for _round in range(2):
+      for edge, idxs in sorted(by_edge.items(), key=lambda kv: kv[0].value):
+          if len(idxs) == 1:
+              # Lone connector: slide along the edge toward its targets.
+              i = idxs[0]
+              horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+              original_pc = cells[i]
+              b0 = polygon_bbox(original_pc.polygon_in_board())
+              span = (b0[2] - b0[0]) if horizontal else (b0[3] - b0[1])
+              limit = bw if horizontal else bh
+              # MEMBER-level collision, not hull/bbox: the convex hull of
+              # a concave group covers board area no part touches, which
+              # blocked the J14 slide toward U3 through an empty corridor.
+              other_courts: list[Polygon] = []
+              for j in range(len(cells)):
+                  if j == i:
+                      continue
+                  for m in cells[j].members_in_board():
+                      fp_m = footprints.get(m.ref)
+                      if fp_m is not None:
+                          other_courts.append(
+                              courtyard_in_frame(fp_m, m.x, m.y, m.rotation_deg)
+                          )
+              best_slide: PlacedCell | None = None
+              pos = _EDGE_MARGIN_MM
+              while pos <= limit - _EDGE_MARGIN_MM - span + _EPS:
+                  if horizontal:
+                      moved = original_pc.moved_to(
+                          original_pc.dx + (pos - b0[0]), original_pc.dy,
+                      )
+                  else:
+                      moved = original_pc.moved_to(
+                          original_pc.dx, original_pc.dy + (pos - b0[1]),
+                      )
+                  moved_courts = [
+                      courtyard_in_frame(
+                          footprints[m.ref], m.x, m.y, m.rotation_deg,
+                      )
+                      for m in moved.members_in_board()
+                      if m.ref in footprints
+                  ]
+                  if not any(
+                      convex_polygons_overlap(mc, oc, clearance_mm=_GROUP_CLEARANCE_MM)
+                      for mc in moved_courts for oc in other_courts
+                  ):
+                      cells[i] = moved
+                      score = _score()
+                      if score < best_score:
+                          best_score = score
+                          best_slide = moved
+                      cells[i] = original_pc
+                  pos += _REORDER_SLIDE_STEP_MM
+              if best_slide is not None:
+                  cells[i] = best_slide
+                  _log.info(
+                      "reorder_edge_connectors: %s slid along %s edge, "
+                      "score -> %s", best_slide.cell.name, edge.value, best_score,
+                  )
+              continue
+          if not (2 <= len(idxs) <= _REORDER_MAX_CELLS):
+              continue
+          horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+          bbs = {i: polygon_bbox(cells[i].polygon_in_board()) for i in idxs}
+          alongs = {
+              i: (bbs[i][0], bbs[i][2]) if horizontal else (bbs[i][1], bbs[i][3])
+              for i in idxs
+          }
+          union_lo = min(a[0] for a in alongs.values())
+          union_hi = max(a[1] for a in alongs.values())
+          spans = {i: alongs[i][1] - alongs[i][0] for i in idxs}
+          free = union_hi - union_lo - sum(spans.values())
+          n = len(idxs)
+          gap = free / (n - 1) if n > 1 else 0.0
+          if gap < 0.0:
+              continue  # cells already tighter than their union: skip
+          other_polys2 = [
+              cells[j].polygon_in_board()
+              for j in range(len(cells)) if j not in idxs
+          ]
+          original = {i: cells[i] for i in idxs}
+          best_cells: dict[int, PlacedCell] | None = None
+          for perm in permutations(sorted(idxs)):
+              cursor = union_lo
+              trial: dict[int, PlacedCell] = {}
+              ok = True
+              for i in perm:
+                  pc = original[i]
+                  b = bbs[i]
+                  if horizontal:
+                      moved = pc.moved_to(pc.dx + (cursor - b[0]), pc.dy)
+                  else:
+                      moved = pc.moved_to(pc.dx, pc.dy + (cursor - b[1]))
+                  mpoly = moved.polygon_in_board()
+                  for op in other_polys2:
+                      if convex_polygons_overlap(mpoly, op, clearance_mm=0.0):
+                          ok = False
+                          break
+                  if not ok:
+                      break
+                  trial[i] = moved
+                  cursor += spans[i] + gap
+              if not ok:
+                  continue
+              for i, moved in trial.items():
+                  cells[i] = moved
+              score = _score()
+              if score < best_score:
+                  best_score = score
+                  best_cells = dict(trial)
+              for i in idxs:
+                  cells[i] = original[i]
+          if best_cells is not None:
+              for i, moved in best_cells.items():
+                  cells[i] = moved
+              for i in idxs:
+                  original[i] = cells[i]
+              _log.info(
+                  "reorder_edge_connectors: %s edge reordered, score -> %s",
+                  edge.value, best_score,
+              )
     return Floorplan(placed=tuple(cells), board_width=bw, board_height=bh)
 
 
