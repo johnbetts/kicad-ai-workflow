@@ -772,12 +772,16 @@ def _run_placement_v2(
     ctx: _BuildContext,
     requirements: ProjectRequirements,
     pre_footprints: list[Footprint],
+    v2_ledger_path: Path | None = None,
 ) -> LayoutResult:
     """Placement engine v2: cells/contracts/proofs (placement_mode="v2").
 
     Halts the build with the violated constraints when any v2 stage
-    fails — there is no degraded output.
+    fails — there is no degraded output. When *v2_ledger_path* is set,
+    every v2 stage appends its proof record there (certify, cells,
+    floorplan) so downstream gates extend the same evidence trail.
     """
+    from datetime import datetime, timezone
     from pathlib import Path as _Path
 
     from kicad_pipeline.placement_v2.pipeline import run_placement_v2
@@ -792,6 +796,8 @@ def _run_placement_v2(
         board_width_mm=ctx.board_width_mm,
         board_height_mm=ctx.board_height_mm,
         part_rules_path=part_rules if part_rules.exists() else None,
+        ledger_path=v2_ledger_path,
+        timestamp=datetime.now(timezone.utc).isoformat() if v2_ledger_path else "",
     )
     if not result.ok:
         details = "; ".join(v.message for v in result.violations[:10])
@@ -809,11 +815,14 @@ def _run_placement(
     requirements: ProjectRequirements,
     pre_footprints: list[Footprint],
     placement_mode: str,
+    v2_ledger_path: Path | None = None,
 ) -> list[Footprint]:
     """Run placement and apply positions/rotations to footprints."""
     layout_result: LayoutResult
     if placement_mode == "v2":
-        layout_result = _run_placement_v2(ctx, requirements, pre_footprints)
+        layout_result = _run_placement_v2(
+            ctx, requirements, pre_footprints, v2_ledger_path,
+        )
     elif placement_mode == "grouped":
         layout_result = place_groups_off_board(
             footprints=tuple(pre_footprints),
@@ -1643,12 +1652,14 @@ def build_pcb(
     pcb_file_path: str | Path | None = None,
     skip_inner_zones: bool = False,
     project_name: str | None = None,
+    v2_ledger_path: str | Path | None = None,
 ) -> PCBDesign:
     """Build a complete :class:`PCBDesign` from *requirements*.
 
     Resolves board dimensions, generates footprints, runs placement,
     adds zones/keepouts/silkscreen, routes traces, and returns the
-    assembled design.
+    assembled design. ``v2_ledger_path`` (placement_mode="v2" only)
+    appends each v2 stage's proof record to a build ledger.
 
     Raises:
         PCBError: If the requirements contain no components.
@@ -1678,6 +1689,7 @@ def build_pcb(
 
     footprints_with_pos = _run_placement(
         ctx, requirements, pre_footprints, placement_mode,
+        v2_ledger_path=Path(v2_ledger_path) if v2_ledger_path is not None else None,
     )
 
     return _post_placement_assembly(
