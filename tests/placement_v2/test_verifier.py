@@ -523,7 +523,7 @@ def test_run_gate_a_report(tmp_path: Path) -> None:
     assert "pin_attach x1" in report.checks_run
     assert "contain x2" in report.checks_run
     assert "courtyard_pair x1" in report.checks_run
-    assert any("face_out" in c and "skipped" in c for c in report.checks_run)
+    assert any("face_out" in c for c in report.checks_run)
 
 
 def test_run_gate_a_fails_on_planted_violation(tmp_path: Path) -> None:

@@ -175,8 +175,7 @@ def _checks_summary(
         f"pin_attach x{len(constraints.pin_attach)}",
         f"sequence x{len(constraints.sequences)}",
         f"edge_pin_distance x{len(constraints.edge_pins)}",
-        f"edge_pin_face_out x{len(constraints.edge_pins)} "
-        f"(skipped: orientation check not implemented)",
+        f"edge_pin_face_out x{len(constraints.edge_pins)}",
         f"contain x{len(pcb.footprints)}",
         f"courtyard_pair x{same_layer_pairs}",
         f"keepout x{len(constraints.keepouts)}",

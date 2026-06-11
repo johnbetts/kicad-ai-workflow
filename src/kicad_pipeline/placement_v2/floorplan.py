@@ -289,11 +289,48 @@ def _ladder_facing_rotation(
     return best
 
 
+def _edge_strip_rotation(
+    ref_cells: list[Cell],
+    horizontal: bool,
+    openings: dict[str, tuple[float, float]],
+) -> CardinalRotation:
+    """Rotation pointing the connectors' wire openings at the strip's
+    facing edge (SOUTH for horizontal strips, EAST for vertical).
+
+    Phoenix-style terminals open toward -Y at rotation 0 and would face
+    the board interior on a south edge without this — the opening
+    direction comes from part rules (EdgePin.opening) since their
+    courtyards are symmetric.
+    """
+    opening = None
+    for c in ref_cells:
+        for r in c.refs:
+            if r in openings:
+                opening = openings[r]
+                break
+        if opening is not None:
+            break
+    if opening is None:
+        return 0
+    target = (0.0, 1.0) if horizontal else (1.0, 0.0)
+    best_rot: CardinalRotation = 0
+    best_dot = -float("inf")
+    for rot in _ROTATIONS:
+        pts = transform_polygon(
+            (Point(opening[0], opening[1]),), 0.0, 0.0, -float(rot),
+        )
+        dot = pts[0].x * target[0] + pts[0].y * target[1]
+        if dot > best_dot + 1e-9:
+            best_dot, best_rot = dot, rot
+    return best_rot
+
+
 def _sequence_strips(
     cells: tuple[Cell, ...],
     sequences: tuple[SequenceAlong, ...],
     clearance: float,
     edge_pinned: frozenset[str] = frozenset(),
+    openings: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[list[PlacedCell], set[str], Edge | None]:
     """Arrange sequence-constrained cells as ordered uniform-pitch strips.
 
@@ -354,7 +391,9 @@ def _sequence_strips(
     for idx_, (seq, ref_cells) in enumerate(resolved):
         horizontal = seq.axis is Axis.HORIZONTAL
         if _is_edge_strip((seq, ref_cells)):
-            rotations.append(0)
+            rotations.append(_edge_strip_rotation(
+                ref_cells, horizontal, openings or {},
+            ))
             continue
         pair = ladder_pairs.get(idx_)
         facing_rot: CardinalRotation | None = None
@@ -477,6 +516,7 @@ def pack_group(
     clearance_mm: float = _GROUP_CLEARANCE_MM,
     sequences: tuple[SequenceAlong, ...] = (),
     edge_pinned: frozenset[str] = frozenset(),
+    openings: dict[str, tuple[float, float]] | None = None,
 ) -> GroupPlan:
     """Pack a FeatureBlock's cells into a compact group-local layout.
 
@@ -487,7 +527,7 @@ def pack_group(
     side stays clear to meet the board edge.
     """
     strip_cells, used, facing = _sequence_strips(
-        cells, sequences, clearance_mm, edge_pinned,
+        cells, sequences, clearance_mm, edge_pinned, openings or {},
     )
     outer_limit: tuple[Edge, float] | None = None
     if facing is not None and strip_cells:
@@ -525,6 +565,7 @@ def pack_board(
     clearance_mm: float = _BOARD_CLEARANCE_MM,
     shrink_margin_mm: float = 3.0,
     obstacles: tuple[PlacedCell, ...] = (),
+    body_dirs: dict[str, tuple[float, float]] | None = None,
 ) -> Floorplan:
     """Pack groups onto the board; shrink-to-fit when no size is given.
 
@@ -580,7 +621,9 @@ def pack_board(
         f"group:{g.name}": g.edge_facing
         for g in groups if g.edge_facing is not None
     }
-    placed = _snap_pinned_groups(placed, edge_pins, facing_by_name, bw, bh)
+    placed = _snap_pinned_groups(
+        placed, edge_pins, facing_by_name, bw, bh, body_dirs or {},
+    )
     return Floorplan(placed=tuple(placed), board_width=bw, board_height=bh)
 
 
@@ -590,6 +633,7 @@ def _snap_pinned_groups(
     facing_by_name: dict[str, Edge | None],
     bw: float,
     bh: float,
+    body_dirs: dict[str, tuple[float, float]] | None = None,
 ) -> list[PlacedCell]:
     """Translate groups containing edge-pinned refs flush to their edge.
 
@@ -619,10 +663,14 @@ def _snap_pinned_groups(
     out: list[PlacedCell] = list(placed)
     snapped_edge: dict[str, Edge] = {}
     edge_claims: dict[Edge, float] = {}
+    movable = [
+        i for i in range(len(out))
+        if out[i].cell.name.startswith("group:conn:")
+    ]
+    preferred: dict[str, Edge] = {}
     order = sorted(
-        range(len(out)),
-        key=lambda i: (out[i].cell.name.startswith("group:conn:"),
-                       out[i].cell.name),
+        (i for i in range(len(out)) if i not in movable),
+        key=lambda i: out[i].cell.name,
     )
     for i in order:
         pc = out[i]
@@ -661,78 +709,118 @@ def _snap_pinned_groups(
         b = polygon_bbox(out[i].polygon_in_board())
         span = (b[2] - b[0]) if edge in (Edge.NORTH, Edge.SOUTH) else (b[3] - b[1])
         edge_claims[edge] = edge_claims.get(edge, 0.0) + span + _BOARD_CLEARANCE_MM
-    return _slide_same_edge(out, snapped_edge, bw, bh)
+    # Explicit EdgePin edges become the connectors' preferred edges.
+    for i in movable:
+        for r in out[i].cell.refs:
+            e = edge_pins.get(r)
+            if e is not None:
+                preferred[out[i].cell.name] = e
+    return _place_conn_groups(out, movable, body_dirs or {}, preferred, bw, bh)
 
 
-def _slide_same_edge(
+def _place_conn_groups(
     cells: list[PlacedCell],
-    snapped_edge: dict[str, Edge],
+    movable: list[int],
+    body_dirs: dict[str, tuple[float, float]],
+    preferred: dict[str, Edge],
     bw: float,
     bh: float,
 ) -> list[PlacedCell]:
-    """Slide snapped CONNECTOR groups along their edge to a free spot.
+    """Place each lifted connector group flush on an edge with room.
 
-    A connector snapped flush can land on anything — another connector
-    on the same edge, or the flank of a functional group that owns the
-    board's south half. Connectors are pinned during legalization, so
-    conflicts must be resolved here: for each movable conn group (in
-    deterministic order) find the free interval along its edge nearest
-    its current position, treating ALL other cells as obstacles.
+    For every movable connector (deterministic order): try its
+    preferred edge, then the others by current distance; on each edge,
+    rotate the opening outward (body bulge -> edge normal) and search
+    for the free interval nearest its current position against ALL
+    other cells. The first edge with room wins. A connector that fits
+    NOWHERE stays put — legalization reports it honestly.
     """
-    movable = sorted(
-        (i for i, pc in enumerate(cells)
-         if pc.cell.name in snapped_edge
-         and pc.cell.name.startswith("group:conn:")),
-        key=lambda i: cells[i].cell.name,
-    )
-    for i in movable:
-        edge = snapped_edge[cells[i].cell.name]
-        horizontal = edge in (Edge.NORTH, Edge.SOUTH)
-        limit = bw if horizontal else bh
-        b = polygon_bbox(cells[i].polygon_in_board())
-        lo, hi = (b[0], b[2]) if horizontal else (b[1], b[3])
-        span = hi - lo
-        # Blocked intervals along this edge from every OTHER cell that
-        # overlaps the connector's PERPENDICULAR band.
-        perp = (b[1], b[3]) if horizontal else (b[0], b[2])
-        blocked: list[tuple[float, float]] = []
-        for j, other in enumerate(cells):
-            if j == i:
-                continue
-            ob = polygon_bbox(other.polygon_in_board())
-            o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
-            if o_perp[0] >= perp[1] + _BOARD_CLEARANCE_MM or \
-                    o_perp[1] <= perp[0] - _BOARD_CLEARANCE_MM:
-                continue
-            o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
-            blocked.append((o_along[0] - _BOARD_CLEARANCE_MM,
-                            o_along[1] + _BOARD_CLEARANCE_MM))
-        blocked.sort()
-        # Free gaps between merged blocked intervals.
-        gaps: list[tuple[float, float]] = []
-        cursor = _EDGE_MARGIN_MM
-        for b_lo, b_hi in blocked:
-            if b_lo > cursor:
-                gaps.append((cursor, min(b_lo, limit - _EDGE_MARGIN_MM)))
-            cursor = max(cursor, b_hi)
-        if cursor < limit - _EDGE_MARGIN_MM:
-            gaps.append((cursor, limit - _EDGE_MARGIN_MM))
-        # Nearest gap that fits, by distance from the current position.
-        best_pos: float | None = None
-        best_dist = float("inf")
-        for g_lo, g_hi in gaps:
-            if g_hi - g_lo < span:
-                continue
-            pos = min(max(lo, g_lo), g_hi - span)
-            dist = abs(pos - lo)
-            if dist < best_dist - 1e-9:
-                best_dist, best_pos = dist, pos
-        if best_pos is None or abs(best_pos - lo) < 1e-9:
-            continue  # stay (verifier/legalize will judge) or no move needed
-        shift = best_pos - lo
-        pc = cells[i]
-        cells[i] = (
-            pc.moved_to(pc.dx + shift, pc.dy) if horizontal
-            else pc.moved_to(pc.dx, pc.dy + shift)
-        )
+    normals = {
+        Edge.WEST: (-1.0, 0.0), Edge.EAST: (1.0, 0.0),
+        Edge.NORTH: (0.0, -1.0), Edge.SOUTH: (0.0, 1.0),
+    }
+    for i in sorted(movable, key=lambda i: cells[i].cell.name):
+        b0 = polygon_bbox(cells[i].polygon_in_board())
+        dists = {
+            Edge.WEST: b0[0], Edge.EAST: bw - b0[2],
+            Edge.NORTH: b0[1], Edge.SOUTH: bh - b0[3],
+        }
+        pref = preferred.get(cells[i].cell.name)
+        edges = sorted(Edge, key=lambda e: (e is not pref, dists[e], e.value))
+        for edge in edges:
+            pc = cells[i]
+            bdir = body_dirs.get(pc.cell.name)
+            if bdir is not None:
+                nx, ny = normals[edge]
+                best_rot: CardinalRotation = 0
+                best_dot = -float("inf")
+                for rot in _ROTATIONS:
+                    pts = transform_polygon(
+                        (Point(bdir[0], bdir[1]),), 0.0, 0.0, -float(rot),
+                    )
+                    dot = pts[0].x * nx + pts[0].y * ny
+                    if dot > best_dot + 1e-9:
+                        best_dot, best_rot = dot, rot
+                pc = pc.rotated(best_rot)
+            b = polygon_bbox(pc.polygon_in_board())
+            horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+            span = (b[2] - b[0]) if horizontal else (b[3] - b[1])
+            depth = (b[3] - b[1]) if horizontal else (b[2] - b[0])
+            limit = bw if horizontal else bh
+            # Perpendicular band this connector will occupy at the edge.
+            if edge is Edge.WEST:
+                band = (_EDGE_MARGIN_MM, _EDGE_MARGIN_MM + depth)
+            elif edge is Edge.EAST:
+                band = (bw - _EDGE_MARGIN_MM - depth, bw - _EDGE_MARGIN_MM)
+            elif edge is Edge.NORTH:
+                band = (_EDGE_MARGIN_MM, _EDGE_MARGIN_MM + depth)
+            else:
+                band = (bh - _EDGE_MARGIN_MM - depth, bh - _EDGE_MARGIN_MM)
+            blocked: list[tuple[float, float]] = []
+            for j, other in enumerate(cells):
+                if j == i:
+                    continue
+                ob = polygon_bbox(other.polygon_in_board())
+                o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
+                if (o_perp[0] >= band[1] + _BOARD_CLEARANCE_MM
+                        or o_perp[1] <= band[0] - _BOARD_CLEARANCE_MM):
+                    continue
+                o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
+                blocked.append((o_along[0] - _BOARD_CLEARANCE_MM,
+                                o_along[1] + _BOARD_CLEARANCE_MM))
+            blocked.sort()
+            gaps: list[tuple[float, float]] = []
+            cursor = _EDGE_MARGIN_MM
+            for b_lo, b_hi in blocked:
+                if b_lo > cursor:
+                    gaps.append((cursor, min(b_lo, limit - _EDGE_MARGIN_MM)))
+                cursor = max(cursor, b_hi)
+            if cursor < limit - _EDGE_MARGIN_MM:
+                gaps.append((cursor, limit - _EDGE_MARGIN_MM))
+            cur_lo = b[0] if horizontal else b[1]
+            best_pos: float | None = None
+            best_dist = float("inf")
+            for g_lo, g_hi in gaps:
+                if g_hi - g_lo < span:
+                    continue
+                pos = min(max(cur_lo, g_lo), g_hi - span)
+                if abs(pos - cur_lo) < best_dist - 1e-9:
+                    best_dist, best_pos = abs(pos - cur_lo), pos
+            if best_pos is None:
+                continue  # no room on this edge: try the next
+            # Flush at the edge, at the chosen along-position.
+            if horizontal:
+                pc = pc.moved_to(pc.dx + (best_pos - b[0]), pc.dy)
+                b = polygon_bbox(pc.polygon_in_board())
+                pc = (pc.moved_to(pc.dx, pc.dy - (b[1] - _EDGE_MARGIN_MM))
+                      if edge is Edge.NORTH else
+                      pc.moved_to(pc.dx, pc.dy + (bh - _EDGE_MARGIN_MM - b[3])))
+            else:
+                pc = pc.moved_to(pc.dx, pc.dy + (best_pos - b[1]))
+                b = polygon_bbox(pc.polygon_in_board())
+                pc = (pc.moved_to(pc.dx - (b[0] - _EDGE_MARGIN_MM), pc.dy)
+                      if edge is Edge.WEST else
+                      pc.moved_to(pc.dx + (bw - _EDGE_MARGIN_MM - b[2]), pc.dy))
+            cells[i] = pc
+            break
     return cells

@@ -105,12 +105,19 @@ class SequenceAlong:
 
 @dataclass(frozen=True)
 class EdgePin:
-    """*ref* must sit on a board edge with its opening facing outward."""
+    """*ref* must sit on a board edge with its opening facing outward.
+
+    ``opening`` is the wire/jack entry direction in the FOOTPRINT frame
+    at rotation 0 (from part rules) — needed when the courtyard is
+    symmetric and the opening cannot be derived from geometry (Phoenix
+    terminal blocks).
+    """
 
     ref: str
     edge: Edge | None = None  # None = solver picks nearest edge
     face_out: bool = True
     max_edge_distance_mm: float = 5.0
+    opening: tuple[float, float] | None = None
     source: ConstraintSource = ConstraintSource.NETLIST
 
 

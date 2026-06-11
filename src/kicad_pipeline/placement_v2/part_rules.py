@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 _ALPHA_PREFIX_RE = re.compile(r"^([A-Za-z]+)")
 
-_RULE_KEYS = frozenset({"match", "keepout", "edge_pin", "isolation_domain"})
+_RULE_KEYS = frozenset({"match", "keepout", "edge_pin", "isolation_domain", "opening_mm"})
 _MATCH_KEYS = frozenset({"ref_prefix", "footprint_contains"})
 _KEEPOUT_KEYS = frozenset({"kind", "polygon_mm"})
 _GAP_KEYS = frozenset({"domain_a", "domain_b", "min_mm"})
@@ -102,6 +102,7 @@ class PartRule:
     keepout: KeepoutSpec | None = None
     edge_pin: bool = False
     isolation_domain: str | None = None
+    opening: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,15 @@ def _parse_rule(obj: object, idx: int, path: Path) -> PartRule:
     edge_pin = rule.get("edge_pin", False)
     if not isinstance(edge_pin, bool):
         raise _fail(path, f"rules[{idx}].edge_pin must be a boolean")
+    opening: tuple[float, float] | None = None
+    if "opening_mm" in rule:
+        raw_open = rule["opening_mm"]
+        if not isinstance(raw_open, list) or len(raw_open) != 2:
+            raise _fail(path, f"rules[{idx}].opening_mm must be [x, y]")
+        opening = (
+            _as_float(raw_open[0], f"rules[{idx}].opening_mm[0]", path),
+            _as_float(raw_open[1], f"rules[{idx}].opening_mm[1]", path),
+        )
     isolation_domain = (
         _as_str(rule["isolation_domain"], f"rules[{idx}].isolation_domain", path)
         if "isolation_domain" in rule
@@ -218,6 +228,7 @@ def _parse_rule(obj: object, idx: int, path: Path) -> PartRule:
         keepout=keepout,
         edge_pin=edge_pin,
         isolation_domain=isolation_domain,
+        opening=opening,
     )
 
 
@@ -286,9 +297,10 @@ def apply_part_rules(
                         source=ConstraintSource.PART_RULE,
                     )
                 )
-            if rule.edge_pin:
+            if rule.edge_pin or rule.opening is not None:
                 edge_pins.append(
-                    EdgePin(ref=comp.ref, edge=None, source=ConstraintSource.PART_RULE)
+                    EdgePin(ref=comp.ref, edge=None, opening=rule.opening,
+                            source=ConstraintSource.PART_RULE)
                 )
             if rule.isolation_domain is not None:
                 domains.append((comp.ref, rule.isolation_domain))

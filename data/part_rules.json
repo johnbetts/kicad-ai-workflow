@@ -45,6 +45,16 @@
         "footprint_contains": "USB"
       },
       "edge_pin": true
+    },
+    {
+      "match": {
+        "footprint_contains": "TerminalBlock"
+      },
+      "edge_pin": true,
+      "opening_mm": [
+        0.0,
+        -1.0
+      ]
     }
   ],
   "isolation_gaps": [

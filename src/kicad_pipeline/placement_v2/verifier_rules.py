@@ -308,7 +308,94 @@ def check_edge_pins(
                 f"{pin.ref} is {dist:.3f}mm from the {edge_name} edge "
                 f"(max {pin.max_edge_distance_mm}mm)",
             ))
+        if pin.face_out:
+            v = _face_out_violation(fp, pin, Edge(edge_name), board_bbox)
+            if v is not None:
+                out.append(v)
+        out.extend(_forefield_violations(pcb, fp, pin, Edge(edge_name), board_bbox))
     return tuple(out)
+
+
+def _forefield_violations(
+    pcb: PCBDesign, fp: Footprint, pin: EdgePin, edge: Edge,
+    board_bbox: tuple[float, float, float, float],
+) -> list[Violation]:
+    """Nothing may sit between an edge connector and its board edge.
+
+    A passive parked in front of a screw terminal blocks the wire
+    opening and the screwdriver — found by human review on the analog
+    board and converted to this deterministic rule.
+    """
+    band = polygon_bbox(_courtyard_in_board(fp))
+    bx1, by1, bx2, by2 = board_bbox
+    if edge is Edge.SOUTH:
+        zone = (band[0], band[3], band[2], by2)
+    elif edge is Edge.NORTH:
+        zone = (band[0], by1, band[2], band[1])
+    elif edge is Edge.EAST:
+        zone = (band[2], band[1], bx2, band[3])
+    else:
+        zone = (bx1, band[1], band[0], band[3])
+    out: list[Violation] = []
+    for other in pcb.footprints:
+        if other.ref == fp.ref or other.ref.startswith("H"):
+            continue
+        ob = polygon_bbox(_courtyard_in_board(other))
+        ow = min(zone[2], ob[2]) - max(zone[0], ob[0])
+        oh = min(zone[3], ob[3]) - max(zone[1], ob[1])
+        if ow > 0.1 and oh > 0.1:
+            out.append(Violation(
+                f"forefield({pin.ref})", (pin.ref, other.ref),
+                Severity.MAJOR, min(ow, oh), 0.0,
+                f"{other.ref} sits between {pin.ref} and the "
+                f"{edge.value} board edge",
+            ))
+    return out
+
+
+#: Body-bulge magnitude below which a connector's orientation cannot be
+#: determined from geometry (symmetric parts like pin headers).
+_FACE_OUT_MIN_BULGE_MM = 0.5
+
+
+def _face_out_violation(
+    fp: Footprint, pin: EdgePin, edge: Edge,
+    board_bbox: tuple[float, float, float, float],
+) -> Violation | None:
+    """Connector opening must face the board edge, not the interior.
+
+    Deterministic proxy: a connector's housing overhangs its pad field
+    on the OPENING side (RJ45 jack mouth, terminal wire entries), so
+    the vector from the pad centroid to the courtyard centroid must
+    point toward the edge. Symmetric parts (bulge < 0.5mm) are
+    indeterminate and pass. Converted from a Gate B vision finding
+    (RJ45 facing the board interior) per the standing rule.
+    """
+    if pin.opening is not None:
+        # Part-rule opening direction, rotated to board frame.
+        bx, by = _rotate_kicad(pin.opening[0], pin.opening[1], fp.rotation)
+    else:
+        pad_cx, pad_cy = origin_to_centroid(
+            fp, fp.position.x, fp.position.y, fp.rotation,
+        )
+        court = _courtyard_in_board(fp)
+        ccx = sum(p.x for p in court) / len(court)
+        ccy = sum(p.y for p in court) / len(court)
+        bx, by = ccx - pad_cx, ccy - pad_cy
+    if math.hypot(bx, by) < _FACE_OUT_MIN_BULGE_MM:
+        return None
+    normal = {
+        Edge.WEST: (-1.0, 0.0), Edge.EAST: (1.0, 0.0),
+        Edge.NORTH: (0.0, -1.0), Edge.SOUTH: (0.0, 1.0),
+    }[edge]
+    dot = bx * normal[0] + by * normal[1]
+    if dot >= -_FACE_OUT_MIN_BULGE_MM:
+        return None
+    return Violation(
+        repr(pin), (pin.ref,), Severity.MAJOR, -dot, _FACE_OUT_MIN_BULGE_MM,
+        f"{pin.ref} opening faces the board interior "
+        f"(body bulge {-dot:.1f}mm away from the {edge.value} edge)",
+    )
 
 
 def check_contain(pcb: PCBDesign, contain: BoardContain) -> tuple[Violation, ...]:

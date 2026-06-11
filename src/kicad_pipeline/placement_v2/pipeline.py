@@ -487,18 +487,33 @@ def run_placement_v2(
             by_group.setdefault(
                 _group_for(cell.refs, requirements), []
             ).append(cell)
+    openings = {
+        ep.ref: ep.opening for ep in constraints.edge_pins
+        if ep.opening is not None
+    }
     plans = tuple(
         pack_group(
             gname,
             tuple(sorted(gcells, key=lambda c: c.name)),
             sequences=constraints.sequences,
             edge_pinned=edge_pinned,
+            openings=openings,
         )
         for gname, gcells in sorted(by_group.items())
     ) + tuple(
         pack_group(f"conn:{sorted(cell.refs)[0]}", (cell,))
         for cell in sorted(lifted, key=lambda c: c.name)
     )
+    # Connector opening direction (pad centroid -> courtyard centroid,
+    # cell frame at rotation 0): lets the edge snap ROTATE each lifted
+    # connector so its opening faces outward (Gate A face_out).
+    body_dirs: dict[str, tuple[float, float]] = {}
+    for cell in lifted:
+        ref = sorted(cell.refs)[0]
+        court = courtyard_polygon(footprints[ref])
+        bx = sum(pt.x for pt in court) / len(court)
+        by = sum(pt.y for pt in court) / len(court)
+        body_dirs[f"group:conn:{ref}"] = (bx, by)
     obstacles = tuple(_obstacle_cell(n, poly) for n, poly in reserved_zones)
     plan = None
     try:
@@ -506,6 +521,7 @@ def run_placement_v2(
             plans, constraints,
             board_width=board_width_mm, board_height=board_height_mm,
             obstacles=obstacles,
+            body_dirs=body_dirs,
         )
         # Edge-snapped groups stay put during legalization: residual
         # overlaps push the INTERIOR groups, never a connector off

@@ -1100,10 +1100,12 @@ def _add_mounting_hole_footprints(
                         break
                 else:
                     log.warning(
-                        "build_pcb: could not find collision-free position "
-                        "for %s near (%.1f, %.1f)",
+                        "build_pcb: no collision-free position for %s near "
+                        "(%.1f, %.1f) — SKIPPING the hole (an overlapping "
+                        "hole is worse than a missing one)",
                         mh_ref, orig_x, orig_y,
                     )
+                    continue
 
             mh_fp = make_mounting_hole(mh_ref, drill_diameter=mh_diameter)
             mh_fp = Footprint(

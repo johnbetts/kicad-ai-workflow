@@ -30,6 +30,7 @@ from kicad_pipeline.placement_v2.cells import Cell, CellProof, PlacedMember, Por
 from kicad_pipeline.placement_v2.footprint_geom import (
     courtyard_halfdims,
     courtyard_in_frame,
+    courtyard_polygon,
     pad_offset_from_centroid,
     pad_position_in_frame,
 )
@@ -157,13 +158,32 @@ def generate_cell(
     seq_refs = _place_sequences(
         name, anchor, footprints, constraints.sequences, placed, clearance_mm
     )
-    anchor_normal = _anti_interface_normal(
-        footprints[anchor],
-        {
-            net: pads for net, pads in (external_nets or {}).items()
-            if net in interface_nets
-        },
+    anchor_ep = next(
+        (ep for ep in constraints.edge_pins if ep.ref == anchor), None,
     )
+    anchor_normal: tuple[float, float] | None
+    if anchor_ep is not None:
+        # Edge-pinned anchor (a screw terminal anchoring its channel):
+        # its interface IS its own opening — supports stack OPPOSITE
+        # it, never in the forefield between connector and board edge.
+        # Part-rule opening wins; symmetric courtyards are blind.
+        if anchor_ep.opening is not None:
+            ox, oy = anchor_ep.opening
+            anchor_normal = (
+                ((-1.0, 0.0) if ox > 0 else (1.0, 0.0))
+                if abs(ox) >= abs(oy) else
+                ((0.0, -1.0) if oy > 0 else (0.0, 1.0))
+            )
+        else:
+            anchor_normal = _anti_opening_normal(footprints[anchor])
+    else:
+        anchor_normal = _anti_interface_normal(
+            footprints[anchor],
+            {
+                net: pads for net, pads in (external_nets or {}).items()
+                if net in interface_nets
+            },
+        )
     normals = _place_attachments(
         footprints, constraints.pin_attach, placed, seq_refs, clearance_mm,
         anchor_normal_override={anchor: anchor_normal} if anchor_normal else None,
@@ -235,6 +255,23 @@ def _anti_interface_normal(
     if abs(mx) >= abs(my):
         return (-1.0, 0.0) if mx > 0 else (1.0, 0.0)
     return (0.0, -1.0) if my > 0 else (0.0, 1.0)
+
+
+def _anti_opening_normal(fp: Footprint) -> tuple[float, float] | None:
+    """Direction opposite a connector's opening (body bulge), cardinal.
+
+    The courtyard centroid offset from the pad centroid marks the
+    housing overhang — the wire-entry side. Support parts belong on
+    the other side; ``None`` when the body is symmetric.
+    """
+    court = courtyard_polygon(fp)
+    bx = sum(p.x for p in court) / len(court)
+    by = sum(p.y for p in court) / len(court)
+    if math.hypot(bx, by) < 0.5:
+        return None
+    if abs(bx) >= abs(by):
+        return (-1.0, 0.0) if bx > 0 else (1.0, 0.0)
+    return (0.0, -1.0) if by > 0 else (0.0, 1.0)
 
 
 def _place_sequences(
