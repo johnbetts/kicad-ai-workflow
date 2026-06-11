@@ -1,0 +1,61 @@
+<html><head><meta charset="utf-8"><style>
+body { font-family: Helvetica, Arial; margin: 28px; }
+h1 { font-size: 18px; } h2 { font-size: 13px; margin-top: 18px; }
+table { border-collapse: collapse; width: 100%; }
+td, th { border: 1px solid #bbb; padding: 5px 7px; vertical-align: top; font-size: 10px; text-align: left; }
+th { background: #eee; }
+.note { font-size: 9px; color: #555; }
+</style></head><body>
+<h1>Build Proof &mdash; relay_v2.kicad_pcb (placement engine v2)</h1>
+<p class="note">Board: 4-channel relay training board, 100&times;60mm, 36 footprints, built 2026-06-11
+via <code>build_pcb(placement_mode="v2")</code>. Every row below was computed by deterministic code
+(<code>placement_v2/ledger.py</code>); "done" is defined as <code>all_green() == True</code>, never by prose.
+Gate A re-derives every constraint from the written .kicad_pcb on disk. Gate B verdicts come from an
+adversarial vision review over the 4-view render standard, parsed through a strict JSON schema
+(prose answers are rejected).</p>
+<h2>Stage ledger &mdash; ALL GREEN: True</h2>
+<table>
+<tr><th>Stage</th><th>Verdict</th><th>Checks run</th><th>Violations</th><th>in/out SHA-256</th><th>Detail</th></tr>
+
+    <tr><td><b>certify</b></td>
+        <td style="color:#0a7d33;font-weight:bold">PASS</td>
+        <td style="font-size:9px">certificates x32</td>
+        <td style="font-size:9px">&mdash;</td>
+        <td style="font-family:monospace;font-size:8px">97cd162cbbb1f066&hellip;<br>d9b6472602a62aca&hellip;</td>
+        <td style="font-size:9px"></td></tr>
+    <tr><td><b>cells</b></td>
+        <td style="color:#0a7d33;font-weight:bold">PASS</td>
+        <td style="font-size:9px">relay_driver:K1: pin_attach x5, sequences x0, zero_courtyard_overlap<br>relay_driver:K2: pin_attach x5, sequences x0, zero_courtyard_overlap<br>relay_driver:K3: pin_attach x5, sequences x0, zero_courtyard_overlap<br>relay_driver:K4: pin_attach x5, sequences x0, zero_courtyard_overlap<br>single:C1: singleton<br>single:C2: singleton<br>single:J1: singleton<br>single:J2: singleton<br>single:J3: singleton<br>single:J4: singleton<br>single:L1: singleton<br>single:L2: singleton</td>
+        <td style="font-size:9px">&mdash;</td>
+        <td style="font-family:monospace;font-size:8px">97cd162cbbb1f066&hellip;<br>3ab3591ad6351667&hellip;</td>
+        <td style="font-size:9px">12 cells (4 subcircuits detected)</td></tr>
+    <tr><td><b>floorplan</b></td>
+        <td style="color:#0a7d33;font-weight:bold">PASS</td>
+        <td style="font-size:9px">groups x1<br>cells x12</td>
+        <td style="font-size:9px">&mdash;</td>
+        <td style="font-family:monospace;font-size:8px">97cd162cbbb1f066&hellip;<br>0c40d11988c141c5&hellip;</td>
+        <td style="font-size:9px">board 100.0x60.0mm</td></tr>
+    <tr><td><b>gate_a</b></td>
+        <td style="color:#0a7d33;font-weight:bold">PASS</td>
+        <td style="font-size:9px">pin_attach x20<br>sequence x2<br>edge_pin_distance x4<br>edge_pin_face_out x4 (skipped: orientation check not implemented)<br>contain x36<br>courtyard_pair x630<br>keepout x0<br>isolation_pair x0</td>
+        <td style="font-size:9px">&mdash;</td>
+        <td style="font-family:monospace;font-size:8px">cdc1af135ae1383a&hellip;<br>cdc1af135ae1383a&hellip;</td>
+        <td style="font-size:9px">re-derived from .kicad_pcb on disk</td></tr>
+    <tr><td><b>gate_b</b></td>
+        <td style="color:#0a7d33;font-weight:bold">PASS</td>
+        <td style="font-size:9px">bodies_no_overlap<br>bodies_flat_on_board<br>bodies_on_pads<br>orientation_sane<br>antenna_zone_clear<br>groups_visually_coherent</td>
+        <td style="font-size:9px">&mdash;</td>
+        <td style="font-family:monospace;font-size:8px">cdc1af135ae1383a&hellip;<br>2d:1f4715559f2a,&hellip;</td>
+        <td style="font-size:9px">6 verdicts over 4 views</td></tr>
+</table>
+<h2>What each stage proves</h2>
+<table>
+<tr><th>Stage</th><th>Guarantee</th></tr>
+<tr><td>certify</td><td>Every footprint matches its hash-keyed certificate; a drifted footprint (changed pads) halts the build before placement.</td></tr>
+<tr><td>cells</td><td>Each subcircuit laid out by pin connectivity proved its internal constraints (pin-attach distances, sequences, zero courtyard overlaps) before being frozen as a rigid cell.</td></tr>
+<tr><td>floorplan</td><td>Cells packed with hard constraints: board containment, no overlaps, terminals pitch-locked under relays, connector strip outermost and edge-snapped; legalization raised no residuals.</td></tr>
+<tr><td>gate_a</td><td>The WRITTEN FILE re-parsed from disk satisfies the full constraint IR: 20 pin attachments, 2 sequences, 4 edge pins, 36 containments, 630 courtyard pairs &mdash; zero violations.</td></tr>
+<tr><td>gate_b</td><td>Adversarial vision over 4 views: no body overlaps, all bodies flat and on their pads (after the &minus;1.8mm relay model calibration), terminals opening outward, channels periodic. 6/6.</td></tr>
+</table>
+<p class="note">Render hashes bound to this exact board: 2d:1f4715559f2a,3d_top:7a013f2aebe3,3d_iso:6ae815f27b0b,3d_iso_back:2d1d60c4ae0f</p>
+</body></html>
