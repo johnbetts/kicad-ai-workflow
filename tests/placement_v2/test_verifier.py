@@ -11,6 +11,7 @@ from kicad_pipeline.models.pcb import (
     BoardOutline,
     DesignRules,
     Footprint,
+    FootprintLine,
     Keepout,
     Pad,
     PCBDesign,
@@ -308,10 +309,13 @@ def test_contain_inside_passes() -> None:
 def test_contain_pad_off_board_is_critical() -> None:
     pcb = _board((_fp("R1", 0.5, 15.0),))  # pad 1 corner at x = -1.0
     found = _only(verify_board(pcb, ConstraintSet()), "BoardContain")
-    assert len(found) == 1
-    assert found[0].severity is Severity.CRITICAL
-    assert found[0].measured == pytest.approx(-1.0)
-    assert found[0].refs == ("R1",)
+    # Both the pad check and the courtyard (body) check fire.
+    pad_v = [v for v in found if "pad clearance" in v.message]
+    body_v = [v for v in found if "courtyard/body" in v.message]
+    assert len(pad_v) == 1 and len(body_v) == 1
+    assert pad_v[0].severity is Severity.CRITICAL
+    assert pad_v[0].measured == pytest.approx(-1.0)
+    assert pad_v[0].refs == ("R1",)
 
 
 def test_contain_respects_margin() -> None:
@@ -329,7 +333,55 @@ def test_contain_is_rotation_aware() -> None:
     assert _only(verify_board(upright, _NO_MARGIN), "BoardContain") == ()
     rotated = _board((_fp("R1", 25.0, 1.0, rotation=90.0),))
     found = _only(verify_board(rotated, _NO_MARGIN), "BoardContain")
-    assert len(found) == 1
+    assert [v for v in found if "pad clearance" in v.message]
+
+
+def _fp_with_courtyard(
+    ref: str, x: float, y: float, court_half_w: float, court_half_h: float,
+) -> Footprint:
+    """Small-pad footprint with explicit oversized courtyard graphics.
+
+    Models a module (ESP32) whose body extends well past its pad field.
+    Courtyard lines are in footprint-local frame around the pad centroid
+    (pads are symmetric about the origin here).
+    """
+    base = _fp(ref, x, y)
+    lines = tuple(
+        FootprintLine(start=Point(x1, y1), end=Point(x2, y2), layer="F.CrtYd")
+        for (x1, y1), (x2, y2) in (
+            ((-court_half_w, -court_half_h), (court_half_w, -court_half_h)),
+            ((court_half_w, -court_half_h), (court_half_w, court_half_h)),
+            ((court_half_w, court_half_h), (-court_half_w, court_half_h)),
+            ((-court_half_w, court_half_h), (-court_half_w, -court_half_h)),
+        )
+    )
+    return Footprint(
+        lib_id=base.lib_id, ref=base.ref, value=base.value,
+        position=base.position, rotation=base.rotation, layer=base.layer,
+        pads=base.pads, graphics=lines,
+    )
+
+
+def test_contain_body_off_board_pads_inside_is_critical() -> None:
+    """Gate C 2026-06-11 item 4a: ESP32 pads in-board, module body off it.
+
+    Pads sit 10mm inside the outline but the 8mm-half-height courtyard
+    crosses the north edge (y=0) — the body check must fire even though
+    every pad passes with margin to spare.
+    """
+    pcb = _board((_fp_with_courtyard("U1", 25.0, 5.0, 6.0, 8.0),))
+    found = _only(verify_board(pcb, _NO_MARGIN), "BoardContain")
+    body_v = [v for v in found if "courtyard/body" in v.message]
+    assert len(body_v) == 1
+    assert body_v[0].severity is Severity.CRITICAL
+    assert body_v[0].measured == pytest.approx(-3.0)  # 8 - 5 past the edge
+    assert not [v for v in found if "pad clearance" in v.message]
+
+
+def test_contain_body_flush_with_edge_passes() -> None:
+    """Flush is legal — edge connectors sit exactly on the outline."""
+    pcb = _board((_fp_with_courtyard("J1", 25.0, 8.0, 6.0, 8.0),))
+    assert _only(verify_board(pcb, _NO_MARGIN), "BoardContain") == ()
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +535,7 @@ def test_round_trip_catches_pad_off_board(tmp_path: Path) -> None:
     pcb = _board((_fp("R1", 0.5, 15.0),))  # planted: pad corner at x = -1.0
     dest = _write(pcb, tmp_path)
     found = verify_board_file(dest, ConstraintSet())
-    contain = _only(found, "BoardContain")
+    contain = [v for v in _only(found, "BoardContain") if "pad clearance" in v.message]
     assert len(contain) == 1
     assert contain[0].severity is Severity.CRITICAL
     assert contain[0].refs == ("R1",)
@@ -521,7 +573,8 @@ def test_run_gate_a_report(tmp_path: Path) -> None:
     assert isinstance(report, GateAReport)
     assert report.passed
     assert "pin_attach x1" in report.checks_run
-    assert "contain x2" in report.checks_run
+    assert "contain_pad x2" in report.checks_run
+    assert "contain_courtyard x2" in report.checks_run
     assert "courtyard_pair x1" in report.checks_run
     assert any("face_out" in c for c in report.checks_run)
 

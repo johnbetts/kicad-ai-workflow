@@ -398,25 +398,48 @@ def _face_out_violation(
     )
 
 
+def _worst_clearance(corners: Polygon, outline: Polygon) -> float | None:
+    """Most negative signed clearance of any corner to the outline."""
+    worst: float | None = None
+    for corner in corners:
+        boundary = _boundary_dist(corner.x, corner.y, outline)
+        clearance = (
+            boundary if point_in_polygon(corner.x, corner.y, outline) else -boundary
+        )
+        if worst is None or clearance < worst:
+            worst = clearance
+    return worst
+
+
 def check_contain(pcb: PCBDesign, contain: BoardContain) -> tuple[Violation, ...]:
-    """Every pad corner inside the outline with >= margin clearance (CRITICAL)."""
+    """Pads AND courtyard (body extent) inside the outline (CRITICAL).
+
+    Pads keep the configured margin. The courtyard — the body proxy —
+    is checked at zero margin: flush with the edge is legal (edge
+    connectors), past the edge is not. Gate C feedback 2026-06-11 item
+    4a: contain checked PADS ONLY, so an ESP32 module whose castellated
+    pads were in-board passed while its body hung off the outline.
+    """
     outline = _outline_points(pcb.outline)
     out: list[Violation] = []
     for fp in pcb.footprints:
-        worst: float | None = None
-        for pad in fp.pads:
-            for corner in _pad_corners(fp, pad):
-                boundary = _boundary_dist(corner.x, corner.y, outline)
-                clearance = (
-                    boundary if point_in_polygon(corner.x, corner.y, outline) else -boundary
-                )
-                if worst is None or clearance < worst:
-                    worst = clearance
-        if worst is not None and worst < contain.margin_mm - _EPS:
+        if not fp.pads:
+            continue
+        worst_pad = _worst_clearance(
+            tuple(c for pad in fp.pads for c in _pad_corners(fp, pad)), outline,
+        )
+        if worst_pad is not None and worst_pad < contain.margin_mm - _EPS:
             out.append(Violation(
-                repr(contain), (fp.ref,), Severity.CRITICAL, worst, contain.margin_mm,
-                f"{fp.ref} pad clearance to board edge is {worst:.3f}mm "
+                repr(contain), (fp.ref,), Severity.CRITICAL, worst_pad, contain.margin_mm,
+                f"{fp.ref} pad clearance to board edge is {worst_pad:.3f}mm "
                 f"(margin {contain.margin_mm}mm; negative = off board)",
+            ))
+        worst_body = _worst_clearance(_courtyard_in_board(fp), outline)
+        if worst_body is not None and worst_body < -_EPS:
+            out.append(Violation(
+                repr(contain), (fp.ref,), Severity.CRITICAL, worst_body, 0.0,
+                f"{fp.ref} courtyard/body extends {-worst_body:.3f}mm past "
+                f"the board edge",
             ))
     return tuple(out)
 
