@@ -191,6 +191,7 @@ def generate_cell(
     _place_orphans(
         footprints, refs, placed, clearance_mm,
         direction=anchor_normal if anchor_normal is not None else (0.0, 1.0),
+        attachments=constraints.pin_attach,
     )
     _resolve_overlaps(footprints, placed, clearance_mm, normals)
 
@@ -339,6 +340,27 @@ class _BandMember:
     host: str
     dst_pin: str
     depth: int  # chain hops from the band root
+    max_mm: float = 10.0  # the placement-driving attachment's bound
+
+
+def _edge_dist(
+    normal: tuple[float, float],
+    host: PlacedMember,
+    pad_x: float,
+    pad_y: float,
+    host_hw: float,
+    host_hh: float,
+) -> float:
+    """Distance from a host pad to the host courtyard edge on *normal*'s side.
+
+    The band starts just past that edge, so this is the floor of any
+    attach distance for a member placed on that side.
+    """
+    if normal[1] != 0:
+        edge = host.y + (host_hh if normal[1] > 0 else -host_hh)
+        return abs(edge - pad_y)
+    edge = host.x + (host_hw if normal[0] > 0 else -host_hw)
+    return abs(edge - pad_x)
 
 
 def _override_feasible(
@@ -350,20 +372,13 @@ def _override_feasible(
     host_hw: float,
     host_hh: float,
 ) -> bool:
-    """Can a member on the override side still meet the attach bound?
+    """Can a member on the override side still meet the attach bound?"""
+    return _edge_dist(normal, host, pad_x, pad_y, host_hw, host_hh) <= attach.max_mm
 
-    The band starts just past the host courtyard edge on the override
-    side, so the attach distance is at least the pad-to-edge distance.
-    When that alone exceeds ``max_mm`` the override is geometrically
-    infeasible for THIS attachment and per-pad placement must win.
-    """
-    if normal[1] != 0:
-        edge = host.y + (host_hh if normal[1] > 0 else -host_hh)
-        edge_dist = abs(edge - pad_y)
-    else:
-        edge = host.x + (host_hw if normal[0] > 0 else -host_hw)
-        edge_dist = abs(edge - pad_x)
-    return edge_dist <= attach.max_mm
+
+_CARDINALS: tuple[tuple[float, float], ...] = (
+    (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+)
 
 
 def _resolve_chains(
@@ -407,11 +422,20 @@ def _resolve_chains(
                     # The anti-opening side cannot satisfy this bound
                     # (an ESP32 module's west-column decoupling pad is
                     # ~17mm from the south band — stacking it there
-                    # broke the 5mm contract). Fall back to the pad's
-                    # own side; the opening side itself stays excluded.
-                    own = _side_normal(tx, ty, host.x, host.y, hw, hh)
+                    # broke the 5mm contract). Fall back to the side
+                    # NEAREST the pad that still meets the bound; the
+                    # opening/interface side itself stays excluded (a
+                    # relay whose coil pad sits on the contact side
+                    # needs a PERPENDICULAR band, found on the full
+                    # nl-s-3c board 2026-06-11).
                     opening = (-normal[0], -normal[1])
-                    normal = own if own != opening else normal
+                    for cand in sorted(
+                        (n for n in _CARDINALS if n != opening),
+                        key=lambda n: _edge_dist(n, host, tx, ty, hw, hh),
+                    ):
+                        if _edge_dist(cand, host, tx, ty, hw, hh) <= a.max_mm:
+                            normal = cand
+                            break
                 if normal is None:
                     normal = _side_normal(tx, ty, host.x, host.y, hw, hh)
                 key = (a.dst.ref, normal)
@@ -423,7 +447,7 @@ def _resolve_chains(
                 continue
             bands.setdefault(key, []).append(
                 _BandMember(ref=a.src.ref, host=a.dst.ref,
-                            dst_pin=a.dst.pin, depth=depth)
+                            dst_pin=a.dst.pin, depth=depth, max_mm=a.max_mm)
             )
             member_band[a.src.ref] = (key, depth)
             progressed = True
@@ -529,11 +553,22 @@ def _place_attachments(
                 infos.append((m, desired, rot, half_along, half_depth, tx, ty))
             infos.sort(key=lambda i: (i[1], i[0].ref))
 
+            # Row budget: the root's span, EXPANDED to what this
+            # level's tightest attach bound allows around its targets.
+            # A tiny host (TSOT-23-6 buck) is ~3mm wide; two input
+            # caps with 5mm bounds can only sit side by side if the
+            # row may extend past the body (found on nl-s-3c, where
+            # the second cap wrapped to a deeper row and broke its
+            # bound).
+            level_bound = min(m.max_mm for m in level_members)
+            level_lo = min(budget_lo, min(i[1] for i in infos) - level_bound)
+            level_hi = max(budget_hi, max(i[1] for i in infos) + level_bound)
+
             # Split into rows that fit the budget, then center each row
             # near its members' mean desired coordinate.
             rows: list[list[tuple[_BandMember, float, float, float, float, float, float]]] = [[]]
             width = 0.0
-            budget_span = budget_hi - budget_lo
+            budget_span = level_hi - level_lo
             for info in infos:
                 w = 2 * info[3] + (clearance_mm if rows[-1] else 0.0)
                 if rows[-1] and width + w > budget_span:
@@ -549,8 +584,8 @@ def _place_attachments(
                 total = sum(2 * i[3] for i in row) + clearance_mm * (len(row) - 1)
                 mean_desired = sum(i[1] for i in row) / len(row)
                 start = min(
-                    max(mean_desired - total / 2, budget_lo),
-                    max(budget_hi - total, budget_lo),
+                    max(mean_desired - total / 2, level_lo),
+                    max(level_hi - total, level_lo),
                 )
                 row_extent = max(2 * i[4] for i in row)
                 cursor = start
@@ -575,12 +610,46 @@ def _src_pin_of(attachments: tuple[PinAttach, ...], ref: str) -> str:
     return "1"
 
 
+def _orphan_order(
+    orphans: list[str], attachments: tuple[PinAttach, ...],
+) -> list[str]:
+    """Shelf order: attachment-connected orphans adjacent, in chain order.
+
+    Alphabetical order once put a debounce cap two shelf slots (14mm)
+    from the resistor it attaches to (nl-s-3c boot button, 2026-06-11).
+    Connected components of the attach graph are walked breadth-first
+    from each component's lowest ref so chains stay consecutive.
+    """
+    members = set(orphans)
+    adj: dict[str, set[str]] = {r: set() for r in orphans}
+    for a in attachments:
+        if a.src.ref in members and a.dst.ref in members:
+            adj[a.src.ref].add(a.dst.ref)
+            adj[a.dst.ref].add(a.src.ref)
+    seen: set[str] = set()
+    out: list[str] = []
+    for start in sorted(orphans):
+        if start in seen:
+            continue
+        queue = [start]
+        seen.add(start)
+        while queue:
+            ref = queue.pop(0)
+            out.append(ref)
+            for nxt in sorted(adj[ref]):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+    return out
+
+
 def _place_orphans(
     footprints: Mapping[str, Footprint],
     refs: set[str],
     placed: dict[str, PlacedMember],
     clearance_mm: float,
     direction: tuple[float, float] = (0.0, 1.0),
+    attachments: tuple[PinAttach, ...] = (),
 ) -> None:
     """Members with no constraint path: deterministic shelf along *direction*.
 
@@ -588,8 +657,10 @@ def _place_orphans(
     south-facing screw terminal's orphan shelf belongs NORTH of it, not
     in the wire-entry forefield (Gate C 2026-06-11 items 1/3 — divider
     passives were shelved between the terminals and the board edge).
+    Orphans that attach to EACH OTHER are shelved adjacently in chain
+    order so their bounds remain satisfiable.
     """
-    orphans = sorted(refs - set(placed))
+    orphans = _orphan_order(sorted(refs - set(placed)), attachments)
     if not orphans:
         return
     dx, dy = direction

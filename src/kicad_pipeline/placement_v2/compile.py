@@ -95,6 +95,11 @@ class _Index:
         self.gnd_nets: frozenset[str] = frozenset(
             n.name for n in requirements.nets if "GND" in n.name.upper()
         )
+        # ref -> FeatureBlock name (functional grouping signal)
+        self.feature_of: dict[str, str] = {}
+        for feature in requirements.features:
+            for ref in feature.components:
+                self.feature_of.setdefault(ref, feature.name)
 
     def _is_power_net(self, net: Net) -> bool:
         upper = net.name.upper()
@@ -152,6 +157,19 @@ def _decoupling_attaches(idx: _Index) -> list[PinAttach]:
             for u in ics
             if cap.placement_group is not None and u.placement_group == cap.placement_group
         ]
+        if not preferred:
+            # A shared rail (+3V3) feeds several ICs: the cap belongs
+            # to the IC in ITS OWN FeatureBlock. Blind ics[0] once
+            # bound every rail cap to the regulator U2, 50-80mm away
+            # (nl-s-3c, 2026-06-11).
+            cap_feature = idx.feature_of.get(cap.ref)
+            preferred = [
+                u for u in ics
+                if cap_feature is not None
+                and idx.feature_of.get(u.ref) == cap_feature
+            ]
+        if not preferred and len(ics) > 1:
+            continue  # ambiguous: a wrong hard bound is worse than none
         ic = preferred[0] if preferred else ics[0]
         out.append(
             PinAttach(
@@ -345,6 +363,12 @@ def _chain_completion_attaches(
                         t in idx.by_ref[other].footprint.lower()
                         for t in _CONNECTOR_FP_TOKENS
                     )
+                    # Same FeatureBlock only: a cross-group monitoring
+                    # tap (ADC divider sensing a relay contact) is a
+                    # measurement net, not a placement chain — the 8mm
+                    # bound put R18 53mm in the red on nl-s-3c
+                    # (2026-06-11).
+                    and idx.feature_of.get(other) == idx.feature_of.get(comp.ref)
                 ),
                 # Prefer the most LOCAL partner — the one touching the
                 # fewest nets (a crystal over the MCU, a transistor
@@ -523,8 +547,14 @@ def _connector_chain_attaches(idx: _Index) -> list[PinAttach]:
     places the passive AT the connector pin's coordinate instead of
     shelving the whole channel as unordered orphans — the root cause of
     the analog AIN/GND crossings (human finding 2026-06-11).
+
+    Only for connectors carrying exactly ONE such chain: a per-channel
+    screw terminal anchors its own channel cell, but a shared harness
+    connector (J3 with three channels) cannot have every channel within
+    the bound — there the connector_fanout crossing check is the
+    invariant, not a hard distance (found on nl-s-3c, 2026-06-11).
     """
-    out: list[PinAttach] = []
+    candidates: list[PinAttach] = []
     for net in idx.nets:
         if len(net.connections) != 2 or not idx.is_signal_net(net.name):
             continue
@@ -539,14 +569,22 @@ def _connector_chain_attaches(idx: _Index) -> list[PinAttach]:
             continue
         if ref_alpha_prefix(part.ref) not in _CHAIN_ENTRY_PREFIXES:
             continue
-        out.append(PinAttach(
+        if idx.feature_of.get(conn.ref) != idx.feature_of.get(part.ref):
+            # A harness connector in another FeatureBlock feeds this
+            # channel from across the board — the fanout crossing
+            # check governs there, not a hard distance.
+            continue
+        candidates.append(PinAttach(
             src=PadRef(part.ref, part.pin),
             dst=PadRef(conn.ref, conn.pin),
             net=net.name,
             max_mm=_CONNECTOR_CHAIN_MAX_MM,
             ideal_mm=_CONNECTOR_CHAIN_IDEAL_MM,
         ))
-    return out
+    chains_per_connector: dict[str, int] = {}
+    for pa in candidates:
+        chains_per_connector[pa.dst.ref] = chains_per_connector.get(pa.dst.ref, 0) + 1
+    return [pa for pa in candidates if chains_per_connector[pa.dst.ref] == 1]
 
 
 def compile_constraints(
