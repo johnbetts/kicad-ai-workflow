@@ -74,8 +74,8 @@ PART_RULES_PATH = _repo / "data" / "part_rules.json"
 
 _VIEWS: tuple[tuple[str, list[str]], ...] = (
     ("2d", ["2d", "-w", "1024"]),
-    ("3d_top", ["3d", "--view", "top", "-w", "1024"]),
-    ("3d_iso", ["3d", "--view", "iso", "-w", "1024"]),
+    ("3d_top", ["3d", "--view", "top", "-w", "1024", "--height", "768"]),
+    ("3d_iso", ["3d", "--view", "iso", "-w", "1024", "--height", "768"]),
 )
 
 

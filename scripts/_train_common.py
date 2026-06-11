@@ -123,9 +123,9 @@ def _render_4_views(pcb_path: Path) -> None:
     out_dir = pcb_path.parent
     views = [
         ("2d", ["-w", "1024"], f"{stem}_2d.png"),
-        ("3d", ["--view", "top", "-w", "1024"], f"{stem}_3d_top.png"),
-        ("3d", ["--view", "iso", "-w", "1024"], f"{stem}_3d_iso.png"),
-        ("3d", ["--view", "iso-back", "-w", "1024"], f"{stem}_3d_isoback.png"),
+        ("3d", ["--view", "top", "-w", "1024", "--height", "768"], f"{stem}_3d_top.png"),
+        ("3d", ["--view", "iso", "-w", "1024", "--height", "768"], f"{stem}_3d_iso.png"),
+        ("3d", ["--view", "iso-back", "-w", "1024", "--height", "768"], f"{stem}_3d_isoback.png"),
     ]
     rendered = 0
     for mode, args, filename in views:

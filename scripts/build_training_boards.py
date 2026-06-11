@@ -57,9 +57,11 @@ PART_RULES_PATH = _repo / "data" / "part_rules.json"
 #: render view name (ledger/REQUIRED_VIEWS key) -> kicad-image-gen args.
 _VIEWS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("2d", ("2d", "-w", "1024")),
-    ("3d_top", ("3d", "--view", "top", "-w", "1024")),
-    ("3d_iso", ("3d", "--view", "iso", "-w", "1024")),
-    ("3d_iso_back", ("3d", "--view", "iso-back", "-w", "1024")),
+    # 3D needs an explicit height: the CLI default is 1800px, which
+    # wraps landscape boards in a portrait frame (renders look cropped).
+    ("3d_top", ("3d", "--view", "top", "-w", "1024", "--height", "768")),
+    ("3d_iso", ("3d", "--view", "iso", "-w", "1024", "--height", "768")),
+    ("3d_iso_back", ("3d", "--view", "iso-back", "-w", "1024", "--height", "768")),
 )
 
 
