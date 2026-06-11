@@ -29,6 +29,7 @@ from kicad_pipeline.placement_v2.ir import Axis, Edge, Severity, Violation
 if TYPE_CHECKING:
     from kicad_pipeline.models.pcb import BoardOutline, Footprint, Pad, PCBDesign
     from kicad_pipeline.placement_v2.ir import (
+        AttachBundle,
         BoardContain,
         CellKeepout,
         EdgePin,
@@ -441,6 +442,63 @@ def check_contain(pcb: PCBDesign, contain: BoardContain) -> tuple[Violation, ...
                 f"{fp.ref} courtyard/body extends {-worst_body:.3f}mm past "
                 f"the board edge",
             ))
+    return tuple(out)
+
+
+def _segments_cross(
+    a1: tuple[float, float], a2: tuple[float, float],
+    b1: tuple[float, float], b2: tuple[float, float],
+) -> bool:
+    """True when open segments a1-a2 and b1-b2 properly intersect."""
+    def orient(p: tuple[float, float], q: tuple[float, float], r: tuple[float, float]) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    return (
+        orient(a1, a2, b1) * orient(a1, a2, b2) < -_EPS
+        and orient(b1, b2, a1) * orient(b1, b2, a2) < -_EPS
+    )
+
+
+def check_attach_bundles(
+    pcb: PCBDesign, bundles: tuple[AttachBundle, ...],
+) -> tuple[Violation, ...]:
+    """Each AttachBundle: zero crossings among its attach lines (MAJOR).
+
+    Each bundle's nets are drawn as straight pad-center segments; any
+    pairwise intersection means the pin order on one side does not
+    mirror the other's physical pad order — an avoidable crossover
+    trace (the relay NO/NC defect class, Gate C 2026-06-11 item 2).
+    """
+    out: list[Violation] = []
+    for bundle in bundles:
+        segments: list[tuple[str, tuple[float, float], tuple[float, float]]] = []
+        missing = False
+        for net, (pad_a, pad_b) in zip(bundle.nets, bundle.pad_pairs, strict=True):
+            ends: list[tuple[float, float]] = []
+            for pad_ref in (pad_a, pad_b):
+                fp = pcb.get_footprint(pad_ref.ref)
+                pad = pad_by_number(fp, pad_ref.pin) if fp is not None else None
+                if fp is None or pad is None:
+                    out.append(_missing(bundle, pad_ref.ref, f"pad {pad_ref}"))
+                    missing = True
+                    break
+                ends.append(_pad_center(fp, pad))
+            if len(ends) == 2:
+                segments.append((net, ends[0], ends[1]))
+        if missing:
+            continue
+        for i in range(len(segments)):
+            for j in range(i + 1, len(segments)):
+                net_i, a1, a2 = segments[i]
+                net_j, b1, b2 = segments[j]
+                if _segments_cross(a1, a2, b1, b2):
+                    out.append(Violation(
+                        repr(bundle), (bundle.ref_a, bundle.ref_b), Severity.MAJOR,
+                        1.0, 0.0,
+                        f"attach lines {net_i} and {net_j} between "
+                        f"{bundle.ref_a} and {bundle.ref_b} cross — pin order "
+                        f"does not mirror the physical pad order",
+                    ))
     return tuple(out)
 
 

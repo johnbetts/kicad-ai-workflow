@@ -122,6 +122,25 @@ class EdgePin:
 
 
 @dataclass(frozen=True)
+class AttachBundle:
+    """Straight pad-to-pad connections between two parts must not cross.
+
+    Compiled from the netlist: when two components are joined by two or
+    more two-pin nets (relay contacts -> screw terminal, ADC channel ->
+    its connector), the pin ORDER on one side must mirror the other's
+    physical pad order or the traces cross. Gate C feedback 2026-06-11
+    item 2 (relay NO/NC) converted to this countable rule: segment
+    intersections between the attach lines must be zero.
+    """
+
+    ref_a: str
+    ref_b: str
+    pad_pairs: tuple[tuple[PadRef, PadRef], ...]  # (a-side pad, b-side pad) per net
+    nets: tuple[str, ...]  # net names, parallel to pad_pairs
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
 class CellKeepout:
     """A keepout region owned by a component, in CELL-LOCAL frame.
 
@@ -180,6 +199,7 @@ class ConstraintSet:
     edge_pins: tuple[EdgePin, ...] = ()
     keepouts: tuple[CellKeepout, ...] = ()
     isolation: tuple[IsolationGap, ...] = ()
+    bundles: tuple[AttachBundle, ...] = ()
     contain: BoardContain = field(default_factory=BoardContain)
 
     def for_refs(self, refs: frozenset[str]) -> ConstraintSet:
@@ -200,6 +220,9 @@ class ConstraintSet:
             edge_pins=tuple(c for c in self.edge_pins if c.ref in refs),
             keepouts=tuple(c for c in self.keepouts if c.owner in refs),
             isolation=(),  # domain-level, never intra-cell
+            bundles=tuple(
+                b for b in self.bundles if b.ref_a in refs and b.ref_b in refs
+            ),
             contain=self.contain,
         )
 
@@ -216,6 +239,7 @@ class ConstraintSet:
             edge_pins=self.edge_pins + other.edge_pins,
             keepouts=self.keepouts + other.keepouts,
             isolation=self.isolation + other.isolation,
+            bundles=self.bundles + other.bundles,
             contain=contain,
         )
 
@@ -227,5 +251,6 @@ class ConstraintSet:
             + len(self.edge_pins)
             + len(self.keepouts)
             + len(self.isolation)
+            + len(self.bundles)
             + 1
         )

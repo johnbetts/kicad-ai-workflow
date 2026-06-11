@@ -239,11 +239,16 @@ def _make_led_resistor(ch: int) -> Component:
 def _make_screw_terminal(ch: int) -> Component:
     """3-pin screw terminal block for relay channel {ch} output.
 
-    Terminal-to-relay alignment: J{ch} must be placed directly above K{ch}
+    Terminal-to-relay alignment: J{ch} must be placed near K{ch}
     (same X position +/-2mm) because their COM/NO/NC nets are connected.
-        J{ch} pin 1 (COM) ↔ K{ch} pin 5 (COM)
-        J{ch} pin 2 (NO)  ↔ K{ch} pin 3 (NO)
-        J{ch} pin 3 (NC)  ↔ K{ch} pin 2 (NC)
+        J{ch} pin 1 (NO)  ↔ K{ch} pad 3 (NO)
+        J{ch} pin 2 (COM) ↔ K{ch} pad 1 (COM, center pin = midline route)
+        J{ch} pin 3 (NC)  ↔ K{ch} pad 4 (NC)
+    Pin ORDER must mirror the relay's physical pad order at the built
+    rotations or the attach lines cross — enforced by Gate A's
+    attach-bundle crossing check (Gate C 2026-06-11 item 2). At the
+    calibrated terminal orientation (rot 0, wire entry south) this
+    order is crossing-free; swapping NO/NC would re-cross.
     """
     return Component(
         ref=f"J{ch}",

@@ -548,3 +548,40 @@ def test_relay_training_nets_match_sanyou_pinout() -> None:
             f"J1 pin {pin.number}: Component says {pin.net}, "
             f"Net list says {j_net_of_pad[pin.number]}"
         )
+
+    # NO/NC terminal pin order (Gate C 2026-06-11 item 2): the human saw
+    # a crossover trace and asked for a J pin 1/3 swap — but that board
+    # had the terminals 180deg WRONG (the un-calibrated opening). With
+    # the calibrated opening the terminals sit at rotation 0, where the
+    # CURRENT order (J1=NO west, J3=NC east) mirrors the relay's pads
+    # (NO west, NC east at the relay row rotation) and the literal swap
+    # would RE-INTRODUCE the crossing. Geometry, not pin labels, is the
+    # invariant — enforced per build by Gate A's attach-bundle crossing
+    # check, compiled here:
+    assert j_net_of_pad["1"] == "RELAY_NO1", j_net_of_pad
+    assert j_net_of_pad["3"] == "RELAY_NC1", j_net_of_pad
+
+
+def test_relay_terminal_bundle_compiled_for_crossing_check() -> None:
+    """Gate C 2026-06-11 item 2: every relay/terminal pair must compile
+    an AttachBundle so Gate A counts attach-line crossings (segment
+    intersections == 0) on every build — the deterministic form of the
+    'avoidable crossover trace' human finding."""
+    import importlib
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    mod = importlib.import_module("train_relay_group")
+    reqs = mod._build_requirements()
+
+    from kicad_pipeline.placement_v2.compile import compile_constraints
+
+    constraints = compile_constraints(reqs)
+    bundles = {(b.ref_a, b.ref_b): b for b in constraints.bundles}
+    for ch in range(1, 5):
+        key = (f"J{ch}", f"K{ch}")
+        assert key in bundles, f"no attach bundle compiled for {key}"
+        assert set(bundles[key].nets) == {
+            f"RELAY_COM{ch}", f"RELAY_NO{ch}", f"RELAY_NC{ch}",
+        }

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from kicad_pipeline.models.requirements import PinType
 from kicad_pipeline.placement_v2.ir import (
+    AttachBundle,
     Axis,
     BoardContain,
     CellKeepout,
@@ -418,6 +419,41 @@ def _connector_edge_pins(idx: _Index) -> list[EdgePin]:
     return out
 
 
+def _attach_bundles(idx: _Index) -> list[AttachBundle]:
+    """Pairs of parts joined by >= 2 two-pin signal nets must not cross.
+
+    The relay NO/NC defect class (Gate C 2026-06-11 item 2): a relay's
+    contact pads and its screw terminal's pins are joined by parallel
+    two-pin nets; if the terminal pin order does not mirror the relay's
+    physical pad order, the straight connections cross and force an
+    avoidable crossover trace. Compiled for EVERY such part pair, then
+    verified geometrically at Gate A (segment intersections == 0).
+    """
+    pair_nets: dict[tuple[str, str], list[tuple[str, PadRef, PadRef]]] = {}
+    for net in idx.nets:
+        if len(net.connections) != 2 or not idx.is_signal_net(net.name):
+            continue
+        a, b = net.connections
+        if a.ref == b.ref:
+            continue
+        ref_a, ref_b = sorted((a.ref, b.ref))
+        pad_a = PadRef(a.ref, a.pin) if a.ref == ref_a else PadRef(b.ref, b.pin)
+        pad_b = PadRef(b.ref, b.pin) if a.ref == ref_a else PadRef(a.ref, a.pin)
+        pair_nets.setdefault((ref_a, ref_b), []).append((net.name, pad_a, pad_b))
+    out: list[AttachBundle] = []
+    for (ref_a, ref_b), entries in sorted(pair_nets.items()):
+        if len(entries) < 2:
+            continue
+        entries.sort()
+        out.append(AttachBundle(
+            ref_a=ref_a,
+            ref_b=ref_b,
+            pad_pairs=tuple((pa, pb) for _, pa, pb in entries),
+            nets=tuple(name for name, _, _ in entries),
+        ))
+    return out
+
+
 def compile_constraints(
     requirements: ProjectRequirements,
     *,
@@ -485,15 +521,18 @@ def compile_constraints(
         edge_pins=tuple(edge_pins.values()),
         keepouts=keepouts,
         isolation=isolation,
+        bundles=tuple(_attach_bundles(idx)),
         contain=BoardContain(margin_mm=_BOARD_MARGIN_MM, source=ConstraintSource.NETLIST),
     )
     logger.info(
-        "compiled %d constraints (%d attach, %d seq, %d edge, %d keepout, %d isolation)",
+        "compiled %d constraints (%d attach, %d seq, %d edge, %d keepout, "
+        "%d isolation, %d bundle)",
         result.count(),
         len(result.pin_attach),
         len(result.sequences),
         len(result.edge_pins),
         len(result.keepouts),
         len(result.isolation),
+        len(result.bundles),
     )
     return result

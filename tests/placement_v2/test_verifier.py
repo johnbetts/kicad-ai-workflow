@@ -18,6 +18,7 @@ from kicad_pipeline.models.pcb import (
     Point,
 )
 from kicad_pipeline.placement_v2.ir import (
+    AttachBundle,
     Axis,
     BoardContain,
     CellKeepout,
@@ -593,3 +594,53 @@ def test_gate_a_report_minor_only_passes() -> None:
     assert GateAReport(violations=(minor,), checks_run=()).passed
     major = IrViolation("x", ("R1",), Severity.MAJOR, 3.0, 2.0, "major")
     assert not GateAReport(violations=(minor, major), checks_run=()).passed
+
+
+# ---------------------------------------------------------------------------
+# attach bundles (relay NO/NC crossing class — Gate C 2026-06-11 item 2)
+# ---------------------------------------------------------------------------
+
+
+def _bundle(pairs: tuple[tuple[str, str], ...], nets: tuple[str, ...]) -> AttachBundle:
+    return AttachBundle(
+        ref_a="K1", ref_b="J1",
+        pad_pairs=tuple(
+            (PadRef("K1", a), PadRef("J1", b)) for a, b in pairs
+        ),
+        nets=nets,
+    )
+
+
+def test_attach_bundle_parallel_lines_pass() -> None:
+    """K1 pads at x 9/11, J1 pads at x 24/26 — straight lines parallel."""
+    pcb = _board((_fp("K1", 10.0, 10.0), _fp("J1", 25.0, 20.0)))
+    cs = ConstraintSet(
+        bundles=(_bundle((("1", "1"), ("2", "2")), ("NO", "NC")),),
+        contain=BoardContain(margin_mm=0.0),
+    )
+    assert _only(verify_board(pcb, cs), "AttachBundle") == ()
+
+
+def test_attach_bundle_crossing_lines_are_major() -> None:
+    """Swapped pin order: K1.1 -> J1.2 and K1.2 -> J1.1 must cross."""
+    pcb = _board((_fp("K1", 10.0, 10.0), _fp("J1", 25.0, 20.0)))
+    cs = ConstraintSet(
+        bundles=(_bundle((("1", "2"), ("2", "1")), ("NO", "NC")),),
+        contain=BoardContain(margin_mm=0.0),
+    )
+    found = _only(verify_board(pcb, cs), "AttachBundle")
+    assert len(found) == 1
+    assert found[0].severity is Severity.MAJOR
+    assert found[0].refs == ("K1", "J1")
+    assert "cross" in found[0].message
+
+
+def test_attach_bundle_missing_pad_is_critical() -> None:
+    pcb = _board((_fp("K1", 10.0, 10.0), _fp("J1", 25.0, 20.0)))
+    cs = ConstraintSet(
+        bundles=(_bundle((("1", "9"), ("2", "1")), ("NO", "NC")),),
+        contain=BoardContain(margin_mm=0.0),
+    )
+    found = verify_board(pcb, cs)
+    assert any(v.severity is Severity.CRITICAL and "not on the board" in v.message
+               for v in found)
