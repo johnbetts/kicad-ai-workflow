@@ -371,15 +371,17 @@ def _make_uart_header() -> Component:
         lcsc=None,
         description="4-pin 2.54mm header — UART debug",
         pins=(
-            # Pin order mirrors each net's nearest physical target,
-            # top to bottom: GND (D1 cathode, top), RX (U1.37), TX
-            # (U1.36), +3V3 (R2 pull-up, bottom) — zero ratsnest
-            # crossings at the header, enforced by Gate A's
-            # connector-fanout check (human finding 2026-06-11).
-            Pin("1", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
-            Pin("2", "RX", PinType.PASSIVE, net="UART_RX"),
-            Pin("3", "TX", PinType.PASSIVE, net="UART_TX"),
-            Pin("4", "3V3", PinType.PASSIVE, net="+3V3"),
+            # Pin order mirrors each net's nearest physical target at
+            # the built placement (J2 horizontal at the south edge):
+            # RX/TX toward U1's pin stack, then +3V3 (R1), GND (J1
+            # shell) outboard — zero ratsnest crossings, enforced by
+            # Gate A's connector-fanout check. NOTE: free-pin orders
+            # are placement-coupled; recompute with the fanout
+            # permutation optimizer whenever the floorplan changes.
+            Pin("1", "RX", PinType.PASSIVE, net="UART_RX"),
+            Pin("2", "TX", PinType.PASSIVE, net="UART_TX"),
+            Pin("3", "3V3", PinType.PASSIVE, net="+3V3"),
+            Pin("4", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
         ),
     )
 
@@ -421,7 +423,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("C2", "1"),
                 NetConnection("R1", "1"),
                 NetConnection("R2", "1"),
-                NetConnection("J2", "4"),
+                NetConnection("J2", "3"),
             ),
         ),
         # --- Private decoupling subnet: C1 <-> U1 3V3 pin ---
@@ -448,7 +450,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("R3", "2"),
                 NetConnection("R4", "2"),
                 NetConnection("D1", "2"),
-                NetConnection("J2", "1"),
+                NetConnection("J2", "4"),
             ),
         ),
         Net(
@@ -499,14 +501,14 @@ def _build_nets() -> tuple[Net, ...]:
             name="UART_TX",
             connections=(
                 NetConnection("U1", "36"),
-                NetConnection("J2", "3"),
+                NetConnection("J2", "2"),
             ),
         ),
         Net(
             name="UART_RX",
             connections=(
                 NetConnection("U1", "37"),
-                NetConnection("J2", "2"),
+                NetConnection("J2", "1"),
             ),
         ),
         Net(

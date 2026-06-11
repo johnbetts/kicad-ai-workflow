@@ -746,7 +746,24 @@ def _place_conn_groups(
             Edge.NORTH: b0[1], Edge.SOUTH: bh - b0[3],
         }
         pref = preferred.get(cells[i].cell.name)
-        edges = sorted(Edge, key=lambda e: (e is not pref, dists[e], e.value))
+        bdir0 = body_dirs.get(cells[i].cell.name)
+
+        def _needs_rotation(e: Edge) -> bool:
+            """Does facing *e* require rotating away from the current pose?
+
+            Rotation stability: an ESP32 whose antenna already points
+            north should claim the north edge over a nearer west edge —
+            rotating flips its pin geometry relative to every already-
+            ordered header pinout (mcu_core regression, 2026-06-11).
+            """
+            if bdir0 is None:
+                return False
+            nx, ny = normals[e]
+            return bdir0[0] * nx + bdir0[1] * ny < 1e-9
+
+        edges = sorted(
+            Edge, key=lambda e: (e is not pref, _needs_rotation(e), dists[e], e.value),
+        )
         for edge in edges:
             pc = cells[i]
             bdir = body_dirs.get(pc.cell.name)
@@ -762,6 +779,16 @@ def _place_conn_groups(
                     if dot > best_dot + 1e-9:
                         best_dot, best_rot = dot, rot
                 pc = pc.rotated(best_rot)
+            else:
+                # No opening (symmetric pin header): lay the LONG axis
+                # along the edge — a 1x14 header once sat flush south
+                # but rotated perpendicular, jutting 37mm into the
+                # board (nl-s-3c, 2026-06-11).
+                bb0 = polygon_bbox(pc.polygon_in_board())
+                tall = (bb0[3] - bb0[1]) > (bb0[2] - bb0[0])
+                wants_horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+                if tall == wants_horizontal:
+                    pc = pc.rotated(90)
             b = polygon_bbox(pc.polygon_in_board())
             horizontal = edge in (Edge.NORTH, Edge.SOUTH)
             span = (b[2] - b[0]) if horizontal else (b[3] - b[1])
@@ -807,7 +834,39 @@ def _place_conn_groups(
                 if abs(pos - cur_lo) < best_dist - 1e-9:
                     best_dist, best_pos = abs(pos - cur_lo), pos
             if best_pos is None:
-                continue  # no room on this edge: try the next
+                if edge is not edges[-1]:
+                    continue  # no room on this edge: try the next
+                # NO edge has a free interval: force-place flush on the
+                # PREFERRED edge at the nearest along-position anyway —
+                # edge presence is the hard constraint; the overlap is
+                # pushed onto INTERIOR groups by legalization (conn
+                # groups are pinned). 'Stays put' once stranded a 6-pin
+                # harness terminal 23mm inland with a whole group in
+                # its forefield (nl-s-3c, 2026-06-11).
+                edge = pref if pref is not None else edges[0]
+                pc = cells[i]
+                bdir2 = body_dirs.get(pc.cell.name)
+                if bdir2 is not None:
+                    nx, ny = normals[edge]
+                    fb_rot: CardinalRotation = 0
+                    fb_dot = -float("inf")
+                    for rot in _ROTATIONS:
+                        pts = transform_polygon(
+                            (Point(bdir2[0], bdir2[1]),), 0.0, 0.0, -float(rot),
+                        )
+                        dot = pts[0].x * nx + pts[0].y * ny
+                        if dot > fb_dot + 1e-9:
+                            fb_dot, fb_rot = dot, rot
+                    pc = pc.rotated(fb_rot)
+                b = polygon_bbox(pc.polygon_in_board())
+                horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+                span = (b[2] - b[0]) if horizontal else (b[3] - b[1])
+                limit = bw if horizontal else bh
+                cur_lo = b[0] if horizontal else b[1]
+                best_pos = min(
+                    max(cur_lo, _EDGE_MARGIN_MM),
+                    limit - _EDGE_MARGIN_MM - span,
+                )
             # Flush at the edge, at the chosen along-position.
             if horizontal:
                 pc = pc.moved_to(pc.dx + (best_pos - b[0]), pc.dy)

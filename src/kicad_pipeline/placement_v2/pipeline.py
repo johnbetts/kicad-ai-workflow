@@ -17,6 +17,7 @@ Coordinate conventions at the boundary:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -471,18 +472,20 @@ def run_placement_v2(
     edge_pinned = frozenset(ep.ref for ep in constraints.edge_pins)
     seq_refs = frozenset(r for s in constraints.sequences for r in s.refs)
     by_group: dict[str, list[Cell]] = {}
-    lifted: list[Cell] = []
+    lifted: list[tuple[str, Cell]] = []  # (pinned ref, cell)
     for cell in cells:
-        # LONE edge-pinned connectors outside a ladder strip become
-        # board-level groups of their own: the group snap can only
-        # satisfy ONE edge per group, so each free connector must be
-        # free to find its own edge (USB north, power south, ...).
-        # Multi-member cells (a connector with its ESD island) stay in
-        # their functional group — splitting them would break their
-        # own attachment bounds.
-        if (len(cell.refs) == 1 and (cell.refs & edge_pinned)
-                and not (cell.refs & seq_refs)):
-            lifted.append(cell)
+        # EVERY edge-pinned cell outside a ladder strip becomes a
+        # board-level group of its own: the group snap can only satisfy
+        # ONE edge per group, so each connector (and each RF module
+        # with its decoupling island) must be free to find its own
+        # edge. Multi-member cells lift WHOLE — their internal bounds
+        # travel with them. Keeping them in functional groups stranded
+        # a 6-pin harness terminal 23mm inland with the analog group in
+        # its forefield, and left the ESP32 antenna mid-board
+        # (nl-s-3c, 2026-06-11).
+        pinned = sorted(cell.refs & edge_pinned)
+        if pinned and not (cell.refs & seq_refs):
+            lifted.append((pinned[0], cell))
         else:
             by_group.setdefault(
                 _group_for(cell.refs, requirements), []
@@ -501,25 +504,30 @@ def run_placement_v2(
         )
         for gname, gcells in sorted(by_group.items())
     ) + tuple(
-        pack_group(f"conn:{sorted(cell.refs)[0]}", (cell,))
-        for cell in sorted(lifted, key=lambda c: c.name)
+        pack_group(f"conn:{ref}", (cell,))
+        for ref, cell in sorted(lifted, key=lambda rc: rc[0])
     )
     # Connector opening direction: lets the edge snap ROTATE each
-    # lifted connector so its opening faces outward (Gate A face_out).
+    # lifted cell so its opening faces outward (Gate A face_out).
     # The CALIBRATED part-rule opening wins; the courtyard-bulge proxy
     # is only a fallback — for USB-C the bulge points the WRONG way
     # (pads sit mid-body) and the proxy snapped the jack mouth toward
-    # the board interior (Gate C 2026-06-11 item 4c).
+    # the board interior (Gate C 2026-06-11 item 4c). Both are the
+    # PINNED member's direction, rotated by its in-cell rotation and
+    # offset to the member's position so multi-member cells aim by
+    # their connector, not by an arbitrary first ref.
     body_dirs: dict[str, tuple[float, float]] = {}
-    for cell in lifted:
-        ref = sorted(cell.refs)[0]
+    for ref, cell in lifted:
+        member = next(m for m in cell.members if m.ref == ref)
         if ref in openings:
-            body_dirs[f"group:conn:{ref}"] = openings[ref]
-            continue
-        court = courtyard_polygon(footprints[ref])
-        bx = sum(pt.x for pt in court) / len(court)
-        by = sum(pt.y for pt in court) / len(court)
-        body_dirs[f"group:conn:{ref}"] = (bx, by)
+            ox, oy = openings[ref]
+        else:
+            court = courtyard_polygon(footprints[ref])
+            ox = sum(pt.x for pt in court) / len(court)
+            oy = sum(pt.y for pt in court) / len(court)
+        rad = math.radians(-member.rotation_deg)
+        c, s = math.cos(rad), math.sin(rad)
+        body_dirs[f"group:conn:{ref}"] = (ox * c - oy * s, ox * s + oy * c)
     obstacles = tuple(_obstacle_cell(n, poly) for n, poly in reserved_zones)
     plan = None
     try:
