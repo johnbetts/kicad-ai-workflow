@@ -1,0 +1,32 @@
+[
+  {
+    "check_id": "fab_clearances",
+    "passed": false,
+    "refs": ["D1", "D2", "D3", "D4", "K1", "K2", "K3", "K4", "L1", "C1", "C2", "L2"],
+    "evidence": "In the 3D top view the flyback diode/transistor clusters (D1-D4, Q1-Q4) sit with their lower pads essentially touching the top edge of each relay body, and the right-side L2/C2/C1/L1 column is stacked so tightly the parts have no visible courtyard gap."
+  },
+  {
+    "check_id": "fab_connector_access",
+    "passed": true,
+    "refs": ["J1", "J2", "J3", "J4"],
+    "evidence": "All four screw terminals J1-J4 sit flush along the bottom board edge with their wire openings facing outward and an unobstructed strip between the terminal faces and the edge, leaving clear screwdriver and cable access in the 3D iso and top views."
+  },
+  {
+    "check_id": "fab_grid_alignment",
+    "passed": true,
+    "refs": ["K1", "K2", "K3", "K4", "Q1", "Q2", "Q3", "Q4", "D5", "D6", "D7", "D8", "J1", "J2", "J3", "J4"],
+    "evidence": "The four relay driver subcircuits (D5/R1/R5/Q1/D1 through D8/R4/R8/Q4/D4) have identical internal layouts at uniform pitch, and relays, drivers, and terminals each form straight aligned rows in the 2D view."
+  },
+  {
+    "check_id": "fab_silkscreen",
+    "passed": false,
+    "refs": ["R1", "R5", "R2", "R6", "R3", "R7", "R4", "R8", "L2", "C2", "C1", "L1", "D1", "D2", "D3", "D4"],
+    "evidence": "In every driver cluster the paired resistor designators (R1/R5, R2/R6, R3/R7, R4/R8) overlap each other, and the right-column L2/C2/C1/L1 labels sit on top of the adjacent components' pads, making several references illegible."
+  },
+  {
+    "check_id": "fab_board_utilization",
+    "passed": false,
+    "refs": ["K1", "K2", "K3", "K4", "Q1", "Q2", "Q3", "Q4"],
+    "evidence": "Roughly the top third of the board is completely empty and wide left/right margins are unused, while the driver clusters above each relay are congested to the point of near-touching, so area usage is badly disproportionate."
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "check_id": "fab_clearances",
+    "passed": false,
+    "refs": ["J1", "C2", "D1", "J2", "U1"],
+    "evidence": "In the 2D view the J1 screw terminal sits inside the dashed courtyard of the bottom-left mounting hole (screw head would collide with the connector body), and in 3d_top the channel passive rows are nearly touching the tops of the THT terminal bodies."
+  },
+  {
+    "check_id": "fab_connector_access",
+    "passed": true,
+    "refs": ["J1", "J2", "J3", "J4", "J5"],
+    "evidence": "Screw terminals J1-J4 sit on the bottom edge with wire openings facing outward and clear board between body and edge (confirmed in 3d_iso/3d_top), and J5 is a vertical header ~2-3 mm from the top edge with unobstructed top-entry access."
+  },
+  {
+    "check_id": "fab_grid_alignment",
+    "passed": true,
+    "refs": ["C2", "D1", "R1", "R2", "C3", "D2", "R3", "R4", "C4", "D3", "R5", "R6", "C5", "D4", "R7", "R8"],
+    "evidence": "All four analog channels use an identical C-D-R-R strip placed on a single shared row at the same Y, with the four screw terminals evenly spaced in an aligned row beneath them."
+  },
+  {
+    "check_id": "fab_silkscreen",
+    "passed": false,
+    "refs": ["C2", "D1", "R1", "U1", "R9", "R10", "C1"],
+    "evidence": "Reference designators are rendered directly on top of their own component pads (e.g. C2/D1/R1 text struck through by pads) and the R10/R9/C1 labels stack on each other beside U1, so legends would be clipped or illegible after fab."
+  },
+  {
+    "check_id": "fab_board_utilization",
+    "passed": false,
+    "refs": ["J5", "U1"],
+    "evidence": "Roughly the top two-thirds of the board is empty dead space (only the lone J5 header floats there) while all channels, passives, and terminals are congested into the bottom quarter, so the area is used disproportionately."
+  }
+]

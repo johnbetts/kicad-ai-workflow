@@ -1,0 +1,38 @@
+[
+  {
+    "check_id": "ee_decoupling",
+    "passed": true,
+    "refs": ["C1", "C2", "Q1", "Q2", "Q3", "Q4"],
+    "evidence": "not applicable - the board contains no ICs (only SOT-23 transistors Q1-Q4 and an LC filter), so there are no IC power pins requiring adjacent decoupling capacitors."
+  },
+  {
+    "check_id": "ee_signal_flow",
+    "passed": true,
+    "refs": ["D5", "R5", "Q1", "D1", "K1", "J1", "K2", "K3", "K4"],
+    "evidence": "Each channel reads top-to-bottom in signal order (LED/base resistor -> transistor -> flyback diode -> relay coil -> contacts -> screw terminal) with the same vertical chain repeated for all four channels and no doubling back."
+  },
+  {
+    "check_id": "ee_crossing_attach_lines",
+    "passed": true,
+    "refs": ["K1", "J1", "K2", "J2", "K3", "J3", "K4", "J4"],
+    "evidence": "For every channel the relay NO pad sits directly above the terminal NO pad, NC above NC, and the COM line drops vertically between them, so the pad-to-pad ratsnest lines are parallel verticals with no crossings."
+  },
+  {
+    "check_id": "ee_isolation",
+    "passed": true,
+    "refs": ["K1", "K2", "K3", "K4", "J1", "J2", "J3", "J4", "Q1", "Q2", "Q3", "Q4"],
+    "evidence": "All logic/driver parts stay on the coil side above the relays while the switched-contact region (relay NO/NC/COM pads and screw terminals) occupies the bottom band with a clear visible gap and no logic component inside it."
+  },
+  {
+    "check_id": "ee_rf_antenna",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable - no RF module or antenna is present on this board."
+  },
+  {
+    "check_id": "ee_power_topology",
+    "passed": true,
+    "refs": ["L1", "C1", "C2", "L2"],
+    "evidence": "There is no regulator or power-entry connector on this group board; the only power components (LC filter L1/L2 with caps C1/C2) are clustered coherently at the right group boundary feeding the +5V_RELAY rail, so no input->regulation->load ordering violation is visible."
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "check_id": "ee_decoupling",
+    "passed": false,
+    "refs": ["C1", "C2", "C3", "U1"],
+    "evidence": "C1-C3 are stacked in a single column roughly 4-8mm left of U1 with an intervening pad row between them and the IC body, rather than each cap sitting immediately adjacent to the power pin it serves."
+  },
+  {
+    "check_id": "ee_signal_flow",
+    "passed": false,
+    "refs": ["J2", "U1"],
+    "evidence": "All six SPI/control ratsnest lines from the right-edge header J2 double back across the entire U1 footprint to pads on the IC's left side, so the SPI chain does not read in placement order."
+  },
+  {
+    "check_id": "ee_crossing_attach_lines",
+    "passed": false,
+    "refs": ["J1", "J2", "U1"],
+    "evidence": "Straight pad-to-pad lines from J1's RX-/RX+/TX pins visibly cross each other on the way to the termination passives, and the J2-to-U1 SPI bundle fans across the IC, forcing avoidable crossover traces."
+  },
+  {
+    "check_id": "ee_isolation",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable"
+  },
+  {
+    "check_id": "ee_rf_antenna",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable"
+  },
+  {
+    "check_id": "ee_power_topology",
+    "passed": true,
+    "refs": ["J3", "U1"],
+    "evidence": "There is no on-board protection or regulation stage; regulated 3V3 enters at header J3 and feeds the U1 load cluster directly, so the trivial input-to-loads order is satisfied."
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "check_id": "bodies_no_overlap",
+    "passed": true,
+    "refs": ["K1", "K2", "K3", "K4", "J1", "J2", "J3", "J4", "Q1", "D1"],
+    "evidence": "3D top and iso views show a visible gap between each relay body and its screw terminal, between adjacent relays, and between driver SMDs and relay tops, with no two bodies intersecting or stacking."
+  },
+  {
+    "check_id": "bodies_flat_on_board",
+    "passed": true,
+    "refs": ["K1", "K2", "K3", "K4", "J1", "J2", "J3", "J4", "Q1", "Q2", "Q3", "Q4", "D1", "D5", "R1", "R5"],
+    "evidence": "In the iso and iso-back views every relay, terminal block, and small SMD body sits flush on the PCB surface with no floating, sunken, or tilted parts."
+  },
+  {
+    "check_id": "bodies_on_pads",
+    "passed": true,
+    "refs": ["K2", "K3", "K4", "Q2", "Q3", "Q4", "D2", "D3", "D4", "D6", "D7", "D8"],
+    "evidence": "In the 3D top view each relay body covers its own coil/contact pad footprint and each SOT-23, diode, and passive body sits centered between its two pad ends with no displaced bodies."
+  },
+  {
+    "check_id": "orientation_sane",
+    "passed": true,
+    "refs": ["J1", "J2", "J3", "J4", "K1", "K2", "K3", "K4", "D1", "D2", "D3", "D4"],
+    "evidence": "Screw terminals J1-J4 sit on the bottom edge with wire openings facing outward, relays K1-K4 form a uniform identically-oriented 1x4 row (pin-1 arc in the same position on each), and the flyback diodes are oriented identically across all four driver clusters."
+  },
+  {
+    "check_id": "antenna_zone_clear",
+    "passed": true,
+    "refs": [],
+    "evidence": "Not applicable - no RF module or antenna keepout region exists on this relay board."
+  },
+  {
+    "check_id": "groups_visually_coherent",
+    "passed": true,
+    "refs": ["K1", "K2", "K3", "K4", "Q1", "Q2", "Q3", "Q4", "R1", "R5", "J1", "J4", "L1", "L2", "C1", "C2"],
+    "evidence": "The 2D view shows four identical grid-aligned driver clusters directly above their relays, a uniform relay row, an aligned terminal row at the edge, and the L/C filter parts in a tidy column, with no scattered or stray components."
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "check_id": "ee_decoupling",
+    "passed": false,
+    "refs": ["C2", "U1", "C1", "C5"],
+    "evidence": "C1/C5 sit immediately adjacent to U1 pins 2 (3V3) and 3 (EN), but C2 (+3V3/GND pads) is stranded mid-board roughly 10mm below the module with resistors and switches between it and any IC power pin."
+  },
+  {
+    "check_id": "ee_signal_flow",
+    "passed": true,
+    "refs": ["J1", "U1", "J2", "SW1", "SW2", "R1", "R2"],
+    "evidence": "Power/USB input J1 on the left edge feeds U1 in the center which feeds UART header J2 on the right edge, and the button chains read SW -> series R -> MCU pin bottom-up without doubling back across the group."
+  },
+  {
+    "check_id": "ee_crossing_attach_lines",
+    "passed": false,
+    "refs": ["U1", "J2"],
+    "evidence": "U1's right pin column places 37:TXD above 36:RXD while J2 orders UART_RX above UART_TX, so the straight TXD->UART_TX and RXD->UART_RX connections cross each other (visible crossing ratsnest lines), forcing an avoidable crossover."
+  },
+  {
+    "check_id": "ee_isolation",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable"
+  },
+  {
+    "check_id": "ee_rf_antenna",
+    "passed": false,
+    "refs": ["U1"],
+    "evidence": "The antenna keepout above U1 is free of components, but it is recessed several millimetres from the top board edge so board material (and potential copper pour) extends beyond the antenna instead of the antenna sitting at the edge."
+  },
+  {
+    "check_id": "ee_power_topology",
+    "passed": true,
+    "refs": ["J1", "J2", "U1"],
+    "evidence": "The board has no protection/regulation stage; power enters at the edge connectors (J1 VBUS, J2 +3V3) and feeds U1 directly, so the input-to-load placement order is consistent."
+  }
+]

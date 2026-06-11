@@ -1,0 +1,32 @@
+[
+  {
+    "check_id": "fab_clearances",
+    "passed": true,
+    "refs": ["C1", "C5", "R5", "D1", "SW1", "SW2", "C2"],
+    "evidence": "In the 3D top view every body (C1/C5 left of U1, R5/D1 right of U1, passives above SW1/SW2) shows visible board surface between itself and its neighbors, with no touching or stacked parts."
+  },
+  {
+    "check_id": "fab_connector_access",
+    "passed": true,
+    "refs": ["J1", "J2"],
+    "evidence": "J1 sits at the left edge with its opening facing outward and clear board in front of it (confirmed in 3d_iso_back), and J2 is a vertical pin header at the right edge with unobstructed top access and nothing between either connector and its edge."
+  },
+  {
+    "check_id": "fab_grid_alignment",
+    "passed": false,
+    "refs": ["R3", "R1", "R4", "R2", "C2", "SW1", "SW2"],
+    "evidence": "The two repeated button subcircuits are not identical: SW2's passives (R3 offset higher and to the left) do not mirror SW1's arrangement, C2 floats alone between the groups, and R3/R1/R4/R2 do not form a single aligned row, giving a ragged scattered look in the 2D view."
+  },
+  {
+    "check_id": "fab_silkscreen",
+    "passed": false,
+    "refs": ["C1", "C5", "U1", "R5", "D1"],
+    "evidence": "C1 and C5 designators overlap each other directly, the U1 bottom pad row labels (15-26) collapse into one illegible garbled string of overlapping text, and R5/D1 labels nearly collide right of the module."
+  },
+  {
+    "check_id": "fab_board_utilization",
+    "passed": false,
+    "refs": ["J2", "J1", "U1", "SW1", "SW2"],
+    "evidence": "Large dead regions occupy most of the right half (only J2), the left side, and both bottom corners while all circuitry crowds the center, and J2 is stranded a full board-width from U1 with long ratsnest lines crossing the empty area."
+  }
+]

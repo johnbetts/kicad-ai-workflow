@@ -1,0 +1,38 @@
+[
+  {
+    "check_id": "bodies_no_overlap",
+    "passed": true,
+    "refs": ["U1", "U2", "J1", "J3", "L1", "D1"],
+    "evidence": "In 3d_top, 3d_iso and 3d_iso_back every visible body (SOIC-8, SOT-223, terminal blocks, header, passives) has clear board surface between it and its neighbors with no intersecting or stacked bodies."
+  },
+  {
+    "check_id": "bodies_flat_on_board",
+    "passed": true,
+    "refs": ["J1", "J2", "J3", "U1", "U2", "L1"],
+    "evidence": "Both iso views show all bodies seated flush on the PCB surface with no floating, sunken, or tilted components."
+  },
+  {
+    "check_id": "bodies_on_pads",
+    "passed": false,
+    "refs": ["R1", "R2"],
+    "evidence": "In 3d_top two bare two-pad footprints below D1 (R1/R2 per the 2D view) have no component bodies at all, so body-centered-on-pads cannot be confirmed for them; all other visible bodies are centered on their pads."
+  },
+  {
+    "check_id": "orientation_sane",
+    "passed": true,
+    "refs": ["J1", "J2", "J3"],
+    "evidence": "Screw terminals J1 (left edge) and J2 (right edge) open outward over the board edge, header J3 sits at the top-right edge, there are no relays, and the single polarized part D1 cannot be inconsistently oriented."
+  },
+  {
+    "check_id": "antenna_zone_clear",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable - no RF module or antenna keepout exists on this board."
+  },
+  {
+    "check_id": "groups_visually_coherent",
+    "passed": false,
+    "refs": ["C4", "C5", "C6", "U2", "J3"],
+    "evidence": "The buck chain along the bottom reads as an ordered row, but the LDO cluster is scattered: C4 floats several mm above U2, C5/C6 are offset rather than grid-aligned with U2, and long ratsnest lines fan out to J3, so the group does not read as a tight aligned cluster."
+  }
+]

@@ -1059,6 +1059,16 @@ def _mounting_hole_collides_with_footprints(
                 return True
             continue
         w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
+        # Courtyard-based size when graphics exist: fp_sizes is pad-
+        # derived and under-counts THT connector BODIES — screw
+        # terminals ended up inside mounting-hole courtyards on the
+        # analog/power corners (Gate C 2026-06-11 standing reminder).
+        from kicad_pipeline.placement_v2.footprint_geom import courtyard_halfdims
+        try:
+            hw_c, hh_c = courtyard_halfdims(fp)
+            w, h = max(w, 2.0 * hw_c), max(h, 2.0 * hh_c)
+        except (ValueError, ZeroDivisionError):
+            pass
         # Account for rotation
         rot = fp.rotation % 360.0
         if 45.0 < rot < 135.0 or 225.0 < rot < 315.0:

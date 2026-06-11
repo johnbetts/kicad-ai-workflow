@@ -1,0 +1,38 @@
+[
+  {
+    "check_id": "ee_decoupling",
+    "passed": false,
+    "refs": ["C2", "C5", "C6", "U1", "U2", "L1"],
+    "evidence": "C4 is within ~2mm of U2, but the +3V3 decoupling pair C5/C6 sits ~8mm from U2 and the +5V rail cap C2 is ~10mm from the L1/buck output, far beyond the few-mm adjacency requirement."
+  },
+  {
+    "check_id": "ee_signal_flow",
+    "passed": true,
+    "refs": ["J1", "C1", "U1", "D1", "L1", "C2", "U2", "J2", "J3"],
+    "evidence": "The chain reads strictly left-to-right (J1 input -> C1/C3 -> U1 buck -> D1/L1 -> C2 -> J2) with the 3V3 branch (U2 -> C5/C6 -> J3) continuing rightward/upward, with no doubling back across the group."
+  },
+  {
+    "check_id": "ee_crossing_attach_lines",
+    "passed": true,
+    "refs": ["J1", "J2", "J3", "C1", "C2", "C5"],
+    "evidence": "Straight pad-to-pad ratsnest lines from J1 to the input caps, J2 to C2, and J3 to C5/C6 run roughly parallel and converge without any pair crossing in the 2D view."
+  },
+  {
+    "check_id": "ee_isolation",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable"
+  },
+  {
+    "check_id": "ee_rf_antenna",
+    "passed": true,
+    "refs": [],
+    "evidence": "not applicable"
+  },
+  {
+    "check_id": "ee_power_topology",
+    "passed": true,
+    "refs": ["J1", "C1", "C3", "U1", "L1", "C2", "C4", "U2", "J2", "J3"],
+    "evidence": "Power flows in placement order from J1 input through input caps C1/C3 to buck U1, then L1/C2 to the 5V load side, with C4 on the input side of LDO U2 and outputs J2/J3 at the far end."
+  }
+]

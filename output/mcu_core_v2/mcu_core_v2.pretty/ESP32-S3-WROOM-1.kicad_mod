@@ -1,0 +1,667 @@
+(footprint "ESP32-S3-WROOM-1"
+  (version 20260206)
+  (generator "kicad-ai-pipeline")
+  (generator_version "10.0")
+  (layer "F.Cu")
+  (attr smd)
+  (property "Reference" "REF**"
+    (at 0.0 0.0 0.0)
+    (layer "F.SilkS")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+    )
+  )
+  (property "Value" "ESP32-S3-WROOM-1"
+    (at 0.0 0.0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Footprint" ""
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Datasheet" ""
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "Description" "ESP32-S3-WROOM-1 WiFi/BLE module"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (property "LCSC" "C2913202"
+    (at 0 0 0)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 1.0 1.0)
+      )
+      (hide yes)
+    )
+  )
+  (fp_text user "1:GND"
+    (at -7.15 -5.26)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "2:3V3"
+    (at -7.15 -3.99)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "3:EN"
+    (at -7.15 -2.72)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "4:IO4"
+    (at -7.15 -1.45)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "5:IO5"
+    (at -7.15 -0.18)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "6:IO6"
+    (at -7.15 1.09)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "7:IO7"
+    (at -7.15 2.36)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "8:IO15"
+    (at -7.15 3.63)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "9:IO16"
+    (at -7.15 4.9)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "10:IO17"
+    (at -7.15 6.17)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "11:IO18"
+    (at -7.15 7.44)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "12:IO8"
+    (at -7.15 8.71)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "13:IO19"
+    (at -7.15 9.98)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "14:IO20"
+    (at -7.15 11.25)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "15:IO3"
+    (at -6.985 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "16:IO46"
+    (at -5.715 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "17:IO9"
+    (at -4.445 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "18:IO10"
+    (at -3.175 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "19:IO11"
+    (at -1.905 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "20:IO12"
+    (at -0.635 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "21:IO13"
+    (at 0.635 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "22:IO14"
+    (at 1.905 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "23:IO21"
+    (at 3.175 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "24:IO47"
+    (at 4.445 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "25:IO48"
+    (at 5.715 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "26:IO45"
+    (at 6.985 10.55)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "27:IO0"
+    (at 7.15 11.25)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "28:IO35"
+    (at 7.15 9.98)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "29:IO36"
+    (at 7.15 8.71)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "30:IO37"
+    (at 7.15 7.44)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "31:IO38"
+    (at 7.15 6.17)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "32:IO39"
+    (at 7.15 4.9)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "33:IO40"
+    (at 7.15 3.63)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "34:IO41"
+    (at 7.15 2.36)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "35:IO42"
+    (at 7.15 1.09)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "36:RXD0"
+    (at 7.15 -0.18)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "37:TXD0"
+    (at 7.15 -1.45)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "38:IO2"
+    (at 7.15 -2.72)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "39:IO1"
+    (at 7.15 -3.99)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_text user "40:GND"
+    (at 7.15 -5.26)
+    (layer "F.Fab")
+    (effects
+      (font
+        (size 0.5 0.5)
+      )
+    )
+  )
+  (fp_line
+    (start -9.6 -13.0)
+    (end 9.6 -13.0)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 9.6 -13.0)
+    (end 9.6 13.0)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start 9.6 13.0)
+    (end -9.6 13.0)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (fp_line
+    (start -9.6 13.0)
+    (end -9.6 -13.0)
+    (layer "F.CrtYd")
+    (width 0.153)
+  )
+  (pad "1" smd rect
+    (at -8.75 -5.26)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "2" smd rect
+    (at -8.75 -3.99)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "3" smd rect
+    (at -8.75 -2.72)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "4" smd rect
+    (at -8.75 -1.45)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "5" smd rect
+    (at -8.75 -0.18)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "6" smd rect
+    (at -8.75 1.09)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "7" smd rect
+    (at -8.75 2.36)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "8" smd rect
+    (at -8.75 3.63)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "9" smd rect
+    (at -8.75 4.9)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "10" smd rect
+    (at -8.75 6.17)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "11" smd rect
+    (at -8.75 7.44)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "12" smd rect
+    (at -8.75 8.71)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "13" smd rect
+    (at -8.75 9.98)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "14" smd rect
+    (at -8.75 11.25)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "15" smd rect
+    (at -6.985 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "16" smd rect
+    (at -5.715 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "17" smd rect
+    (at -4.445 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "18" smd rect
+    (at -3.175 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "19" smd rect
+    (at -1.905 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "20" smd rect
+    (at -0.635 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "21" smd rect
+    (at 0.635 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "22" smd rect
+    (at 1.905 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "23" smd rect
+    (at 3.175 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "24" smd rect
+    (at 4.445 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "25" smd rect
+    (at 5.715 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "26" smd rect
+    (at 6.985 12.15)
+    (size 0.9 1.2)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "27" smd rect
+    (at 8.75 11.25)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "28" smd rect
+    (at 8.75 9.98)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "29" smd rect
+    (at 8.75 8.71)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "30" smd rect
+    (at 8.75 7.44)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "31" smd rect
+    (at 8.75 6.17)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "32" smd rect
+    (at 8.75 4.9)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "33" smd rect
+    (at 8.75 3.63)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "34" smd rect
+    (at 8.75 2.36)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "35" smd rect
+    (at 8.75 1.09)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "36" smd rect
+    (at 8.75 -0.18)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "37" smd rect
+    (at 8.75 -1.45)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "38" smd rect
+    (at 8.75 -2.72)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "39" smd rect
+    (at 8.75 -3.99)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "40" smd rect
+    (at 8.75 -5.26)
+    (size 1.2 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (pad "41" smd rect
+    (at 0.0 2.5)
+    (size 6.7 6.7)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+  )
+  (model "${KICAD10_3DMODEL_DIR}/RF_Module.3dshapes/ESP32-S3-WROOM-1.step"
+    (offset
+      (xyz 0.0 0.0 0.0)
+    )
+    (scale
+      (xyz 1.0 1.0 1.0)
+    )
+    (rotate
+      (xyz 0.0 0.0 0.0)
+    )
+  )
+  (embedded_fonts no)
+)

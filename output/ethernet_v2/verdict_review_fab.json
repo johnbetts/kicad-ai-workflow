@@ -1,0 +1,32 @@
+[
+  {
+    "check_id": "fab_clearances",
+    "passed": true,
+    "refs": ["U1", "C1", "C2", "C3", "R1", "R2", "R3", "C4", "C5", "Y1", "J1"],
+    "evidence": "3D top shows visible gaps between all bodies: the passive column sits clear of the RJ45 THT body, the crystal Y1 and its load caps C4/C5 have daylight between them, and nothing abuts the QFP courtyard."
+  },
+  {
+    "check_id": "fab_connector_access",
+    "passed": false,
+    "refs": ["J3", "J2"],
+    "evidence": "J3 (2-pin header) is stranded in the middle-bottom of the board nowhere near an edge, and J2's pin column is inset from the right edge rather than on it; only J1 (RJ45) properly faces outward at the left edge."
+  },
+  {
+    "check_id": "fab_grid_alignment",
+    "passed": true,
+    "refs": ["C1", "R3", "C2", "R1", "R2", "C3", "C4", "Y1", "C5", "J2"],
+    "evidence": "The decoupling/pull-up parts form a single vertical column, the crystal subcircuit C4-Y1-C5 is a clean horizontal row, and J2 pads form an aligned vertical column; there are no repeated subcircuits to compare."
+  },
+  {
+    "check_id": "fab_silkscreen",
+    "passed": false,
+    "refs": ["C1", "R3", "C2", "U1", "J2", "J3", "Y1", "C4", "C5"],
+    "evidence": "In the 2D view C1 and R3 designators overlap each other, the U1 label renders doubled/illegible, J2 and J3 labels sit directly on their pin-1 pads, and Y1/C4/C5 text overlaps component pads."
+  },
+  {
+    "check_id": "fab_board_utilization",
+    "passed": false,
+    "refs": ["J3", "U1", "J1"],
+    "evidence": "Roughly half the board (entire bottom region, top-left, and right of J2) is empty copper while all circuitry crowds a center-left band, and J3 is stranded alone mid-board far from any functional group."
+  }
+]

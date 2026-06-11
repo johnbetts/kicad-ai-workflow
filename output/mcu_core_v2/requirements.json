@@ -1,0 +1,978 @@
+{
+  "project": {
+    "name": "MCUCoreTraining",
+    "author": null,
+    "revision": "v1",
+    "description": null
+  },
+  "features": [
+    {
+      "name": "MCU Core",
+      "description": "ESP32-S3-WROOM-1 with decoupling, boot/reset buttons, USB-C programming port, status LED, and UART debug header",
+      "components": [
+        "U1",
+        "C1",
+        "C2",
+        "SW1",
+        "SW2",
+        "R1",
+        "R2",
+        "C5",
+        "J1",
+        "R3",
+        "R4",
+        "D1",
+        "R5",
+        "J2"
+      ],
+      "nets": [
+        "+3V3",
+        "+3V3_U1_DEC",
+        "GND",
+        "VBUS",
+        "USB_DP",
+        "USB_DM",
+        "EN",
+        "EN_DEB",
+        "BOOT",
+        "UART_TX",
+        "UART_RX",
+        "LED",
+        "LED_A",
+        "CC1",
+        "CC2"
+      ],
+      "subcircuits": [
+        "decoupling"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "ref": "U1",
+      "value": "ESP32-S3-WROOM-1",
+      "footprint": "RF_Module:ESP32-S3-WROOM-1",
+      "lcsc": "C2913202",
+      "description": "ESP32-S3-WROOM-1 WiFi/BLE module",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "2",
+          "name": "3V3",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "+3V3_U1_DEC"
+        },
+        {
+          "number": "3",
+          "name": "EN",
+          "pin_type": "input",
+          "function": null,
+          "net": "EN"
+        },
+        {
+          "number": "4",
+          "name": "IO4",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "5",
+          "name": "IO5",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "6",
+          "name": "IO6",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "7",
+          "name": "IO7",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "8",
+          "name": "IO15",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "9",
+          "name": "IO16",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "10",
+          "name": "IO17",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "11",
+          "name": "IO18",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "12",
+          "name": "IO8",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "13",
+          "name": "IO19",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "USB_DP"
+        },
+        {
+          "number": "14",
+          "name": "IO20",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "USB_DM"
+        },
+        {
+          "number": "15",
+          "name": "IO3",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "16",
+          "name": "IO46",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "17",
+          "name": "IO9",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "18",
+          "name": "IO10",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "19",
+          "name": "IO11",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "20",
+          "name": "IO12",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "21",
+          "name": "IO13",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "22",
+          "name": "IO14",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "23",
+          "name": "IO21",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "24",
+          "name": "IO47",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "25",
+          "name": "IO48",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "26",
+          "name": "IO45",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "27",
+          "name": "IO0",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "BOOT"
+        },
+        {
+          "number": "28",
+          "name": "IO35",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "29",
+          "name": "IO36",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "30",
+          "name": "IO37",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "31",
+          "name": "IO38",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "32",
+          "name": "IO39",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "33",
+          "name": "IO40",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "34",
+          "name": "IO41",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "35",
+          "name": "IO42",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "36",
+          "name": "RXD0",
+          "pin_type": "output",
+          "function": null,
+          "net": "UART_TX"
+        },
+        {
+          "number": "37",
+          "name": "TXD0",
+          "pin_type": "input",
+          "function": null,
+          "net": "UART_RX"
+        },
+        {
+          "number": "38",
+          "name": "IO2",
+          "pin_type": "output",
+          "function": null,
+          "net": "LED"
+        },
+        {
+          "number": "39",
+          "name": "IO1",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": null
+        },
+        {
+          "number": "40",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "41",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "C1",
+      "value": "100nF",
+      "footprint": "C_0402",
+      "lcsc": "C49678",
+      "description": "100nF decoupling 0402",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3_U1_DEC"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "C2",
+      "value": "10uF",
+      "footprint": "C_0805",
+      "lcsc": "C15850",
+      "description": "10uF bulk decoupling 0805",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "SW1",
+      "value": "BOOT",
+      "footprint": "SW_Push_4.5x4.5mm",
+      "lcsc": "C318884",
+      "description": "Tactile switch \u2014 BOOT",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "BOOT"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "SW2",
+      "value": "RESET",
+      "footprint": "SW_Push_4.5x4.5mm",
+      "lcsc": "C318884",
+      "description": "Tactile switch \u2014 RESET",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "EN"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R1",
+      "value": "10K",
+      "footprint": "R_0402",
+      "lcsc": "C17414",
+      "description": "10K pull-up 0402 \u2014 EN",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "EN"
+        }
+      ]
+    },
+    {
+      "ref": "R2",
+      "value": "10K",
+      "footprint": "R_0402",
+      "lcsc": "C17414",
+      "description": "10K pull-up 0402 \u2014 BOOT/IO0",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "BOOT"
+        }
+      ]
+    },
+    {
+      "ref": "C5",
+      "value": "100nF",
+      "footprint": "C_0402",
+      "lcsc": "C49678",
+      "description": "100nF EN debounce 0402",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "EN_DEB"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "J1",
+      "value": "USB-C",
+      "footprint": "USB-C",
+      "lcsc": null,
+      "description": "USB-C connector",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "A1",
+          "name": "GND",
+          "pin_type": "power_in",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "A4",
+          "name": "VBUS",
+          "pin_type": "power_in",
+          "function": "vcc",
+          "net": "VBUS"
+        },
+        {
+          "number": "A5",
+          "name": "CC1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "CC1"
+        },
+        {
+          "number": "A6",
+          "name": "D+",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "USB_DP"
+        },
+        {
+          "number": "A7",
+          "name": "D-",
+          "pin_type": "bidirectional",
+          "function": null,
+          "net": "USB_DM"
+        },
+        {
+          "number": "B5",
+          "name": "CC2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "CC2"
+        },
+        {
+          "number": "S1",
+          "name": "SHIELD",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R3",
+      "value": "5.1K",
+      "footprint": "R_0402",
+      "lcsc": "C25905",
+      "description": "5.1K CC pull-down 0402 \u2014 CC1",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "CC1"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R4",
+      "value": "5.1K",
+      "footprint": "R_0402",
+      "lcsc": "C25905",
+      "description": "5.1K CC pull-down 0402 \u2014 CC2",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "CC2"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "D1",
+      "value": "LED",
+      "footprint": "LED_0603",
+      "lcsc": "C2286",
+      "description": "Red LED 0603 \u2014 status",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "A",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED_A"
+        },
+        {
+          "number": "2",
+          "name": "K",
+          "pin_type": "passive",
+          "function": null,
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "ref": "R5",
+      "value": "330R",
+      "footprint": "R_0603",
+      "lcsc": "C23138",
+      "description": "330R LED resistor 0603",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "1",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED"
+        },
+        {
+          "number": "2",
+          "name": "2",
+          "pin_type": "passive",
+          "function": null,
+          "net": "LED_A"
+        }
+      ]
+    },
+    {
+      "ref": "J2",
+      "value": "UART_Header",
+      "footprint": "PinHeader_1x04_P2.54mm",
+      "lcsc": null,
+      "description": "4-pin 2.54mm header \u2014 UART debug",
+      "datasheet": null,
+      "pins": [
+        {
+          "number": "1",
+          "name": "RX",
+          "pin_type": "passive",
+          "function": null,
+          "net": "UART_RX"
+        },
+        {
+          "number": "2",
+          "name": "TX",
+          "pin_type": "passive",
+          "function": null,
+          "net": "UART_TX"
+        },
+        {
+          "number": "3",
+          "name": "3V3",
+          "pin_type": "passive",
+          "function": null,
+          "net": "+3V3"
+        },
+        {
+          "number": "4",
+          "name": "GND",
+          "pin_type": "passive",
+          "function": "gnd",
+          "net": "GND"
+        }
+      ]
+    }
+  ],
+  "nets": [
+    {
+      "name": "+3V3",
+      "connections": [
+        {
+          "ref": "C2",
+          "pin": "1"
+        },
+        {
+          "ref": "R1",
+          "pin": "1"
+        },
+        {
+          "ref": "R2",
+          "pin": "1"
+        },
+        {
+          "ref": "J2",
+          "pin": "3"
+        }
+      ]
+    },
+    {
+      "name": "+3V3_U1_DEC",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "2"
+        },
+        {
+          "ref": "C1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "GND",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "1"
+        },
+        {
+          "ref": "U1",
+          "pin": "40"
+        },
+        {
+          "ref": "U1",
+          "pin": "41"
+        },
+        {
+          "ref": "C1",
+          "pin": "2"
+        },
+        {
+          "ref": "C2",
+          "pin": "2"
+        },
+        {
+          "ref": "C5",
+          "pin": "2"
+        },
+        {
+          "ref": "SW1",
+          "pin": "2"
+        },
+        {
+          "ref": "SW2",
+          "pin": "2"
+        },
+        {
+          "ref": "J1",
+          "pin": "A1"
+        },
+        {
+          "ref": "J1",
+          "pin": "S1"
+        },
+        {
+          "ref": "R3",
+          "pin": "2"
+        },
+        {
+          "ref": "R4",
+          "pin": "2"
+        },
+        {
+          "ref": "D1",
+          "pin": "2"
+        },
+        {
+          "ref": "J2",
+          "pin": "4"
+        }
+      ]
+    },
+    {
+      "name": "VBUS",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "A4"
+        }
+      ]
+    },
+    {
+      "name": "USB_DP",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "A6"
+        },
+        {
+          "ref": "U1",
+          "pin": "13"
+        }
+      ]
+    },
+    {
+      "name": "USB_DM",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "A7"
+        },
+        {
+          "ref": "U1",
+          "pin": "14"
+        }
+      ]
+    },
+    {
+      "name": "EN",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "3"
+        },
+        {
+          "ref": "R1",
+          "pin": "2"
+        },
+        {
+          "ref": "SW2",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "EN_DEB",
+      "connections": [
+        {
+          "ref": "C5",
+          "pin": "1"
+        },
+        {
+          "ref": "U1",
+          "pin": "3"
+        }
+      ]
+    },
+    {
+      "name": "BOOT",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "27"
+        },
+        {
+          "ref": "R2",
+          "pin": "2"
+        },
+        {
+          "ref": "SW1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "UART_TX",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "36"
+        },
+        {
+          "ref": "J2",
+          "pin": "2"
+        }
+      ]
+    },
+    {
+      "name": "UART_RX",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "37"
+        },
+        {
+          "ref": "J2",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "LED",
+      "connections": [
+        {
+          "ref": "U1",
+          "pin": "38"
+        },
+        {
+          "ref": "R5",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "LED_A",
+      "connections": [
+        {
+          "ref": "R5",
+          "pin": "2"
+        },
+        {
+          "ref": "D1",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "CC1",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "A5"
+        },
+        {
+          "ref": "R3",
+          "pin": "1"
+        }
+      ]
+    },
+    {
+      "name": "CC2",
+      "connections": [
+        {
+          "ref": "J1",
+          "pin": "B5"
+        },
+        {
+          "ref": "R4",
+          "pin": "1"
+        }
+      ]
+    }
+  ],
+  "pin_map": null,
+  "power_budget": null,
+  "mechanical": {
+    "board_width_mm": 70,
+    "board_height_mm": 50,
+    "enclosure": null,
+    "mounting_hole_diameter_mm": 3.2,
+    "mounting_hole_positions": [],
+    "notes": null
+  },
+  "recommendations": []
+}
