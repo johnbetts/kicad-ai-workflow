@@ -1173,6 +1173,26 @@ def _add_mounting_hole_footprints(
             len(mh_positions),
         )
 
+    # Keepout rings must follow the holes ACTUALLY placed: shifted or
+    # skipped holes left stale rings at the nominal corners — screw
+    # terminals rendered sitting on hole-shaped keepouts where no hole
+    # exists (human finding 2026-06-11, power_chain J1/J2 corners).
+    placed_holes = tuple(
+        (fp.position.x, fp.position.y)
+        for fp in final_footprints
+        if fp.ref.startswith("H") and fp.pads
+        and fp.pads[0].pad_type == "np_thru_hole"
+    )
+    ctx.keepouts[:] = [
+        k for k in ctx.keepouts if getattr(k, "tag", "") != "mounting_hole"
+    ]
+    if placed_holes:
+        ctx.keepouts.extend(_make_mounting_hole_keepouts(
+            ctx.board_width_mm, ctx.board_height_mm, _MOUNTING_HOLE_INSET_MM,
+            mh_diameter / 2.0 + 1.0,
+            mounting_positions=placed_holes,
+        ))
+
 
 def _run_autoroute_step(
     ctx: _BuildContext,

@@ -678,31 +678,31 @@
       "pins": [
         {
           "number": "1",
+          "name": "GND",
+          "pin_type": "passive",
+          "function": "gnd",
+          "net": "GND"
+        },
+        {
+          "number": "2",
           "name": "RX",
           "pin_type": "passive",
           "function": null,
           "net": "UART_RX"
         },
         {
-          "number": "2",
+          "number": "3",
           "name": "TX",
           "pin_type": "passive",
           "function": null,
           "net": "UART_TX"
         },
         {
-          "number": "3",
+          "number": "4",
           "name": "3V3",
           "pin_type": "passive",
           "function": null,
           "net": "+3V3"
-        },
-        {
-          "number": "4",
-          "name": "GND",
-          "pin_type": "passive",
-          "function": "gnd",
-          "net": "GND"
         }
       ]
     }
@@ -725,7 +725,7 @@
         },
         {
           "ref": "J2",
-          "pin": "3"
+          "pin": "4"
         }
       ]
     },
@@ -799,7 +799,7 @@
         },
         {
           "ref": "J2",
-          "pin": "4"
+          "pin": "1"
         }
       ]
     },
@@ -894,7 +894,7 @@
         },
         {
           "ref": "J2",
-          "pin": "2"
+          "pin": "3"
         }
       ]
     },
@@ -907,7 +907,7 @@
         },
         {
           "ref": "J2",
-          "pin": "1"
+          "pin": "2"
         }
       ]
     },

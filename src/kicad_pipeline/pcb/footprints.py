@@ -4275,6 +4275,72 @@ def _route_fp_switch_misc(
     return None
 
 
+#: Measured pad geometry of official KiCad LQFP footprints, keyed by pin
+#: count: (body_mm, pitch_mm, pad_center_offset_mm, pad_len_mm, pad_w_mm).
+#: Source: Package_QFP.pretty in KiCad 10 (pad-1 positions read directly
+#: from the .kicad_mod files, 2026-06-11). A formula-derived layout once
+#: produced a DUAL-ROW "LQFP-48" with 24 pads per side spanning 14.5mm
+#: against the 7x7mm STEP body (Gate C human finding: 2D pads and 3D
+#: component don't match).
+_LQFP_VARIANTS: dict[int, tuple[float, float, float, float, float]] = {
+    32: (7.0, 0.8, 4.175, 1.5, 0.5),
+    44: (10.0, 0.8, 5.6625, 1.475, 0.55),
+    48: (7.0, 0.5, 4.1625, 1.475, 0.3),
+    64: (10.0, 0.5, 5.675, 1.55, 0.3),
+    100: (14.0, 0.5, 7.675, 1.6, 0.3),
+}
+
+
+def make_lqfp(ref: str, value: str, pin_count: int, lib_id: str = "") -> Footprint | None:
+    """Quad flat-pack footprint matching the official KiCad LQFP geometry.
+
+    Pin order is the JEDEC quad convention: pin 1 at the TOP of the LEFT
+    side, counting counter-clockwise (left top-to-bottom, bottom
+    left-to-right, right bottom-to-top, top right-to-left). Returns
+    ``None`` for pin counts without a measured variant — falling back to
+    a dual-row layout would silently regress to the mismatched-pads bug.
+    """
+    variant = _LQFP_VARIANTS.get(pin_count)
+    if variant is None:
+        return None
+    body, pitch, offset, pad_len, pad_w = variant
+    per_side = pin_count // 4
+    span = (per_side - 1) * pitch
+    pads: list[Pad] = []
+    for i in range(per_side):  # left, top -> bottom
+        pads.append(_smd_pad(
+            str(i + 1), -offset, -span / 2.0 + i * pitch, pad_len, pad_w, LAYER_F_CU,
+        ))
+    for i in range(per_side):  # bottom, left -> right
+        pads.append(_smd_pad(
+            str(per_side + i + 1), -span / 2.0 + i * pitch, offset, pad_w, pad_len,
+            LAYER_F_CU,
+        ))
+    for i in range(per_side):  # right, bottom -> top
+        pads.append(_smd_pad(
+            str(2 * per_side + i + 1), offset, span / 2.0 - i * pitch, pad_len, pad_w,
+            LAYER_F_CU,
+        ))
+    for i in range(per_side):  # top, right -> left
+        pads.append(_smd_pad(
+            str(3 * per_side + i + 1), span / 2.0 - i * pitch, -offset, pad_w, pad_len,
+            LAYER_F_CU,
+        ))
+    court = 2.0 * offset + pad_len  # covers the gull-wing pad extent
+    graphics: tuple[FootprintLine, ...] = (*_courtyard_rect(court, court, clearance=0.0),)
+    texts = (
+        _ref_text(ref, -(court / 2.0 + _TEXT_OFFSET_SMALL), LAYER_F_SILKSCREEN),
+        _val_text(value, court / 2.0 + _TEXT_OFFSET_SMALL, LAYER_F_FAB),
+    )
+    fid = lib_id or f"LQFP-{pin_count}"
+    model = _model_for_package(fid)
+    return Footprint(
+        lib_id=fid, ref=ref, value=value, position=Point(0.0, 0.0),
+        layer=LAYER_F_CU, pads=tuple(pads), graphics=graphics, texts=texts,
+        attr="smd", models=(model,) if model is not None else (),
+    )
+
+
 def _route_fp_smd_ic(
     ref: str,
     value: str,
@@ -4293,6 +4359,13 @@ def _route_fp_smd_ic(
     ic_prefixes = ("MSOP", "TSSOP", "SOIC", "QFP", "QFN", "SOP", "DFN", "SSOP", "LQFP")
     if not any(upper.startswith(p) for p in ic_prefixes):
         return None
+    # QUAD packages must not fall through to the dual-row generator:
+    # it laid an "LQFP-48" out as two 24-pin columns 14.5mm apart under
+    # a 7x7mm body (bare pad rows flanking the 3D component).
+    if upper.startswith(("LQFP", "QFP")):
+        quad = make_lqfp(ref, value, _parse_pin_count(fid), lib_id=fid)
+        if quad is not None:
+            return quad
     pin_count = _parse_pin_count(fid)
     if pin_count < 2:
         pin_count = 8

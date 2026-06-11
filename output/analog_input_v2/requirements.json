@@ -704,17 +704,17 @@
       "pins": [
         {
           "number": "1",
-          "name": "SDA",
-          "pin_type": "bidirectional",
-          "function": "i2c_sda",
-          "net": "SDA"
-        },
-        {
-          "number": "2",
           "name": "SCL",
           "pin_type": "input",
           "function": "i2c_scl",
           "net": "SCL"
+        },
+        {
+          "number": "2",
+          "name": "SDA",
+          "pin_type": "bidirectional",
+          "function": "i2c_sda",
+          "net": "SDA"
         },
         {
           "number": "3",
@@ -1050,7 +1050,7 @@
         },
         {
           "ref": "J5",
-          "pin": "1"
+          "pin": "2"
         }
       ]
     },
@@ -1067,7 +1067,7 @@
         },
         {
           "ref": "J5",
-          "pin": "2"
+          "pin": "1"
         }
       ]
     }

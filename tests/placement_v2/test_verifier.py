@@ -22,9 +22,11 @@ from kicad_pipeline.placement_v2.ir import (
     Axis,
     BoardContain,
     CellKeepout,
+    ConnectorFanout,
     ConstraintSet,
     Edge,
     EdgePin,
+    FanoutLine,
     IsolationGap,
     KeepoutKind,
     PadRef,
@@ -644,3 +646,64 @@ def test_attach_bundle_missing_pad_is_critical() -> None:
     found = verify_board(pcb, cs)
     assert any(v.severity is Severity.CRITICAL and "not on the board" in v.message
                for v in found)
+
+
+# ---------------------------------------------------------------------------
+# connector fanouts (analog AIN/GND crossing class — human finding 2026-06-11)
+# ---------------------------------------------------------------------------
+
+
+def test_connector_fanout_parallel_lines_pass() -> None:
+    """J1 pads fan straight up to targets in matching order."""
+    pcb = _board((
+        _fp("J1", 25.0, 25.0, pad_dx=3.0),  # pads at x 22 / 28
+        _fp("R1", 22.0, 10.0), _fp("C1", 28.0, 10.0),
+    ))
+    cs = ConstraintSet(
+        fanouts=(ConnectorFanout(ref="J1", lines=(
+            FanoutLine("AIN", PadRef("J1", "1"), (PadRef("R1", "1"),)),
+            FanoutLine("GND", PadRef("J1", "2"),
+                       (PadRef("C1", "1"), PadRef("R1", "2"))),
+        )),),
+        contain=BoardContain(margin_mm=0.0),
+    )
+    assert _only(verify_board(pcb, cs), "ConnectorFanout") == ()
+
+
+def test_connector_fanout_crossing_lines_are_major() -> None:
+    """Swapped targets: left pad to right part and vice versa must cross."""
+    pcb = _board((
+        _fp("J1", 25.0, 25.0, pad_dx=3.0),
+        _fp("R1", 28.0, 10.0), _fp("C1", 22.0, 10.0),
+    ))
+    cs = ConstraintSet(
+        fanouts=(ConnectorFanout(ref="J1", lines=(
+            FanoutLine("AIN", PadRef("J1", "1"), (PadRef("R1", "1"),)),
+            FanoutLine("GND", PadRef("J1", "2"), (PadRef("C1", "1"),)),
+        )),),
+        contain=BoardContain(margin_mm=0.0),
+    )
+    found = _only(verify_board(pcb, cs), "ConnectorFanout")
+    assert len(found) == 1
+    assert found[0].severity is Severity.MAJOR
+    assert "cross" in found[0].message
+
+
+def test_connector_fanout_uses_nearest_candidate() -> None:
+    """A global net's line goes to the NEAREST pad — the far candidate
+    would cross, the near one does not; the check must pick the near one."""
+    pcb = _board((
+        _fp("J1", 25.0, 25.0, pad_dx=3.0),
+        _fp("R1", 22.0, 10.0),
+        _fp("C1", 28.0, 10.0),   # near GND pad, no crossing
+        _fp("C9", 10.0, 10.0),   # far GND pad, would cross the AIN line
+    ))
+    cs = ConstraintSet(
+        fanouts=(ConnectorFanout(ref="J1", lines=(
+            FanoutLine("AIN", PadRef("J1", "1"), (PadRef("R1", "1"),)),
+            FanoutLine("GND", PadRef("J1", "2"),
+                       (PadRef("C9", "1"), PadRef("C1", "1"))),
+        )),),
+        contain=BoardContain(margin_mm=0.0),
+    )
+    assert _only(verify_board(pcb, cs), "ConnectorFanout") == ()

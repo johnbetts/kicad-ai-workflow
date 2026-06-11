@@ -1,6 +1,6 @@
 {
   "board": "power_chain",
-  "board_sha256": "19281fb6dd5bae31c4ed3dc46592cca32bfc1403f3206d90ac0c3bc24de14527",
+  "board_sha256": "3555bb1c0c1ab836eb138fe27e3fda4247fd5bf81a0ece701400f5df8a05ebcd",
   "renders": {
     "2d": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/power_chain_v2/power_chain_v2_2d.png",
     "3d_top": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/power_chain_v2/power_chain_v2_3d_top.png",

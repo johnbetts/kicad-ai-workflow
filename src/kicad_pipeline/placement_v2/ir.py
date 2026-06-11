@@ -141,6 +141,37 @@ class AttachBundle:
 
 
 @dataclass(frozen=True)
+class FanoutLine:
+    """One ratsnest line leaving a connector pad.
+
+    ``candidates`` lists every other pad on the net; the verifier draws
+    the line to the NEAREST candidate in board space — the deterministic
+    proxy for the rendered ratsnest MST edge (global nets like GND have
+    many pads, but the visible line goes to the closest one).
+    """
+
+    net: str
+    src: PadRef  # the connector's pad
+    candidates: tuple[PadRef, ...]  # every other pad on the net
+
+
+@dataclass(frozen=True)
+class ConnectorFanout:
+    """All ratsnest lines leaving one connector must be crossing-free.
+
+    Human finding 2026-06-11 (analog board): each terminal's AIN line
+    went up-right while its GND line went up-left — an X on all four
+    channels that AttachBundle could not see because GND is a global
+    net. Verified by pairwise segment intersection over the nearest-
+    candidate lines.
+    """
+
+    ref: str  # the free-pin-order connector
+    lines: tuple[FanoutLine, ...]
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
 class CellKeepout:
     """A keepout region owned by a component, in CELL-LOCAL frame.
 
@@ -200,6 +231,7 @@ class ConstraintSet:
     keepouts: tuple[CellKeepout, ...] = ()
     isolation: tuple[IsolationGap, ...] = ()
     bundles: tuple[AttachBundle, ...] = ()
+    fanouts: tuple[ConnectorFanout, ...] = ()
     contain: BoardContain = field(default_factory=BoardContain)
 
     def for_refs(self, refs: frozenset[str]) -> ConstraintSet:
@@ -223,6 +255,7 @@ class ConstraintSet:
             bundles=tuple(
                 b for b in self.bundles if b.ref_a in refs and b.ref_b in refs
             ),
+            fanouts=(),  # board-level: candidates span the whole netlist
             contain=self.contain,
         )
 
@@ -240,6 +273,7 @@ class ConstraintSet:
             keepouts=self.keepouts + other.keepouts,
             isolation=self.isolation + other.isolation,
             bundles=self.bundles + other.bundles,
+            fanouts=self.fanouts + other.fanouts,
             contain=contain,
         )
 
@@ -252,5 +286,6 @@ class ConstraintSet:
             + len(self.keepouts)
             + len(self.isolation)
             + len(self.bundles)
+            + len(self.fanouts)
             + 1
         )

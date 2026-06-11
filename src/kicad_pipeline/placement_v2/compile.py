@@ -27,9 +27,11 @@ from kicad_pipeline.placement_v2.ir import (
     Axis,
     BoardContain,
     CellKeepout,
+    ConnectorFanout,
     ConstraintSet,
     ConstraintSource,
     EdgePin,
+    FanoutLine,
     IsolationGap,
     PadRef,
     PinAttach,
@@ -475,6 +477,78 @@ def _attach_bundles(idx: _Index) -> list[AttachBundle]:
     return out
 
 
+def _connector_fanouts(idx: _Index) -> list[ConnectorFanout]:
+    """Every free-pin connector's ratsnest lines must not cross.
+
+    For each connected pad of the connector, the line runs to the
+    nearest same-net pad (resolved by the verifier from the artifact).
+    Global nets (GND) are INCLUDED — the analog terminals' AIN/GND X
+    (human finding 2026-06-11) was invisible to AttachBundle precisely
+    because GND has many connections.
+    """
+    out: list[ConnectorFanout] = []
+    for comp in idx.components:
+        if not _has_free_pin_order(comp):
+            continue
+        lines: list[FanoutLine] = []
+        for net_name, pins in sorted(idx.nets_of(comp.ref).items()):
+            net = next(n for n in idx.nets if n.name == net_name)
+            for pin in pins:
+                candidates = tuple(
+                    PadRef(c.ref, c.pin) for c in net.connections
+                    if (c.ref, c.pin) != (comp.ref, pin)
+                )
+                if candidates:
+                    lines.append(FanoutLine(
+                        net=net_name, src=PadRef(comp.ref, pin),
+                        candidates=candidates,
+                    ))
+        if len(lines) >= 2:
+            out.append(ConnectorFanout(ref=comp.ref, lines=tuple(lines)))
+    return out
+
+
+#: Passive ref prefixes whose 2-pin link to a connector pad roots the
+#: subcircuit chain at that pad (divider entry at its screw terminal).
+_CHAIN_ENTRY_PREFIXES = frozenset({"R", "C", "D", "L"})
+_CONNECTOR_CHAIN_MAX_MM = 8.0
+_CONNECTOR_CHAIN_IDEAL_MM = 3.0
+
+
+def _connector_chain_attaches(idx: _Index) -> list[PinAttach]:
+    """Root each channel chain at its connector pin.
+
+    A 2-pin signal net joining a free-pin connector pad to a passive
+    (divider entry resistor) becomes a PinAttach so the band generator
+    places the passive AT the connector pin's coordinate instead of
+    shelving the whole channel as unordered orphans — the root cause of
+    the analog AIN/GND crossings (human finding 2026-06-11).
+    """
+    out: list[PinAttach] = []
+    for net in idx.nets:
+        if len(net.connections) != 2 or not idx.is_signal_net(net.name):
+            continue
+        a, b = net.connections
+        comp_a, comp_b = idx.by_ref.get(a.ref), idx.by_ref.get(b.ref)
+        if comp_a is None or comp_b is None:
+            continue
+        conn, part = (a, b) if _has_free_pin_order(comp_a) else (b, a)
+        conn_comp = idx.by_ref[conn.ref]
+        part_comp = idx.by_ref[part.ref]
+        if not _has_free_pin_order(conn_comp) or _has_free_pin_order(part_comp):
+            continue
+        if ref_alpha_prefix(part.ref) not in _CHAIN_ENTRY_PREFIXES:
+            continue
+        out.append(PinAttach(
+            src=PadRef(part.ref, part.pin),
+            dst=PadRef(conn.ref, conn.pin),
+            net=net.name,
+            max_mm=_CONNECTOR_CHAIN_MAX_MM,
+            ideal_mm=_CONNECTOR_CHAIN_IDEAL_MM,
+        ))
+    return out
+
+
 def compile_constraints(
     requirements: ProjectRequirements,
     *,
@@ -502,6 +576,7 @@ def compile_constraints(
         + _placement_near_attaches(idx)
         + _relay_driver_attaches(idx)
         + _connector_support_attaches(idx)
+        + _connector_chain_attaches(idx)
     ):
         attaches.setdefault((pa.src.ref, pa.src.pin, pa.dst.ref, pa.dst.pin), pa)
     attached_srcs = frozenset(k[0] for k in attaches)
@@ -543,11 +618,12 @@ def compile_constraints(
         keepouts=keepouts,
         isolation=isolation,
         bundles=tuple(_attach_bundles(idx)),
+        fanouts=tuple(_connector_fanouts(idx)),
         contain=BoardContain(margin_mm=_BOARD_MARGIN_MM, source=ConstraintSource.NETLIST),
     )
     logger.info(
         "compiled %d constraints (%d attach, %d seq, %d edge, %d keepout, "
-        "%d isolation, %d bundle)",
+        "%d isolation, %d bundle, %d fanout)",
         result.count(),
         len(result.pin_attach),
         len(result.sequences),
@@ -555,5 +631,6 @@ def compile_constraints(
         len(result.keepouts),
         len(result.isolation),
         len(result.bundles),
+        len(result.fanouts),
     )
     return result

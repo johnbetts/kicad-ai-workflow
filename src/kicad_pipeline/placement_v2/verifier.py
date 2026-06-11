@@ -48,6 +48,7 @@ from kicad_pipeline.models.pcb import (
 from kicad_pipeline.placement_v2.ir import Severity
 from kicad_pipeline.placement_v2.verifier_rules import (
     check_attach_bundles,
+    check_connector_fanouts,
     check_contain,
     check_courtyards,
     check_edge_pins,
@@ -103,6 +104,7 @@ def verify_board(
     violations.extend(check_keepouts(pcb, constraints.keepouts))
     violations.extend(check_isolation(pcb, constraints.isolation, domains))
     violations.extend(check_attach_bundles(pcb, constraints.bundles))
+    violations.extend(check_connector_fanouts(pcb, constraints.fanouts))
     return tuple(violations)
 
 
@@ -184,6 +186,7 @@ def _checks_summary(
         f"keepout x{len(constraints.keepouts)}",
         f"isolation_pair x{isolation_pairs}",
         f"attach_bundle x{len(constraints.bundles)}",
+        f"connector_fanout x{len(constraints.fanouts)}",
     )
 
 

@@ -441,8 +441,11 @@ def _make_5v_test_header() -> Component:
         placement_near="C2",
         placement_near_max_mm=10.0,
         pins=(
-            Pin("1", "+5V", PinType.PASSIVE, PinFunction.VCC, net="+5V"),
-            Pin("2", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
+            # GND on pin 1: its nearest pad (C5) sits above the +5V
+            # target (R1), so this order keeps the two fanout lines
+            # parallel (Gate A connector_fanout, 2026-06-11).
+            Pin("1", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
+            Pin("2", "+5V", PinType.PASSIVE, PinFunction.VCC, net="+5V"),
         ),
     )
 
@@ -513,7 +516,7 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("C4", "2"),
                 NetConnection("C5", "2"),
                 NetConnection("C6", "2"),  # HF bypass cap
-                NetConnection("J2", "2"),
+                NetConnection("J2", "1"),
                 NetConnection("J3", "2"),
             ),
         ),
@@ -546,7 +549,7 @@ def _build_nets() -> tuple[Net, ...]:
             name="+5V",
             connections=(
                 NetConnection("R1", "1"),   # FB top to +5V
-                NetConnection("J2", "1"),   # 5V test point
+                NetConnection("J2", "2"),   # 5V test point
             ),
         ),
         # Private subnet: LDO input — C4 must be right at U2 VIN

@@ -303,7 +303,13 @@ def _make_i2c_pullup_scl() -> Component:
 
 
 def _make_mcu_header() -> Component:
-    """4-pin header to MCU (J5): SDA, SCL, +3V3, GND."""
+    """4-pin header to MCU (J5): SCL, SDA, +3V3, GND.
+
+    Pin order mirrors the physical order of each net's nearest target
+    (R10 SCL pullup sits above R9 SDA pullup): zero ratsnest crossings
+    at the header, enforced by Gate A's connector-fanout check (human
+    finding 2026-06-11).
+    """
     return Component(
         ref="J5",
         value="PinHeader_1x04",
@@ -311,8 +317,8 @@ def _make_mcu_header() -> Component:
         lcsc=None,  # C2337 is 40-pin! Use parametric 4-pin header
         description="4-pin 2.54mm header — MCU I2C interface",
         pins=(
-            Pin("1", "SDA", PinType.BIDIRECTIONAL, PinFunction.I2C_SDA, net="SDA"),
-            Pin("2", "SCL", PinType.INPUT, PinFunction.I2C_SCL, net="SCL"),
+            Pin("1", "SCL", PinType.INPUT, PinFunction.I2C_SCL, net="SCL"),
+            Pin("2", "SDA", PinType.BIDIRECTIONAL, PinFunction.I2C_SDA, net="SDA"),
             Pin("3", "VCC", PinType.POWER_IN, PinFunction.VCC, net="+3V3"),
             Pin("4", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
         ),
@@ -464,7 +470,7 @@ def _build_requirements() -> ProjectRequirements:
         connections=(
             NetConnection("U1", "9"),
             NetConnection("R9", "2"),
-            NetConnection("J5", "1"),
+            NetConnection("J5", "2"),
         ),
     ))
     nets.append(Net(
@@ -472,7 +478,7 @@ def _build_requirements() -> ProjectRequirements:
         connections=(
             NetConnection("U1", "10"),
             NetConnection("R10", "2"),
-            NetConnection("J5", "2"),
+            NetConnection("J5", "1"),
         ),
     ))
     all_net_names.extend(["SDA", "SCL"])

@@ -429,17 +429,17 @@
       "pins": [
         {
           "number": "1",
-          "name": "+5V",
-          "pin_type": "passive",
-          "function": "vcc",
-          "net": "+5V"
-        },
-        {
-          "number": "2",
           "name": "GND",
           "pin_type": "passive",
           "function": "gnd",
           "net": "GND"
+        },
+        {
+          "number": "2",
+          "name": "+5V",
+          "pin_type": "passive",
+          "function": "vcc",
+          "net": "+5V"
         }
       ]
     },
@@ -539,7 +539,7 @@
         },
         {
           "ref": "J2",
-          "pin": "2"
+          "pin": "1"
         },
         {
           "ref": "J3",
@@ -603,7 +603,7 @@
         },
         {
           "ref": "J2",
-          "pin": "1"
+          "pin": "2"
         }
       ]
     },

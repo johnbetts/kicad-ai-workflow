@@ -559,3 +559,31 @@ def test_esp32_courtyard_covers_full_module_body() -> None:
             f"{fp.lib_id}: courtyard y [{y1:.2f}, {y2:.2f}] does not cover "
             f"module body y [{body_cy - 12.75:.2f}, {body_cy + 12.75:.2f}]"
         )
+
+
+def test_lqfp48_is_quad_not_dual_row() -> None:
+    """Human finding 2026-06-11: 'ethernet U1 2D pads and 3D component
+    don't match'. The dual-row generator laid LQFP-48 out as two 24-pin
+    columns 14.5mm apart under a 7x7mm body. Quad geometry must match
+    the official KiCad LQFP-48_7x7mm_P0.5mm footprint."""
+    fp = footprint_for_component("U1", "W5500", "LQFP-48")
+    assert len(fp.pads) == 48
+    xs = [p.position.x for p in fp.pads]
+    ys = [p.position.y for p in fp.pads]
+    # Quad: square pad field, 4.1625mm pad-center offset (official value)
+    assert max(xs) == pytest.approx(4.1625)
+    assert min(xs) == pytest.approx(-4.1625)
+    assert max(ys) == pytest.approx(4.1625)
+    assert min(ys) == pytest.approx(-4.1625)
+    # 12 pads per side, JEDEC CCW from top-left
+    p1 = next(p for p in fp.pads if p.number == "1")
+    p13 = next(p for p in fp.pads if p.number == "13")
+    p25 = next(p for p in fp.pads if p.number == "25")
+    p37 = next(p for p in fp.pads if p.number == "37")
+    assert (p1.position.x, p1.position.y) == (pytest.approx(-4.1625), pytest.approx(-2.75))
+    assert p13.position.y == pytest.approx(4.1625)  # bottom row
+    assert p25.position.x == pytest.approx(4.1625)  # right column
+    assert p37.position.y == pytest.approx(-4.1625)  # top row
+    # Gull-wing pads: long axis points outward
+    assert (p1.size_x, p1.size_y) == (pytest.approx(1.475), pytest.approx(0.3))
+    assert (p13.size_x, p13.size_y) == (pytest.approx(0.3), pytest.approx(1.475))

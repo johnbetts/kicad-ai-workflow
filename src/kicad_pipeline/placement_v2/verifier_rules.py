@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         AttachBundle,
         BoardContain,
         CellKeepout,
+        ConnectorFanout,
         EdgePin,
         IsolationGap,
         PinAttach,
@@ -498,6 +499,56 @@ def check_attach_bundles(
                         f"attach lines {net_i} and {net_j} between "
                         f"{bundle.ref_a} and {bundle.ref_b} cross — pin order "
                         f"does not mirror the physical pad order",
+                    ))
+    return tuple(out)
+
+
+def check_connector_fanouts(
+    pcb: PCBDesign, fanouts: tuple[ConnectorFanout, ...],
+) -> tuple[Violation, ...]:
+    """Each ConnectorFanout: zero crossings among its ratsnest lines (MAJOR).
+
+    Each line runs from the connector pad to the NEAREST candidate pad
+    in board space — the deterministic proxy for the rendered ratsnest
+    MST edge. Crossing lines at a connector mean the pin order (or the
+    channel layout above it) forces avoidable crossover traces — the
+    analog AIN/GND X, human finding 2026-06-11.
+    """
+    out: list[Violation] = []
+    for fanout in fanouts:
+        conn_fp = pcb.get_footprint(fanout.ref)
+        if conn_fp is None:
+            out.append(_missing(fanout, fanout.ref, f"connector {fanout.ref!r}"))
+            continue
+        segments: list[tuple[str, str, tuple[float, float], tuple[float, float]]] = []
+        for line in fanout.lines:
+            src_pad = pad_by_number(conn_fp, line.src.pin)
+            if src_pad is None:
+                out.append(_missing(fanout, fanout.ref, f"pad {line.src}"))
+                continue
+            sx, sy = _pad_center(conn_fp, src_pad)
+            nearest: tuple[float, tuple[float, float], str] | None = None
+            for cand in line.candidates:
+                fp = pcb.get_footprint(cand.ref)
+                pad = pad_by_number(fp, cand.pin) if fp is not None else None
+                if fp is None or pad is None:
+                    continue
+                cx, cy = _pad_center(fp, pad)
+                d = math.hypot(cx - sx, cy - sy)
+                if nearest is None or d < nearest[0]:
+                    nearest = (d, (cx, cy), cand.ref)
+            if nearest is not None:
+                segments.append((line.net, nearest[2], (sx, sy), nearest[1]))
+        for i in range(len(segments)):
+            for j in range(i + 1, len(segments)):
+                net_i, ref_i, a1, a2 = segments[i]
+                net_j, ref_j, b1, b2 = segments[j]
+                if _segments_cross(a1, a2, b1, b2):
+                    out.append(Violation(
+                        repr(fanout), (fanout.ref, ref_i, ref_j), Severity.MAJOR,
+                        1.0, 0.0,
+                        f"ratsnest lines {net_i} (to {ref_i}) and {net_j} "
+                        f"(to {ref_j}) cross at connector {fanout.ref}",
                     ))
     return tuple(out)
 
