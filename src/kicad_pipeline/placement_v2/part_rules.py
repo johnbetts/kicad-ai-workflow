@@ -48,7 +48,9 @@ logger = logging.getLogger(__name__)
 
 _ALPHA_PREFIX_RE = re.compile(r"^([A-Za-z]+)")
 
-_RULE_KEYS = frozenset({"match", "keepout", "edge_pin", "isolation_domain", "opening_mm"})
+_RULE_KEYS = frozenset(
+    {"match", "keepout", "edge_pin", "isolation_domain", "opening_mm", "calibrated"}
+)
 _MATCH_KEYS = frozenset({"ref_prefix", "footprint_contains"})
 _KEEPOUT_KEYS = frozenset({"kind", "polygon_mm"})
 _GAP_KEYS = frozenset({"domain_a", "domain_b", "min_mm"})
@@ -103,6 +105,12 @@ class PartRule:
     edge_pin: bool = False
     isolation_domain: str | None = None
     opening: tuple[float, float] | None = None
+    #: True when ``opening`` was MEASURED from an isolated single-part
+    #: render (scripts/calibrate_part_openings.py), not asserted. An
+    #: asserted opening once confirmed a wrong guess (terminal blocks
+    #: faced the board interior on three training boards) — the
+    #: face_out check then validated the guess, not reality.
+    calibrated: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,17 +226,30 @@ def _parse_rule(obj: object, idx: int, path: Path) -> PartRule:
             _as_float(raw_open[0], f"rules[{idx}].opening_mm[0]", path),
             _as_float(raw_open[1], f"rules[{idx}].opening_mm[1]", path),
         )
+    calibrated = rule.get("calibrated", False)
+    if not isinstance(calibrated, bool):
+        raise _fail(path, f"rules[{idx}].calibrated must be a boolean")
+    if calibrated and opening is None:
+        raise _fail(path, f"rules[{idx}] sets 'calibrated' without an 'opening_mm'")
     isolation_domain = (
         _as_str(rule["isolation_domain"], f"rules[{idx}].isolation_domain", path)
         if "isolation_domain" in rule
         else None
     )
+    if opening is not None and not calibrated:
+        logger.warning(
+            "part rules %s: rules[%d] (%s) has an UNCALIBRATED opening_mm=%s — "
+            "asserted openings have confirmed wrong guesses before; run "
+            "scripts/calibrate_part_openings.py and set 'calibrated': true",
+            path, idx, fp_contains or ref_prefix, list(opening),
+        )
     return PartRule(
         match=PartRuleMatch(ref_prefix=ref_prefix, footprint_contains=fp_contains),
         keepout=keepout,
         edge_pin=edge_pin,
         isolation_domain=isolation_domain,
         opening=opening,
+        calibrated=calibrated,
     )
 
 

@@ -25,7 +25,12 @@
           ]
         ]
       },
-      "edge_pin": true
+      "edge_pin": true,
+      "opening_mm": [
+        0.0,
+        -1.0
+      ],
+      "calibrated": true
     },
     {
       "match": {
@@ -38,13 +43,23 @@
       "match": {
         "footprint_contains": "RJ45"
       },
-      "edge_pin": true
+      "edge_pin": true,
+      "opening_mm": [
+        0.0,
+        -1.0
+      ],
+      "calibrated": true
     },
     {
       "match": {
         "footprint_contains": "USB"
       },
-      "edge_pin": true
+      "edge_pin": true,
+      "opening_mm": [
+        0.0,
+        1.0
+      ],
+      "calibrated": true
     },
     {
       "match": {
@@ -53,8 +68,9 @@
       "edge_pin": true,
       "opening_mm": [
         0.0,
-        -1.0
-      ]
+        1.0
+      ],
+      "calibrated": true
     }
   ],
   "isolation_gaps": [

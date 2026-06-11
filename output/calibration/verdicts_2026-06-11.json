@@ -1,0 +1,42 @@
+[
+  {
+    "part": "TerminalBlock_5.08mm_3P",
+    "rule_match": "TerminalBlock",
+    "opening_side": "south",
+    "body_visible": true,
+    "body_offset_mm": [0.0, 0.0],
+    "evidence": "Iso view (camera from south, confirmed by ESP32 antenna far-side) shows the three round wire-entry openings on the near long face with screw heads on top; 3d_top body is centered over the 3-pad row from the 2D image."
+  },
+  {
+    "part": "TerminalBlock_5.08mm_2P",
+    "rule_match": "TerminalBlock",
+    "opening_side": "south",
+    "body_visible": true,
+    "body_offset_mm": [0.0, 0.0],
+    "evidence": "Same green block geometry as 3P: two triangular wire-entry openings face the south long face in iso, screws on top, body centered over the two pads in 3d_top."
+  },
+  {
+    "part": "USB-C",
+    "rule_match": "USB",
+    "opening_side": "south",
+    "body_visible": true,
+    "body_offset_mm": [0.0, 0.0],
+    "evidence": "3d_top shows gold SMT leads at the body's north edge (matching the A1-A4 pin row in 2D) with the receptacle extending south, and the iso view shows the dark plug mouth on the south face; body sits over the pad field."
+  },
+  {
+    "part": "RJ45_HR911105A",
+    "rule_match": "RJ45",
+    "opening_side": "north",
+    "body_visible": true,
+    "body_offset_mm": [5.0, 0.0],
+    "evidence": "Iso shows a featureless white shell with LED light pipes on the far (north) edge; in 3d_top the body is roughly 5mm east of the pad field and the footprint's LED pads 9-12 are on the SOUTH side so the model also appears 180 deg off versus the pads."
+  },
+  {
+    "part": "ESP32-S3-WROOM-1",
+    "rule_match": "ESP32",
+    "opening_side": "north",
+    "body_visible": true,
+    "body_offset_mm": [0.0, 0.0],
+    "evidence": "3d_top shows the dark antenna section (no shield can, no pins) extending north beyond the castellated pads, matching the 2D footprint; iso confirms the meandered antenna on the far north edge and the body aligns with the pad rows."
+  }
+]
