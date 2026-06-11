@@ -353,6 +353,11 @@ class _BuildContext:
     rf_pos: tuple[float, float, float] | None
     fp_sizes: dict[str, tuple[float, float]]
     fp_bboxes: dict[str, object]
+    #: True when the board size came from the caller or requirements;
+    #: False when it is a heuristic estimate (auto-size). Placement v2
+    #: treats an ESTIMATE as advisory and shrink-to-fits instead — a
+    #: heuristic cap once missed a feasible floorplan by 0.03mm.
+    explicit_dimensions: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -790,11 +795,15 @@ def _run_placement_v2(
     # Mounting-hole corners are NOT reserved: the hole placer shifts
     # holes along the edge when a corner is occupied (collision check
     # below), which beats starving edge-snapped groups of corner space.
+    # Auto-ESTIMATED dims are advisory only: v2 shrink-to-fits and the
+    # build adopts the packed size (a 0.03mm-too-small estimate once
+    # halted a feasible power-chain floorplan).
+    explicit = ctx.explicit_dimensions
     result = run_placement_v2(
         requirements,
         {fp.ref: fp for fp in pre_footprints},
-        board_width_mm=ctx.board_width_mm,
-        board_height_mm=ctx.board_height_mm,
+        board_width_mm=ctx.board_width_mm if explicit else None,
+        board_height_mm=ctx.board_height_mm if explicit else None,
         part_rules_path=part_rules if part_rules.exists() else None,
         ledger_path=v2_ledger_path,
         timestamp=datetime.now(timezone.utc).isoformat() if v2_ledger_path else "",
@@ -803,6 +812,22 @@ def _run_placement_v2(
         details = "; ".join(v.message for v in result.violations[:10])
         raise PCBError(
             f"placement v2 halted at stage {result.halted_stage!r}: {details}"
+        )
+    if not explicit and result.board_width > 0.0:
+        ctx.board_width_mm = result.board_width
+        ctx.board_height_mm = result.board_height
+        ctx.outline = _make_board_outline(
+            ctx.board_width_mm, ctx.board_height_mm,
+            ctx.origin_x, ctx.origin_y,
+            corner_radius_mm=ctx.corner_radius_mm,
+        )
+        # Pre-placement keepouts (mounting-hole corners) were computed
+        # for the stale estimate — regenerate for the adopted outline.
+        ctx.keepouts.clear()
+        _build_pre_placement_keepouts(ctx, requirements)
+        log.info(
+            "build_pcb: adopted v2 shrink-to-fit board %.1f x %.1f mm",
+            ctx.board_width_mm, ctx.board_height_mm,
         )
     return LayoutResult(
         positions=result.positions_dict(),
@@ -1023,7 +1048,16 @@ def _mounting_hole_collides_with_footprints(
     mh_half = mh_radius + 1.0 + gap  # drill radius + annular ring + gap
     for fp in existing_fps:
         if fp.ref.startswith("H"):
-            continue  # Skip other mounting holes
+            # Other mounting holes are obstacles too: H3's shift search
+            # once walked the whole edge and stopped 0.9mm from H2
+            # because placed holes were skipped (courtyards overlapped).
+            w, h = (2.0 * (mh_radius + 1.0), 2.0 * (mh_radius + 1.0))
+            if (mx - mh_half < fp.position.x + w / 2.0
+                    and mx + mh_half > fp.position.x - w / 2.0
+                    and my - mh_half < fp.position.y + h / 2.0
+                    and my + mh_half > fp.position.y - h / 2.0):
+                return True
+            continue
         w, h = fp_sizes.get(fp.ref, (2.0, 2.0))
         # Account for rotation
         rot = fp.rotation % 360.0
@@ -1526,6 +1560,7 @@ def _setup_board(
         rf_pos=None,
         fp_sizes=fp_sizes,
         fp_bboxes=fp_bboxes,
+        explicit_dimensions=tmpl_obj is not None or _explicit_dimensions,
     )
 
     return ctx, nets, pre_footprints
@@ -1685,12 +1720,14 @@ def build_pcb(
     )
 
     _build_pre_placement_keepouts(ctx, requirements)
-    corner_keepouts = list(ctx.keepouts)
 
     footprints_with_pos = _run_placement(
         ctx, requirements, pre_footprints, placement_mode,
         v2_ledger_path=Path(v2_ledger_path) if v2_ledger_path is not None else None,
     )
+    # Captured AFTER placement: v2 may adopt a shrink-to-fit board size
+    # and regenerate the mounting-hole corner keepouts for it.
+    corner_keepouts = list(ctx.keepouts)
 
     return _post_placement_assembly(
         ctx, requirements, footprints_with_pos, nets,

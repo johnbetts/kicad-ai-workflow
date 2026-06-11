@@ -419,6 +419,20 @@ def _connector_edge_pins(idx: _Index) -> list[EdgePin]:
     return out
 
 
+#: Footprint tokens of connectors whose PIN ASSIGNMENT is a free choice
+#: in requirements (screw terminals, generic headers) — crossing attach
+#: lines there mean the requirements chose the wrong pin order. Fixed-
+#: pinout pairs (RJ45 <-> PHY, USB <-> MCU) are excluded: their pin
+#: orders are device facts and a straight-line crossing may be routed
+#: legitimately with a layer swap.
+_FREE_PIN_CONNECTOR_TOKENS = ("terminalblock", "pinheader", "conn_01x", "screw")
+
+
+def _has_free_pin_order(comp: Component) -> bool:
+    fp = comp.footprint.lower()
+    return any(t in fp for t in _FREE_PIN_CONNECTOR_TOKENS)
+
+
 def _attach_bundles(idx: _Index) -> list[AttachBundle]:
     """Pairs of parts joined by >= 2 two-pin signal nets must not cross.
 
@@ -426,8 +440,10 @@ def _attach_bundles(idx: _Index) -> list[AttachBundle]:
     contact pads and its screw terminal's pins are joined by parallel
     two-pin nets; if the terminal pin order does not mirror the relay's
     physical pad order, the straight connections cross and force an
-    avoidable crossover trace. Compiled for EVERY such part pair, then
-    verified geometrically at Gate A (segment intersections == 0).
+    avoidable crossover trace. Compiled for every such pair where at
+    least one side has a freely-assignable pin order (see
+    :data:`_FREE_PIN_CONNECTOR_TOKENS`), then verified geometrically at
+    Gate A (segment intersections == 0).
     """
     pair_nets: dict[tuple[str, str], list[tuple[str, PadRef, PadRef]]] = {}
     for net in idx.nets:
@@ -435,6 +451,11 @@ def _attach_bundles(idx: _Index) -> list[AttachBundle]:
             continue
         a, b = net.connections
         if a.ref == b.ref:
+            continue
+        comp_a, comp_b = idx.by_ref.get(a.ref), idx.by_ref.get(b.ref)
+        if comp_a is None or comp_b is None:
+            continue
+        if not (_has_free_pin_order(comp_a) or _has_free_pin_order(comp_b)):
             continue
         ref_a, ref_b = sorted((a.ref, b.ref))
         pad_a = PadRef(a.ref, a.pin) if a.ref == ref_a else PadRef(b.ref, b.pin)

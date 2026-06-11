@@ -371,8 +371,12 @@ def _make_uart_header() -> Component:
         lcsc=None,
         description="4-pin 2.54mm header — UART debug",
         pins=(
-            Pin("1", "TX", PinType.PASSIVE, net="UART_TX"),
-            Pin("2", "RX", PinType.PASSIVE, net="UART_RX"),
+            # Pin order mirrors U1's right-column pin stack (pin 37 TXD0
+            # sits ABOVE pin 36 RXD0): RX on header pin 1, TX on pin 2,
+            # so the straight attach lines never cross (Gate A
+            # attach-bundle check, Gate C 2026-06-11 item 2 class).
+            Pin("1", "RX", PinType.PASSIVE, net="UART_RX"),
+            Pin("2", "TX", PinType.PASSIVE, net="UART_TX"),
             Pin("3", "3V3", PinType.PASSIVE, net="+3V3"),
             Pin("4", "GND", PinType.PASSIVE, PinFunction.GND, net="GND"),
         ),
@@ -398,8 +402,8 @@ def _build_nets() -> tuple[Net, ...]:
         EN:           U1 pin 3 -> R1 pin 2 -> SW2 pin 1
         EN_DEB:       C5 pin 1 -> U1 pin 3 (private debounce subnet)
         BOOT:         U1 pin 27 (IO0) -> R2 pin 2 -> SW1 pin 1
-        UART_TX:      U1 pin 36 (RXD0) -> J2 pin 1
-        UART_RX:      U1 pin 37 (TXD0) -> J2 pin 2
+        UART_TX:      U1 pin 36 (RXD0) -> J2 pin 2
+        UART_RX:      U1 pin 37 (TXD0) -> J2 pin 1  (mirrors U1 pin stack)
         LED:          U1 pin 38 (IO2) -> R5 pin 1
         LED_A:        R5 pin 2 -> D1 A
         CC1:          J1 A5 -> R3 pin 1
@@ -492,14 +496,14 @@ def _build_nets() -> tuple[Net, ...]:
             name="UART_TX",
             connections=(
                 NetConnection("U1", "36"),
-                NetConnection("J2", "1"),
+                NetConnection("J2", "2"),
             ),
         ),
         Net(
             name="UART_RX",
             connections=(
                 NetConnection("U1", "37"),
-                NetConnection("J2", "2"),
+                NetConnection("J2", "1"),
             ),
         ),
         Net(

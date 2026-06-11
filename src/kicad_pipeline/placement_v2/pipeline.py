@@ -504,12 +504,18 @@ def run_placement_v2(
         pack_group(f"conn:{sorted(cell.refs)[0]}", (cell,))
         for cell in sorted(lifted, key=lambda c: c.name)
     )
-    # Connector opening direction (pad centroid -> courtyard centroid,
-    # cell frame at rotation 0): lets the edge snap ROTATE each lifted
-    # connector so its opening faces outward (Gate A face_out).
+    # Connector opening direction: lets the edge snap ROTATE each
+    # lifted connector so its opening faces outward (Gate A face_out).
+    # The CALIBRATED part-rule opening wins; the courtyard-bulge proxy
+    # is only a fallback — for USB-C the bulge points the WRONG way
+    # (pads sit mid-body) and the proxy snapped the jack mouth toward
+    # the board interior (Gate C 2026-06-11 item 4c).
     body_dirs: dict[str, tuple[float, float]] = {}
     for cell in lifted:
         ref = sorted(cell.refs)[0]
+        if ref in openings:
+            body_dirs[f"group:conn:{ref}"] = openings[ref]
+            continue
         court = courtyard_polygon(footprints[ref])
         bx = sum(pt.x for pt in court) / len(court)
         by = sum(pt.y for pt in court) / len(court)

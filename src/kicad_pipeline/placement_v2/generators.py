@@ -188,7 +188,10 @@ def generate_cell(
         footprints, constraints.pin_attach, placed, seq_refs, clearance_mm,
         anchor_normal_override={anchor: anchor_normal} if anchor_normal else None,
     )
-    _place_orphans(footprints, refs, placed, clearance_mm)
+    _place_orphans(
+        footprints, refs, placed, clearance_mm,
+        direction=anchor_normal if anchor_normal is not None else (0.0, 1.0),
+    )
     _resolve_overlaps(footprints, placed, clearance_mm, normals)
 
     violations = _verify_cell(footprints, constraints, placed, clearance_mm)
@@ -338,6 +341,31 @@ class _BandMember:
     depth: int  # chain hops from the band root
 
 
+def _override_feasible(
+    attach: PinAttach,
+    normal: tuple[float, float],
+    host: PlacedMember,
+    pad_x: float,
+    pad_y: float,
+    host_hw: float,
+    host_hh: float,
+) -> bool:
+    """Can a member on the override side still meet the attach bound?
+
+    The band starts just past the host courtyard edge on the override
+    side, so the attach distance is at least the pad-to-edge distance.
+    When that alone exceeds ``max_mm`` the override is geometrically
+    infeasible for THIS attachment and per-pad placement must win.
+    """
+    if normal[1] != 0:
+        edge = host.y + (host_hh if normal[1] > 0 else -host_hh)
+        edge_dist = abs(edge - pad_y)
+    else:
+        edge = host.x + (host_hw if normal[0] > 0 else -host_hw)
+        edge_dist = abs(edge - pad_x)
+    return edge_dist <= attach.max_mm
+
+
 def _resolve_chains(
     footprints: Mapping[str, Footprint],
     attachments: tuple[PinAttach, ...],
@@ -366,14 +394,25 @@ def _resolve_chains(
             if a.dst.ref in placed:
                 host = placed[a.dst.ref]
                 host_fp = footprints[a.dst.ref]
+                hw, hh = courtyard_halfdims(host_fp)
+                tx, ty = pad_position_in_frame(
+                    host_fp, a.dst.pin, host.x, host.y, host.rotation_deg
+                )
                 normal = (
                     (anchor_normal_override or {}).get(a.dst.ref)
                 )
+                if normal is not None and not _override_feasible(
+                    a, normal, host, tx, ty, hw, hh,
+                ):
+                    # The anti-opening side cannot satisfy this bound
+                    # (an ESP32 module's west-column decoupling pad is
+                    # ~17mm from the south band — stacking it there
+                    # broke the 5mm contract). Fall back to the pad's
+                    # own side; the opening side itself stays excluded.
+                    own = _side_normal(tx, ty, host.x, host.y, hw, hh)
+                    opening = (-normal[0], -normal[1])
+                    normal = own if own != opening else normal
                 if normal is None:
-                    hw, hh = courtyard_halfdims(host_fp)
-                    tx, ty = pad_position_in_frame(
-                        host_fp, a.dst.pin, host.x, host.y, host.rotation_deg
-                    )
                     normal = _side_normal(tx, ty, host.x, host.y, hw, hh)
                 key = (a.dst.ref, normal)
                 depth = 1
@@ -541,22 +580,49 @@ def _place_orphans(
     refs: set[str],
     placed: dict[str, PlacedMember],
     clearance_mm: float,
+    direction: tuple[float, float] = (0.0, 1.0),
 ) -> None:
-    """Members with no constraint path: deterministic shelf south of all."""
+    """Members with no constraint path: deterministic shelf along *direction*.
+
+    *direction* is the anchor's anti-opening normal when it has one: a
+    south-facing screw terminal's orphan shelf belongs NORTH of it, not
+    in the wire-entry forefield (Gate C 2026-06-11 items 1/3 — divider
+    passives were shelved between the terminals and the board edge).
+    """
     orphans = sorted(refs - set(placed))
     if not orphans:
         return
-    max_y = max(
-        m.y + courtyard_halfdims(footprints[m.ref])[1] for m in placed.values()
-    )
-    cursor = -math.inf
-    for ref in orphans:
-        hw, hh = courtyard_halfdims(footprints[ref])
-        x = max(cursor + hw + clearance_mm, 0.0)
-        placed[ref] = PlacedMember(
-            ref=ref, x=x, y=max_y + clearance_mm + hh, rotation_deg=0.0
+    dx, dy = direction
+    if dy != 0.0:
+        sign = 1.0 if dy > 0 else -1.0
+        depth_edge = (max if sign > 0 else min)(
+            m.y + sign * courtyard_halfdims(footprints[m.ref])[1]
+            for m in placed.values()
         )
-        cursor = x + hw
+        cursor = -math.inf
+        for ref in orphans:
+            hw, hh = courtyard_halfdims(footprints[ref])
+            x = max(cursor + hw + clearance_mm, 0.0)
+            placed[ref] = PlacedMember(
+                ref=ref, x=x, y=depth_edge + sign * (clearance_mm + hh),
+                rotation_deg=0.0,
+            )
+            cursor = x + hw
+    else:
+        sign = 1.0 if dx > 0 else -1.0
+        depth_edge = (max if sign > 0 else min)(
+            m.x + sign * courtyard_halfdims(footprints[m.ref])[0]
+            for m in placed.values()
+        )
+        cursor = -math.inf
+        for ref in orphans:
+            hw, hh = courtyard_halfdims(footprints[ref])
+            y = max(cursor + hh + clearance_mm, 0.0)
+            placed[ref] = PlacedMember(
+                ref=ref, x=depth_edge + sign * (clearance_mm + hw), y=y,
+                rotation_deg=0.0,
+            )
+            cursor = y + hh
 
 
 def _resolve_overlaps(
