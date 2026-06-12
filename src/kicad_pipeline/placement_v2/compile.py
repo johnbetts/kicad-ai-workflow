@@ -8,7 +8,11 @@ so that higher-priority sources override lower ones on key collisions:
    and repeated arrays, connector edge pins, board containment.
 2. **Part rules** — per-part-class JSON rules (keepouts, isolation
    domains, edge pins). See :mod:`kicad_pipeline.placement_v2.part_rules`.
-3. **Human feedback locks** (highest) — persisted sign-off corrections.
+3. **Board intent** — the typed, requirements-resident ``BoardIntent``
+   (human-confirmed connector edges and pin-freedom declarations;
+   drafted by :mod:`kicad_pipeline.placement_v2.intent`).
+4. **Human feedback locks** (highest) — persisted live-iteration
+   corrections layered on top of the confirmed intent.
 
 Override keys: edge pins collide on ``ref``; sequences on their exact
 ``refs`` tuple; a feedback pin-attach replaces ANY existing attach with
@@ -30,6 +34,7 @@ from kicad_pipeline.placement_v2.ir import (
     ConnectorFanout,
     ConstraintSet,
     ConstraintSource,
+    Edge,
     EdgePin,
     FanoutLine,
     GroupAssoc,
@@ -93,6 +98,17 @@ class _Index:
         self.power_nets: frozenset[str] = frozenset(
             n.name for n in requirements.nets if self._is_power_net(n)
         )
+        # Declared pin-assignment freedom (board_intent): True/False
+        # overrides the footprint-class heuristic; absent refs use it.
+        self.pins_interchangeable: dict[str, bool] = {}
+        self.intent_refs: frozenset[str] = frozenset()
+        if requirements.board_intent is not None:
+            self.intent_refs = frozenset(
+                c.ref for c in requirements.board_intent.connectors
+            )
+            for c in requirements.board_intent.connectors:
+                if c.pins_interchangeable is not None:
+                    self.pins_interchangeable[c.ref] = c.pins_interchangeable
         self.gnd_nets: frozenset[str] = frozenset(
             n.name for n in requirements.nets if "GND" in n.name.upper()
         )
@@ -510,7 +526,15 @@ def _connector_edge_pins(idx: _Index) -> list[EdgePin]:
 _FREE_PIN_CONNECTOR_TOKENS = ("terminalblock", "pinheader", "conn_01x", "screw")
 
 
-def _has_free_pin_order(comp: Component) -> bool:
+def _has_free_pin_order(comp: Component, idx: _Index | None = None) -> bool:
+    """Pin assignment is a free requirements choice for this part.
+
+    A board_intent declaration wins (``pins_interchangeable=False``
+    marks a FIXED external contract — J1 harness, J14 display ribbon);
+    undeclared parts fall back to the footprint-class heuristic.
+    """
+    if idx is not None and comp.ref in idx.pins_interchangeable:
+        return idx.pins_interchangeable[comp.ref]
     fp = comp.footprint.lower()
     return any(t in fp for t in _FREE_PIN_CONNECTOR_TOKENS)
 
@@ -537,7 +561,7 @@ def _attach_bundles(idx: _Index) -> list[AttachBundle]:
         comp_a, comp_b = idx.by_ref.get(a.ref), idx.by_ref.get(b.ref)
         if comp_a is None or comp_b is None:
             continue
-        if not (_has_free_pin_order(comp_a) or _has_free_pin_order(comp_b)):
+        if not (_has_free_pin_order(comp_a, idx) or _has_free_pin_order(comp_b, idx)):
             continue
         ref_a, ref_b = sorted((a.ref, b.ref))
         pad_a = PadRef(a.ref, a.pin) if a.ref == ref_a else PadRef(b.ref, b.pin)
@@ -568,7 +592,15 @@ def _connector_fanouts(idx: _Index) -> list[ConnectorFanout]:
     """
     out: list[ConnectorFanout] = []
     for comp in idx.components:
-        if not _has_free_pin_order(comp):
+        # Free-pin connectors AND connectors whose pin freedom the
+        # human DECLARED (either way): a FIXED-pinout harness terminal
+        # still wants crossing-free fanout — components move even when
+        # pins cannot (the J1 relay-row reversal was driven by exactly
+        # this check). Edge-only intent entries do NOT qualify: naming
+        # the ESP32's edge must not hang a 40-pin fanout web on it
+        # (nl-s-3c went 23 -> 153 violations doing that, 2026-06-12).
+        if not (_has_free_pin_order(comp, idx)
+                or comp.ref in idx.pins_interchangeable):
             continue
         lines: list[FanoutLine] = []
         for net_name, pins in sorted(idx.nets_of(comp.ref).items()):
@@ -618,10 +650,10 @@ def _connector_chain_attaches(idx: _Index) -> list[PinAttach]:
         comp_a, comp_b = idx.by_ref.get(a.ref), idx.by_ref.get(b.ref)
         if comp_a is None or comp_b is None:
             continue
-        conn, part = (a, b) if _has_free_pin_order(comp_a) else (b, a)
+        conn, part = (a, b) if _has_free_pin_order(comp_a, idx) else (b, a)
         conn_comp = idx.by_ref[conn.ref]
         part_comp = idx.by_ref[part.ref]
-        if not _has_free_pin_order(conn_comp) or _has_free_pin_order(part_comp):
+        if not _has_free_pin_order(conn_comp, idx) or _has_free_pin_order(part_comp, idx):
             continue
         if ref_alpha_prefix(part.ref) not in _CHAIN_ENTRY_PREFIXES:
             continue
@@ -641,6 +673,24 @@ def _connector_chain_attaches(idx: _Index) -> list[PinAttach]:
     for pa in candidates:
         chains_per_connector[pa.dst.ref] = chains_per_connector.get(pa.dst.ref, 0) + 1
     return [pa for pa in candidates if chains_per_connector[pa.dst.ref] == 1]
+
+
+def _with_calibrated_opening(prior: EdgePin | None, ep: EdgePin) -> EdgePin:
+    """Carry a prior CALIBRATED opening into an overriding edge pin.
+
+    A human edge declaration pins the EDGE; the part-rule calibrated
+    opening is orthogonal measured data and must survive the merge — a
+    wholesale replace once dropped the RJ45/ESP32 openings, so the
+    floorplan aimed them by the courtyard-bulge proxy and faced them
+    the wrong way (nl-s-3c, 2026-06-11).
+    """
+    if prior is not None and prior.opening is not None and ep.opening is None:
+        return EdgePin(
+            ref=ep.ref, edge=ep.edge, face_out=ep.face_out,
+            max_edge_distance_mm=ep.max_edge_distance_mm,
+            opening=prior.opening, source=ep.source,
+        )
+    return ep
 
 
 def compile_constraints(
@@ -692,6 +742,21 @@ def compile_constraints(
         for ep in compiled.edge_pins:  # part rules override netlist edge pins
             edge_pins[ep.ref] = ep
 
+    if requirements.board_intent is not None:
+        # Typed board intent (requirements-resident, human-confirmed):
+        # same authority as feedback locks; locks loaded AFTER remain
+        # the live-iteration override channel on top of it.
+        for ci in requirements.board_intent.connectors:
+            if ci.edge is None:
+                continue
+            ep = EdgePin(
+                ref=ci.ref, edge=Edge(ci.edge), face_out=True,
+                source=ConstraintSource.HUMAN_FEEDBACK,
+            )
+            edge_pins[ci.ref] = _with_calibrated_opening(
+                edge_pins.get(ci.ref), ep,
+            )
+
     if feedback_locks_path is not None:
         locks = load_feedback_locks(feedback_locks_path)
         for pa in locks.pin_attach:
@@ -703,19 +768,9 @@ def compile_constraints(
         for seq in locks.sequences:
             sequences[seq.refs] = seq
         for ep in locks.edge_pins:
-            # A lock pins the EDGE; the part-rule CALIBRATED opening is
-            # orthogonal measured data and must survive the merge — a
-            # wholesale replace once dropped the RJ45/ESP32 openings,
-            # so the floorplan aimed them by the courtyard-bulge proxy
-            # and faced them the wrong way (nl-s-3c, 2026-06-11).
-            prior = edge_pins.get(ep.ref)
-            if prior is not None and prior.opening is not None and ep.opening is None:
-                ep = EdgePin(
-                    ref=ep.ref, edge=ep.edge, face_out=ep.face_out,
-                    max_edge_distance_mm=ep.max_edge_distance_mm,
-                    opening=prior.opening, source=ep.source,
-                )
-            edge_pins[ep.ref] = ep
+            edge_pins[ep.ref] = _with_calibrated_opening(
+                edge_pins.get(ep.ref), ep,
+            )
 
     result = ConstraintSet(
         pin_attach=tuple(attaches.values()),

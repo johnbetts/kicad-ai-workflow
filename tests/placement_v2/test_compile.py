@@ -525,3 +525,91 @@ class TestConnectorGroupAssocs:
             comps, nets, {"Block": ("U1",)},
         ))
         assert not cs.group_assocs
+
+
+# ---------------------------------------------------------------------------
+# board_intent: typed spec-as-data (council 2026-06-11)
+# ---------------------------------------------------------------------------
+
+
+class TestBoardIntent:
+    @staticmethod
+    def _req_with_intent(intent):  # type: ignore[no-untyped-def]
+        from kicad_pipeline.models.requirements import BoardIntent  # noqa: F401
+
+        comps = (
+            _comp("J14", footprint="PinHeader_1x14"),
+            _comp("U3", footprint="ESP32"),
+            _comp("J9", footprint="TerminalBlock_2P"),
+            _comp("K1", footprint="Relay"),
+        )
+        nets = (
+            _net("TFT_CS", ("J14", "1"), ("U3", "2")),
+            _net("TFT_DC", ("J14", "2"), ("U3", "3")),
+            _net("COIL", ("J9", "1"), ("K1", "1")),
+            _net("CONTACT", ("J9", "2"), ("K1", "3")),
+        )
+        return ProjectRequirements(
+            project=ProjectInfo(name="test"),
+            features=(),
+            components=comps,
+            nets=nets,
+            board_intent=intent,
+        )
+
+    def test_intent_edge_becomes_explicit_edge_pin(self) -> None:
+        from kicad_pipeline.models.requirements import BoardIntent, ConnectorIntent
+
+        cs = compile_constraints(self._req_with_intent(
+            BoardIntent(connectors=(ConnectorIntent("J14", "east"),)),
+        ))
+        ep = {e.ref: e for e in cs.edge_pins}["J14"]
+        assert ep.edge is Edge.EAST
+        assert ep.source is ConstraintSource.HUMAN_FEEDBACK
+
+    def test_intent_edge_preserves_calibrated_opening(self, tmp_path: Path) -> None:
+        from kicad_pipeline.models.requirements import BoardIntent, ConnectorIntent
+
+        rules = tmp_path / "rules.json"
+        rules.write_text(json.dumps({"rules": [{
+            "match": {"footprint_contains": "PinHeader"},
+            "edge_pin": True,
+            "opening_mm": [0.0, -1.0],
+            "calibrated": True,
+        }]}))
+        cs = compile_constraints(
+            self._req_with_intent(
+                BoardIntent(connectors=(ConnectorIntent("J14", "east"),)),
+            ),
+            part_rules_path=rules,
+        )
+        ep = {e.ref: e for e in cs.edge_pins}["J14"]
+        assert ep.edge is Edge.EAST
+        assert ep.opening == (0.0, -1.0)
+
+    def test_declared_fixed_pinout_drops_bundle_keeps_fanout(self) -> None:
+        from kicad_pipeline.models.requirements import BoardIntent, ConnectorIntent
+
+        free = compile_constraints(self._req_with_intent(None))
+        assert any({b.ref_a, b.ref_b} == {"J14", "U3"} for b in free.bundles)
+        fixed = compile_constraints(self._req_with_intent(
+            BoardIntent(connectors=(
+                ConnectorIntent("J14", "east", pins_interchangeable=False),
+            )),
+        ))
+        # Pin-order findings against a FIXED external contract are
+        # device facts -> no bundle; the geometric fanout check stays
+        # (components still move even when pins cannot).
+        assert not any({b.ref_a, b.ref_b} == {"J14", "U3"} for b in fixed.bundles)
+        assert any(f.ref == "J14" for f in fixed.fanouts)
+
+    def test_undeclared_connectors_keep_heuristic(self) -> None:
+        from kicad_pipeline.models.requirements import BoardIntent, ConnectorIntent
+
+        cs = compile_constraints(self._req_with_intent(
+            BoardIntent(connectors=(
+                ConnectorIntent("J14", "east", pins_interchangeable=False),
+            )),
+        ))
+        # J9 (terminal block, undeclared) keeps its free-pin bundle.
+        assert any({b.ref_a, b.ref_b} == {"J9", "K1"} for b in cs.bundles)

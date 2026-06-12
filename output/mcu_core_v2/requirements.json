@@ -974,5 +974,6 @@
     "mounting_hole_positions": [],
     "notes": null
   },
+  "board_intent": null,
   "recommendations": []
 }

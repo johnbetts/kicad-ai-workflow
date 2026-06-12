@@ -153,6 +153,65 @@ class MechanicalConstraints:
     board_template: str | None = None
 
 
+#: Valid board edge names for :class:`ConnectorIntent` (matches the PCB
+#: convention in ``placement_v2.ir.Edge``; kept as strings here so the
+#: requirements model stays independent of the placement engine).
+BOARD_EDGES: frozenset[str] = frozenset({"north", "south", "east", "west"})
+
+
+@dataclass(frozen=True)
+class ConnectorIntent:
+    """Human-confirmed placement intent for one edge connector.
+
+    Attributes:
+        ref: The connector's reference designator ("J14").
+        edge: Board edge the connector must claim, or ``None`` to let
+            the solver choose (``north``/``south``/``east``/``west``).
+        pins_interchangeable: Whether the pin ASSIGNMENT in requirements
+            is a free choice the tooling may critique (``True``: screw
+            terminals whose order is ours to pick). ``False`` declares
+            the pinout a fixed external CONTRACT (harness, display
+            ribbon) — pin-order findings against it are device facts,
+            not defects, and nothing may ever auto-permute its pins.
+            ``None`` (default) means undeclared: the footprint-class
+            heuristic decides.
+    """
+
+    ref: str
+    edge: str | None = None
+    pins_interchangeable: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.edge is not None and self.edge not in BOARD_EDGES:
+            raise ValueError(
+                f"ConnectorIntent({self.ref!r}): edge must be one of "
+                f"{sorted(BOARD_EDGES)}, got {self.edge!r}"
+            )
+
+
+@dataclass(frozen=True)
+class BoardIntent:
+    """Machine-readable board-level placement intent (spec-as-data).
+
+    Council verdict 2026-06-11: inference proposes, declaration
+    governs. The compiler GENERATES a draft from the netlist
+    (:func:`kicad_pipeline.placement_v2.intent.draft_board_intent`);
+    the human confirms or edits it ONCE; the confirmed intent lives
+    here in requirements — a typed, validated, versioned channel
+    replacing the hand-authored locks side-channel — and Gate A
+    enforces it on every build.
+    """
+
+    connectors: tuple[ConnectorIntent, ...] = ()
+
+    def get_connector(self, ref: str) -> ConnectorIntent | None:
+        """Return the intent entry for *ref*, or None."""
+        for c in self.connectors:
+            if c.ref == ref:
+                return c
+        return None
+
+
 @dataclass(frozen=True)
 class BoardContext:
     """High-level context about what the board connects to.
@@ -214,6 +273,7 @@ class ProjectRequirements:
     mechanical: MechanicalConstraints | None = None
     recommendations: tuple[Recommendation, ...] = ()
     board_context: BoardContext | None = None
+    board_intent: BoardIntent | None = None
 
     def get_component(self, ref: str) -> Component | None:
         """Return component by ref, or None if not found."""

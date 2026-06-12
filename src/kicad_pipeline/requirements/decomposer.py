@@ -28,7 +28,9 @@ from kicad_pipeline.exceptions import ComponentError, RequirementsError
 if TYPE_CHECKING:
     from pathlib import Path
 from kicad_pipeline.models.requirements import (
+    BoardIntent,
     Component,
+    ConnectorIntent,
     FeatureBlock,
     MCUPinMap,
     MechanicalConstraints,
@@ -81,6 +83,7 @@ class RequirementsBuilder:
         self._pin_map: MCUPinMap | None = None
         self._power_budget: PowerBudget | None = None
         self._mechanical: MechanicalConstraints | None = None
+        self._board_intent: BoardIntent | None = None
 
     # ------------------------------------------------------------------
     # Mutation helpers
@@ -159,6 +162,15 @@ class RequirementsBuilder:
             budget.total_current_ma,
             len(budget.rails),
         )
+
+    def set_board_intent(self, intent: BoardIntent) -> None:
+        """Set (or replace) the board-level placement intent.
+
+        Args:
+            intent: Human-confirmed connector/zone placement intent.
+        """
+        self._board_intent = intent
+        log.debug("Set board intent: %d connectors", len(intent.connectors))
 
     def set_mechanical(self, mech: MechanicalConstraints) -> None:
         """Set (or replace) mechanical constraints.
@@ -251,6 +263,7 @@ class RequirementsBuilder:
             power_budget=self._power_budget,
             mechanical=self._mechanical,
             recommendations=tuple(self._recommendations),
+            board_intent=self._board_intent,
         )
         log.info(
             "Built ProjectRequirements: %d components, %d nets, %d features",
@@ -387,7 +400,21 @@ def requirements_to_dict(req: ProjectRequirements) -> dict[str, object]:
           "pin_map": {...} | null,
           "power_budget": {...} | null,
           "mechanical": {...} | null,
-          "recommendations": [...]
+          "board_intent": (
+            {
+                "connectors": [
+                    {
+                        "ref": c.ref,
+                        "edge": c.edge,
+                        "pins_interchangeable": c.pins_interchangeable,
+                    }
+                    for c in req.board_intent.connectors
+                ]
+            }
+            if req.board_intent is not None
+            else None
+        ),
+        "recommendations": [...]
         }
 
     Args:
@@ -414,6 +441,20 @@ def requirements_to_dict(req: ProjectRequirements) -> dict[str, object]:
         ),
         "mechanical": (
             _mechanical_to_dict(req.mechanical) if req.mechanical is not None else None
+        ),
+        "board_intent": (
+            {
+                "connectors": [
+                    {
+                        "ref": c.ref,
+                        "edge": c.edge,
+                        "pins_interchangeable": c.pins_interchangeable,
+                    }
+                    for c in req.board_intent.connectors
+                ]
+            }
+            if req.board_intent is not None
+            else None
         ),
         "recommendations": [_rec_to_dict(r) for r in req.recommendations],
     }
@@ -457,6 +498,7 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
     power_budget = _parse_power_budget(data)
     mechanical = _parse_mechanical(data)
     recommendations = _parse_recommendations(data)
+    board_intent = _parse_board_intent(data)
 
     builder = RequirementsBuilder(project)
     for comp in components:
@@ -473,6 +515,8 @@ def _parse_requirements(data: dict[str, object]) -> ProjectRequirements:
         builder.set_power_budget(power_budget)
     if mechanical is not None:
         builder.set_mechanical(mechanical)
+    if board_intent is not None:
+        builder.set_board_intent(board_intent)
 
     return builder.build()
 
@@ -615,6 +659,27 @@ def _parse_mechanical(data: dict[str, object]) -> MechanicalConstraints | None:
         mounting_hole_positions=tuple(hole_positions),
         notes=_optional_str(md.get("notes")),
     )
+
+
+def _parse_board_intent(data: dict[str, object]) -> BoardIntent | None:
+    """Parse the optional board_intent block."""
+    raw = data.get("board_intent")
+    if raw is None:
+        return None
+    bi = _as_dict(raw)
+    connectors = tuple(
+        ConnectorIntent(
+            ref=str(cd["ref"]),
+            edge=_optional_str(cd.get("edge")),
+            pins_interchangeable=(
+                None if cd.get("pins_interchangeable") is None
+                else bool(cd["pins_interchangeable"])
+            ),
+        )
+        for c_raw in _as_list(bi.get("connectors", []))
+        for cd in (_as_dict(c_raw),)
+    )
+    return BoardIntent(connectors=connectors)
 
 
 def _parse_recommendations(data: dict[str, object]) -> list[Recommendation]:

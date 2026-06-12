@@ -666,5 +666,6 @@
   "pin_map": null,
   "power_budget": null,
   "mechanical": null,
+  "board_intent": null,
   "recommendations": []
 }
