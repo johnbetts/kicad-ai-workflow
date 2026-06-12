@@ -213,6 +213,27 @@ class CellKeepout:
 
 
 @dataclass(frozen=True)
+class IsolationRegion:
+    """A ferrite-isolated rail subtree that must occupy its own region.
+
+    Derived from the netlist (a private rail fed only through ferrite
+    beads — RELAY_5V/RELAY_GND behind L3/L5, AVCC/AGND behind L4/L6)
+    and confirmed by the human via ``BoardIntent.isolation_regions``
+    (inference proposes, declaration governs; silently auto-zoning
+    misfires on filter ferrites — council 2026-06-11). Gate A
+    re-derives the region hull from the artifact and checks: no
+    foreign component inside it, ``min_gap_mm`` to every other
+    region's hull, and each boundary ferrite ON the border.
+    """
+
+    name: str  # the isolated rail(s), e.g. "AGND+AVCC"
+    refs: tuple[str, ...]  # members (exclusive occupants of the region)
+    boundary_refs: tuple[str, ...]  # ferrites that sit ON the border
+    min_gap_mm: float = 8.0  # spec: zones of different domains, >=8mm
+    source: ConstraintSource = ConstraintSource.HUMAN_FEEDBACK
+
+
+@dataclass(frozen=True)
 class IsolationGap:
     """Minimum edge-to-edge gap between two voltage domains' cells."""
 
@@ -258,6 +279,7 @@ class ConstraintSet:
     bundles: tuple[AttachBundle, ...] = ()
     fanouts: tuple[ConnectorFanout, ...] = ()
     group_assocs: tuple[GroupAssoc, ...] = ()
+    isolation_regions: tuple[IsolationRegion, ...] = ()
     contain: BoardContain = field(default_factory=BoardContain)
 
     def for_refs(self, refs: frozenset[str]) -> ConstraintSet:
@@ -283,6 +305,7 @@ class ConstraintSet:
             ),
             fanouts=(),  # board-level: candidates span the whole netlist
             group_assocs=(),  # board-level: parent hull spans other cells
+            isolation_regions=(),  # board-level: hulls span many cells
             contain=self.contain,
         )
 
@@ -302,6 +325,7 @@ class ConstraintSet:
             bundles=self.bundles + other.bundles,
             fanouts=self.fanouts + other.fanouts,
             group_assocs=self.group_assocs + other.group_assocs,
+            isolation_regions=self.isolation_regions + other.isolation_regions,
             contain=contain,
         )
 
@@ -316,5 +340,6 @@ class ConstraintSet:
             + len(self.bundles)
             + len(self.fanouts)
             + len(self.group_assocs)
+            + len(self.isolation_regions)
             + 1
         )

@@ -39,6 +39,7 @@ from kicad_pipeline.placement_v2.ir import (
     FanoutLine,
     GroupAssoc,
     IsolationGap,
+    IsolationRegion,
     PadRef,
     PinAttach,
     SequenceAlong,
@@ -742,10 +743,18 @@ def compile_constraints(
         for ep in compiled.edge_pins:  # part rules override netlist edge pins
             edge_pins[ep.ref] = ep
 
+    isolation_regions: tuple[IsolationRegion, ...] = ()
     if requirements.board_intent is not None:
         # Typed board intent (requirements-resident, human-confirmed):
         # same authority as feedback locks; locks loaded AFTER remain
         # the live-iteration override channel on top of it.
+        isolation_regions = tuple(
+            IsolationRegion(
+                name=r.name, refs=r.refs, boundary_refs=r.boundary_refs,
+                min_gap_mm=r.min_gap_mm,
+            )
+            for r in requirements.board_intent.isolation_regions
+        )
         for ci in requirements.board_intent.connectors:
             if ci.edge is None:
                 continue
@@ -781,11 +790,12 @@ def compile_constraints(
         bundles=tuple(_attach_bundles(idx)),
         fanouts=tuple(_connector_fanouts(idx)),
         group_assocs=tuple(_connector_group_assocs(idx)),
+        isolation_regions=isolation_regions,
         contain=BoardContain(margin_mm=_BOARD_MARGIN_MM, source=ConstraintSource.NETLIST),
     )
     logger.info(
         "compiled %d constraints (%d attach, %d seq, %d edge, %d keepout, "
-        "%d isolation, %d bundle, %d fanout, %d assoc)",
+        "%d isolation, %d bundle, %d fanout, %d assoc, %d region)",
         result.count(),
         len(result.pin_attach),
         len(result.sequences),
@@ -795,5 +805,6 @@ def compile_constraints(
         len(result.bundles),
         len(result.fanouts),
         len(result.group_assocs),
+        len(result.isolation_regions),
     )
     return result

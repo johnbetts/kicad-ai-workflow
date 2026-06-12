@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         EdgePin,
         GroupAssoc,
         IsolationGap,
+        IsolationRegion,
         PinAttach,
         Polygon,
         SequenceAlong,
@@ -691,6 +692,111 @@ def check_keepouts(
                 f"polygon of {keepout.owner} "
                 f"(expected bbox {tuple(round(v, 3) for v in d_bbox)})",
             ))
+    return tuple(out)
+
+
+#: How far a boundary ferrite's center may sit from its region hull
+#: boundary and still count as "on the border". Calibrated against the
+#: human reference design (rereference/2026-03-09): its L4/L6 measure
+#: 6.9mm from the analog hull — the gold-standard board must pass.
+REGION_BORDER_TOL_MM = 8.0
+
+
+def check_isolation_regions(
+    pcb: PCBDesign, regions: tuple[IsolationRegion, ...],
+) -> tuple[Violation, ...]:
+    """Each IsolationRegion: exclusive, separated, ferrite-bounded (MAJOR).
+
+    Re-derived from the artifact per region: (a) the hull (bbox of
+    member courtyards) contains no FOREIGN footprint's centroid
+    (members and boundary ferrites excepted, mounting holes ignored);
+    (b) hull-to-hull gap to every other region >= the larger of the two
+    ``min_gap_mm``; (c) every boundary ferrite's centroid lies within
+    ``REGION_BORDER_TOL_MM`` of the hull boundary — ON the border, not
+    deep inside or stranded away (spec 4.2: ferrites at zone borders).
+    """
+    out: list[Violation] = []
+    hulls: dict[str, tuple[float, float, float, float]] = {}
+    membership: dict[str, frozenset[str]] = {}
+    for region in regions:
+        boxes = []
+        for ref in region.refs:
+            fp = pcb.get_footprint(ref)
+            if fp is not None and fp.pads:
+                boxes.append(polygon_bbox(_courtyard_in_board(fp)))
+        if not boxes:
+            continue
+        hulls[region.name] = (
+            min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes),
+        )
+        membership[region.name] = frozenset(region.refs) | frozenset(
+            region.boundary_refs
+        )
+
+    for region in regions:
+        hull = hulls.get(region.name)
+        if hull is None:
+            continue
+        allowed = membership[region.name]
+        for fp in pcb.footprints:
+            if fp.ref in allowed or fp.ref.startswith("H") or not fp.pads:
+                continue
+            cx, cy = origin_to_centroid(
+                fp, fp.position.x, fp.position.y, fp.rotation,
+            )
+            if hull[0] <= cx <= hull[2] and hull[1] <= cy <= hull[3]:
+                out.append(Violation(
+                    repr(region), (region.name, fp.ref), Severity.MAJOR,
+                    0.0, 0.0,
+                    f"{fp.ref} is a foreign component inside isolation "
+                    f"region {region.name!r}",
+                ))
+        for ref in region.boundary_refs:
+            fp = pcb.get_footprint(ref)
+            if fp is None:
+                out.append(_missing(region, ref, f"boundary ferrite {ref!r}"))
+                continue
+            cx, cy = origin_to_centroid(
+                fp, fp.position.x, fp.position.y, fp.rotation,
+            )
+            # Distance from the centroid to the hull RECTANGLE boundary
+            # (positive whether inside or outside).
+            dx = max(hull[0] - cx, 0.0, cx - hull[2])
+            dy = max(hull[1] - cy, 0.0, cy - hull[3])
+            if dx > 0.0 or dy > 0.0:
+                dist = math.hypot(dx, dy)  # outside the hull
+            else:
+                dist = min(
+                    cx - hull[0], hull[2] - cx, cy - hull[1], hull[3] - cy,
+                )  # inside: depth from the nearest hull edge
+            if dist > REGION_BORDER_TOL_MM:
+                out.append(Violation(
+                    repr(region), (region.name, ref), Severity.MAJOR,
+                    dist, REGION_BORDER_TOL_MM,
+                    f"boundary ferrite {ref} sits {dist:.1f}mm from the "
+                    f"border of isolation region {region.name!r} "
+                    f"(max {REGION_BORDER_TOL_MM}mm)",
+                ))
+
+    names = sorted(hulls)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = hulls[names[i]], hulls[names[j]]
+            gap_x = max(a[0] - b[2], b[0] - a[2], 0.0)
+            gap_y = max(a[1] - b[3], b[1] - a[3], 0.0)
+            gap = math.hypot(gap_x, gap_y) if (gap_x and gap_y) else max(gap_x, gap_y)
+            required = max(
+                next(r.min_gap_mm for r in regions if r.name == names[i]),
+                next(r.min_gap_mm for r in regions if r.name == names[j]),
+            )
+            if gap < required - _EPS:
+                out.append(Violation(
+                    f"region_gap({names[i]},{names[j]})",
+                    (names[i], names[j]), Severity.MAJOR, gap, required,
+                    f"isolation regions {names[i]!r} and {names[j]!r} are "
+                    f"{gap:.1f}mm apart (min {required}mm)",
+                ))
     return tuple(out)
 
 

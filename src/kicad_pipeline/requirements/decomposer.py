@@ -32,6 +32,7 @@ from kicad_pipeline.models.requirements import (
     Component,
     ConnectorIntent,
     FeatureBlock,
+    IsolationRegionIntent,
     MCUPinMap,
     MechanicalConstraints,
     Net,
@@ -409,7 +410,16 @@ def requirements_to_dict(req: ProjectRequirements) -> dict[str, object]:
                         "pins_interchangeable": c.pins_interchangeable,
                     }
                     for c in req.board_intent.connectors
-                ]
+                ],
+                "isolation_regions": [
+                    {
+                        "name": r.name,
+                        "refs": list(r.refs),
+                        "boundary_refs": list(r.boundary_refs),
+                        "min_gap_mm": r.min_gap_mm,
+                    }
+                    for r in req.board_intent.isolation_regions
+                ],
             }
             if req.board_intent is not None
             else None
@@ -451,7 +461,16 @@ def requirements_to_dict(req: ProjectRequirements) -> dict[str, object]:
                         "pins_interchangeable": c.pins_interchangeable,
                     }
                     for c in req.board_intent.connectors
-                ]
+                ],
+                "isolation_regions": [
+                    {
+                        "name": r.name,
+                        "refs": list(r.refs),
+                        "boundary_refs": list(r.boundary_refs),
+                        "min_gap_mm": r.min_gap_mm,
+                    }
+                    for r in req.board_intent.isolation_regions
+                ],
             }
             if req.board_intent is not None
             else None
@@ -679,7 +698,19 @@ def _parse_board_intent(data: dict[str, object]) -> BoardIntent | None:
         for c_raw in _as_list(bi.get("connectors", []))
         for cd in (_as_dict(c_raw),)
     )
-    return BoardIntent(connectors=connectors)
+    regions = tuple(
+        IsolationRegionIntent(
+            name=str(rd["name"]),
+            refs=tuple(str(x) for x in _as_list(rd.get("refs", []))),
+            boundary_refs=tuple(
+                str(x) for x in _as_list(rd.get("boundary_refs", []))
+            ),
+            min_gap_mm=float(str(rd.get("min_gap_mm", 8.0))),
+        )
+        for r_raw in _as_list(bi.get("isolation_regions", []))
+        for rd in (_as_dict(r_raw),)
+    )
+    return BoardIntent(connectors=connectors, isolation_regions=regions)
 
 
 def _parse_recommendations(data: dict[str, object]) -> list[Recommendation]:

@@ -127,3 +127,77 @@ class TestBoardIntentSerialization:
         )
         again = requirements_from_dict(requirements_to_dict(req))
         assert again.board_intent is None
+
+
+class TestDraftIsolationRegions:
+    """Ferrite-subtree region drafts (oracle: the human reference board
+    passes the drafted nl-s-3c regions with zero violations)."""
+
+    @staticmethod
+    def _ferrite_board() -> ProjectRequirements:
+        from kicad_pipeline.models.requirements import Pin, PinType
+
+        comps = (
+            Component(ref="U1", value="reg", footprint="SOT-223", pins=(
+                Pin(number="1", name="OUT", pin_type=PinType.POWER_OUT),
+            )),
+            _comp("L3", "L_0805"),
+            Component(ref="L7", value="Ferrite_600R", footprint="L_0805"),
+            Component(ref="L8", value="4.7uH", footprint="L_1210"),
+            _comp("K1", "Relay"), _comp("Q1", "SOT-23"), _comp("R1", "R_0402"),
+            _comp("C1", "C_0402"), _comp("D1", "LED_0603"),
+            _comp("J9", "PinHeader_1x02"),
+        )
+        nets = (
+            # +5V is the main rail (regulator POWER_OUT + canonical name).
+            Net(name="+5V", connections=(
+                NetConnection("U1", "1"), NetConnection("L7", "1"),
+                NetConnection("L8", "1"),
+            )),
+            # RELAY_5V: private rail behind ferrite L7, 3 members.
+            Net(name="RELAY_5V", connections=(
+                NetConnection("L7", "2"), NetConnection("K1", "1"),
+                NetConnection("Q1", "1"), NetConnection("C1", "1"),
+            )),
+            # Buck inductor L8 bridges to a 2-member node: no region.
+            Net(name="SW_NODE", connections=(
+                NetConnection("L8", "2"), NetConnection("R1", "1"),
+            )),
+            # Passive chain: D1 hangs off region member Q1 via a 2-pin
+            # signal net -> closure 2 pulls it in.
+            Net(name="LED_SIG", connections=(
+                NetConnection("Q1", "2"), NetConnection("D1", "1"),
+            )),
+            # Connector whose only signal partners are region members ->
+            # closure 3 pulls it in.
+            Net(name="COIL_OUT", connections=(
+                NetConnection("J9", "1"), NetConnection("K1", "3"),
+            )),
+        )
+        return ProjectRequirements(
+            project=ProjectInfo(name="t"), features=(),
+            components=comps, nets=nets,
+        )
+
+    def test_ferrite_subtree_drafts_region(self) -> None:
+        from kicad_pipeline.placement_v2.intent import draft_isolation_regions
+
+        regions = draft_isolation_regions(self._ferrite_board())
+        assert len(regions) == 1
+        region = regions[0]
+        assert region.name == "RELAY_5V"
+        assert region.boundary_refs == ("L7",)
+        assert "K1" in region.refs and "Q1" in region.refs and "C1" in region.refs
+
+    def test_passive_chain_and_connector_closures(self) -> None:
+        from kicad_pipeline.placement_v2.intent import draft_isolation_regions
+
+        region = draft_isolation_regions(self._ferrite_board())[0]
+        assert "D1" in region.refs  # closure 2: 2-pin signal chain
+        assert "J9" in region.refs  # closure 3: all partners inside
+
+    def test_power_inductor_never_drafts_region(self) -> None:
+        from kicad_pipeline.placement_v2.intent import draft_isolation_regions
+
+        regions = draft_isolation_regions(self._ferrite_board())
+        assert all("SW_NODE" not in r.name for r in regions)

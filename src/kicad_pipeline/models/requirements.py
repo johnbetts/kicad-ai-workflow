@@ -190,6 +190,26 @@ class ConnectorIntent:
 
 
 @dataclass(frozen=True)
+class IsolationRegionIntent:
+    """Human-confirmed isolation region (voltage/noise domain zone).
+
+    Attributes:
+        name: Region name, conventionally the isolated rail(s)
+            ("AGND+AVCC", "RELAY_5V+RELAY_GND").
+        refs: Component refs that are the region's exclusive occupants.
+        boundary_refs: Ferrites (or the bounding regulator) that must
+            sit ON the region border.
+        min_gap_mm: Minimum hull-to-hull gap to every other region
+            (spec: zones of different voltage domains keep >= 8mm).
+    """
+
+    name: str
+    refs: tuple[str, ...]
+    boundary_refs: tuple[str, ...] = ()
+    min_gap_mm: float = 8.0
+
+
+@dataclass(frozen=True)
 class BoardIntent:
     """Machine-readable board-level placement intent (spec-as-data).
 
@@ -203,6 +223,7 @@ class BoardIntent:
     """
 
     connectors: tuple[ConnectorIntent, ...] = ()
+    isolation_regions: tuple[IsolationRegionIntent, ...] = ()
 
     def get_connector(self, ref: str) -> ConnectorIntent | None:
         """Return the intent entry for *ref*, or None."""

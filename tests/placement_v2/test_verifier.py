@@ -781,3 +781,74 @@ def test_group_assoc_missing_connector_is_critical() -> None:
     violations = check_group_assocs(board, (assoc,))
     assert len(violations) == 1
     assert violations[0].severity is Severity.CRITICAL
+
+
+# ---------------------------------------------------------------------------
+# isolation_region (ferrite-separated rail subtrees, 2026-06-12)
+# ---------------------------------------------------------------------------
+
+
+def _region(name: str, refs: tuple[str, ...], boundary: tuple[str, ...] = (),
+            gap: float = 8.0):  # type: ignore[no-untyped-def]
+    from kicad_pipeline.placement_v2.ir import IsolationRegion
+
+    return IsolationRegion(
+        name=name, refs=refs, boundary_refs=boundary, min_gap_mm=gap,
+    )
+
+
+def test_isolation_region_clean_passes() -> None:
+    from kicad_pipeline.placement_v2.verifier_rules import check_isolation_regions
+
+    board = _board((
+        _fp("K1", 10.0, 10.0), _fp("Q1", 14.0, 10.0),  # region A
+        _fp("L7", 17.0, 10.0),                          # ferrite on border
+        _fp("U9", 40.0, 10.0),                          # far outside
+    ))
+    region = _region("RELAY", ("K1", "Q1"), ("L7",))
+    assert check_isolation_regions(board, (region,)) == ()
+
+
+def test_isolation_region_foreign_part_is_major() -> None:
+    from kicad_pipeline.placement_v2.verifier_rules import check_isolation_regions
+
+    board = _board((
+        _fp("K1", 10.0, 10.0), _fp("Q1", 30.0, 10.0),
+        _fp("R9", 20.0, 10.0),  # interloper between the members
+    ))
+    violations = check_isolation_regions(
+        board, (_region("RELAY", ("K1", "Q1")),),
+    )
+    assert len(violations) == 1
+    assert violations[0].severity is Severity.MAJOR
+    assert "R9" in violations[0].refs
+
+
+def test_isolation_region_gap_too_small_is_major() -> None:
+    from kicad_pipeline.placement_v2.verifier_rules import check_isolation_regions
+
+    board = _board((
+        _fp("K1", 10.0, 10.0),
+        _fp("U4", 16.0, 10.0),  # ~2.5mm courtyard gap to K1's region
+    ))
+    violations = check_isolation_regions(board, (
+        _region("RELAY", ("K1",)),
+        _region("ANALOG", ("U4",)),
+    ))
+    assert len(violations) == 1
+    assert "apart" in violations[0].message
+    assert violations[0].measured < 8.0
+
+
+def test_isolation_region_stranded_ferrite_is_major() -> None:
+    from kicad_pipeline.placement_v2.verifier_rules import check_isolation_regions
+
+    board = _board((
+        _fp("K1", 10.0, 10.0), _fp("Q1", 14.0, 10.0),
+        _fp("L7", 40.0, 25.0),  # ferrite nowhere near the region border
+    ))
+    violations = check_isolation_regions(
+        board, (_region("RELAY", ("K1", "Q1"), ("L7",)),),
+    )
+    assert len(violations) == 1
+    assert "boundary ferrite" in violations[0].message
