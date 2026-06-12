@@ -47,7 +47,7 @@ def make_passive_symbol(
     pin1 = LibPin(
         number="1",
         name=pin1_name,
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(-(SCHEMATIC_PIN_LENGTH_MM + _half), 0.0),
         rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -57,7 +57,7 @@ def make_passive_symbol(
     pin2 = LibPin(
         number="2",
         name=pin2_name,
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(SCHEMATIC_PIN_LENGTH_MM + _half, 0.0),
         rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,

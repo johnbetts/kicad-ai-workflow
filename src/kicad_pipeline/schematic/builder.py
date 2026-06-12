@@ -1694,6 +1694,11 @@ def schematic_to_sexp(
     # KiCad 9 canonical sheet_instances section
     root.append(_sheet_instances_section(schematic, instance_path, root_uuid))
 
+    # MANDATORY since format 20260101: KiCad 10's parser refuses the
+    # whole file without a top-level embedded_fonts token (found by the
+    # kicad-cli round-trip gate, 2026-06-12).
+    root.append(["embedded_fonts", "no"])
+
     # NOTE: KiCad 9 does NOT use a top-level (symbol_instances ...) section.
     # Ref designators are resolved entirely through per-symbol (instances ...)
     # blocks emitted by _symbol_instance_sexp() and _power_symbol_sexp().

@@ -1,6 +1,6 @@
 {
   "board": "ethernet",
-  "board_sha256": "522db306a1ccee8aec9115d50e8a7f3d84a7bbbbb173602e27f689f8244efefd",
+  "board_sha256": "519b17741d02c326cf490898a803cea9e4cc8461c86b9cbc54edfa310ebcc9f8",
   "renders": {
     "2d": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/ethernet_v2/ethernet_v2_2d.png",
     "3d_top": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/ethernet_v2/ethernet_v2_3d_top.png",

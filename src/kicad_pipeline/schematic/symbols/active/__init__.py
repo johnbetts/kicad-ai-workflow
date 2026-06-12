@@ -4,7 +4,7 @@ from kicad_pipeline.constants import SCHEMATIC_PIN_LENGTH_MM
 from kicad_pipeline.models.schematic import LibPin, LibPolyline, LibSymbol, Point, Stroke
 from kicad_pipeline.schematic.symbols.utils import _make_font
 
-__all__ = ["make_led_symbol", "_make_diode_symbol", "_make_npn_symbol"]
+__all__ = ["_make_diode_symbol", "_make_npn_symbol", "make_led_symbol"]
 
 
 def make_led_symbol(lib_id: str = "Device:LED") -> LibSymbol:
@@ -41,7 +41,7 @@ def make_led_symbol(lib_id: str = "Device:LED") -> LibSymbol:
     anode = LibPin(
         number="1",
         name="A",
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 1.27), 0.0),
         rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -51,7 +51,7 @@ def make_led_symbol(lib_id: str = "Device:LED") -> LibSymbol:
     cathode = LibPin(
         number="2",
         name="K",
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(SCHEMATIC_PIN_LENGTH_MM + 1.27, 0.0),
         rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -93,7 +93,7 @@ def _make_diode_symbol(lib_id: str = "Device:D") -> LibSymbol:
     anode = LibPin(
         number="1",
         name="A",
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 1.27), 0.0),
         rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -103,7 +103,7 @@ def _make_diode_symbol(lib_id: str = "Device:D") -> LibSymbol:
     cathode = LibPin(
         number="2",
         name="K",
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(SCHEMATIC_PIN_LENGTH_MM + 1.27, 0.0),
         rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -129,7 +129,7 @@ def _make_npn_symbol() -> LibSymbol:
     base = LibPin(
         number="1",
         name="B",
-        pin_type=0,  # INPUT
+        pin_type="input",
         at=Point(-(SCHEMATIC_PIN_LENGTH_MM + 5.08), 0.0),
         rotation=0.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -139,7 +139,7 @@ def _make_npn_symbol() -> LibSymbol:
     collector = LibPin(
         number="2",
         name="C",
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(SCHEMATIC_PIN_LENGTH_MM + 5.08, -2.54),
         rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,
@@ -149,7 +149,7 @@ def _make_npn_symbol() -> LibSymbol:
     emitter = LibPin(
         number="3",
         name="E",
-        pin_type=1,  # PASSIVE
+        pin_type="passive",
         at=Point(SCHEMATIC_PIN_LENGTH_MM + 5.08, 2.54),
         rotation=180.0,
         length=SCHEMATIC_PIN_LENGTH_MM,

@@ -30,7 +30,7 @@ def make_power_symbol(net_name: str) -> LibSymbol:
         pin = LibPin(
             number="1",
             name="~",
-            pin_type=2,  # POWER_IN
+            pin_type="power_in",
             at=Point(0.0, 0.0),
             rotation=270.0,
             length=SCHEMATIC_PIN_LENGTH_MM,
@@ -55,7 +55,7 @@ def make_power_symbol(net_name: str) -> LibSymbol:
         pin = LibPin(
             number="1",
             name="~",
-            pin_type=2,  # POWER_IN
+            pin_type="power_in",
             at=Point(0.0, 0.0),
             rotation=90.0,
             length=SCHEMATIC_PIN_LENGTH_MM,

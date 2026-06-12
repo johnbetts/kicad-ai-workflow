@@ -101,24 +101,48 @@ def _render_views(board: str, pcb_path: Path) -> dict[str, Path]:
     return renders
 
 
-def _sync_record(pcb, requirements, board_sha: str):
-    """Run the schematic_pcb_sync hard gate as a ledger stage."""
+def _sync_record(pcb, requirements, board_sha: str,
+                 sch_path=None, pcb_path=None):
+    """Run the schematic<->PCB sync hard gate as a ledger stage.
+
+    Two layers: the in-memory ref-set check, plus the WRITTEN-FILE
+    round-trip through KiCad's own parser (kicad-cli netlist export
+    diffed against the written PCB's footprints and pad nets) — the
+    "Update PCB from Schematic is a no-op" invariant. The file-level
+    layer found that every generated schematic failed to LOAD in
+    KiCad 10 (numeric pin types, missing embedded_fonts, 2026-06-12);
+    the in-memory check alone was blind to it.
+    """
     from kicad_pipeline.evals.dfm_gates import check_schematic_pcb_sync
+    from kicad_pipeline.evals.sch_pcb_sync import check_written_sync
     from kicad_pipeline.placement_v2.ir import Severity, Violation
     from kicad_pipeline.placement_v2.ledger import StageRecord
 
     result = check_schematic_pcb_sync(pcb, requirements)
-    violations = ()
+    violations = []
+    details = [result.detail]
+    checks = ["schematic_pcb_sync"]
     if not result.passed:
-        violations = (Violation(
+        violations.append(Violation(
             constraint="schematic_pcb_sync", refs=(),
             severity=Severity.CRITICAL, measured=1.0, limit=0.0,
             message=result.detail,
-        ),)
+        ))
+    if sch_path is not None and pcb_path is not None:
+        report = check_written_sync(sch_path, pcb_path)
+        checks.append("written_file_sync_kicad_cli")
+        details.append(f"file: {report.detail}")
+        if not report.passed:
+            violations.extend(Violation(
+                constraint="written_file_sync", refs=(),
+                severity=Severity.CRITICAL, measured=1.0, limit=0.0,
+                message=msg,
+            ) for msg in report.issues[:20])
+    passed = not violations
     return StageRecord(
         stage="sync", input_sha256=board_sha, output_sha256=board_sha,
-        checks_run=("schematic_pcb_sync",), violations=violations,
-        passed=result.passed, detail=result.detail, timestamp=_now(),
+        checks_run=tuple(checks), violations=tuple(violations),
+        passed=passed, detail="; ".join(details), timestamp=_now(),
     )
 
 
@@ -170,7 +194,10 @@ def build_board(board: str) -> bool:
     write_schematic(schematic, out / f"{stem}.kicad_sch", project_name=stem)
     write_project_file(stem, out)
     ledger = _ledger(board)
-    sync_rec = _sync_record(pcb, requirements, board_sha)
+    sync_rec = _sync_record(
+        pcb, requirements, board_sha,
+        sch_path=out / f"{stem}.kicad_sch", pcb_path=pcb_path,
+    )
     ledger.append(sync_rec)
     print(f"  sync: {'PASS' if sync_rec.passed else 'FAIL — ' + sync_rec.detail}")
 

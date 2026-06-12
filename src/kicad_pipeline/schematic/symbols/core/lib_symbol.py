@@ -7,11 +7,9 @@ import logging
 from kicad_pipeline.constants import (
     SCHEMATIC_PIN_LENGTH_MM,
     SCHEMATIC_SYMBOL_PIN_SPACING_MM,
-    SCHEMATIC_TEXT_SIZE_MM,
 )
 from kicad_pipeline.models.requirements import Component, Pin, PinType
 from kicad_pipeline.models.schematic import (
-    FontEffect,
     LibPin,
     LibRectangle,
     LibSymbol,

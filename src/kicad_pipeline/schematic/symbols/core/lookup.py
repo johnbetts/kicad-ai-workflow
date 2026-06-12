@@ -4,7 +4,11 @@ import logging
 
 from kicad_pipeline.models.requirements import Component
 from kicad_pipeline.models.schematic import LibSymbol
-from kicad_pipeline.schematic.symbols.active import _make_diode_symbol, _make_npn_symbol, make_led_symbol
+from kicad_pipeline.schematic.symbols.active import (
+    _make_diode_symbol,
+    _make_npn_symbol,
+    make_led_symbol,
+)
 from kicad_pipeline.schematic.symbols.core.lib_symbol import make_lib_symbol
 from kicad_pipeline.schematic.symbols.passive import make_passive_symbol
 from kicad_pipeline.schematic.symbols.power import make_power_symbol

@@ -7,7 +7,11 @@ group.
 """
 
 from kicad_pipeline.schematic.symbols.active import make_led_symbol
-from kicad_pipeline.schematic.symbols.core import BUILTIN_SYMBOLS, get_or_make_symbol, make_lib_symbol
+from kicad_pipeline.schematic.symbols.core import (
+    BUILTIN_SYMBOLS,
+    get_or_make_symbol,
+    make_lib_symbol,
+)
 from kicad_pipeline.schematic.symbols.passive import make_passive_symbol
 from kicad_pipeline.schematic.symbols.power import make_power_symbol
 
