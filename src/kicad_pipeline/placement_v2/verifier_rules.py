@@ -240,12 +240,20 @@ def check_sequences(
         if missing or len(coords) < 2:
             continue
         if seq.aligned:
+            # An aligned ARRAY is a row on WHICHEVER axis it ended up
+            # (the packer may rotate the whole group; "K1-K4 in a row"
+            # carries no axis preference — axis-locking the rotation
+            # instead made wide rows unpackable, 2026-06-12). The row
+            # axis is the one with the larger spread; the other must be
+            # colinear, and order/pitch are checked along the row.
+            if (max(cross) - min(cross)) > (max(coords) - min(coords)):
+                coords, cross = cross, coords
             spread = max(cross) - min(cross)
             if spread > ALIGN_TOL_MM:
                 out.append(Violation(
                     repr(seq), seq.refs, Severity.MAJOR, spread, ALIGN_TOL_MM,
                     f"refs {seq.refs} deviate {spread:.3f}mm from a straight "
-                    f"row across the {seq.axis.value} axis",
+                    f"row",
                 ))
         deltas = [b - a for a, b in pairwise(coords)]
         increasing = all(d > _EPS for d in deltas)

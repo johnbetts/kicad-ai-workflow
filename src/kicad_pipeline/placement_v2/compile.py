@@ -167,7 +167,15 @@ def _decoupling_attaches(idx: _Index) -> list[PinAttach]:
         if not power or not gnd:
             continue
         net_name = power[0]
-        ics = [u for u in idx.refs_with_prefix("U") if net_name in idx.nets_of(u.ref)]
+        # Loads worth decoupling: ICs and LED-class modules (a WS2812
+        # is an IC with a supply pin — binding only to U refs attached
+        # C34 to the regulator 20mm away instead of the LED it serves;
+        # proximity audit 2026-06-12).
+        ics = [
+            u
+            for u in (*idx.refs_with_prefix("U"), *idx.refs_with_prefix("LED"))
+            if net_name in idx.nets_of(u.ref)
+        ]
         if not ics:
             continue
         preferred = [

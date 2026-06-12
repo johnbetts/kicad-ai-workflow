@@ -213,7 +213,9 @@ def _place_greedy_around(
     for cell in order:
         best: PlacedCell | None = None
         best_score = float("inf")
-        rotations = _ROTATIONS if allow_rotation else (0,)
+        rotations: tuple[CardinalRotation, ...] = (
+            _ROTATIONS if allow_rotation else (0,)
+        )
         for rot in rotations:
             x1, y1, x2, y2 = _center_offset(cell, rot)
             w, h = x2 - x1, y2 - y1
@@ -241,8 +243,7 @@ def _place_greedy_around(
             # overlapping in-board candidate and let legalization
             # separate them (it reports honestly if it cannot).
             best = _least_overlap_fallback(
-                cell, placed, clearance, board,
-                _ROTATIONS if allow_rotation else (0,),
+                cell, placed, clearance, board, rotations,
             )
         if best is None:
             x1, y1, x2, y2 = _center_offset(cell, 0)
