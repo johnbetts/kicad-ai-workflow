@@ -53,11 +53,20 @@ def _ic_fp(ref: str) -> Footprint:
 
 def _board() -> tuple[ProjectRequirements, dict[str, Footprint]]:
     """IC + two decoupling caps + pull-up resistor."""
+    # Full 8-pin map: the netlist lint (certify stage) rejects stub pin
+    # maps covering <50% of the footprint's pads — the fixture must
+    # model the part honestly, exactly like a real board would.
     u1 = Component(
         ref="U1", value="MCU", footprint="SOIC-8",
         pins=(
-            Pin("8", "VDD", PinType.POWER_IN, net="+3V3"),
+            Pin("1", "SDA", PinType.BIDIRECTIONAL, net="SDA"),
+            Pin("2", "IO2", PinType.BIDIRECTIONAL),
+            Pin("3", "IO3", PinType.BIDIRECTIONAL),
             Pin("4", "GND", PinType.POWER_IN, net="GND"),
+            Pin("5", "IO5", PinType.BIDIRECTIONAL),
+            Pin("6", "IO6", PinType.BIDIRECTIONAL),
+            Pin("7", "IO7", PinType.BIDIRECTIONAL),
+            Pin("8", "VDD", PinType.POWER_IN, net="+3V3"),
         ),
     )
     c1 = Component(ref="C1", value="100nF", footprint="C_0402")

@@ -392,9 +392,15 @@ def run_placement_v2(
         if added:
             _log.info("v2: bootstrapped %d certificates", added)
     cert_violations = certify_board_footprints(footprints, keys, store)
+    # Netlist lint rides the certify stage: stub pin maps (W5500 with
+    # 18 declared pins on an LQFP-48) and reversed protection diodes
+    # are DOA-board facts known before any placement (2026-06-12).
+    from kicad_pipeline.evals.netlist_lint import lint_netlist
+
+    cert_violations = cert_violations + lint_netlist(requirements, footprints)
     log_.add(
         "certify", not cert_violations,
-        (f"certificates x{len(footprints)}",), cert_violations,
+        (f"certificates x{len(footprints)}", "netlist_lint"), cert_violations,
         req_hash, sha256_text(",".join(
             f"{r}:{compute_footprint_sha256(fp)[:12]}"
             for r, fp in sorted(footprints.items())
