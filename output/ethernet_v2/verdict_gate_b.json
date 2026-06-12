@@ -1,38 +1,8 @@
 [
-  {
-    "check_id": "bodies_no_overlap",
-    "passed": true,
-    "refs": ["J1", "U1", "Y1", "J2", "J3"],
-    "evidence": "In 3d_top, 3d_iso and 3d_iso_back every body (RJ45, QFP, crystal, headers, passives) has visible board surface between it and its neighbors with no intersecting or stacked bodies."
-  },
-  {
-    "check_id": "bodies_flat_on_board",
-    "passed": true,
-    "refs": ["J1", "U1", "Y1", "J2", "J3", "C4", "C5"],
-    "evidence": "In 3d_iso and 3d_iso_back all bodies sit flush on the PCB surface with no floating, sunken, or tilted parts; the RJ45 overhang at the board edge is its normal mounting posture."
-  },
-  {
-    "check_id": "bodies_on_pads",
-    "passed": false,
-    "refs": ["U1"],
-    "evidence": "3d_top shows two long vertical rows of bare pads flanking U1 with no component body on them, and the 2d view shows U1's body outline with these displaced pad strips rather than pads under the body, so the body/footprint correspondence is not clearly satisfied."
-  },
-  {
-    "check_id": "orientation_sane",
-    "passed": true,
-    "refs": ["J1", "J2", "J3", "U1"],
-    "evidence": "J1 RJ45 opens outward off the left board edge, J2 and J3 are vertical pin headers opening upward, U1 pin-1 marker is visible, and no relays or polarized discrete inconsistencies are present."
-  },
-  {
-    "check_id": "antenna_zone_clear",
-    "passed": true,
-    "refs": [],
-    "evidence": "Not applicable - this Ethernet board has no RF module or antenna keepout region in any view."
-  },
-  {
-    "check_id": "groups_visually_coherent",
-    "passed": false,
-    "refs": ["J3", "J2", "C1", "R3", "C2"],
-    "evidence": "The 2d view shows J3 stranded alone mid-board far from any group, J2 isolated at the top-right with long ratsnest runs to U1, overlapping silkscreen in the C1/R3/C2 passive column, and large dead regions in all four corners while the center is congested."
-  }
+  {"check_id": "bodies_no_overlap", "passed": true, "refs": ["U1", "J1", "J2", "J3", "Y1"], "evidence": "In 3d_top, 3d_iso and 3d_iso_back every body (RJ45 magjack, QFP, headers, crystal, passives) is visibly separated from its neighbors with no intersecting or stacked bodies."},
+  {"check_id": "bodies_flat_on_board", "passed": true, "refs": ["J1", "J2", "J3", "U1", "Y1"], "evidence": "Both iso views show all bodies seated flush on the top surface with no floating, sunken, or tilted parts; the RJ45 overhang past the edge is normal jack geometry."},
+  {"check_id": "bodies_on_pads", "passed": true, "refs": ["U1", "J1", "J2", "J3", "Y1", "C4", "C5"], "evidence": "3d_top body positions match the 2d pad locations (QFP centered on its pad ring, header bodies over their pin pads, magjack shield posts on the SH holes) with no displaced footprint."},
+  {"check_id": "orientation_sane", "passed": true, "refs": ["J1", "J2", "J3"], "evidence": "The RJ45 opening faces outward over the nearest board edge (visible in 3d_iso_back), the vertical pin headers mate upward, and there are no relays or polarized parts to misorient."},
+  {"check_id": "antenna_zone_clear", "passed": true, "refs": [], "evidence": "No RF module or antenna keepout exists on this board; not applicable."},
+  {"check_id": "groups_visually_coherent", "passed": false, "refs": ["J2", "J3", "C1", "R3", "C2", "R1", "R2", "C3"], "evidence": "In 2d the SPI header J2 and power header J3 are stranded far from the U1 PHY cluster with long crossing ratsnest lines, the entire bottom half of the board is empty, and the C1/R3/C2 and R1/R2/C3 reference labels pile on top of each other showing ragged, crowded sub-clusters rather than clean grid-aligned groups."}
 ]

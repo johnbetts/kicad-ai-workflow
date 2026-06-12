@@ -1,38 +1,8 @@
 [
-  {
-    "check_id": "bodies_no_overlap",
-    "passed": true,
-    "refs": ["U1", "C1", "C5", "R5", "D1", "SW1", "SW2"],
-    "evidence": "In 3d_top and both iso views every body (module, switches, passives) has visible separation from its neighbors with no intersecting or stacked 3D bodies."
-  },
-  {
-    "check_id": "bodies_flat_on_board",
-    "passed": true,
-    "refs": ["U1", "SW1", "SW2", "J1", "J2", "C2"],
-    "evidence": "Iso and iso-back renders show the module, switches, connectors, and all passives seated flush on the PCB surface with no floating, sunken, or tilted bodies."
-  },
-  {
-    "check_id": "bodies_on_pads",
-    "passed": true,
-    "refs": ["U1", "SW1", "SW2", "C1", "C5", "R5", "D1", "C2"],
-    "evidence": "3d_top shows the module body centered in its pad ring and every switch and passive centered over its own pads, with iso views confirming J1/J2 sit on their footprints."
-  },
-  {
-    "check_id": "orientation_sane",
-    "passed": true,
-    "refs": ["J1", "J2", "SW1", "SW2", "D1"],
-    "evidence": "J1 opens outward at the left edge, J2 is a vertical THT header at the right edge, both switches share identical orientation, no relays exist, and D1 is the only polarized part."
-  },
-  {
-    "check_id": "antenna_zone_clear",
-    "passed": true,
-    "refs": ["U1"],
-    "evidence": "The dashed antenna keepout sits at the top board edge in front of U1's antenna section and is completely free of components, traces, and copper in the 2d and 3d_top views."
-  },
-  {
-    "check_id": "groups_visually_coherent",
-    "passed": true,
-    "refs": ["U1", "C1", "C5", "R5", "D1", "SW1", "SW2", "R1", "R2", "R3", "R4", "C2"],
-    "evidence": "The MCU cluster hugs U1 and the button group forms two identical, column-aligned resistor/switch subcircuits at uniform pitch with C2 centered above, reading as tight grid-aligned clusters."
-  }
+  {"check_id": "bodies_no_overlap", "passed": true, "refs": ["U1", "SW1", "SW2", "J1", "J2"], "evidence": "In all three 3D views every visible body (ESP32 module, both tact switches, USB-C, pin header, passives) is spatially distinct with no intersecting or stacked bodies."},
+  {"check_id": "bodies_flat_on_board", "passed": true, "refs": ["U1", "SW1", "SW2", "J1", "J2", "C2"], "evidence": "In 3d_iso and 3d_iso_back all bodies sit flush on the PCB surface with no floating, sunken, or tilted parts; the USB-C overhang at the edge is normal for that connector."},
+  {"check_id": "bodies_on_pads", "passed": true, "refs": ["U1", "SW1", "SW2", "J1", "C2"], "evidence": "In 3d_top each visible body is centered over its own pad pattern (module over its castellated pads, switches over their 4-pad clusters, USB-C over its pad row), with no body displaced from its footprint."},
+  {"check_id": "orientation_sane", "passed": true, "refs": ["J1", "J2", "D1"], "evidence": "USB-C J1 opens outward toward the bottom-right board edge and header J2 sits along the left edge; there are no relays, and the single polarized part shows no inconsistent orientation."},
+  {"check_id": "antenna_zone_clear", "passed": true, "refs": ["U1"], "evidence": "The dashed antenna keepout sits along the top board edge directly above the ESP32 antenna section and contains no components, pads, or visible copper in the 2D and 3d_top views."},
+  {"check_id": "groups_visually_coherent", "passed": false, "refs": ["C2", "R3", "R4", "J2", "C1", "C5"], "evidence": "C2 is stranded alone mid-board far from U1, R3/R4 float between the switch cluster and nothing, J2 is isolated in the bottom-left corner, and large empty regions on the right and center make the layout read as scattered rather than tight grid-aligned clusters."}
 ]

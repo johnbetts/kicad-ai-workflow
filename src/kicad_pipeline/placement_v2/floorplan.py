@@ -737,6 +737,97 @@ _REORDER_FLUSH_TOL_MM = 1.5
 _REORDER_MAX_CELLS = 6
 #: Along-edge step when sliding a lone connector toward its targets.
 _REORDER_SLIDE_STEP_MM = 4.0
+#: Reorder rounds cap; the loop exits early once a round commits nothing.
+_REORDER_MAX_ROUNDS = 4
+
+
+def classify_cell_edge(
+    bbox: tuple[float, float, float, float],
+    board_width: float,
+    board_height: float,
+    explicit_edge: Edge | None = None,
+    tol_mm: float = _REORDER_FLUSH_TOL_MM,
+) -> Edge | None:
+    """Which board edge a flush connector cell belongs to, or ``None``.
+
+    A cell flush at a CORNER is within tolerance of TWO edges — a
+    fixed check order silently claimed the wrong one (J14 at the top
+    of the east edge was classified NORTH and permuted horizontally
+    with the terminal row instead of sliding along east; nl-s-3c,
+    2026-06-11). Resolution order:
+
+    1. An explicit EdgePin edge (human lock / part rule) is the answer
+       when the cell is actually flush there.
+    2. Geometry: among edges within tolerance, prefer the one parallel
+       to the cell's LONG axis (a vertical header lies along east/west).
+    3. Remaining ties: smaller flush distance, then edge name.
+    """
+    x1, y1, x2, y2 = bbox
+    dists = {
+        Edge.NORTH: abs(y1 - _EDGE_MARGIN_MM),
+        Edge.SOUTH: abs(board_height - _EDGE_MARGIN_MM - y2),
+        Edge.WEST: abs(x1 - _EDGE_MARGIN_MM),
+        Edge.EAST: abs(board_width - _EDGE_MARGIN_MM - x2),
+    }
+    flush = [e for e in Edge if dists[e] <= tol_mm]
+    if explicit_edge is not None and explicit_edge in flush:
+        return explicit_edge
+    if not flush:
+        return None
+    if len(flush) == 1:
+        return flush[0]
+    tall = (y2 - y1) > (x2 - x1)
+    along = [e for e in flush if (e in (Edge.EAST, Edge.WEST)) == tall]
+    candidates = along or flush
+    return min(candidates, key=lambda e: (dists[e], e.value))
+
+
+def _forefield_clear(
+    moved: PlacedCell,
+    edge: Edge,
+    bw: float,
+    bh: float,
+    pinned_refs: frozenset[str],
+    footprints: Mapping[str, Footprint],
+    other_courts: list[Polygon],
+) -> bool:
+    """No other component in the band between a pinned member and *edge*.
+
+    Mirrors Gate A's forefield rule (verifier_rules._forefield_violations):
+    a slide that wins on crossings/length but parks parts in front of a
+    connector's wire opening trades a soft metric for a hard violation.
+    The moved cell's OWN members count too — Gate A has no cell concept,
+    so an RF module slid onto the edge its decoupling island faces is a
+    violation even though the island is in the same rigid cell
+    (mcu_core: U1 slid west over its C1/C5, 2026-06-11).
+    """
+    members = tuple(moved.members_in_board())
+    for m in members:
+        if m.ref not in pinned_refs or m.ref not in footprints:
+            continue
+        cb = polygon_bbox(
+            courtyard_in_frame(footprints[m.ref], m.x, m.y, m.rotation_deg)
+        )
+        if edge is Edge.SOUTH:
+            zone = (cb[0], cb[3], cb[2], bh)
+        elif edge is Edge.NORTH:
+            zone = (cb[0], 0.0, cb[2], cb[1])
+        elif edge is Edge.EAST:
+            zone = (cb[2], cb[1], bw, cb[3])
+        else:
+            zone = (0.0, cb[1], cb[0], cb[3])
+        own_courts = [
+            courtyard_in_frame(footprints[o.ref], o.x, o.y, o.rotation_deg)
+            for o in members
+            if o.ref != m.ref and o.ref in footprints
+        ]
+        for oc in (*other_courts, *own_courts):
+            ob = polygon_bbox(oc)
+            ow = min(zone[2], ob[2]) - max(zone[0], ob[0])
+            oh = min(zone[3], ob[3]) - max(zone[1], ob[1])
+            if ow > 0.1 and oh > 0.1:
+                return False
+    return True
 
 
 def reorder_edge_connectors(
@@ -779,17 +870,21 @@ def reorder_edge_connectors(
             _positions(), footprints, constraints.fanouts, constraints.bundles,
         )
 
+    explicit_edges = {
+        ep.ref: ep.edge for ep in constraints.edge_pins if ep.edge is not None
+    }
+    pinned_member_refs = frozenset(ep.ref for ep in constraints.edge_pins)
+
     def _edge_of(pc: PlacedCell) -> Edge | None:
-        b = polygon_bbox(pc.polygon_in_board())
-        if abs(b[1] - _EDGE_MARGIN_MM) <= _REORDER_FLUSH_TOL_MM:
-            return Edge.NORTH
-        if abs(bh - _EDGE_MARGIN_MM - b[3]) <= _REORDER_FLUSH_TOL_MM:
-            return Edge.SOUTH
-        if abs(b[0] - _EDGE_MARGIN_MM) <= _REORDER_FLUSH_TOL_MM:
-            return Edge.WEST
-        if abs(bw - _EDGE_MARGIN_MM - b[2]) <= _REORDER_FLUSH_TOL_MM:
-            return Edge.EAST
-        return None
+        explicit = next(
+            (explicit_edges[r] for r in sorted(pc.cell.refs)
+             if r in explicit_edges),
+            None,
+        )
+        return classify_cell_edge(
+            polygon_bbox(pc.polygon_in_board()), bw, bh,
+            explicit_edge=explicit,
+        )
 
     by_edge: dict[Edge, list[int]] = {}
     for i, pc in enumerate(cells):
@@ -800,11 +895,18 @@ def reorder_edge_connectors(
             by_edge.setdefault(edge, []).append(i)
 
     best_score = _score()
-    # Two rounds: a later edge's reorder can unlock an earlier edge's
-    # improvement (the J14 slide toward U3 only pays off AFTER the
-    # south edge reorder moves U3's neighbors). Deterministic, bounded.
-    for _round in range(2):
-      for edge, idxs in sorted(by_edge.items(), key=lambda kv: kv[0].value):
+    # Rounds repeat until a full round commits nothing (a later edge's
+    # reorder can unlock an earlier edge's improvement — the J14 slide
+    # toward U3 only pays off AFTER the south edge reorder moves U3's
+    # neighbors), capped for determinism. Within a round, multi-cell
+    # PERMUTATIONS run before lone SLIDES: a slide committed against a
+    # not-yet-reordered edge drags the permutations into a worse basin
+    # (nl-s-3c: 25 crossings vs 22).
+    for _round in range(_REORDER_MAX_ROUNDS):
+      round_start_score = best_score
+      for edge, idxs in sorted(
+          by_edge.items(), key=lambda kv: (len(kv[1]) == 1, kv[0].value),
+      ):
           if len(idxs) == 1:
               # Lone connector: slide along the edge toward its targets.
               i = idxs[0]
@@ -847,6 +949,9 @@ def reorder_edge_connectors(
                   if not any(
                       convex_polygons_overlap(mc, oc, clearance_mm=_GROUP_CLEARANCE_MM)
                       for mc in moved_courts for oc in other_courts
+                  ) and _forefield_clear(
+                      moved, edge, bw, bh, pinned_member_refs,
+                      footprints, other_courts,
                   ):
                       cells[i] = moved
                       score = _score()
@@ -873,19 +978,32 @@ def reorder_edge_connectors(
           union_lo = min(a[0] for a in alongs.values())
           union_hi = max(a[1] for a in alongs.values())
           spans = {i: alongs[i][1] - alongs[i][0] for i in idxs}
-          free = union_hi - union_lo - sum(spans.values())
           n = len(idxs)
-          gap = free / (n - 1) if n > 1 else 0.0
-          if gap < 0.0:
-              continue  # cells already tighter than their union: skip
+          limit2 = bw if horizontal else bh
+          # Two union extents per edge: the cells' ORIGINAL extent
+          # (conservative, keeps the row where the packer put it) and
+          # the FULL edge (lets a terminal row spread toward its
+          # targets). The full-edge family was previously reachable
+          # only by accident — a mis-classified corner cell inflating
+          # the union (J14, nl-s-3c 2026-06-11) — and reached strictly
+          # fewer crossings; the objective arbitrates as usual.
+          unions = [(union_lo, union_hi)]
+          full = (_EDGE_MARGIN_MM, limit2 - _EDGE_MARGIN_MM)
+          if full[1] - full[0] > union_hi - union_lo + 1.0:
+              unions.append(full)
           other_polys2 = [
               cells[j].polygon_in_board()
               for j in range(len(cells)) if j not in idxs
           ]
           original = {i: cells[i] for i in idxs}
           best_cells: dict[int, PlacedCell] | None = None
-          for perm in permutations(sorted(idxs)):
-              cursor = union_lo
+          for u_lo, u_hi in unions:
+            free = u_hi - u_lo - sum(spans.values())
+            gap = free / (n - 1) if n > 1 else 0.0
+            if gap < 0.0:
+                continue  # cells already tighter than this union: skip
+            for perm in permutations(sorted(idxs)):
+              cursor = u_lo
               trial: dict[int, PlacedCell] = {}
               ok = True
               for i in perm:
@@ -923,6 +1041,8 @@ def reorder_edge_connectors(
                   "reorder_edge_connectors: %s edge reordered, score -> %s",
                   edge.value, best_score,
               )
+      if best_score == round_start_score:
+          break  # converged: a full round committed nothing
     return Floorplan(placed=tuple(cells), board_width=bw, board_height=bh)
 
 

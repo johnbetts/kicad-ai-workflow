@@ -13,6 +13,7 @@ from kicad_pipeline.placement_v2.cells import Cell, CellProof, PlacedCell, Place
 from kicad_pipeline.placement_v2.cells_compose import compose_group_cell
 from kicad_pipeline.placement_v2.floorplan import (
     Floorplan,
+    classify_cell_edge,
     pack_board,
     pack_group,
 )
@@ -181,3 +182,42 @@ class TestLegalize:
         fp = Floorplan(placed=(a, b), board_width=60.0, board_height=40.0)
         out = legalize(fp)
         assert out.placed == fp.placed
+
+
+class TestClassifyCellEdge:
+    """Corner-flush edge classification (J14 NE-corner regression, 2026-06-11)."""
+
+    def test_corner_flush_tall_cell_prefers_vertical_edge(self) -> None:
+        # A 4x37mm vertical header flush at the NE corner: within
+        # tolerance of BOTH north and east. The old order-biased check
+        # returned NORTH; the long axis says it lies along EAST.
+        bbox = (155.8, 0.5, 159.5, 37.2)
+        assert classify_cell_edge(bbox, 160.0, 80.0) is Edge.EAST
+
+    def test_corner_flush_wide_cell_prefers_horizontal_edge(self) -> None:
+        bbox = (0.5, 0.5, 30.0, 5.0)  # wide cell at the NW corner
+        assert classify_cell_edge(bbox, 160.0, 80.0) is Edge.NORTH
+
+    def test_explicit_edge_pin_wins_at_corner(self) -> None:
+        # Wide cell at the NW corner, but the human locked it WEST.
+        bbox = (0.5, 0.5, 30.0, 5.0)
+        assert (
+            classify_cell_edge(bbox, 160.0, 80.0, explicit_edge=Edge.WEST)
+            is Edge.WEST
+        )
+
+    def test_explicit_edge_ignored_when_not_flush_there(self) -> None:
+        # Locked SOUTH but physically flush only north: geometry governs
+        # (the slide math would be wrong on the locked edge).
+        bbox = (50.0, 0.5, 80.0, 5.0)
+        assert (
+            classify_cell_edge(bbox, 160.0, 80.0, explicit_edge=Edge.SOUTH)
+            is Edge.NORTH
+        )
+
+    def test_interior_cell_is_none(self) -> None:
+        assert classify_cell_edge((50.0, 30.0, 70.0, 40.0), 160.0, 80.0) is None
+
+    def test_single_flush_edge_unambiguous(self) -> None:
+        assert classify_cell_edge((50.0, 0.5, 80.0, 5.0), 160.0, 80.0) is Edge.NORTH
+        assert classify_cell_edge((155.0, 30.0, 159.5, 50.0), 160.0, 80.0) is Edge.EAST

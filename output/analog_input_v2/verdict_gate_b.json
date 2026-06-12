@@ -1,38 +1,6 @@
-[
-  {
-    "check_id": "bodies_no_overlap",
-    "passed": true,
-    "refs": ["J1", "J2", "J3", "J4", "J5", "U1"],
-    "evidence": "In 3d_top, 3d_iso and 3d_iso_back no two component bodies intersect; the passive rows sit close above the screw-terminal bodies but a visible gap remains, though the bottom-left mounting-hole courtyard does encroach on J1's pad area in the 2D view (pad geometry, not a body overlap)."
-  },
-  {
-    "check_id": "bodies_flat_on_board",
-    "passed": true,
-    "refs": ["J1", "J2", "J3", "J5", "U1"],
-    "evidence": "In 3d_iso and 3d_iso_back every screw terminal, the J5 pin header, U1 and all passives sit flush on the PCB surface with no floating, sunken or tilted bodies."
-  },
-  {
-    "check_id": "bodies_on_pads",
-    "passed": true,
-    "refs": ["U1", "R9", "R10", "C1", "J5"],
-    "evidence": "In 3d_top, U1's body is centered between its two pad rows (pin-1 dot aligned), the J5 header covers its four through-holes, and every passive body sits symmetrically between its two end pads."
-  },
-  {
-    "check_id": "orientation_sane",
-    "passed": true,
-    "refs": ["J1", "J2", "J3", "J4", "J5", "D1", "D2", "D3", "D4"],
-    "evidence": "Screw terminals J1-J4 form a uniform evenly-spaced row on the bottom edge with wire openings facing outward (confirmed in 3d_iso), J5 is a vertical header mating upward, and diodes D1-D4 occupy the identical position/orientation in all four channel strips."
-  },
-  {
-    "check_id": "antenna_zone_clear",
-    "passed": true,
-    "refs": [],
-    "evidence": "not applicable"
-  },
-  {
-    "check_id": "groups_visually_coherent",
-    "passed": true,
-    "refs": ["C2", "D1", "R1", "R2", "C3", "D2", "R3", "R4", "C4", "D3", "R5", "R6", "C5", "D4", "R7", "R8", "U1"],
-    "evidence": "The four ADC channels are identical C-D-R-R strips on a single shared row directly above their respective terminals, and the U1/R9/R10/C1 ADC cluster is tight, so groups read as organized grid-aligned clusters despite large unused board area (a utilization issue, not group scatter)."
-  }
-]
+[{"check_id": "bodies_no_overlap", "passed": true, "refs": ["J1", "J2", "J3", "J4", "J5", "U1"], "evidence": "In 3d_top, 3d_iso and 3d_iso_back all bodies (four terminal blocks, pin header, SOIC, channel passives) are clearly separated with visible board surface between them and no stacking or intersection."},
+{"check_id": "bodies_flat_on_board", "passed": true, "refs": ["J1", "J2", "J3", "J4", "J5", "U1", "D1", "D2", "D3", "D4"], "evidence": "Both iso views show every body seated flush on the PCB surface with no floating, sunken, or tilted components."},
+{"check_id": "bodies_on_pads", "passed": true, "refs": ["U1", "J1", "J2", "J3", "J4", "R9", "R10", "C1"], "evidence": "In 3d_top the SOIC body is centered over its pad rows, the terminal bodies cover their pad pairs, and each channel-strip passive body sits on its own footprint with no displaced parts."},
+{"check_id": "orientation_sane", "passed": true, "refs": ["J1", "J2", "J3", "J4", "D1", "D2", "D3", "D4"], "evidence": "All four screw terminals form a uniform aligned row at the bottom edge with wire openings facing outward, and the polarized diodes D1-D4 are oriented identically in each channel strip."},
+{"check_id": "antenna_zone_clear", "passed": true, "refs": [], "evidence": "not applicable"},
+{"check_id": "groups_visually_coherent", "passed": true, "refs": ["C2", "D1", "R2", "R1", "C3", "C4", "C5", "U1"], "evidence": "The 2d view shows four identical vertical channel strips (C-D-R-R) in aligned columns over their terminals, with the ADC cluster centered and the I2C header at top, reading as tight grid-aligned groups."}]
