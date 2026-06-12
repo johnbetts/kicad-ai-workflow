@@ -53,6 +53,10 @@ _BOARD_CLEARANCE_MM = 2.0
 # Matches the IR's BoardContain margin (0.5mm) — a stricter packing
 # margin than the verifier enforces just rejects boards that would pass.
 _EDGE_MARGIN_MM = 0.5
+# A locked edge cell deeper than this fraction of the perpendicular
+# board dimension bisects the interior; it corner-anchors at the far
+# end of its edge instead of joining the name-sorted shelf walk.
+_DEEP_LOCK_FRACTION = 0.25
 _ROTATIONS: tuple[CardinalRotation, ...] = (0, 90, 180, 270)
 
 
@@ -88,6 +92,9 @@ class Floorplan:
     placed: tuple[PlacedCell, ...]
     board_width: float
     board_height: float
+    #: Cell names the packer placed deliberately (edge-snapped groups,
+    #: locked connectors); legalization must not move them.
+    pinned: tuple[str, ...] = ()
 
 
 def _hpwl(port_groups: dict[str, list[tuple[float, float]]]) -> float:
@@ -659,7 +666,7 @@ def pack_board(
     locked_names: set[str] = set()
     if board is not None:
         bw0, bh0 = board
-        shelf: dict[Edge, float] = dict.fromkeys(Edge, _EDGE_MARGIN_MM)
+        aimed: list[tuple[GroupPlan, PlacedCell, Edge, float, float]] = []
         for g in sorted(groups, key=lambda g: g.name):
             if not g.name.startswith("conn:"):
                 continue
@@ -679,6 +686,32 @@ def pack_board(
             horizontal = edge in (Edge.NORTH, Edge.SOUTH)
             span = (bb[2] - bb[0]) if horizontal else (bb[3] - bb[1])
             depth = (bb[3] - bb[1]) if horizontal else (bb[2] - bb[0])
+            aimed.append((g, pc, edge, span, depth))
+        # A locked cell DEEP enough to bisect the board (an RF module
+        # whose body+antenna keepout reaches a large fraction of the
+        # perpendicular dimension) anchors at the FAR corner of its
+        # edge instead of joining the name-sorted walk: U3's 42.6mm-
+        # deep ESP32 cell landed at x=66-99 of a 160x80 outline and no
+        # 76mm relay bank could coexist on the opposite band (nl-s-3c,
+        # 2026-06-12). Corners are where humans put RF modules anyway.
+        corner_anchored: set[str] = set()
+        for ce in sorted(Edge, key=lambda e: e.value):
+            on_edge = [a for a in aimed if a[2] is ce]
+            if len(on_edge) < 2:
+                continue
+            deepest = max(on_edge, key=lambda a: a[4])
+            perp = bh0 if ce in (Edge.NORTH, Edge.SOUTH) else bw0
+            if deepest[4] > _DEEP_LOCK_FRACTION * perp:
+                corner_anchored.add(deepest[0].name)
+        shelf: dict[Edge, float] = dict.fromkeys(Edge, _EDGE_MARGIN_MM)
+        # Corner-anchored cells place FIRST so the low walk treats
+        # them as obstacles.
+        ordered_locked = sorted(
+            aimed, key=lambda a: a[0].name not in corner_anchored
+        )
+        for g, pc, edge, span, depth in ordered_locked:
+            bb = polygon_bbox(pc.polygon_in_board())
+            horizontal = edge in (Edge.NORTH, Edge.SOUTH)
             # Corner-aware: skip past locked cells from PERPENDICULAR
             # edges that reach into this edge's band (the north and
             # west shelves once collided at the NW corner).
@@ -688,19 +721,31 @@ def pack_board(
                 band_lo, band_hi = bw0 - _EDGE_MARGIN_MM - depth, bw0 - _EDGE_MARGIN_MM
             else:
                 band_lo, band_hi = bh0 - _EDGE_MARGIN_MM - depth, bh0 - _EDGE_MARGIN_MM
-            along = shelf[edge]
-            # Reserved obstacles (mounting-hole corners) join the walk:
-            # without them a locked connector shelf-placed at the edge
-            # start sat ON a reserved corner, and legalization (both
-            # pinned) was infeasible.
-            for other in (*obstacles, *locked_placed):
-                ob = polygon_bbox(other.polygon_in_board())
-                o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
-                if o_perp[0] >= band_hi + clearance_mm or o_perp[1] <= band_lo - clearance_mm:
-                    continue
-                o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
-                if o_along[1] + clearance_mm > along and o_along[0] < along + span:
-                    along = o_along[1] + clearance_mm
+            if g.name in corner_anchored:
+                hi = (bw0 if horizontal else bh0) - _EDGE_MARGIN_MM
+                for other in (*obstacles, *locked_placed):
+                    ob = polygon_bbox(other.polygon_in_board())
+                    o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
+                    if o_perp[0] >= band_hi + clearance_mm or o_perp[1] <= band_lo - clearance_mm:
+                        continue
+                    o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
+                    if o_along[0] - clearance_mm < hi and o_along[1] > hi - span:
+                        hi = o_along[0] - clearance_mm
+                along = hi - span
+            else:
+                along = shelf[edge]
+                # Reserved obstacles (mounting-hole corners) join the
+                # walk: without them a locked connector shelf-placed at
+                # the edge start sat ON a reserved corner, and
+                # legalization (both pinned) was infeasible.
+                for other in (*obstacles, *locked_placed):
+                    ob = polygon_bbox(other.polygon_in_board())
+                    o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
+                    if o_perp[0] >= band_hi + clearance_mm or o_perp[1] <= band_lo - clearance_mm:
+                        continue
+                    o_along = (ob[0], ob[2]) if horizontal else (ob[1], ob[3])
+                    if o_along[1] + clearance_mm > along and o_along[0] < along + span:
+                        along = o_along[1] + clearance_mm
             if horizontal:
                 pc = pc.moved_to(pc.dx + (along - bb[0]), pc.dy)
                 bb = polygon_bbox(pc.polygon_in_board())
@@ -713,7 +758,8 @@ def pack_board(
                 pc = (pc.moved_to(pc.dx - (bb[0] - _EDGE_MARGIN_MM), pc.dy)
                       if edge is Edge.WEST else
                       pc.moved_to(pc.dx + (bw0 - _EDGE_MARGIN_MM - bb[2]), pc.dy))
-            shelf[edge] = along + span + clearance_mm
+            if g.name not in corner_anchored:
+                shelf[edge] = along + span + clearance_mm
             locked_placed.append(pc)
             locked_names.add(g.name)
 
@@ -753,18 +799,80 @@ def pack_board(
         f"group:{g.name}": g.edge_facing
         for g in groups if g.edge_facing is not None
     }
+    # Group-follows-connector — the complement of connector-as-subgroup:
+    # when a group's associated connector is LOCKED to an edge, the
+    # GROUP comes to that edge. The 24V/relay domain belongs under its
+    # harness terminal; letting the packer stand the relay bank up
+    # mid-board sends 24V across the interior and digital lines through
+    # the relay zone (board owner, 2026-06-12). Structural facing wins;
+    # the assoc edge is a fallback.
+    explicit_edge_by_ref = {
+        ep.ref: ep.edge for ep in constraints.edge_pins
+        if ep.edge is not None
+    }
+    group_names = {g.name for g in groups}
+    assoc_facing_names: set[str] = set()
+    assoc_anchors: dict[str, list[str]] = {}
+    for assoc in constraints.group_assocs:
+        a_edge = explicit_edge_by_ref.get(assoc.ref)
+        if a_edge is None or assoc.group not in group_names:
+            _log.info(
+                "assoc-facing: skip %s->%s (edge=%s, group known=%s)",
+                assoc.ref, assoc.group, a_edge, assoc.group in group_names,
+            )
+            continue
+        if facing_by_name.setdefault(f"group:{assoc.group}", a_edge) is a_edge:
+            assoc_facing_names.add(f"group:{assoc.group}")
+            assoc_anchors.setdefault(f"group:{assoc.group}", []).append(
+                f"group:conn:{assoc.ref}"
+            )
+            _log.info(
+                "assoc-facing: group:%s follows %s to %s",
+                assoc.group, assoc.ref, a_edge,
+            )
     # Connector-as-subgroup: a connector whose signal partners live in
     # one FeatureBlock targets the edge segment ADJACENT to those
     # partners — group first, connector second (2026-06-11 addendum).
     assoc_partners: dict[str, tuple[str, ...]] = {}
     for assoc in constraints.group_assocs:
         assoc_partners[f"group:conn:{assoc.ref}"] = assoc.partner_refs
-    placed = _snap_pinned_groups(
+    placed, snapped_names = _snap_pinned_groups(
         placed, edge_pins, facing_by_name, bw, bh, body_dirs or {},
         final_names=frozenset(f"group:{n}" for n in locked_names),
         assoc_partners=assoc_partners,
+        assoc_facing_names=frozenset(assoc_facing_names),
+        assoc_anchors=assoc_anchors,
     )
-    return Floorplan(placed=tuple(placed), board_width=bw, board_height=bh)
+    pinned_set = snapped_names | {f"group:{n}" for n in locked_names}
+    if snapped_names:
+        # The snap rearranged the board around the interior pack:
+        # groups that did NOT snap (Power Supply) may now sit under a
+        # band-placed group with no legal minimal-motion escape —
+        # legalization halted, not converged (nl-s-3c, 2026-06-12).
+        # Re-pack them greedily around everything that IS pinned.
+        keep: list[PlacedCell] = []
+        repack: list[PlacedCell] = []
+        for pc2 in placed:
+            nm = pc2.cell.name
+            if (nm in pinned_set or nm.startswith("reserved:")
+                    or nm.startswith("group:conn:")):
+                keep.append(pc2)
+            else:
+                repack.append(pc2)
+        if repack:
+            _log.info(
+                "pack_board: re-packing %d interior group(s) around"
+                " snapped bands: %s",
+                len(repack), ", ".join(p.cell.name for p in repack),
+            )
+            placed = _place_greedy_around(
+                tuple(p.cell for p in repack), keep, clearance_mm,
+                (bw, bh), allow_rotation=True,
+            )
+    return Floorplan(
+        placed=tuple(placed), board_width=bw, board_height=bh,
+        pinned=tuple(sorted(pinned_set)),
+    )
 
 
 #: Edge-flushness tolerance when classifying connector cells per edge.
@@ -1284,7 +1392,10 @@ def reorder_edge_connectors(
                   cells[i] = pc
       if best_score == round_start_score:
           break  # converged: a full round committed nothing
-    return Floorplan(placed=tuple(cells), board_width=bw, board_height=bh)
+    return Floorplan(
+        placed=tuple(cells), board_width=bw, board_height=bh,
+        pinned=plan.pinned,
+    )
 
 
 
@@ -1297,7 +1408,9 @@ def _snap_pinned_groups(
     body_dirs: dict[str, tuple[float, float]] | None = None,
     final_names: frozenset[str] = frozenset(),
     assoc_partners: dict[str, tuple[str, ...]] | None = None,
-) -> list[PlacedCell]:
+    assoc_facing_names: frozenset[str] = frozenset(),
+    assoc_anchors: dict[str, list[str]] | None = None,
+) -> tuple[list[PlacedCell], set[str]]:
     """Translate groups containing edge-pinned refs flush to their edge.
 
     A group whose plan recorded ``edge_facing`` (its connector strip is
@@ -1324,6 +1437,13 @@ def _snap_pinned_groups(
     # power group covering the whole south edge means the pin headers
     # belong on east/west, not wedged into it.
     out: list[PlacedCell] = list(placed)
+    for o in out:
+        if o.cell.name in final_names:
+            fb = polygon_bbox(o.polygon_in_board())
+            _log.info(
+                "snap: locked %s bbox=%.1f,%.1f,%.1f,%.1f",
+                o.cell.name, fb[0], fb[1], fb[2], fb[3],
+            )
     snapped_edge: dict[str, Edge] = {}
     edge_claims: dict[Edge, float] = {}
     movable = [
@@ -1332,10 +1452,23 @@ def _snap_pinned_groups(
         and out[i].cell.name not in final_names  # pre-placed locked cells
     ]
     preferred: dict[str, Edge] = {}
+    def _bb_area(i: int) -> float:
+        b = polygon_bbox(out[i].polygon_in_board())
+        return (b[2] - b[0]) * (b[3] - b[1])
+
+    # Structurally-faced groups snap rigidly and go first; assoc-
+    # following groups run a feasibility search, LARGEST first — the
+    # 76mm relay bank has far fewer viable band slots than a 28mm
+    # analog strip, so it must claim its segment before smaller
+    # groups fragment the edge (nl-s-3c, 2026-06-12).
     order = sorted(
         (i for i in range(len(out))
          if i not in movable and out[i].cell.name not in final_names),
-        key=lambda i: out[i].cell.name,
+        key=lambda i: (
+            out[i].cell.name in assoc_facing_names,
+            -_bb_area(i),
+            out[i].cell.name,
+        ),
     )
     for i in order:
         pc = out[i]
@@ -1369,7 +1502,180 @@ def _snap_pinned_groups(
                     dists[e],
                 ),
             )
+        orig = out[i]
+        if pc.cell.name in assoc_facing_names:
+            # A group FOLLOWING its locked connector lies ALONG that
+            # edge (long axis parallel): the relay row belongs under
+            # its north terminal, not standing into the board.
+            bbp = polygon_bbox(pc.polygon_in_board())
+            tall = (bbp[3] - bbp[1]) > (bbp[2] - bbp[0])
+            wants_horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+            if tall == wants_horizontal:
+                pc = pc.rotated(90 if pc.rotation in (0, 180) else 0)
         out[i] = _snap_to(pc, edge)
+        if pc.cell.name in assoc_facing_names:
+            # The locked partner connector already OWNS the edge band:
+            # a following group sits directly INWARD of the band, at an
+            # along-position chosen by a small candidate search — the
+            # anchor connector's center first, then abutments of every
+            # band cell. Score = (band depth over my interval, distance
+            # from anchor): prefer the shallow segment NEAR the anchor
+            # over tucking behind a deep cell (U3's ESP32+antenna
+            # reaches 41mm into an 80mm board — cascading inward past
+            # it threw groups off the outline; 2026-06-12).
+            horizontal_edge = edge in (Edge.NORTH, Edge.SOUTH)
+            gb = polygon_bbox(out[i].polygon_in_board())
+            half = ((gb[2] - gb[0]) if horizontal_edge else (gb[3] - gb[1])) / 2
+            depth_g = (gb[3] - gb[1]) if horizontal_edge else (gb[2] - gb[0])
+            along_lim = (bw if horizontal_edge else bh)
+            lo_lim = _EDGE_MARGIN_MM + half
+            hi_lim = along_lim - _EDGE_MARGIN_MM - half
+            anchor_names = (assoc_anchors or {}).get(pc.cell.name, [])
+            anchor_name = anchor_names[0] if anchor_names else None
+            anchor = next(
+                (o for o in out if o.cell.name == anchor_name), None
+            )
+            if anchor is not None:
+                ab = polygon_bbox(anchor.polygon_in_board())
+                anchor_c = ((ab[0] + ab[2]) / 2 if horizontal_edge
+                            else (ab[1] + ab[3]) / 2)
+            else:
+                anchor_c = ((gb[0] + gb[2]) / 2 if horizontal_edge
+                            else (gb[1] + gb[3]) / 2)
+            # Reserve the deepest assoc connector's band depth even
+            # over an EMPTY segment: the edge reorder later slides the
+            # group's connectors into the segment in FRONT of it — a
+            # group snapped flush leaves them nowhere to go (MCU
+            # grabbed the south edge and J2/J16 were stranded 40mm
+            # away; 2026-06-12).
+            reserve = 0.0
+            for an in anchor_names:
+                ao = next((o for o in out if o.cell.name == an), None)
+                if ao is None:
+                    continue
+                abb = polygon_bbox(ao.polygon_in_board())
+                reserve = max(reserve, {
+                    Edge.NORTH: abb[3], Edge.SOUTH: bh - abb[1],
+                    Edge.WEST: abb[2], Edge.EAST: bw - abb[0],
+                }[edge])
+            # Hard cells (locked, already-snapped, reserved): the FLUSH
+            # ones form this edge's band and set the inward depth; ALL
+            # of them gate candidate feasibility (a deep cell from the
+            # OPPOSITE edge — U3's column reaches y=36.9 on an 80mm
+            # board — rejects candidates whose rect would clip it).
+            hard_bbs: list[tuple[float, float, float, float]] = []
+            band: list[tuple[float, float, float]] = []
+            for o in out:
+                if o.cell.name == out[i].cell.name:
+                    continue
+                if not (o.cell.name in final_names
+                        or o.cell.name in snapped_edge
+                        or o.cell.name.startswith("reserved:")):
+                    continue
+                ob = polygon_bbox(o.polygon_in_board())
+                hard_bbs.append(ob)
+                near_o = {
+                    Edge.NORTH: ob[1], Edge.SOUTH: bh - ob[3],
+                    Edge.WEST: ob[0], Edge.EAST: bw - ob[2],
+                }[edge]
+                if near_o > _EDGE_MARGIN_MM + _REORDER_FLUSH_TOL_MM:
+                    continue  # not part of this edge's band
+                extent = {
+                    Edge.NORTH: ob[3], Edge.SOUTH: bh - ob[1],
+                    Edge.WEST: ob[2], Edge.EAST: bw - ob[0],
+                }[edge]
+                if horizontal_edge:
+                    band.append((ob[0], ob[2], extent))
+                else:
+                    band.append((ob[1], ob[3], extent))
+            candidates = [min(max(anchor_c, lo_lim), hi_lim)]
+            for hb in hard_bbs:
+                h_lo, h_hi = (hb[0], hb[2]) if horizontal_edge else (hb[1], hb[3])
+                candidates.append(h_lo - _BOARD_CLEARANCE_MM - half)
+                candidates.append(h_hi + _BOARD_CLEARANCE_MM + half)
+
+            # Fresh binding: mypy does not carry narrowing into nested
+            # function defaults (edge is Edge|None until resolved above).
+            edge_r: Edge = edge
+
+            def _rect_at(
+                c: float,
+                *,
+                _edge: Edge = edge_r,
+                _half: float = half,
+                _depth_g: float = depth_g,
+                _reserve: float = reserve,
+                _band: list[tuple[float, float, float]] = band,
+            ) -> tuple[float, float, float, float]:
+                depth = max(
+                    (ext for b_lo, b_hi, ext in _band
+                     if b_lo < c + _half + _BOARD_CLEARANCE_MM
+                     and b_hi > c - _half - _BOARD_CLEARANCE_MM),
+                    default=0.0,
+                )
+                near = max(
+                    max(depth, _reserve) + _BOARD_CLEARANCE_MM,
+                    _EDGE_MARGIN_MM,
+                )
+                if _edge is Edge.NORTH:
+                    return (c - _half, near, c + _half, near + _depth_g)
+                if _edge is Edge.SOUTH:
+                    return (c - _half, bh - near - _depth_g, c + _half, bh - near)
+                if _edge is Edge.WEST:
+                    return (near, c - _half, near + _depth_g, c + _half)
+                return (bw - near - _depth_g, c - _half, bw - near, c + _half)
+
+            best: tuple[float, float, float] | None = None  # cost, near, c
+            for c in candidates:
+                if c < lo_lim - 1e-6 or c > hi_lim + 1e-6:
+                    continue
+                rect = _rect_at(c)
+                if (rect[0] < _EDGE_MARGIN_MM - 1e-6
+                        or rect[1] < _EDGE_MARGIN_MM - 1e-6
+                        or rect[2] > bw - _EDGE_MARGIN_MM + 1e-6
+                        or rect[3] > bh - _EDGE_MARGIN_MM + 1e-6):
+                    continue
+                if any(
+                    rect[0] < hb[2] + _GROUP_CLEARANCE_MM
+                    and rect[2] > hb[0] - _GROUP_CLEARANCE_MM
+                    and rect[1] < hb[3] + _GROUP_CLEARANCE_MM
+                    and rect[3] > hb[1] - _GROUP_CLEARANCE_MM
+                    for hb in hard_bbs
+                ):
+                    continue
+                near = {
+                    Edge.NORTH: rect[1], Edge.SOUTH: bh - rect[3],
+                    Edge.WEST: rect[0], Edge.EAST: bw - rect[2],
+                }[edge]
+                # Cost is a SUM, not lexicographic: sitting behind the
+                # own terminal band (~10mm deep) is the IDEAL outcome,
+                # not a penalty to flee 80mm along the edge to avoid
+                # (Analog jumped to the empty east end; 2026-06-12).
+                cost = near + abs(c - anchor_c)
+                if best is None or (cost, c) < (best[0], best[2]):
+                    best = (cost, near, c)
+            if best is None:
+                _log.info(
+                    "assoc-facing: revert %s — no feasible %s band slot",
+                    pc.cell.name, edge,
+                )
+                out[i] = orig
+                continue
+            _cost, near, c = best
+            if horizontal_edge:
+                dxs = c - (gb[0] + gb[2]) / 2
+                dys = (near - gb[1] if edge is Edge.NORTH
+                       else (bh - near) - gb[3])
+            else:
+                dys = c - (gb[1] + gb[3]) / 2
+                dxs = (near - gb[0] if edge is Edge.WEST
+                       else (bw - near) - gb[2])
+            out[i] = out[i].moved_to(out[i].dx + dxs, out[i].dy + dys)
+            _log.info(
+                "assoc-facing: %s -> %s band (along=%.1f, near=%.1f,"
+                " anchor=%s)",
+                pc.cell.name, edge, c, near, anchor_name,
+            )
         # Clear reserved corners: a flush-snapped group keeps its packed
         # along-position, which may cover a hard-reserved mounting-hole
         # corner — slide it along the edge by the minimal amount
@@ -1393,6 +1699,38 @@ def _snap_pinned_groups(
                          if (rb[1] + rb[3]) / 2 < (gb[1] + gb[3]) / 2
                          else rb[1] - gb[3] - _BOARD_CLEARANCE_MM)
                 out[i] = out[i].moved_to(out[i].dx, out[i].dy + shift)
+        if pc.cell.name in assoc_facing_names:
+            # Crowded edge band (pushed past the far margin or still
+            # colliding with a pinned party): revert the snap — the
+            # GroupAssoc gap check still pulls the group toward its
+            # connector, just not flush against an edge it cannot fit.
+            gb = polygon_bbox(out[i].polygon_in_board())
+            off_board = (
+                gb[0] < _EDGE_MARGIN_MM - 1e-6
+                or gb[1] < _EDGE_MARGIN_MM - 1e-6
+                or gb[2] > bw - _EDGE_MARGIN_MM + 1e-6
+                or gb[3] > bh - _EDGE_MARGIN_MM + 1e-6
+            )
+            collides = any(
+                convex_polygons_overlap(
+                    out[i].polygon_in_board(), o.polygon_in_board()
+                )
+                for o in out
+                if o.cell.name != out[i].cell.name
+                and (o.cell.name in final_names
+                     or o.cell.name in snapped_edge
+                     or o.cell.name.startswith("reserved:"))
+            )
+            if off_board or collides:
+                _log.info(
+                    "assoc-facing: revert %s snap to %s (off_board=%s,"
+                    " collides=%s, bbox=%.1f,%.1f,%.1f,%.1f,"
+                    " board=%.1fx%.1f)",
+                    pc.cell.name, edge, off_board, collides,
+                    gb[0], gb[1], gb[2], gb[3], bw, bh,
+                )
+                out[i] = orig
+                continue
         snapped_edge[out[i].cell.name] = edge
         b = polygon_bbox(out[i].polygon_in_board())
         span = (b[2] - b[0]) if edge in (Edge.NORTH, Edge.SOUTH) else (b[3] - b[1])
@@ -1410,7 +1748,7 @@ def _snap_pinned_groups(
     return _place_conn_groups(
         out, movable, body_dirs or {}, preferred, bw, bh, pinned_names,
         assoc_partners or {},
-    )
+    ), set(snapped_edge)
 
 
 def _place_conn_groups(

@@ -106,6 +106,21 @@ FAB_CHECKLIST: tuple[PersonaCheck, ...] = (
 
 EE_CHECKLIST: tuple[PersonaCheck, ...] = (
     PersonaCheck(
+        check_id="ee_domain_zoning",
+        views=("2d",),
+        prompt=(
+            "Do voltage domains form contiguous zones with field "
+            "wiring at its own board edge? The 24V/relay-contact side "
+            "must hug the edge where its harness terminal sits — high "
+            "voltage must never have to cross the board interior, and "
+            "low-voltage digital lines must not run through the "
+            "relay/24V zone to reach a terminal. Ferrite-isolated "
+            "analog must be one contiguous region apart from the "
+            "digital section."
+        ),
+        severity=Severity.MAJOR,
+    ),
+    PersonaCheck(
         check_id="ee_decoupling",
         views=("2d",),
         prompt=(

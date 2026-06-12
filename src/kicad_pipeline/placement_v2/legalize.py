@@ -160,7 +160,10 @@ def legalize(
     residual = _residual_violations(cells, bw, bh, clearance_mm)
     if residual:
         raise LegalizationError(residual)
-    return FloorplanResult(placed=tuple(cells), board_width=bw, board_height=bh)
+    return FloorplanResult(
+        placed=tuple(cells), board_width=bw, board_height=bh,
+        pinned=plan.pinned,
+    )
 
 
 def _residual_violations(

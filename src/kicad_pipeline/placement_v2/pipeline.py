@@ -567,7 +567,7 @@ def run_placement_v2(
         pinned_groups = frozenset(
             f"group:{p.name}" for p in group_plans
             if p.edge_facing is not None or p.name.startswith("conn:")
-        ) | frozenset(o.cell.name for o in obstacles)
+        ) | frozenset(o.cell.name for o in obstacles) | frozenset(built.pinned)
         built = legalize(built, pinned=pinned_groups)
         # The board owner's method, made deterministic: reorder same-
         # edge connectors to remove avoidable ratsnest crossings (the
