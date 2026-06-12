@@ -281,7 +281,7 @@ def _make_en_debounce_cap() -> Component:
         lcsc="C49678",
         description="100nF EN debounce 0402",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="EN_DEB"),
+            Pin("1", "1", PinType.PASSIVE, net="EN"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -479,14 +479,11 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "3"),
                 NetConnection("R1", "2"),
                 NetConnection("SW2", "1"),
-            ),
-        ),
-        # --- Private EN debounce subnet: C5 <-> U1 EN ---
-        Net(
-            name="EN_DEB",
-            connections=(
+                # C5 debounce cap on the SAME node — a former "private
+                # subnet" split that diverged the schematic netlist
+                # from the PCB (KI-024); proximity comes from the v2
+                # decoupling/chain attachments, not net fiction.
                 NetConnection("C5", "1"),
-                NetConnection("U1", "3"),
             ),
         ),
         Net(

@@ -222,7 +222,7 @@ def _make_tvs_diode(ch: int) -> Component:
         lcsc="C118739",
         description=f"3.3V TVS protection SOD-323 — CH{ch}",
         pins=(
-            Pin("1", "A", PinType.PASSIVE, net=f"AIN{ch}_PROT"),
+            Pin("1", "A", PinType.PASSIVE, net=f"AIN{ch}_DIV"),
             Pin("2", "K", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -242,7 +242,7 @@ def _make_filter_cap(ch: int) -> Component:
         lcsc="C49678",
         description=f"100nF anti-aliasing filter 0402 — CH{ch}",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_PROT"),
+            Pin("1", "1", PinType.PASSIVE, net=f"AIN{ch}_DIV"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -358,18 +358,16 @@ def _channel_nets(ch: int) -> tuple[Net, ...]:
                 NetConnection(f"R{r_top}", "1"),
             ),
         ),
-        # Divider midpoint: R_top out -> R_bot in (shared divider node)
+        # Divider midpoint — ONE node: R_top out, R_bot in, clamp,
+        # filter, and the ADC input. This was previously split into a
+        # "private" _PROT subnet to coax placement; the split made the
+        # schematic and PCB netlists permanently disagree (KI-024) and
+        # the netlist lint now rejects shared-pin net splits. Proximity
+        # comes from the v2 compiler's chain/ADC-channel attachments.
         Net(
             name=f"AIN{ch}_DIV",
             connections=(
                 NetConnection(f"R{r_top}", "2"),
-                NetConnection(f"R{r_bot}", "1"),
-            ),
-        ),
-        # Private protection subnet: D{ch} + C_filt between divider and ADC
-        Net(
-            name=f"AIN{ch}_PROT",
-            connections=(
                 NetConnection(f"R{r_bot}", "1"),
                 NetConnection(f"D{ch}", "1"),
                 NetConnection(f"C{c_filt}", "1"),

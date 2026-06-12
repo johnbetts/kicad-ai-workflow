@@ -33,7 +33,6 @@
         "USB_DP",
         "USB_DM",
         "EN",
-        "EN_DEB",
         "BOOT",
         "UART_TX",
         "UART_RX",
@@ -502,7 +501,7 @@
           "name": "1",
           "pin_type": "passive",
           "function": null,
-          "net": "EN_DEB"
+          "net": "EN"
         },
         {
           "number": "2",
@@ -852,19 +851,10 @@
         {
           "ref": "SW2",
           "pin": "1"
-        }
-      ]
-    },
-    {
-      "name": "EN_DEB",
-      "connections": [
+        },
         {
           "ref": "C5",
           "pin": "1"
-        },
-        {
-          "ref": "U1",
-          "pin": "3"
         }
       ]
     },

@@ -148,6 +148,38 @@ def check_diode_polarity(
     return tuple(out)
 
 
+def check_duplicate_pin_nets(
+    requirements: ProjectRequirements,
+) -> tuple[Violation, ...]:
+    """One (ref, pin) must belong to exactly one net (CRITICAL).
+
+    A pin listed in two nets means one electrical node carries two
+    names: KiCad's netlister merges them through the shared pin while
+    the PCB builder assigns each name separately — the written
+    schematic and PCB then permanently disagree (KI-024 first cause;
+    EN/EN_DEB, XTAL1/XTAL1_C4, AINx_DIV/AINx_PROT in the trainers).
+    """
+    seen: dict[tuple[str, str], list[str]] = {}
+    for net in requirements.nets:
+        for conn in net.connections:
+            seen.setdefault((conn.ref, conn.pin), []).append(net.name)
+    out: list[Violation] = []
+    for (ref, pin), nets in sorted(seen.items()):
+        if len(nets) > 1:
+            out.append(Violation(
+                constraint=f"duplicate_pin_nets({ref}.{pin})",
+                refs=(ref,),
+                severity=Severity.CRITICAL,
+                measured=float(len(nets)), limit=1.0,
+                message=(
+                    f"{ref}.{pin} belongs to {len(nets)} nets "
+                    f"({', '.join(nets)}) — one node, two names: schematic "
+                    f"and PCB netlists will diverge; merge the nets"
+                ),
+            ))
+    return tuple(out)
+
+
 def lint_netlist(
     requirements: ProjectRequirements,
     footprints: Mapping[str, Footprint],
@@ -156,6 +188,7 @@ def lint_netlist(
     return (
         check_pin_pad_coverage(requirements, footprints)
         + check_diode_polarity(requirements)
+        + check_duplicate_pin_nets(requirements)
     )
 
 

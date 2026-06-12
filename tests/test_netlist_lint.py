@@ -114,3 +114,30 @@ class TestDiodePolarity:
 
     def test_led_anode_on_rail_is_fine(self) -> None:
         assert check_diode_polarity(self._tvs("+5V", "GND", value="GREEN LED")) == ()
+
+
+class TestDuplicatePinNets:
+    def test_pin_in_two_nets_is_critical(self) -> None:
+        from kicad_pipeline.evals.netlist_lint import check_duplicate_pin_nets
+
+        comp = Component(ref="U1", value="ic", footprint="fp", pins=(
+            Pin(number="3", name="EN", pin_type=PinType.INPUT),
+        ))
+        req = _req([comp], nets=(
+            Net(name="EN", connections=(NetConnection("U1", "3"),)),
+            Net(name="EN_DEB", connections=(NetConnection("U1", "3"),)),
+        ))
+        violations = check_duplicate_pin_nets(req)
+        assert len(violations) == 1
+        assert violations[0].severity is Severity.CRITICAL
+        assert "EN" in violations[0].message and "EN_DEB" in violations[0].message
+
+    def test_unique_membership_passes(self) -> None:
+        from kicad_pipeline.evals.netlist_lint import check_duplicate_pin_nets
+
+        comp = Component(ref="U1", value="ic", footprint="fp", pins=())
+        req = _req([comp], nets=(
+            Net(name="A", connections=(NetConnection("U1", "1"),)),
+            Net(name="B", connections=(NetConnection("U1", "2"),)),
+        ))
+        assert check_duplicate_pin_nets(req) == ()

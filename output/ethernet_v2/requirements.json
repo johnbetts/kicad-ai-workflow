@@ -41,8 +41,6 @@
         "RX-",
         "XTAL1",
         "XTAL2",
-        "XTAL1_C4",
-        "XTAL2_C5",
         "RSVD"
       ],
       "subcircuits": [
@@ -395,13 +393,6 @@
           "pin_type": "power_in",
           "function": "gnd",
           "net": "GND"
-        },
-        {
-          "number": "49",
-          "name": "PAD",
-          "pin_type": "power_in",
-          "function": "gnd",
-          "net": "GND"
         }
       ]
     },
@@ -514,7 +505,7 @@
           "name": "1",
           "pin_type": "passive",
           "function": null,
-          "net": "XTAL1_C4"
+          "net": "XTAL1"
         },
         {
           "number": "2",
@@ -538,7 +529,7 @@
           "name": "1",
           "pin_type": "passive",
           "function": null,
-          "net": "XTAL2_C5"
+          "net": "XTAL2"
         },
         {
           "number": "2",
@@ -642,15 +633,8 @@
           "net": "GND"
         },
         {
-          "number": "13",
-          "name": "SHIELD1",
-          "pin_type": "passive",
-          "function": null,
-          "net": "GND"
-        },
-        {
-          "number": "14",
-          "name": "SHIELD2",
+          "number": "SH",
+          "name": "SHIELD",
           "pin_type": "passive",
           "function": null,
           "net": "GND"
@@ -1018,10 +1002,6 @@
           "pin": "48"
         },
         {
-          "ref": "U1",
-          "pin": "49"
-        },
-        {
           "ref": "J1",
           "pin": "10"
         },
@@ -1031,11 +1011,7 @@
         },
         {
           "ref": "J1",
-          "pin": "13"
-        },
-        {
-          "ref": "J1",
-          "pin": "14"
+          "pin": "SH"
         }
       ]
     },
@@ -1187,6 +1163,10 @@
         {
           "ref": "Y1",
           "pin": "1"
+        },
+        {
+          "ref": "C4",
+          "pin": "1"
         }
       ]
     },
@@ -1197,28 +1177,6 @@
           "ref": "U1",
           "pin": "24"
         },
-        {
-          "ref": "Y1",
-          "pin": "2"
-        }
-      ]
-    },
-    {
-      "name": "XTAL1_C4",
-      "connections": [
-        {
-          "ref": "Y1",
-          "pin": "1"
-        },
-        {
-          "ref": "C4",
-          "pin": "1"
-        }
-      ]
-    },
-    {
-      "name": "XTAL2_C5",
-      "connections": [
         {
           "ref": "Y1",
           "pin": "2"

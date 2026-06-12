@@ -219,7 +219,6 @@ def _make_w5500() -> Component:
             Pin("46", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
             Pin("47", "VCC", PinType.POWER_IN, PinFunction.VCC, net="+3V3"),
             Pin("48", "GND", PinType.POWER_IN, PinFunction.GND, net="GND"),
-            Pin("49", "PAD", PinType.POWER_IN, PinFunction.GND, net="GND"),
         ),
     )
 
@@ -302,7 +301,7 @@ def _make_crystal_cap_1() -> Component:
         lcsc="C1804",
         description="22pF crystal load cap 0402",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="XTAL1_C4"),
+            Pin("1", "1", PinType.PASSIVE, net="XTAL1"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -320,7 +319,7 @@ def _make_crystal_cap_2() -> Component:
         lcsc="C1804",
         description="22pF crystal load cap 0402",
         pins=(
-            Pin("1", "1", PinType.PASSIVE, net="XTAL2_C5"),
+            Pin("1", "1", PinType.PASSIVE, net="XTAL2"),
             Pin("2", "2", PinType.PASSIVE, net="GND"),
         ),
     )
@@ -353,8 +352,7 @@ def _make_rj45() -> Component:
             Pin("10", "LED_G-", PinType.PASSIVE, net="GND"),
             Pin("11", "LED_Y+", PinType.PASSIVE, net="+3V3"),
             Pin("12", "LED_Y-", PinType.PASSIVE, net="GND"),
-            Pin("13", "SHIELD1", PinType.PASSIVE, net="GND"),
-            Pin("14", "SHIELD2", PinType.PASSIVE, net="GND"),
+            Pin("SH", "SHIELD", PinType.PASSIVE, net="GND"),
         ),
     )
 
@@ -536,11 +534,9 @@ def _build_nets() -> tuple[Net, ...]:
                 NetConnection("U1", "45"),
                 NetConnection("U1", "46"),
                 NetConnection("U1", "48"),
-                NetConnection("U1", "49"),  # exposed pad
                 NetConnection("J1", "10"),  # LED_G-
                 NetConnection("J1", "12"),  # LED_Y-
-                NetConnection("J1", "13"),  # SHIELD1
-                NetConnection("J1", "14"),  # SHIELD2
+                NetConnection("J1", "SH"),  # shield (both SH pads)
             ),
         ),
         Net(
@@ -620,26 +616,13 @@ def _build_nets() -> tuple[Net, ...]:
             connections=(
                 NetConnection("U1", "23"),
                 NetConnection("Y1", "1"),
+                NetConnection("C4", "1"),
             ),
         ),
         Net(
             name="XTAL2",
             connections=(
                 NetConnection("U1", "24"),
-                NetConnection("Y1", "2"),
-            ),
-        ),
-        # Private crystal load cap subnets
-        Net(
-            name="XTAL1_C4",
-            connections=(
-                NetConnection("Y1", "1"),
-                NetConnection("C4", "1"),
-            ),
-        ),
-        Net(
-            name="XTAL2_C5",
-            connections=(
                 NetConnection("Y1", "2"),
                 NetConnection("C5", "1"),
             ),

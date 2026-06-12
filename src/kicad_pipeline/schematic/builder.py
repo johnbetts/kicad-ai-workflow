@@ -65,7 +65,7 @@ from kicad_pipeline.schematic.placement import (
     layout_compact,
     layout_schematic,
 )
-from kicad_pipeline.schematic.wiring import route_net
+from kicad_pipeline.schematic.wiring import resolve_stub_collisions, route_net
 from kicad_pipeline.sexp.parser import parse_file
 from kicad_pipeline.sexp.writer import SExpNode, write_file
 
@@ -684,30 +684,49 @@ def _make_power_symbols_at_pins(
             gk: _group_key = (conn.ref, net.name, side)
             groups.setdefault(gk, []).append((conn.pin, pin_pos))
 
+    # Power nets sharing one (ref, side) MUST NOT consolidate: every
+    # net's bus line sits at the same depth, so two nets' buses overlap
+    # collinearly and KiCad merges them — and a deeper bus is no fix,
+    # because the outer net's pin stubs then CROSS the inner bus (a
+    # crossing also merges). The W5500's interleaved GND/VCC/AVDD pins
+    # merged into one blob this way (KI-024, ethernet trainer). On
+    # multi-net sides each pin gets its own symbol, with depth
+    # staggered PER NET so parallel stubs never share an endpoint.
+    nets_per_side: dict[tuple[str, str], list[str]] = {}
+    for (ref, net_name, side) in groups:
+        entry = nets_per_side.setdefault((ref, side), [])
+        if net_name not in entry:
+            entry.append(net_name)
+    for entry in nets_per_side.values():
+        entry.sort()
+
     for (_ref, net_name, side), pin_list in groups.items():
         lib_id = _POWER_LIB_IDS.get(net_name, f"power:{net_name}")
         is_gnd = net_name in _GND_NETS
-        dx, dy, rotation = _power_symbol_offset(side, stub, is_gnd)
+        side_nets = nets_per_side[(_ref, side)]
+        multi_net_side = len(side_nets) > 1
+        depth = stub + side_nets.index(net_name) * 2.54 if multi_net_side else stub
+        dx, dy, rotation = _power_symbol_offset(side, depth, is_gnd)
 
-        if len(pin_list) == 1:
-            _pin_num, pin_pos = pin_list[0]
-            sx, sy = pin_pos.x + dx, pin_pos.y + dy
-            wires.append(Wire(
-                start=pin_pos, end=Point(x=sx, y=sy),
-                stroke=Stroke(), uuid=_new_uuid(),
-            ))
-            pwr_idx += 1
-            symbols.append(PowerSymbol(
-                lib_id=lib_id,
-                position=Point(x=sx, y=sy),
-                ref=f"#PWR0{pwr_idx:02d}",
-                value=net_name,
-                rotation=rotation,
-                uuid=_new_uuid(),
-            ))
+        if multi_net_side or len(pin_list) == 1:
+            for _pin_num, pin_pos in pin_list:
+                sx, sy = pin_pos.x + dx, pin_pos.y + dy
+                wires.append(Wire(
+                    start=pin_pos, end=Point(x=sx, y=sy),
+                    stroke=Stroke(), uuid=_new_uuid(),
+                ))
+                pwr_idx += 1
+                symbols.append(PowerSymbol(
+                    lib_id=lib_id,
+                    position=Point(x=sx, y=sy),
+                    ref=f"#PWR0{pwr_idx:02d}",
+                    value=net_name,
+                    rotation=rotation,
+                    uuid=_new_uuid(),
+                ))
             continue
 
-        # Multiple pins — consolidate via bus wire
+        # Single power net on this side, multiple pins — consolidate.
         pwr_idx += 1
         _make_consolidated_power_bus(
             pin_list, side, dx, dy, rotation, lib_id, net_name,
@@ -1001,6 +1020,24 @@ def build_schematic(
         requirements, pin_positions, pin_sides,
         all_wires, all_global_labels, all_junctions,
     )
+    # KI-024: dense placement can land one net's stub on another net's
+    # stub/label/pin — KiCad merges them and the written schematic
+    # diverges from the PCB netlist. Resolve by shortening offenders.
+    pin_nets: dict[tuple[float, float], str] = {}
+    for net in requirements.nets:
+        for conn in net.connections:
+            pt = pin_positions.get((conn.ref, conn.pin))
+            if pt is not None:
+                pin_nets[(round(pt.x, 3), round(pt.y, 3))] = net.name
+    unresolved = resolve_stub_collisions(
+        all_wires, all_global_labels, all_local_labels,
+        power_syms, pin_nets,
+    )
+    if unresolved:
+        log.warning(
+            "build_schematic: %d wire stubs still touch foreign nets — "
+            "the written-file sync gate will fail this board", unresolved,
+        )
     no_connects = _make_no_connect_markers(requirements, pin_positions)
 
     log.info(
