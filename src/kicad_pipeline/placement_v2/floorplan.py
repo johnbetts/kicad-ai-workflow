@@ -470,12 +470,31 @@ def _sequence_strips(
         )
         base_other = cursor_other + strip_thickness / 2
         cursor_other += strip_thickness + 2 * clearance
+        # Align by the SEQUENCE MEMBER's centroid, not the cell bbox
+        # center: cells have different internal support shapes, so bbox
+        # alignment left K1 2.7mm off the K2-K4 line (nl-s-3c,
+        # 2026-06-11) — the members must form a true 1xN line at
+        # uniform member pitch. The first cell's bbox anchors the row
+        # line and start; every member then lands exactly on it.
+        member_anchor: tuple[float, float] | None = None
         for i, cell in enumerate(ref_cells):
             x1, y1, x2, y2 = _center_offset(cell, strip_rot)
-            cx = pitch * i - (x1 + x2) / 2
-            cy = base_other - (y1 + y2) / 2
-            if not horizontal:
-                cx, cy = base_other - (x1 + x2) / 2, pitch * i - (y1 + y2) / 2
+            member = next(m for m in cell.members if m.ref == seq.refs[i])
+            mpt = transform_polygon(
+                (Point(member.x, member.y),), 0.0, 0.0, -float(strip_rot),
+            )[0]
+            if member_anchor is None:
+                cx = pitch * i - (x1 + x2) / 2
+                cy = base_other - (y1 + y2) / 2
+                if not horizontal:
+                    cx, cy = base_other - (x1 + x2) / 2, pitch * i - (y1 + y2) / 2
+                member_anchor = (mpt.x + cx, mpt.y + cy)
+            elif horizontal:
+                cx = member_anchor[0] + pitch * i - mpt.x
+                cy = member_anchor[1] - mpt.y
+            else:
+                cx = member_anchor[0] - mpt.x
+                cy = member_anchor[1] + pitch * i - mpt.y
             placed.append(PlacedCell(cell, cx, cy, strip_rot))
             used.add(cell.name)
     return placed, used, facing
@@ -796,6 +815,76 @@ def classify_cell_edge(
     return min(candidates, key=lambda e: (dists[e], e.value))
 
 
+def count_assoc_violations(
+    positions: Mapping[str, tuple[float, float, float]],
+    footprints: Mapping[str, Footprint],
+    assocs: tuple[GroupAssoc, ...],
+    board_width: float,
+    board_height: float,
+) -> int:
+    """How many GroupAssocs the given positions violate.
+
+    Mirrors Gate A's check_group_assocs exactly: the axis comes from
+    the connector's nearest edge measured by COURTYARD bbox (a deep-
+    bodied RJ45 flush north has its centroid nearer the east edge), and
+    the connector's courtyard along-INTERVAL must come within tolerance
+    of the partner-centroid hull.
+    """
+    count = 0
+    for assoc in assocs:
+        conn = positions.get(assoc.ref)
+        fp = footprints.get(assoc.ref)
+        if conn is None or fp is None:
+            continue
+        cb = polygon_bbox(courtyard_in_frame(fp, conn[0], conn[1], conn[2]))
+        dists = {
+            Edge.WEST: cb[0], Edge.EAST: board_width - cb[2],
+            Edge.NORTH: cb[1], Edge.SOUTH: board_height - cb[3],
+        }
+        nearest = min(sorted(Edge, key=lambda e: e.value), key=lambda e: dists[e])
+        horizontal = nearest in (Edge.NORTH, Edge.SOUTH)
+        vals = [
+            positions[r][0] if horizontal else positions[r][1]
+            for r in assoc.partner_refs if r in positions
+        ]
+        if not vals:
+            continue
+        conn_int = (cb[0], cb[2]) if horizontal else (cb[1], cb[3])
+        gap = max(0.0, min(vals) - conn_int[1], conn_int[0] - max(vals))
+        if gap > assoc.tolerance_mm:
+            count += 1
+    return count
+
+
+def plan_score(
+    plan: Floorplan,
+    footprints: Mapping[str, Footprint],
+    constraints: ConstraintSet,
+) -> tuple[int, float]:
+    """(Gate A countable violations, ratsnest length) for a whole plan.
+
+    The same objective :func:`reorder_edge_connectors` descends on;
+    used to pick between alternative plans (forward vs reversed array
+    strips) by what Gate A will actually count.
+    """
+    from kicad_pipeline.placement_v2.crossings import crossings_and_length
+
+    positions = {
+        m.ref: (m.x, m.y, m.rotation_deg)
+        for pc in plan.placed for m in pc.members_in_board()
+    }
+    crossings, length = crossings_and_length(
+        positions, footprints, constraints.fanouts, constraints.bundles,
+    )
+    return (
+        crossings + count_assoc_violations(
+            positions, footprints, constraints.group_assocs,
+            plan.board_width, plan.board_height,
+        ),
+        length,
+    )
+
+
 def _forefield_clear(
     moved: PlacedCell,
     edge: Edge,
@@ -899,42 +988,6 @@ def reorder_edge_connectors(
             None,
         )
 
-    def _assoc_violations(pos_map: dict[str, tuple[float, float, float]]) -> int:
-        """How many GroupAssocs the current positions violate.
-
-        Mirrors Gate A's check_group_assocs exactly: the axis comes
-        from the connector's nearest edge measured by COURTYARD bbox
-        (a deep-bodied RJ45 flush north has its centroid nearer the
-        east edge), the connector's courtyard along-INTERVAL must come
-        within tolerance of the partner-centroid hull.
-        """
-        count = 0
-        for assoc in constraints.group_assocs:
-            conn = pos_map.get(assoc.ref)
-            fp = footprints.get(assoc.ref)
-            if conn is None or fp is None:
-                continue
-            cb = polygon_bbox(courtyard_in_frame(fp, conn[0], conn[1], conn[2]))
-            dists = {
-                Edge.WEST: cb[0], Edge.EAST: bw - cb[2],
-                Edge.NORTH: cb[1], Edge.SOUTH: bh - cb[3],
-            }
-            nearest = min(sorted(Edge, key=lambda e: e.value), key=lambda e: dists[e])
-            horizontal = nearest in (Edge.NORTH, Edge.SOUTH)
-            vals = [
-                pos_map[r][0] if horizontal else pos_map[r][1]
-                for r in assoc.partner_refs if r in pos_map
-            ]
-            if not vals:
-                continue
-            conn_int = (cb[0], cb[2]) if horizontal else (cb[1], cb[3])
-            gap = max(
-                0.0, min(vals) - conn_int[1], conn_int[0] - max(vals),
-            )
-            if gap > assoc.tolerance_mm:
-                count += 1
-        return count
-
     def _score() -> tuple[int, float]:
         """(Gate A countable violations, ratsnest length) — both kinds
         of MAJOR violation weigh the same, exactly as Gate A counts."""
@@ -942,7 +995,12 @@ def reorder_edge_connectors(
         crossings, length = crossings_and_length(
             pos_map, footprints, constraints.fanouts, constraints.bundles,
         )
-        return (crossings + _assoc_violations(pos_map), length)
+        return (
+            crossings + count_assoc_violations(
+                pos_map, footprints, constraints.group_assocs, bw, bh,
+            ),
+            length,
+        )
 
     def _edge_of(pc: PlacedCell) -> Edge | None:
         explicit = next(

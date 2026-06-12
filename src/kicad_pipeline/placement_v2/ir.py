@@ -94,12 +94,16 @@ class SequenceAlong:
     Verified by checking the relevant coordinate of each ref is strictly
     monotonic in sequence order. ``pitch_mm`` of ``None`` means spacing
     is free; a value pins members to a fixed pitch (relay/ADC arrays).
+    ``aligned`` additionally requires the members' CROSS-axis centroids
+    to form a line (a relay bank is a true 1xN row, not just ordered —
+    K1 sat 2.7mm off the K2-K4 line, nl-s-3c 2026-06-11).
     """
 
     axis: Axis
     refs: tuple[str, ...]
     pitch_mm: float | None = None
     max_span_mm: float | None = None  # whole chain must fit in this span
+    aligned: bool = False
     source: ConstraintSource = ConstraintSource.NETLIST
 
 

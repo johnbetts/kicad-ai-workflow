@@ -432,7 +432,9 @@ def _array_sequences(idx: _Index) -> list[SequenceAlong]:
         for key in sorted(kinds):
             refs = sorted(kinds[key], key=_ref_sort_key)
             if len(refs) >= minimum:
-                out.append(SequenceAlong(axis=Axis.HORIZONTAL, refs=tuple(refs)))
+                out.append(SequenceAlong(
+                    axis=Axis.HORIZONTAL, refs=tuple(refs), aligned=True,
+                ))
     return out
 
 

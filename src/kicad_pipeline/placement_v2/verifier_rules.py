@@ -43,6 +43,8 @@ if TYPE_CHECKING:
 
 #: Tolerance when checking a SequenceAlong's fixed pitch.
 PITCH_TOL_MM = 0.1
+#: Cross-axis tolerance for ``aligned`` sequences (true 1xN rows).
+ALIGN_TOL_MM = 0.5
 #: Tolerance when matching a derived keepout bbox to a board keepout zone.
 KEEPOUT_BBOX_TOL_MM = 1.0
 
@@ -223,6 +225,7 @@ def check_sequences(
     out: list[Violation] = []
     for seq in sequences:
         coords: list[float] = []
+        cross: list[float] = []
         missing = False
         for ref in seq.refs:
             fp = pcb.get_footprint(ref)
@@ -232,8 +235,17 @@ def check_sequences(
                 continue
             cx, cy = origin_to_centroid(fp, fp.position.x, fp.position.y, fp.rotation)
             coords.append(cx if seq.axis is Axis.HORIZONTAL else cy)
+            cross.append(cy if seq.axis is Axis.HORIZONTAL else cx)
         if missing or len(coords) < 2:
             continue
+        if seq.aligned:
+            spread = max(cross) - min(cross)
+            if spread > ALIGN_TOL_MM:
+                out.append(Violation(
+                    repr(seq), seq.refs, Severity.MAJOR, spread, ALIGN_TOL_MM,
+                    f"refs {seq.refs} deviate {spread:.3f}mm from a straight "
+                    f"row across the {seq.axis.value} axis",
+                ))
         deltas = [b - a for a, b in pairwise(coords)]
         increasing = all(d > _EPS for d in deltas)
         decreasing = all(d < -_EPS for d in deltas)

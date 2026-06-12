@@ -40,8 +40,10 @@ from kicad_pipeline.placement_v2.certify import (
 from kicad_pipeline.placement_v2.compile import compile_constraints
 from kicad_pipeline.placement_v2.floorplan import (
     Floorplan,
+    GroupPlan,
     pack_board,
     pack_group,
+    plan_score,
     reorder_edge_connectors,
 )
 from kicad_pipeline.placement_v2.footprint_geom import (
@@ -49,7 +51,12 @@ from kicad_pipeline.placement_v2.footprint_geom import (
     pad_position_in_frame,
 )
 from kicad_pipeline.placement_v2.generators import CellGenerationError, generate_cell
-from kicad_pipeline.placement_v2.ir import PadRef, Severity, Violation
+from kicad_pipeline.placement_v2.ir import (
+    PadRef,
+    SequenceAlong,
+    Severity,
+    Violation,
+)
 from kicad_pipeline.placement_v2.ledger import (
     BuildLedger,
     StageRecord,
@@ -501,19 +508,23 @@ def run_placement_v2(
         ep.ref: ep.opening for ep in constraints.edge_pins
         if ep.opening is not None
     }
-    plans = tuple(
-        pack_group(
-            gname,
-            tuple(sorted(gcells, key=lambda c: c.name)),
-            sequences=constraints.sequences,
-            edge_pinned=edge_pinned,
-            openings=openings,
+
+    def _pack_groups(sequences: tuple[SequenceAlong, ...]) -> tuple[GroupPlan, ...]:
+        return tuple(
+            pack_group(
+                gname,
+                tuple(sorted(gcells, key=lambda c: c.name)),
+                sequences=sequences,
+                edge_pinned=edge_pinned,
+                openings=openings,
+            )
+            for gname, gcells in sorted(by_group.items())
+        ) + tuple(
+            pack_group(f"conn:{ref}", (cell,))
+            for ref, cell in sorted(lifted, key=lambda rc: rc[0])
         )
-        for gname, gcells in sorted(by_group.items())
-    ) + tuple(
-        pack_group(f"conn:{ref}", (cell,))
-        for ref, cell in sorted(lifted, key=lambda rc: rc[0])
-    )
+
+    plans = _pack_groups(constraints.sequences)
     # Connector opening direction: lets the edge snap ROTATE each
     # lifted cell so its opening faces outward (Gate A face_out).
     # The CALIBRATED part-rule opening wins; the courtyard-bulge proxy
@@ -536,10 +547,10 @@ def run_placement_v2(
         c, s = math.cos(rad), math.sin(rad)
         body_dirs[f"group:conn:{ref}"] = (ox * c - oy * s, ox * s + oy * c)
     obstacles = tuple(_obstacle_cell(n, poly) for n, poly in reserved_zones)
-    plan = None
-    try:
-        plan = pack_board(
-            plans, constraints,
+
+    def _build_plan(group_plans: tuple[GroupPlan, ...]) -> Floorplan:
+        built = pack_board(
+            group_plans, constraints,
             board_width=board_width_mm, board_height=board_height_mm,
             obstacles=obstacles,
             body_dirs=body_dirs,
@@ -548,14 +559,44 @@ def run_placement_v2(
         # overlaps push the INTERIOR groups, never a connector off
         # its edge.
         pinned_groups = frozenset(
-            f"group:{p.name}" for p in plans
+            f"group:{p.name}" for p in group_plans
             if p.edge_facing is not None or p.name.startswith("conn:")
         ) | frozenset(o.cell.name for o in obstacles)
-        plan = legalize(plan, pinned=pinned_groups)
+        built = legalize(built, pinned=pinned_groups)
         # The board owner's method, made deterministic: reorder same-
         # edge connectors to remove avoidable ratsnest crossings (the
         # same counter Gate A scores). Council first-action 2026-06-11.
-        plan = reorder_edge_connectors(plan, footprints, constraints)
+        return reorder_edge_connectors(built, footprints, constraints)
+
+    plan = None
+    try:
+        plan = _build_plan(plans)
+        # An ALIGNED array's ref order is solver-chosen (identical
+        # parts, ref-sort is arbitrary) and Gate A accepts monotonic in
+        # EITHER direction — so the REVERSED row is a legal second
+        # candidate. It is the fix when a shared terminal's fixed pin
+        # order runs opposite the row (J1 at rotation 180 reads
+        # FUEL..PREHEAT while K1-K4 read PREHEAT..FUEL — every attach
+        # line crossed; nl-s-3c 2026-06-11). Both variants are built
+        # and the better plan by Gate A countable violations wins.
+        reversed_seqs = tuple(
+            SequenceAlong(
+                axis=s.axis, refs=tuple(reversed(s.refs)),
+                pitch_mm=s.pitch_mm, max_span_mm=s.max_span_mm,
+                aligned=s.aligned, source=s.source,
+            ) if s.aligned and len(s.refs) >= 2 else s
+            for s in constraints.sequences
+        )
+        if reversed_seqs != constraints.sequences:
+            try:
+                plan_rev = _build_plan(_pack_groups(reversed_seqs))
+            except Exception:
+                plan_rev = None
+            if plan_rev is not None and plan_score(
+                plan_rev, footprints, constraints,
+            ) < plan_score(plan, footprints, constraints):
+                _log.info("v2: reversed array-strip variant wins")
+                plan = plan_rev
     except LegalizationError as exc:
         log_.add("floorplan", False, ("pack_board", "legalize"),
                  exc.violations, req_hash, "")
