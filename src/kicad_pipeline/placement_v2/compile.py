@@ -32,6 +32,7 @@ from kicad_pipeline.placement_v2.ir import (
     ConstraintSource,
     EdgePin,
     FanoutLine,
+    GroupAssoc,
     IsolationGap,
     PadRef,
     PinAttach,
@@ -435,6 +436,59 @@ def _array_sequences(idx: _Index) -> list[SequenceAlong]:
     return out
 
 
+def _is_connector(comp: Component) -> bool:
+    fp = comp.footprint.lower()
+    return ref_alpha_prefix(comp.ref) == "J" or any(
+        t in fp for t in _CONNECTOR_FP_TOKENS
+    )
+
+
+def _connector_group_assocs(idx: _Index) -> list[GroupAssoc]:
+    """Connector -> parent FeatureBlock when its signal partners agree.
+
+    The connector-as-subgroup directive (board owner, 2026-06-11
+    evening addendum): an edge connector whose SIGNAL nets terminate
+    overwhelmingly in ONE FeatureBlock is that group's edge subgroup
+    (J14's SPI/TFT nets all end at U3 -> MCU). Majority means strictly
+    more than half of the signal-net partner connections; power and
+    ground nets carry no ownership. The connector itself does not vote
+    (J14 lives in its own 'Display' block; its partners decide).
+    """
+    out: list[GroupAssoc] = []
+    for comp in idx.components:
+        if not _is_connector(comp):
+            continue
+        votes: dict[str, list[str]] = {}
+        total = 0
+        for net in idx.nets:
+            if not idx.is_signal_net(net.name):
+                continue
+            pins_here = [c for c in net.connections if c.ref == comp.ref]
+            if not pins_here:
+                continue
+            for conn in net.connections:
+                if conn.ref == comp.ref:
+                    continue
+                block = idx.feature_of.get(conn.ref)
+                if block is None:
+                    continue
+                total += 1
+                votes.setdefault(block, []).append(conn.ref)
+        if not votes:
+            continue
+        block, partners = max(
+            votes.items(), key=lambda kv: (len(kv[1]), kv[0]),
+        )
+        if len(partners) * 2 <= total:
+            continue  # no strict majority: ambiguous, compile nothing
+        out.append(GroupAssoc(
+            ref=comp.ref,
+            group=block,
+            partner_refs=tuple(sorted(set(partners), key=_ref_sort_key)),
+        ))
+    return out
+
+
 def _connector_edge_pins(idx: _Index) -> list[EdgePin]:
     """Every connector (J* ref or connector-family footprint) pins to an edge."""
     out: list[EdgePin] = []
@@ -669,11 +723,12 @@ def compile_constraints(
         isolation=isolation,
         bundles=tuple(_attach_bundles(idx)),
         fanouts=tuple(_connector_fanouts(idx)),
+        group_assocs=tuple(_connector_group_assocs(idx)),
         contain=BoardContain(margin_mm=_BOARD_MARGIN_MM, source=ConstraintSource.NETLIST),
     )
     logger.info(
         "compiled %d constraints (%d attach, %d seq, %d edge, %d keepout, "
-        "%d isolation, %d bundle, %d fanout)",
+        "%d isolation, %d bundle, %d fanout, %d assoc)",
         result.count(),
         len(result.pin_attach),
         len(result.sequences),
@@ -682,5 +737,6 @@ def compile_constraints(
         len(result.isolation),
         len(result.bundles),
         len(result.fanouts),
+        len(result.group_assocs),
     )
     return result

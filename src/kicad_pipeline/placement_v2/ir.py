@@ -172,6 +172,27 @@ class ConnectorFanout:
 
 
 @dataclass(frozen=True)
+class GroupAssoc:
+    """An edge connector functionally owned by one FeatureBlock.
+
+    Compiled when the majority of the connector's SIGNAL-net partners
+    live in a single FeatureBlock (J14's nine SPI/TFT nets all end at
+    U3 -> the MCU block). The connector is that group's EDGE SUBGROUP:
+    it must claim the edge SEGMENT adjacent to the parent group's
+    placement — group first, connector second (board owner directive,
+    2026-06-11 evening addendum). Verified at Gate A by projecting the
+    parent hull onto the connector's edge axis: the connector centroid
+    must fall inside the projection interval ± ``tolerance_mm``.
+    """
+
+    ref: str  # the connector ("J14")
+    group: str  # parent FeatureBlock name ("MCU")
+    partner_refs: tuple[str, ...]  # majority signal-net partners ("U3", ...)
+    tolerance_mm: float = 15.0
+    source: ConstraintSource = ConstraintSource.NETLIST
+
+
+@dataclass(frozen=True)
 class CellKeepout:
     """A keepout region owned by a component, in CELL-LOCAL frame.
 
@@ -232,6 +253,7 @@ class ConstraintSet:
     isolation: tuple[IsolationGap, ...] = ()
     bundles: tuple[AttachBundle, ...] = ()
     fanouts: tuple[ConnectorFanout, ...] = ()
+    group_assocs: tuple[GroupAssoc, ...] = ()
     contain: BoardContain = field(default_factory=BoardContain)
 
     def for_refs(self, refs: frozenset[str]) -> ConstraintSet:
@@ -256,6 +278,7 @@ class ConstraintSet:
                 b for b in self.bundles if b.ref_a in refs and b.ref_b in refs
             ),
             fanouts=(),  # board-level: candidates span the whole netlist
+            group_assocs=(),  # board-level: parent hull spans other cells
             contain=self.contain,
         )
 
@@ -274,6 +297,7 @@ class ConstraintSet:
             isolation=self.isolation + other.isolation,
             bundles=self.bundles + other.bundles,
             fanouts=self.fanouts + other.fanouts,
+            group_assocs=self.group_assocs + other.group_assocs,
             contain=contain,
         )
 
@@ -287,5 +311,6 @@ class ConstraintSet:
             + len(self.isolation)
             + len(self.bundles)
             + len(self.fanouts)
+            + len(self.group_assocs)
             + 1
         )

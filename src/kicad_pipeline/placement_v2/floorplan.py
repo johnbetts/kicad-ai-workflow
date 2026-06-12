@@ -38,7 +38,12 @@ if TYPE_CHECKING:
 
     from kicad_pipeline.models.pcb import Footprint
     from kicad_pipeline.placement_v2.cells import CardinalRotation, Cell
-    from kicad_pipeline.placement_v2.ir import ConstraintSet, Polygon, SequenceAlong
+    from kicad_pipeline.placement_v2.ir import (
+        ConstraintSet,
+        GroupAssoc,
+        Polygon,
+        SequenceAlong,
+    )
 
 _log = logging.getLogger(__name__)
 _EPS = 1e-9
@@ -724,9 +729,16 @@ def pack_board(
         f"group:{g.name}": g.edge_facing
         for g in groups if g.edge_facing is not None
     }
+    # Connector-as-subgroup: a connector whose signal partners live in
+    # one FeatureBlock targets the edge segment ADJACENT to those
+    # partners — group first, connector second (2026-06-11 addendum).
+    assoc_partners: dict[str, tuple[str, ...]] = {}
+    for assoc in constraints.group_assocs:
+        assoc_partners[f"group:conn:{assoc.ref}"] = assoc.partner_refs
     placed = _snap_pinned_groups(
         placed, edge_pins, facing_by_name, bw, bh, body_dirs or {},
         final_names=frozenset(f"group:{n}" for n in locked_names),
+        assoc_partners=assoc_partners,
     )
     return Floorplan(placed=tuple(placed), board_width=bw, board_height=bh)
 
@@ -739,6 +751,8 @@ _REORDER_MAX_CELLS = 6
 _REORDER_SLIDE_STEP_MM = 4.0
 #: Reorder rounds cap; the loop exits early once a round commits nothing.
 _REORDER_MAX_ROUNDS = 4
+#: Fine step when repairing a connector into its parent group's segment.
+_ASSOC_REPAIR_STEP_MM = 1.0
 
 
 def classify_cell_edge(
@@ -835,18 +849,25 @@ def reorder_edge_connectors(
     footprints: Mapping[str, Footprint],
     constraints: ConstraintSet,
 ) -> Floorplan:
-    """Reorder same-edge connector cells to minimize ratsnest crossings.
+    """Reorder same-edge connector cells to minimize Gate A violations.
 
     The board owner's method, made deterministic (council 2026-06-11):
     "look at the lines and see what cross is avoidable by moving
-    components." For each edge with 2+ flush connector cells, every
-    permutation within their original along-extent is tried; a LONE
-    connector instead SLIDES along its whole edge toward its targets
-    ("J14 is more logical closer to U3"). Objective is lexicographic
-    (avoidable crossings, total ratsnest length) — the SAME counter
-    Gate A scores, with length as the closer-is-better tiebreak.
-    Bounded: never new edges, never interior cells; any move that would
-    collide with another cell is discarded.
+    components." For each edge with 2+ flush connector cells, ordered
+    layouts (uniform spread, packed to either end, over the original
+    extent AND the full edge) are tried for every permutation; a LONE
+    connector instead SLIDES along its whole edge. A fine-step REPAIR
+    pass then pulls associated connectors toward their parent group's
+    segment where a whole-layout move cannot (ethernet J1: 3.1mm short
+    while every layout jump collided with the PHY cluster).
+
+    Objective is lexicographic ``(violations, length)`` where
+    violations = avoidable crossings + GroupAssoc misses — the SAME
+    counts Gate A scores, weighted equally because Gate A weighs them
+    equally: an assoc-first objective once traded 10 new crossings for
+    8 assoc fixes and made the board strictly worse (nl-s-3c,
+    2026-06-11). Bounded: never new edges, never interior cells; any
+    move that would collide or block a connector forefield is discarded.
     """
     from itertools import permutations
 
@@ -865,15 +886,63 @@ def reorder_edge_connectors(
                 out[m.ref] = (m.x, m.y, m.rotation_deg)
         return out
 
-    def _score() -> tuple[int, float]:
-        return crossings_and_length(
-            _positions(), footprints, constraints.fanouts, constraints.bundles,
-        )
-
     explicit_edges = {
         ep.ref: ep.edge for ep in constraints.edge_pins if ep.edge is not None
     }
     pinned_member_refs = frozenset(ep.ref for ep in constraints.edge_pins)
+    assoc_by_ref = {a.ref: a for a in constraints.group_assocs}
+
+    def _cell_assoc(pc: PlacedCell) -> GroupAssoc | None:
+        return next(
+            (assoc_by_ref[r] for r in sorted(pc.cell.refs)
+             if r in assoc_by_ref),
+            None,
+        )
+
+    def _assoc_violations(pos_map: dict[str, tuple[float, float, float]]) -> int:
+        """How many GroupAssocs the current positions violate.
+
+        Mirrors Gate A's check_group_assocs exactly: the axis comes
+        from the connector's nearest edge measured by COURTYARD bbox
+        (a deep-bodied RJ45 flush north has its centroid nearer the
+        east edge), the connector's courtyard along-INTERVAL must come
+        within tolerance of the partner-centroid hull.
+        """
+        count = 0
+        for assoc in constraints.group_assocs:
+            conn = pos_map.get(assoc.ref)
+            fp = footprints.get(assoc.ref)
+            if conn is None or fp is None:
+                continue
+            cb = polygon_bbox(courtyard_in_frame(fp, conn[0], conn[1], conn[2]))
+            dists = {
+                Edge.WEST: cb[0], Edge.EAST: bw - cb[2],
+                Edge.NORTH: cb[1], Edge.SOUTH: bh - cb[3],
+            }
+            nearest = min(sorted(Edge, key=lambda e: e.value), key=lambda e: dists[e])
+            horizontal = nearest in (Edge.NORTH, Edge.SOUTH)
+            vals = [
+                pos_map[r][0] if horizontal else pos_map[r][1]
+                for r in assoc.partner_refs if r in pos_map
+            ]
+            if not vals:
+                continue
+            conn_int = (cb[0], cb[2]) if horizontal else (cb[1], cb[3])
+            gap = max(
+                0.0, min(vals) - conn_int[1], conn_int[0] - max(vals),
+            )
+            if gap > assoc.tolerance_mm:
+                count += 1
+        return count
+
+    def _score() -> tuple[int, float]:
+        """(Gate A countable violations, ratsnest length) — both kinds
+        of MAJOR violation weigh the same, exactly as Gate A counts."""
+        pos_map = _positions()
+        crossings, length = crossings_and_length(
+            pos_map, footprints, constraints.fanouts, constraints.bundles,
+        )
+        return (crossings + _assoc_violations(pos_map), length)
 
     def _edge_of(pc: PlacedCell) -> Edge | None:
         explicit = next(
@@ -885,6 +954,29 @@ def reorder_edge_connectors(
             polygon_bbox(pc.polygon_in_board()), bw, bh,
             explicit_edge=explicit,
         )
+
+    def _member_courts_except(skip: int) -> list[Polygon]:
+        out: list[Polygon] = []
+        for j in range(len(cells)):
+            if j == skip:
+                continue
+            if cells[j].cell.kind == "reserved":
+                out.append(cells[j].polygon_in_board())
+                continue
+            for m in cells[j].members_in_board():
+                fp_m = footprints.get(m.ref)
+                if fp_m is not None:
+                    out.append(
+                        courtyard_in_frame(fp_m, m.x, m.y, m.rotation_deg)
+                    )
+        return out
+
+    def _cell_courts(pc: PlacedCell) -> list[Polygon]:
+        return [
+            courtyard_in_frame(footprints[m.ref], m.x, m.y, m.rotation_deg)
+            for m in pc.members_in_board()
+            if m.ref in footprints
+        ] or [pc.polygon_in_board()]
 
     by_edge: dict[Edge, list[int]] = {}
     for i, pc in enumerate(cells):
@@ -918,16 +1010,7 @@ def reorder_edge_connectors(
               # MEMBER-level collision, not hull/bbox: the convex hull of
               # a concave group covers board area no part touches, which
               # blocked the J14 slide toward U3 through an empty corridor.
-              other_courts: list[Polygon] = []
-              for j in range(len(cells)):
-                  if j == i:
-                      continue
-                  for m in cells[j].members_in_board():
-                      fp_m = footprints.get(m.ref)
-                      if fp_m is not None:
-                          other_courts.append(
-                              courtyard_in_frame(fp_m, m.x, m.y, m.rotation_deg)
-                          )
+              other_courts = _member_courts_except(i)
               best_slide: PlacedCell | None = None
               pos = _EDGE_MARGIN_MM
               while pos <= limit - _EDGE_MARGIN_MM - span + _EPS:
@@ -939,16 +1022,9 @@ def reorder_edge_connectors(
                       moved = original_pc.moved_to(
                           original_pc.dx, original_pc.dy + (pos - b0[1]),
                       )
-                  moved_courts = [
-                      courtyard_in_frame(
-                          footprints[m.ref], m.x, m.y, m.rotation_deg,
-                      )
-                      for m in moved.members_in_board()
-                      if m.ref in footprints
-                  ]
                   if not any(
                       convex_polygons_overlap(mc, oc, clearance_mm=_GROUP_CLEARANCE_MM)
-                      for mc in moved_courts for oc in other_courts
+                      for mc in _cell_courts(moved) for oc in other_courts
                   ) and _forefield_clear(
                       moved, edge, bw, bh, pinned_member_refs,
                       footprints, other_courts,
@@ -991,19 +1067,43 @@ def reorder_edge_connectors(
           full = (_EDGE_MARGIN_MM, limit2 - _EDGE_MARGIN_MM)
           if full[1] - full[0] > union_hi - union_lo + 1.0:
               unions.append(full)
-          other_polys2 = [
-              cells[j].polygon_in_board()
-              for j in range(len(cells)) if j not in idxs
-          ]
+          # MEMBER-level collision, matching the slide branch: a group
+          # hull is a convex over-approximation that vetoes trials whose
+          # actual parts are clear (the Ethernet group hull blocked J1
+          # from reaching its parent segment). Reserved zones have no
+          # real members and keep their hulls.
+          other_polys2: list[Polygon] = []
+          for j in range(len(cells)):
+              if j in idxs:
+                  continue
+              if cells[j].cell.kind == "reserved":
+                  other_polys2.append(cells[j].polygon_in_board())
+                  continue
+              for m in cells[j].members_in_board():
+                  fp_m = footprints.get(m.ref)
+                  if fp_m is not None:
+                      other_polys2.append(
+                          courtyard_in_frame(fp_m, m.x, m.y, m.rotation_deg)
+                      )
           original = {i: cells[i] for i in idxs}
           best_cells: dict[int, PlacedCell] | None = None
+          # Layout families per union: UNIFORM gap (spread), PACKED-LO
+          # and PACKED-HI (bunched toward one end). Uniform alone could
+          # not put two connectors both near their parent group's end
+          # of the edge (mcu_core J1+J2 vs the west-side MCU cluster).
+          layouts: list[tuple[float, float]] = []  # (start cursor, gap)
           for u_lo, u_hi in unions:
             free = u_hi - u_lo - sum(spans.values())
-            gap = free / (n - 1) if n > 1 else 0.0
-            if gap < 0.0:
+            if free < 0.0:
                 continue  # cells already tighter than this union: skip
+            layouts.append((u_lo, free / (n - 1) if n > 1 else 0.0))
+            packed_extent = sum(spans.values()) + _BOARD_CLEARANCE_MM * (n - 1)
+            if u_hi - u_lo > packed_extent + 1.0:
+                layouts.append((u_lo, _BOARD_CLEARANCE_MM))
+                layouts.append((u_hi - packed_extent, _BOARD_CLEARANCE_MM))
+          for start, gap in layouts:
             for perm in permutations(sorted(idxs)):
-              cursor = u_lo
+              cursor = start
               trial: dict[int, PlacedCell] = {}
               ok = True
               for i in perm:
@@ -1013,10 +1113,12 @@ def reorder_edge_connectors(
                       moved = pc.moved_to(pc.dx + (cursor - b[0]), pc.dy)
                   else:
                       moved = pc.moved_to(pc.dx, pc.dy + (cursor - b[1]))
-                  mpoly = moved.polygon_in_board()
-                  for op in other_polys2:
-                      if convex_polygons_overlap(mpoly, op, clearance_mm=0.0):
-                          ok = False
+                  for mp in _cell_courts(moved):
+                      for op in other_polys2:
+                          if convex_polygons_overlap(mp, op, clearance_mm=0.0):
+                              ok = False
+                              break
+                      if not ok:
                           break
                   if not ok:
                       break
@@ -1041,9 +1143,86 @@ def reorder_edge_connectors(
                   "reorder_edge_connectors: %s edge reordered, score -> %s",
                   edge.value, best_score,
               )
+      # Assoc repair: permutation layouts are coarse (whole-union
+      # jumps); a connector a few mm outside its parent's segment needs
+      # a MINIMAL shift, not a re-layout (ethernet J1: 3.1mm short
+      # while 10mm jumps collided with the PHY cluster). Fine-step
+      # scan over in-window positions, smallest displacement first,
+      # committed only when the TOTAL violation score improves.
+      for edge, idxs in sorted(by_edge.items(), key=lambda kv: kv[0].value):
+          for i in idxs:
+              pc = cells[i]
+              assoc = _cell_assoc(pc)
+              if assoc is None:
+                  continue
+              horizontal = edge in (Edge.NORTH, Edge.SOUTH)
+              pos_map = _positions()
+              vals = [
+                  pos_map[r][0] if horizontal else pos_map[r][1]
+                  for r in assoc.partner_refs if r in pos_map
+              ]
+              fp_c = footprints.get(assoc.ref)
+              conn = pos_map.get(assoc.ref)
+              if not vals or fp_c is None or conn is None:
+                  continue
+              cb = polygon_bbox(
+                  courtyard_in_frame(fp_c, conn[0], conn[1], conn[2])
+              )
+              interval = (cb[0], cb[2]) if horizontal else (cb[1], cb[3])
+              window = (min(vals), max(vals))
+              if max(0.0, window[0] - interval[1],
+                     interval[0] - window[1]) <= assoc.tolerance_mm:
+                  continue
+              rep_courts = _member_courts_except(i)
+              bb = polygon_bbox(pc.polygon_in_board())
+              span = (bb[2] - bb[0]) if horizontal else (bb[3] - bb[1])
+              limit = bw if horizontal else bh
+              cell_lo = bb[0] if horizontal else bb[1]
+              conn_span = interval[1] - interval[0]
+              # Connector-interval lo targets keeping the interval gap
+              # within tolerance, nearest displacement first.
+              t_lo = window[0] - assoc.tolerance_mm - conn_span
+              t_hi = window[1] + assoc.tolerance_mm
+              targets = sorted(
+                  (t_lo + k * _ASSOC_REPAIR_STEP_MM
+                   for k in range(int((t_hi - t_lo)
+                                      / _ASSOC_REPAIR_STEP_MM) + 1)),
+                  key=lambda t: abs(t - interval[0]),
+              )
+              for target in targets:
+                  new_lo = cell_lo + (target - interval[0])
+                  if (new_lo < _EDGE_MARGIN_MM
+                          or new_lo + span > limit - _EDGE_MARGIN_MM):
+                      continue
+                  delta = target - interval[0]
+                  moved = (
+                      pc.moved_to(pc.dx + delta, pc.dy) if horizontal
+                      else pc.moved_to(pc.dx, pc.dy + delta)
+                  )
+                  if any(
+                      convex_polygons_overlap(mc, oc, clearance_mm=_GROUP_CLEARANCE_MM)
+                      for mc in _cell_courts(moved) for oc in rep_courts
+                  ) or not _forefield_clear(
+                      moved, edge, bw, bh, pinned_member_refs,
+                      footprints, rep_courts,
+                  ):
+                      continue
+                  cells[i] = moved
+                  score = _score()
+                  if score < best_score:
+                      best_score = score
+                      _log.info(
+                          "reorder_edge_connectors: %s repaired into its "
+                          "parent group's %s-edge segment (%+.1fmm), "
+                          "score -> %s",
+                          pc.cell.name, edge.value, delta, best_score,
+                      )
+                      break
+                  cells[i] = pc
       if best_score == round_start_score:
           break  # converged: a full round committed nothing
     return Floorplan(placed=tuple(cells), board_width=bw, board_height=bh)
+
 
 
 def _snap_pinned_groups(
@@ -1054,6 +1233,7 @@ def _snap_pinned_groups(
     bh: float,
     body_dirs: dict[str, tuple[float, float]] | None = None,
     final_names: frozenset[str] = frozenset(),
+    assoc_partners: dict[str, tuple[str, ...]] | None = None,
 ) -> list[PlacedCell]:
     """Translate groups containing edge-pinned refs flush to their edge.
 
@@ -1143,6 +1323,7 @@ def _snap_pinned_groups(
     }
     return _place_conn_groups(
         out, movable, body_dirs or {}, preferred, bw, bh, pinned_names,
+        assoc_partners or {},
     )
 
 
@@ -1154,6 +1335,7 @@ def _place_conn_groups(
     bw: float,
     bh: float,
     pinned_names: frozenset[str] | set[str] = frozenset(),
+    assoc_partners: dict[str, tuple[str, ...]] | None = None,
 ) -> list[PlacedCell]:
     """Place each lifted connector group flush on an edge with room.
 
@@ -1163,17 +1345,44 @@ def _place_conn_groups(
     for the free interval nearest its current position against ALL
     other cells. The first edge with room wins. A connector that fits
     NOWHERE stays put — legalization reports it honestly.
+
+    A connector with a GroupAssoc instead ranks edges by distance to
+    its PARTNER ANCHOR (mean of partner positions) and targets the
+    along-position nearest the anchor's projection — the connector is
+    its parent group's edge subgroup, so the parent's placement, not
+    the packer's incidental drop point, decides where it belongs.
     """
     normals = {
         Edge.WEST: (-1.0, 0.0), Edge.EAST: (1.0, 0.0),
         Edge.NORTH: (0.0, -1.0), Edge.SOUTH: (0.0, 1.0),
     }
+    member_pos: dict[str, tuple[float, float]] = {}
+    for pc in cells:
+        for m in pc.members_in_board():
+            member_pos[m.ref] = (m.x, m.y)
     for i in sorted(movable, key=lambda i: cells[i].cell.name):
         b0 = polygon_bbox(cells[i].polygon_in_board())
-        dists = {
-            Edge.WEST: b0[0], Edge.EAST: bw - b0[2],
-            Edge.NORTH: b0[1], Edge.SOUTH: bh - b0[3],
-        }
+        anchor: tuple[float, float] | None = None
+        partner_pts = [
+            member_pos[r]
+            for r in (assoc_partners or {}).get(cells[i].cell.name, ())
+            if r in member_pos
+        ]
+        if partner_pts:
+            anchor = (
+                sum(p[0] for p in partner_pts) / len(partner_pts),
+                sum(p[1] for p in partner_pts) / len(partner_pts),
+            )
+        if anchor is not None:
+            dists = {
+                Edge.WEST: anchor[0], Edge.EAST: bw - anchor[0],
+                Edge.NORTH: anchor[1], Edge.SOUTH: bh - anchor[1],
+            }
+        else:
+            dists = {
+                Edge.WEST: b0[0], Edge.EAST: bw - b0[2],
+                Edge.NORTH: b0[1], Edge.SOUTH: bh - b0[3],
+            }
         pref = preferred.get(cells[i].cell.name)
         bdir0 = body_dirs.get(cells[i].cell.name)
 
@@ -1253,7 +1462,12 @@ def _place_conn_groups(
                 cursor = max(cursor, b_hi)
             if cursor < limit - _EDGE_MARGIN_MM:
                 gaps.append((cursor, limit - _EDGE_MARGIN_MM))
-            cur_lo = b[0] if horizontal else b[1]
+            if anchor is not None:
+                # Target the along-position whose CENTER lands on the
+                # parent anchor's projection, not the packer's drop point.
+                cur_lo = (anchor[0] if horizontal else anchor[1]) - span / 2
+            else:
+                cur_lo = b[0] if horizontal else b[1]
             best_pos: float | None = None
             best_dist = float("inf")
             for g_lo, g_hi in gaps:
@@ -1277,7 +1491,23 @@ def _place_conn_groups(
                 if pref is None and edge is not edges[-1]:
                     continue  # no room on this edge: try the next
                 if pref is None:
-                    edge = edges[0]
+                    # Force near the packer's DROP POINT, never the
+                    # association anchor: forcing onto the parent
+                    # group's own edge band parked an RJ45 on top of
+                    # its Ethernet group on a board too tight for
+                    # legalization to separate (ethernet trainer,
+                    # 2026-06-11). The reorder pass pulls associated
+                    # connectors into their parent segment later,
+                    # collision-checked.
+                    anchor = None
+                    edge = min(
+                        sorted(Edge, key=lambda e: e.value),
+                        key=lambda e: (
+                            _needs_rotation(e),
+                            {Edge.WEST: b0[0], Edge.EAST: bw - b0[2],
+                             Edge.NORTH: b0[1], Edge.SOUTH: bh - b0[3]}[e],
+                        ),
+                    )
                     pc = cells[i]
                     bdir2 = body_dirs.get(pc.cell.name)
                     if bdir2 is not None:
@@ -1297,7 +1527,10 @@ def _place_conn_groups(
                     span = (b[2] - b[0]) if horizontal else (b[3] - b[1])
                     depth = (b[3] - b[1]) if horizontal else (b[2] - b[0])
                     limit = bw if horizontal else bh
-                    cur_lo = b[0] if horizontal else b[1]
+                    if anchor is not None:
+                        cur_lo = (anchor[0] if horizontal else anchor[1]) - span / 2
+                    else:
+                        cur_lo = b[0] if horizontal else b[1]
                     if edge is Edge.WEST or edge is Edge.NORTH:
                         band = (_EDGE_MARGIN_MM, _EDGE_MARGIN_MM + depth)
                     elif edge is Edge.EAST:

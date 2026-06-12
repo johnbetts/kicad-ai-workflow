@@ -707,3 +707,77 @@ def test_connector_fanout_uses_nearest_candidate() -> None:
         contain=BoardContain(margin_mm=0.0),
     )
     assert _only(verify_board(pcb, cs), "ConnectorFanout") == ()
+
+
+# ---------------------------------------------------------------------------
+# group_assoc (connector-as-subgroup, 2026-06-11)
+# ---------------------------------------------------------------------------
+
+
+def test_group_assoc_connector_inside_parent_segment_passes() -> None:
+    from kicad_pipeline.placement_v2.ir import GroupAssoc
+    from kicad_pipeline.placement_v2.verifier_rules import check_group_assocs
+
+    # Connector flush on the east edge of the 50x30 outline, partner
+    # mid-board at y=14: connector centroid y=16 is inside ±15.
+    board = _board((
+        _fp("J14", 48.0, 16.0),
+        _fp("U3", 30.0, 14.0),
+    ))
+    assoc = GroupAssoc(ref="J14", group="MCU", partner_refs=("U3",))
+    assert check_group_assocs(board, (assoc,)) == ()
+
+
+def test_group_assoc_connector_outside_parent_segment_is_major() -> None:
+    from kicad_pipeline.placement_v2.ir import GroupAssoc
+    from kicad_pipeline.placement_v2.verifier_rules import check_group_assocs
+
+    # Connector at the top of the east edge (y=2, courtyard to y=2.75),
+    # partner at y=22: interval gap 19.25mm > 15mm tolerance -> MAJOR.
+    board = _board((
+        _fp("J14", 48.0, 2.0),
+        _fp("U3", 25.0, 22.0),
+    ))
+    assoc = GroupAssoc(ref="J14", group="MCU", partner_refs=("U3",))
+    violations = check_group_assocs(board, (assoc,))
+    assert len(violations) == 1
+    assert violations[0].severity is Severity.MAJOR
+    assert "J14" in violations[0].refs
+    assert violations[0].measured == pytest.approx(19.25, abs=0.1)
+
+
+def test_group_assoc_horizontal_edge_uses_x_axis() -> None:
+    from kicad_pipeline.placement_v2.ir import GroupAssoc
+    from kicad_pipeline.placement_v2.verifier_rules import check_group_assocs
+
+    # Connector flush on the north edge (courtyard x 43.25-46.75);
+    # partners span x 10-20: interval gap 23.25mm > 15mm -> MAJOR.
+    board = _board((
+        _fp("J1", 45.0, 2.0),
+        _fp("K1", 10.0, 20.0),
+        _fp("K2", 20.0, 20.0),
+    ))
+    assoc = GroupAssoc(ref="J1", group="Relays", partner_refs=("K1", "K2"))
+    violations = check_group_assocs(board, (assoc,))
+    assert len(violations) == 1
+    assert violations[0].measured == pytest.approx(23.25, abs=0.1)
+
+
+def test_group_assoc_missing_partner_is_skipped() -> None:
+    from kicad_pipeline.placement_v2.ir import GroupAssoc
+    from kicad_pipeline.placement_v2.verifier_rules import check_group_assocs
+
+    board = _board((_fp("J14", 48.0, 2.0),))
+    assoc = GroupAssoc(ref="J14", group="MCU", partner_refs=("U3",))
+    assert check_group_assocs(board, (assoc,)) == ()
+
+
+def test_group_assoc_missing_connector_is_critical() -> None:
+    from kicad_pipeline.placement_v2.ir import GroupAssoc
+    from kicad_pipeline.placement_v2.verifier_rules import check_group_assocs
+
+    board = _board((_fp("U3", 25.0, 14.0),))
+    assoc = GroupAssoc(ref="J14", group="MCU", partner_refs=("U3",))
+    violations = check_group_assocs(board, (assoc,))
+    assert len(violations) == 1
+    assert violations[0].severity is Severity.CRITICAL

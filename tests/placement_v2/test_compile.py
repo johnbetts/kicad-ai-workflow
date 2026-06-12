@@ -432,3 +432,96 @@ class TestFeedbackLocks:
         locks.write_text("[1,")
         with pytest.raises(ValueError, match=str(locks)):
             compile_constraints(_req(()), feedback_locks_path=locks)
+
+
+# ---------------------------------------------------------------------------
+# netlist: connector -> group association (connector-as-subgroup)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorGroupAssocs:
+    """J14 directive 2026-06-11: signal-partner majority owns the connector."""
+
+    @staticmethod
+    def _req_with_features(
+        components: tuple[Component, ...],
+        nets: tuple[Net, ...],
+        features: dict[str, tuple[str, ...]],
+    ) -> ProjectRequirements:
+        from kicad_pipeline.models.requirements import FeatureBlock
+
+        return ProjectRequirements(
+            project=ProjectInfo(name="test"),
+            features=tuple(
+                FeatureBlock(
+                    name=name, description="", components=refs,
+                    nets=(), subcircuits=(),
+                )
+                for name, refs in features.items()
+            ),
+            components=components,
+            nets=nets,
+        )
+
+    def test_all_signal_partners_in_one_block_associates(self) -> None:
+        # J14-like: every signal net ends at U3 (MCU); power nets do not vote.
+        comps = (
+            _comp("J14", footprint="PinHeader_1x14"),
+            _comp("U3", footprint="ESP32"),
+            _comp("L3", footprint="L_0805"),
+        )
+        nets = (
+            _net("SPI_SCK", ("J14", "1"), ("U3", "10")),
+            _net("SPI_MOSI", ("J14", "2"), ("U3", "11")),
+            _net("TFT_CS", ("J14", "3"), ("U3", "12")),
+            _net("+5V", ("J14", "4"), ("L3", "1")),
+        )
+        cs = compile_constraints(self._req_with_features(
+            comps, nets, {"Display": ("J14",), "MCU": ("U3",), "Power": ("L3",)},
+        ))
+        assocs = {a.ref: a for a in cs.group_assocs}
+        assert assocs["J14"].group == "MCU"
+        assert assocs["J14"].partner_refs == ("U3",)
+
+    def test_no_strict_majority_compiles_nothing(self) -> None:
+        comps = (
+            _comp("J9", footprint="PinHeader_1x04"),
+            _comp("U1", footprint="IC"),
+            _comp("U2", footprint="IC"),
+        )
+        nets = (
+            _net("A", ("J9", "1"), ("U1", "1")),
+            _net("B", ("J9", "2"), ("U2", "1")),
+        )
+        cs = compile_constraints(self._req_with_features(
+            comps, nets, {"BlockA": ("U1",), "BlockB": ("U2",)},
+        ))
+        assert not any(a.ref == "J9" for a in cs.group_assocs)
+
+    def test_majority_wins_over_minority_block(self) -> None:
+        comps = (
+            _comp("J1", footprint="TerminalBlock_4P"),
+            _comp("K1", footprint="Relay"),
+            _comp("K2", footprint="Relay"),
+            _comp("R18", footprint="R_0402"),
+        )
+        nets = (
+            _net("HARNESS_A", ("J1", "1"), ("K1", "3")),
+            _net("HARNESS_B", ("J1", "2"), ("K2", "3")),
+            _net("SENSE", ("J1", "3"), ("R18", "1")),
+        )
+        cs = compile_constraints(self._req_with_features(
+            comps, nets,
+            {"Relays": ("K1", "K2"), "Analog": ("R18",), "IO": ("J1",)},
+        ))
+        assocs = {a.ref: a for a in cs.group_assocs}
+        assert assocs["J1"].group == "Relays"
+        assert assocs["J1"].partner_refs == ("K1", "K2")
+
+    def test_non_connector_gets_no_assoc(self) -> None:
+        comps = (_comp("R1", footprint="R_0402"), _comp("U1", footprint="IC"))
+        nets = (_net("SIG", ("R1", "1"), ("U1", "1")),)
+        cs = compile_constraints(self._req_with_features(
+            comps, nets, {"Block": ("U1",)},
+        ))
+        assert not cs.group_assocs

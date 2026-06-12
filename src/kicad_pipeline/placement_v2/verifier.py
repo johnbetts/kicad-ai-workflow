@@ -52,6 +52,7 @@ from kicad_pipeline.placement_v2.verifier_rules import (
     check_contain,
     check_courtyards,
     check_edge_pins,
+    check_group_assocs,
     check_isolation,
     check_keepouts,
     check_pin_attach,
@@ -105,6 +106,7 @@ def verify_board(
     violations.extend(check_isolation(pcb, constraints.isolation, domains))
     violations.extend(check_attach_bundles(pcb, constraints.bundles))
     violations.extend(check_connector_fanouts(pcb, constraints.fanouts))
+    violations.extend(check_group_assocs(pcb, constraints.group_assocs))
     return tuple(violations)
 
 
@@ -187,6 +189,7 @@ def _checks_summary(
         f"isolation_pair x{isolation_pairs}",
         f"attach_bundle x{len(constraints.bundles)}",
         f"connector_fanout x{len(constraints.fanouts)}",
+        f"group_assoc x{len(constraints.group_assocs)}",
     )
 
 

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         CellKeepout,
         ConnectorFanout,
         EdgePin,
+        GroupAssoc,
         IsolationGap,
         PinAttach,
         Polygon,
@@ -550,6 +551,63 @@ def check_connector_fanouts(
                         f"ratsnest lines {net_i} (to {ref_i}) and {net_j} "
                         f"(to {ref_j}) cross at connector {fanout.ref}",
                     ))
+    return tuple(out)
+
+
+def check_group_assocs(
+    pcb: PCBDesign, assocs: tuple[GroupAssoc, ...],
+) -> tuple[Violation, ...]:
+    """Each GroupAssoc: connector inside its parent's edge segment (MAJOR).
+
+    The connector is its parent FeatureBlock's edge subgroup (board
+    owner directive 2026-06-11): it must claim the edge SEGMENT
+    adjacent to the parent's placement. Re-derived from the artifact:
+    project the partner refs' pad centroids and the connector's
+    COURTYARD interval onto the connector's edge axis; the gap between
+    the two intervals must be <= tolerance. Interval gap, not centroid
+    distance: a 20mm-wide RJ45 packed directly against its PHY cluster
+    has a large centroid offset purely from its own half-span (ethernet
+    trainer, 2026-06-11). Generalizes the K3/K4 "stranded from serving
+    terminals" fab finding into a countable rule.
+    """
+    board_bbox = polygon_bbox(_outline_points(pcb.outline))
+    out: list[Violation] = []
+    for assoc in assocs:
+        fp = pcb.get_footprint(assoc.ref)
+        if fp is None:
+            out.append(_missing(assoc, assoc.ref, f"connector {assoc.ref!r}"))
+            continue
+        fp_bbox = polygon_bbox(_courtyard_in_board(fp))
+        _, edge_name = min(
+            ((_edge_distance(fp_bbox, board_bbox, e), e.value) for e in Edge),
+            key=lambda item: item[0],
+        )
+        horizontal = Edge(edge_name) in (Edge.NORTH, Edge.SOUTH)
+        coords: list[float] = []
+        for ref in assoc.partner_refs:
+            partner = pcb.get_footprint(ref)
+            if partner is None:
+                continue
+            cx, cy = origin_to_centroid(
+                partner, partner.position.x, partner.position.y, partner.rotation,
+            )
+            coords.append(cx if horizontal else cy)
+        if not coords:
+            continue  # no partner on the board: nothing to measure
+        hull_lo, hull_hi = min(coords), max(coords)
+        conn_lo, conn_hi = (
+            (fp_bbox[0], fp_bbox[2]) if horizontal else (fp_bbox[1], fp_bbox[3])
+        )
+        gap = max(0.0, hull_lo - conn_hi, conn_lo - hull_hi)
+        if gap > assoc.tolerance_mm:
+            out.append(Violation(
+                repr(assoc), (assoc.ref, *assoc.partner_refs), Severity.MAJOR,
+                gap, assoc.tolerance_mm,
+                f"{assoc.ref} sits {gap:.1f}mm from its parent group "
+                f"{assoc.group!r}'s segment on the {edge_name} edge "
+                f"(connector spans [{conn_lo:.1f}, {conn_hi:.1f}], parent "
+                f"hull [{hull_lo:.1f}, {hull_hi:.1f}], max {assoc.tolerance_mm}mm)",
+            ))
     return tuple(out)
 
 
