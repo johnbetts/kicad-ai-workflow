@@ -501,7 +501,11 @@ def _build_requirements() -> ProjectRequirements:
         components=tuple(components),
         nets=tuple(nets),
         mechanical=MechanicalConstraints(
-            board_width_mm=_BOARD_WIDTH_MM, board_height_mm=_BOARD_HEIGHT_MM
+            board_width_mm=_BOARD_WIDTH_MM, board_height_mm=_BOARD_HEIGHT_MM,
+            # The south edge is consumed by the terminal ladder —
+            # corner holes are hard-reserved zones, so declare the 3
+            # that fit (both north corners + SW clear of J1).
+            mounting_hole_positions=((3.5, 3.5), (61.5, 3.5), (3.5, 36.5)),
         ),
     )
 

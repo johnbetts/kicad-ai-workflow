@@ -223,7 +223,11 @@ def _antenna_origin_from_rf_position(
     # half-height (12.75mm) minus half the keepout height as the offset
     # from body centre.
     module_half_h = RF_MODULE_BODY_HEIGHT_MM / 2.0  # 12.75 mm
-    antenna_offset = module_half_h - height / 2.0
+    # The offset runs ALONG the antenna axis: that is the rect's
+    # height when the module points north/south, its width at 90/270
+    # (the caller swaps the rect dims for east/west modules).
+    along = height if round(rot) % 180 == 0 else width
+    antenna_offset = module_half_h - along / 2.0
     angle_rad = _m.radians(rot)
     # In unrotated position, antenna points in -Y direction.
     dx = -antenna_offset * _m.sin(angle_rad)
@@ -265,6 +269,13 @@ def make_antenna_keepout(
         resulting polygon would be degenerate (< 1 mm²).
     """
     if rf_position is not None:
+        # The keepout rectangle rotates WITH the module: a module at
+        # 90/270 points its antenna east/west and the W x H rect must
+        # swap dimensions (Gate A re-derives the keepout from the
+        # owner's pose and flagged the unswapped zone the first time a
+        # module settled west-facing — mcu_core, 2026-06-12).
+        if round(rf_position[2]) % 180 == 90:
+            width, height = height, width
         x0, y0 = _antenna_origin_from_rf_position(
             rf_position, width, height, board_width, board_height,
         )

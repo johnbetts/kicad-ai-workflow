@@ -63,16 +63,6 @@
       (hide yes)
     )
   )
-  (property "Group" "MCU Core"
-    (at 0 0 0)
-    (layer "F.Fab")
-    (effects
-      (font
-        (size 1.0 1.0)
-      )
-      (hide yes)
-    )
-  )
   (fp_line
     (start -4.75 -4.5)
     (end 4.75 -4.5)

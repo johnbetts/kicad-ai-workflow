@@ -1,6 +1,6 @@
 {
   "board": "mcu_core",
-  "board_sha256": "3f1173b0cd7012c6f7cb1707259619cd8af90ca4102d319c54c3db52cdcb4c07",
+  "board_sha256": "8e373c34944397ff20aec7c18008fb4e13d2cd11181878a3d5399d9c180b4385",
   "renders": {
     "2d": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/mcu_core_v2/mcu_core_v2_2d.png",
     "3d_top": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/mcu_core_v2/mcu_core_v2_3d_top.png",

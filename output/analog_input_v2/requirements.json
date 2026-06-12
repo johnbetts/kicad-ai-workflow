@@ -1039,7 +1039,20 @@
     "board_height_mm": 40.0,
     "enclosure": null,
     "mounting_hole_diameter_mm": 3.2,
-    "mounting_hole_positions": [],
+    "mounting_hole_positions": [
+      [
+        3.5,
+        3.5
+      ],
+      [
+        61.5,
+        3.5
+      ],
+      [
+        3.5,
+        36.5
+      ]
+    ],
     "notes": null
   },
   "board_intent": null,

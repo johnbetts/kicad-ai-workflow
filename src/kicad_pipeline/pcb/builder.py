@@ -793,13 +793,46 @@ def _run_placement_v2(
     from kicad_pipeline.placement_v2.pipeline import run_placement_v2
 
     part_rules = _Path(__file__).resolve().parents[3] / "data" / "part_rules.json"
-    # Mounting-hole corners are NOT reserved: the hole placer shifts
-    # holes along the edge when a corner is occupied (collision check
-    # below), which beats starving edge-snapped groups of corner space.
-    # Auto-ESTIMATED dims are advisory only: v2 shrink-to-fits and the
-    # build adopts the packed size (a 0.03mm-too-small estimate once
-    # halted a feasible power-chain floorplan).
+    # Mounting-hole corners are HARD-RESERVED on explicit-dim boards:
+    # the old shift-or-skip policy left nl-s-3c with 3 of 4 holes, both
+    # north ones 12mm off their corners — a torque-loaded screw-
+    # terminal edge with a 153mm unsupported span (fab review,
+    # 2026-06-12). Auto-sized boards skip reservation (corner positions
+    # are unknown before packing; the post-placement shifter handles
+    # them). Auto-ESTIMATED dims are advisory only: v2 shrink-to-fits
+    # and the build adopts the packed size.
     explicit = ctx.explicit_dimensions
+    reserved: tuple[tuple[str, tuple[Point, ...]], ...] = ()
+    if explicit:
+        inset = _MOUNTING_HOLE_INSET_MM
+        diameter = (
+            ctx.template_mounting_diameter
+            or (requirements.mechanical.mounting_hole_diameter_mm
+                if requirements.mechanical is not None else None)
+            or _MOUNTING_HOLE_DIAMETER_MM
+        )
+        half = diameter / 2.0 + 1.0  # keepout ring around the hole
+        # Same position resolution as _add_mounting_hole_footprints:
+        # template > mechanical declarations > default 4 corners. Small
+        # boards whose edges are consumed by connector rows declare a
+        # feasible hole set instead of the default corners.
+        positions = ctx.template_mounting_positions
+        if positions is None and requirements.mechanical is not None:
+            positions = requirements.mechanical.mounting_hole_positions or None
+        if positions is None:
+            positions = (
+                (inset, inset),
+                (ctx.board_width_mm - inset, inset),
+                (ctx.board_width_mm - inset, ctx.board_height_mm - inset),
+                (inset, ctx.board_height_mm - inset),
+            )
+        reserved = tuple(
+            (f"mh_{idx}", (
+                Point(cx - half, cy - half), Point(cx + half, cy - half),
+                Point(cx + half, cy + half), Point(cx - half, cy + half),
+            ))
+            for idx, (cx, cy) in enumerate(positions, start=1)
+        )
     result = run_placement_v2(
         requirements,
         {fp.ref: fp for fp in pre_footprints},
@@ -809,6 +842,7 @@ def _run_placement_v2(
         feedback_locks_path=v2_feedback_locks_path,
         ledger_path=v2_ledger_path,
         timestamp=datetime.now(timezone.utc).isoformat() if v2_ledger_path else "",
+        reserved_zones=reserved,
     )
     if not result.ok:
         details = "; ".join(v.message for v in result.violations[:10])

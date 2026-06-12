@@ -589,7 +589,13 @@ def _build_requirements() -> ProjectRequirements:
         features=(mcu_feature,),
         components=components,
         nets=nets,
-        mechanical=MechanicalConstraints(board_width_mm=70, board_height_mm=50),
+        mechanical=MechanicalConstraints(
+            board_width_mm=70, board_height_mm=50,
+            # 3 feasible holes: the NW corner hosts the ESP32 module
+            # (antenna north, body west) — corner holes are hard-
+            # reserved zones, and 4 do not fit this training board.
+            mounting_hole_positions=((66.5, 3.5), (66.5, 46.5), (3.5, 46.5)),
+        ),
     )
 
 

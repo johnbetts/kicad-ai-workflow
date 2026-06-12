@@ -688,7 +688,11 @@ def pack_board(
             else:
                 band_lo, band_hi = bh0 - _EDGE_MARGIN_MM - depth, bh0 - _EDGE_MARGIN_MM
             along = shelf[edge]
-            for other in locked_placed:
+            # Reserved obstacles (mounting-hole corners) join the walk:
+            # without them a locked connector shelf-placed at the edge
+            # start sat ON a reserved corner, and legalization (both
+            # pinned) was infeasible.
+            for other in (*obstacles, *locked_placed):
                 ob = polygon_bbox(other.polygon_in_board())
                 o_perp = (ob[1], ob[3]) if horizontal else (ob[0], ob[2])
                 if o_perp[0] >= band_hi + clearance_mm or o_perp[1] <= band_lo - clearance_mm:
@@ -1365,6 +1369,29 @@ def _snap_pinned_groups(
                 ),
             )
         out[i] = _snap_to(pc, edge)
+        # Clear reserved corners: a flush-snapped group keeps its packed
+        # along-position, which may cover a hard-reserved mounting-hole
+        # corner — slide it along the edge by the minimal amount
+        # (legalization cannot resolve two pinned parties).
+        horizontal_snap = edge in (Edge.NORTH, Edge.SOUTH)
+        for other in out:
+            if not other.cell.name.startswith("reserved:"):
+                continue
+            gb = polygon_bbox(out[i].polygon_in_board())
+            rb = polygon_bbox(other.polygon_in_board())
+            if (gb[0] >= rb[2] or gb[2] <= rb[0]
+                    or gb[1] >= rb[3] or gb[3] <= rb[1]):
+                continue
+            if horizontal_snap:
+                shift = (rb[2] - gb[0] + _BOARD_CLEARANCE_MM
+                         if (rb[0] + rb[2]) / 2 < (gb[0] + gb[2]) / 2
+                         else rb[0] - gb[2] - _BOARD_CLEARANCE_MM)
+                out[i] = out[i].moved_to(out[i].dx + shift, out[i].dy)
+            else:
+                shift = (rb[3] - gb[1] + _BOARD_CLEARANCE_MM
+                         if (rb[1] + rb[3]) / 2 < (gb[1] + gb[3]) / 2
+                         else rb[1] - gb[3] - _BOARD_CLEARANCE_MM)
+                out[i] = out[i].moved_to(out[i].dx, out[i].dy + shift)
         snapped_edge[out[i].cell.name] = edge
         b = polygon_bbox(out[i].polygon_in_board())
         span = (b[2] - b[0]) if edge in (Edge.NORTH, Edge.SOUTH) else (b[3] - b[1])
