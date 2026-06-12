@@ -1,6 +1,6 @@
 {
   "board": "analog_input",
-  "board_sha256": "5f8bdfc2afe40911b764af61dd03637c225001d978e92aadc507b067f8800ee4",
+  "board_sha256": "adb3374dedb9f8216293fc664bf2ce4c9373ff9958f5d709a2e1b980ee8badbe",
   "renders": {
     "2d": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/analog_input_v2/analog_input_v2_2d.png",
     "3d_top": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/analog_input_v2/analog_input_v2_3d_top.png",

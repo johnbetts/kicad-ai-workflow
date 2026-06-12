@@ -1,6 +1,6 @@
 {
   "board": "relay_group",
-  "board_sha256": "6e7d5a4f0a1c629178ff3100355fdfefbcc27fd685e50c544a4c519c9026f988",
+  "board_sha256": "4881f9866d43d3bd1f8ab4d491738d7dc7ed0182f2da00f3659c74bbcf1ac87a",
   "renders": {
     "2d": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/relay_group_v2/relay_group_v2_2d.png",
     "3d_top": "/Users/johnbetts/Dropbox/Source/kicad-ai-workflow/output/relay_group_v2/relay_group_v2_3d_top.png",

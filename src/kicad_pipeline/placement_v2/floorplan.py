@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from kicad_pipeline.placement_v2.ir import (
         ConstraintSet,
         GroupAssoc,
+        IsolationRegion,
         Polygon,
         SequenceAlong,
     )
@@ -557,6 +558,7 @@ def pack_group(
     sequences: tuple[SequenceAlong, ...] = (),
     edge_pinned: frozenset[str] = frozenset(),
     openings: dict[str, tuple[float, float]] | None = None,
+    band_depth_mm: float | None = None,
 ) -> GroupPlan:
     """Pack a FeatureBlock's cells into a compact group-local layout.
 
@@ -565,6 +567,13 @@ def pack_group(
     greedily around them by port wirelength. An edge-pinned strip is
     the group's outermost row and nothing may pack beyond it — that
     side stays clear to meet the board edge.
+
+    *band_depth_mm* constrains the pack to a wide shallow band: a group
+    whose EDGE terminals span more edge than a compact pack is wide
+    (four analog screw terminals over a square analog block) must lay
+    its channel strips side-by-side in a ROW, or the terminals can
+    never all sit inside the group's along-edge window (nl-s-3c J3/J5
+    stranding, 2026-06-12).
     """
     strip_cells, used, facing = _sequence_strips(
         cells, sequences, clearance_mm, edge_pinned, openings or {},
@@ -580,8 +589,15 @@ def pack_group(
         (c for c in cells if c.name not in used),
         key=lambda c: (-c.area, c.name),
     ))
+    band: tuple[float, float] | None = None
+    if band_depth_mm is not None and not strip_cells:
+        width_budget = 2 * _EDGE_MARGIN_MM + sum(
+            max(b[2] - b[0], b[3] - b[1]) + clearance_mm
+            for b in (polygon_bbox(c.polygon) for c in rest)
+        )
+        band = (width_budget, band_depth_mm + 2 * _EDGE_MARGIN_MM)
     placed = _place_greedy_around(
-        rest, strip_cells, clearance_mm, board=None, allow_rotation=True,
+        rest, strip_cells, clearance_mm, board=band, allow_rotation=True,
         outer_limit=outer_limit,
     )
     if not placed:
@@ -836,12 +852,30 @@ def pack_board(
     assoc_partners: dict[str, tuple[str, ...]] = {}
     for assoc in constraints.group_assocs:
         assoc_partners[f"group:conn:{assoc.ref}"] = assoc.partner_refs
+    # Isolation-region tag per cell: a band slot beside a cell of a
+    # DIFFERENT region must keep that region pair's min_gap, not the
+    # generic clearance (analog band abutted the relay rect at 2mm
+    # where the regions demand 8mm; nl-s-3c 2026-06-12).
+    # Only functional GROUP cells are tagged: a region's edge
+    # terminals (conn:J3) legitimately share the edge band with the
+    # neighbor region's group — Gate A's hull gap binds between the
+    # groups' component blocks, and tagging connector cells made the
+    # relay band infeasible against the stale terminal shelf.
+    cell_regions: dict[str, tuple[str, float]] = {}
+    for pc0 in placed:
+        if pc0.cell.name.startswith("group:conn:"):
+            continue
+        for reg in constraints.isolation_regions:
+            if set(pc0.cell.refs) & set(reg.refs):
+                cell_regions[pc0.cell.name] = (reg.name, reg.min_gap_mm)
+                break
     placed, snapped_names = _snap_pinned_groups(
         placed, edge_pins, facing_by_name, bw, bh, body_dirs or {},
         final_names=frozenset(f"group:{n}" for n in locked_names),
         assoc_partners=assoc_partners,
         assoc_facing_names=frozenset(assoc_facing_names),
         assoc_anchors=assoc_anchors,
+        cell_regions=cell_regions,
     )
     pinned_set = snapped_names | {f"group:{n}" for n in locked_names}
     if snapped_names:
@@ -969,6 +1003,80 @@ def count_assoc_violations(
     return count
 
 
+def count_region_violations(
+    positions: Mapping[str, tuple[float, float, float]],
+    footprints: Mapping[str, Footprint],
+    regions: tuple[IsolationRegion, ...],
+) -> int:
+    """How many IsolationRegion violations the given positions incur.
+
+    Mirrors Gate A's check_isolation_regions on positions alone:
+    foreign centroids inside a region hull, pairwise hull gaps below
+    min_gap, and boundary ferrites off the hull border. Without this
+    term the reorder happily strands one analog terminal west of the
+    relay bank — 1 assoc miss either way, but FIVE region violations
+    invisible to the objective (nl-s-3c J3, 2026-06-12).
+    """
+    from kicad_pipeline.placement_v2.verifier_rules import REGION_BORDER_TOL_MM
+
+    count = 0
+    hulls: dict[str, tuple[float, float, float, float]] = {}
+    membership: dict[str, frozenset[str]] = {}
+    for region in regions:
+        boxes = []
+        for ref in region.refs:
+            p = positions.get(ref)
+            fp = footprints.get(ref)
+            if p is None or fp is None or not fp.pads:
+                continue
+            boxes.append(polygon_bbox(courtyard_in_frame(fp, p[0], p[1], p[2])))
+        if not boxes:
+            continue
+        hulls[region.name] = (
+            min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes),
+        )
+        membership[region.name] = frozenset(region.refs) | frozenset(
+            region.boundary_refs
+        )
+    for region in regions:
+        hull = hulls.get(region.name)
+        if hull is None:
+            continue
+        mem = membership[region.name]
+        for ref, p in positions.items():
+            if ref in mem or ref not in footprints:
+                continue
+            if hull[0] <= p[0] <= hull[2] and hull[1] <= p[1] <= hull[3]:
+                count += 1
+        for other in regions:
+            o_hull = hulls.get(other.name)
+            if o_hull is None or other.name <= region.name:
+                continue
+            dx = max(o_hull[0] - hull[2], hull[0] - o_hull[2], 0.0)
+            dy = max(o_hull[1] - hull[3], hull[1] - o_hull[3], 0.0)
+            if max(dx, dy) < max(region.min_gap_mm, other.min_gap_mm):
+                count += 1
+        for fref in region.boundary_refs:
+            p = positions.get(fref)
+            if p is None:
+                continue
+            # Distance from the ferrite centroid to the hull BORDER
+            # (zero on the boundary, grows inward and outward).
+            ox = max(hull[0] - p[0], p[0] - hull[2], 0.0)
+            oy = max(hull[1] - p[1], p[1] - hull[3], 0.0)
+            if ox > 0.0 or oy > 0.0:
+                dist = max(ox, oy)
+            else:
+                dist = min(
+                    p[0] - hull[0], hull[2] - p[0],
+                    p[1] - hull[1], hull[3] - p[1],
+                )
+            if dist > REGION_BORDER_TOL_MM:
+                count += 1
+    return count
+
+
 def plan_score(
     plan: Floorplan,
     footprints: Mapping[str, Footprint],
@@ -993,6 +1101,8 @@ def plan_score(
         crossings + count_assoc_violations(
             positions, footprints, constraints.group_assocs,
             plan.board_width, plan.board_height,
+        ) + count_region_violations(
+            positions, footprints, constraints.isolation_regions,
         ),
         length,
     )
@@ -1111,6 +1221,8 @@ def reorder_edge_connectors(
         return (
             crossings + count_assoc_violations(
                 pos_map, footprints, constraints.group_assocs, bw, bh,
+            ) + count_region_violations(
+                pos_map, footprints, constraints.isolation_regions,
             ),
             length,
         )
@@ -1410,6 +1522,7 @@ def _snap_pinned_groups(
     assoc_partners: dict[str, tuple[str, ...]] | None = None,
     assoc_facing_names: frozenset[str] = frozenset(),
     assoc_anchors: dict[str, list[str]] | None = None,
+    cell_regions: dict[str, tuple[str, float]] | None = None,
 ) -> tuple[list[PlacedCell], set[str]]:
     """Translate groups containing edge-pinned refs flush to their edge.
 
@@ -1563,7 +1676,13 @@ def _snap_pinned_groups(
             # of them gate candidate feasibility (a deep cell from the
             # OPPOSITE edge — U3's column reaches y=36.9 on an 80mm
             # board — rejects candidates whose rect would clip it).
-            hard_bbs: list[tuple[float, float, float, float]] = []
+            my_region = (cell_regions or {}).get(pc.cell.name)
+            # (bbox, abutment clearance, feasibility clearance): cells
+            # of a DIFFERENT isolation region demand that pair's
+            # min_gap, not the generic board clearance.
+            hard_bbs: list[
+                tuple[tuple[float, float, float, float], float, float]
+            ] = []
             band: list[tuple[float, float, float]] = []
             for o in out:
                 if o.cell.name == out[i].cell.name:
@@ -1573,7 +1692,15 @@ def _snap_pinned_groups(
                         or o.cell.name.startswith("reserved:")):
                     continue
                 ob = polygon_bbox(o.polygon_in_board())
-                hard_bbs.append(ob)
+                o_region = (cell_regions or {}).get(o.cell.name)
+                abut_clr = _BOARD_CLEARANCE_MM
+                feas_clr = _GROUP_CLEARANCE_MM
+                if (my_region is not None and o_region is not None
+                        and my_region[0] != o_region[0]):
+                    gap = max(my_region[1], o_region[1])
+                    abut_clr = max(abut_clr, gap + 0.5)
+                    feas_clr = max(feas_clr, gap)
+                hard_bbs.append((ob, abut_clr, feas_clr))
                 near_o = {
                     Edge.NORTH: ob[1], Edge.SOUTH: bh - ob[3],
                     Edge.WEST: ob[0], Edge.EAST: bw - ob[2],
@@ -1589,10 +1716,10 @@ def _snap_pinned_groups(
                 else:
                     band.append((ob[1], ob[3], extent))
             candidates = [min(max(anchor_c, lo_lim), hi_lim)]
-            for hb in hard_bbs:
+            for hb, abut_clr, _f in hard_bbs:
                 h_lo, h_hi = (hb[0], hb[2]) if horizontal_edge else (hb[1], hb[3])
-                candidates.append(h_lo - _BOARD_CLEARANCE_MM - half)
-                candidates.append(h_hi + _BOARD_CLEARANCE_MM + half)
+                candidates.append(h_lo - abut_clr - half)
+                candidates.append(h_hi + abut_clr + half)
 
             # Fresh binding: mypy does not carry narrowing into nested
             # function defaults (edge is Edge|None until resolved above).
@@ -1636,11 +1763,11 @@ def _snap_pinned_groups(
                         or rect[3] > bh - _EDGE_MARGIN_MM + 1e-6):
                     continue
                 if any(
-                    rect[0] < hb[2] + _GROUP_CLEARANCE_MM
-                    and rect[2] > hb[0] - _GROUP_CLEARANCE_MM
-                    and rect[1] < hb[3] + _GROUP_CLEARANCE_MM
-                    and rect[3] > hb[1] - _GROUP_CLEARANCE_MM
-                    for hb in hard_bbs
+                    rect[0] < hb[2] + feas_clr
+                    and rect[2] > hb[0] - feas_clr
+                    and rect[1] < hb[3] + feas_clr
+                    and rect[3] > hb[1] - feas_clr
+                    for hb, _a, feas_clr in hard_bbs
                 ):
                     continue
                 near = {

@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from kicad_pipeline.models.pcb import Point
+from kicad_pipeline.optimization.geometry import polygon_bbox
 from kicad_pipeline.pcb.pin_map import centroid_to_origin
 from kicad_pipeline.placement_v2.arrays import instantiate_array
 from kicad_pipeline.placement_v2.cells import (
@@ -414,6 +415,45 @@ def run_placement_v2(
 
     net_pads = _net_pad_map(requirements)
     detected = detect_subcircuits(requirements)
+    # Region-aware composition: a detected subcircuit that bundles
+    # isolation-region members with a FOREIGN edge-pinned connector
+    # (the harness terminal J1 anchoring an adc_channel whose divider
+    # belongs to AGND+AVCC) would lift the region's refs to the
+    # connector's edge and stretch the region hull across foreign
+    # zones (30 Gate A violations, nl-s-3c 2026-06-12). The
+    # cross-domain sense strip anchors at the ADC end instead: drop
+    # the foreign connector from the cell and re-anchor at the
+    # in-region member with the most pads.
+    edge_pin_refs = frozenset(ep.ref for ep in constraints.edge_pins)
+    region_of: dict[str, str] = {}
+    for reg in constraints.isolation_regions:
+        for rr in reg.refs:
+            region_of[rr] = reg.name
+    split_detected: list[DetectedSubCircuit] = []
+    for sub in detected:
+        member_regions = {region_of[r] for r in sub.refs if r in region_of}
+        foreign_pinned = tuple(
+            r for r in sub.refs
+            if r in edge_pin_refs and region_of.get(r) not in member_regions
+        )
+        if member_regions and foreign_pinned:
+            keep = tuple(r for r in sub.refs if r not in foreign_pinned)
+            if len(keep) >= 2:
+                anchor = sub.anchor_ref if sub.anchor_ref in keep else max(
+                    keep,
+                    key=lambda r: (
+                        len(footprints[r].pads) if r in footprints else 0, r,
+                    ),
+                )
+                _log.info(
+                    "cells: split foreign edge connector(s) %s out of %s:%s"
+                    " (region %s); re-anchored at %s",
+                    ",".join(foreign_pinned), sub.circuit_type.value,
+                    sub.anchor_ref, ",".join(sorted(member_regions)), anchor,
+                )
+                sub = replace(sub, refs=keep, anchor_ref=anchor)
+        split_detected.append(sub)
+    detected = tuple(split_detected)
     cells: list[Cell] = []
     cell_violations: list[Violation] = []
     claimed: set[str] = set()
@@ -515,6 +555,29 @@ def run_placement_v2(
         if ep.opening is not None
     }
 
+    # Band packing: a group with TWO OR MORE edge-locked assoc
+    # connectors must pack as a wide shallow row — its terminals span
+    # more edge than a compact square pack, and the GroupAssoc window
+    # (group hull ± tolerance) can never hold them all otherwise
+    # (nl-s-3c: four analog terminals over a 37mm block; J3/J5
+    # stranded west over the relay zone, 2026-06-12).
+    explicit_edge_refs = frozenset(
+        ep.ref for ep in constraints.edge_pins if ep.edge is not None
+    )
+    assoc_conn_count: dict[str, int] = {}
+    for assoc in constraints.group_assocs:
+        if assoc.ref in explicit_edge_refs:
+            assoc_conn_count[assoc.group] = (
+                assoc_conn_count.get(assoc.group, 0) + 1
+            )
+
+    def _band_depth(gcells: list[Cell]) -> float:
+        depths = []
+        for c in gcells:
+            b = polygon_bbox(c.polygon)
+            depths.append(max(b[2] - b[0], b[3] - b[1]))
+        return max(depths) if depths else 0.0
+
     def _pack_groups(sequences: tuple[SequenceAlong, ...]) -> tuple[GroupPlan, ...]:
         return tuple(
             pack_group(
@@ -523,6 +586,10 @@ def run_placement_v2(
                 sequences=sequences,
                 edge_pinned=edge_pinned,
                 openings=openings,
+                band_depth_mm=(
+                    _band_depth(gcells)
+                    if assoc_conn_count.get(gname, 0) >= 2 else None
+                ),
             )
             for gname, gcells in sorted(by_group.items())
         ) + tuple(
